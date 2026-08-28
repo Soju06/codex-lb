@@ -18,6 +18,7 @@ These tests are LOCAL ONLY — not pushed upstream.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections import deque
 from contextlib import nullcontext
@@ -29,12 +30,22 @@ import anyio
 import pytest
 
 from app.core.clients.proxy import ProxyResponseError
-from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.errors import openai_error
 from app.db.models import AccountStatus
 from app.modules.proxy import service as proxy_service
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio(loop_scope="session")]
+
+
+def _without_installation_metadata(text: str) -> dict[str, Any]:
+    payload = json.loads(text)
+    client_metadata = payload.get("client_metadata")
+    if isinstance(client_metadata, dict):
+        client_metadata.pop("x-codex-installation-id", None)
+        if not client_metadata:
+            payload.pop("client_metadata", None)
+    return payload
 
 
 def _make_session(*, closed: bool = False) -> proxy_service._HTTPBridgeSession:
@@ -48,7 +59,7 @@ def _make_session(*, closed: bool = False) -> proxy_service._HTTPBridgeSession:
         ),
         request_model="gpt-5.4",
         account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
-        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque(),
         pending_lock=anyio.Lock(),
@@ -217,7 +228,14 @@ class TestMidRequestFailurePreservesPreviousResponseId:
             f"If this is 400, the bug is present: the CLI will drop "
             f"previous_response_id and resend full conversation (70K tok/turn)."
         )
-        assert exc_info.value.payload["error"]["code"] in ("upstream_unavailable", "bridge_owner_unreachable")
+        # A raw send failure is surfaced with the more specific
+        # ``stream_incomplete`` code; it is still a retriable 502 and keeps
+        # previous_response_id intact for the client retry.
+        assert exc_info.value.payload["error"]["code"] in (
+            "upstream_unavailable",
+            "bridge_owner_unreachable",
+            "stream_incomplete",
+        )
         assert "previous_response_not_found" not in str(exc_info.value.payload)
 
 
@@ -298,10 +316,20 @@ class TestRetryHelperPreservesPreviousResponseId:
         )
 
         assert result is True
-        send_text.assert_awaited_once_with('{"type":"response.create","input":"hello"}')
+        send_text.assert_awaited_once()
+        send_text_await = send_text.await_args
+        assert send_text_await is not None
+        assert _without_installation_metadata(send_text_await.args[0]) == {
+            "type": "response.create",
+            "input": "hello",
+        }
         assert request_state.previous_response_id is None
         assert request_state.proxy_injected_previous_response_id is False
-        assert request_state.request_text == '{"type":"response.create","input":"hello"}'
+        assert request_state.request_text is not None
+        assert _without_installation_metadata(request_state.request_text) == {
+            "type": "response.create",
+            "input": "hello",
+        }
 
 
 class TestContextGrowthScenarios:

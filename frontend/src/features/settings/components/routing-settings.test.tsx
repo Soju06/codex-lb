@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
+import type { DashboardSettings } from "@/features/settings/schemas";
 import { createAccountSummary, createDashboardSettings } from "@/test/mocks/factories";
 
 if (!HTMLElement.prototype.hasPointerCapture) {
@@ -19,14 +20,176 @@ if (!HTMLElement.prototype.scrollIntoView) {
   HTMLElement.prototype.scrollIntoView = () => undefined;
 }
 
-const BASE_SETTINGS = createDashboardSettings({
+const LIMIT_WARMUP_DEFAULTS = {
+  limitWarmupEnabled: false,
+  limitWarmupWindows: "both" as const,
+  limitWarmupModel: "auto",
+  limitWarmupPrompt: "Say OK.",
+  limitWarmupCooldownSeconds: 3600,
+  limitWarmupMinAvailablePercent: 100,
+  limitWarmupStaggeredIdleEnabled: false,
+  limitWarmupIdleThresholdPercent: 1,
+};
+
+const BASE_SETTINGS: DashboardSettings = {
+  ...createDashboardSettings(),
+  ...LIMIT_WARMUP_DEFAULTS,
   stickyThreadsEnabled: false,
   preferEarlierResetAccounts: true,
   totpConfigured: false,
-});
+};
 const BASE_UPDATE_PAYLOAD = buildSettingsUpdateRequest(BASE_SETTINGS, {});
 
 describe("RoutingSettings", () => {
+  it("saves per-account capacity limits including zero for unlimited", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    expect(screen.getByRole("spinbutton", { name: "Response-create limit" })).toHaveValue(4);
+    expect(screen.getByRole("spinbutton", { name: "Stream limit" })).toHaveValue(8);
+    expect(screen.getByRole("spinbutton", { name: "Stream recovery reserve" })).toHaveValue(1);
+    expect(screen.getByRole("spinbutton", { name: "API key fair-share threshold (%)" })).toHaveValue(0);
+
+    await user.clear(screen.getByRole("spinbutton", { name: "Response-create limit" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Response-create limit" }), "0");
+    await user.clear(screen.getByRole("spinbutton", { name: "Stream limit" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Stream limit" }), "12");
+    await user.clear(screen.getByRole("spinbutton", { name: "Stream recovery reserve" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Stream recovery reserve" }), "2");
+    await user.clear(screen.getByRole("spinbutton", { name: "API key fair-share threshold (%)" }));
+    await user.type(screen.getByRole("spinbutton", { name: "API key fair-share threshold (%)" }), "80");
+    await user.click(screen.getByRole("button", { name: "Save capacity limits" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      proxyAccountResponseCreateLimit: 0,
+      proxyAccountStreamLimit: 12,
+      proxyAccountStreamRecoveryReserve: 2,
+      proxyApiKeyFairShareCongestionThresholdPct: 80,
+    });
+  });
+
+  it("renders inherited capacity values as empty inputs with effective hints", () => {
+    render(
+      <RoutingSettings
+        settings={{
+          ...BASE_SETTINGS,
+          proxyAccountResponseCreateLimitOverride: null,
+          proxyAccountStreamLimitOverride: null,
+          proxyAccountStreamRecoveryReserveOverride: null,
+          proxyApiKeyFairShareCongestionThresholdPctOverride: null,
+        }}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByRole("spinbutton", { name: "Response-create limit" })).toHaveValue(null);
+    expect(screen.getByRole("spinbutton", { name: "Stream limit" })).toHaveValue(null);
+    expect(screen.getByRole("spinbutton", { name: "Stream recovery reserve" })).toHaveValue(null);
+    expect(screen.getByRole("spinbutton", { name: "API key fair-share threshold (%)" })).toHaveValue(null);
+    expect(screen.getAllByText(/Inherited effective value:/)).toHaveLength(4);
+  });
+
+  it.each([
+    ["Response-create limit", "proxyAccountResponseCreateLimit"],
+    ["Stream limit", "proxyAccountStreamLimit"],
+    ["Stream recovery reserve", "proxyAccountStreamRecoveryReserve"],
+    ["API key fair-share threshold (%)", "proxyApiKeyFairShareCongestionThresholdPct"],
+  ] as const)("sends only an explicit null when clearing %s", async (label, field) => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.clear(screen.getByRole("spinbutton", { name: label }));
+    await user.click(screen.getByRole("button", { name: "Save capacity limits" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      [field]: null,
+    });
+  });
+
+  it("does not pin unedited capacity values when clearing an inherited field", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const inheritedSettings = {
+      ...BASE_SETTINGS,
+      proxyAccountResponseCreateLimitOverride: null,
+      proxyAccountStreamLimitOverride: null,
+      proxyAccountStreamRecoveryReserveOverride: null,
+      proxyApiKeyFairShareCongestionThresholdPctOverride: null,
+    };
+    render(<RoutingSettings settings={inheritedSettings} busy={false} onSave={onSave} />);
+
+    await user.type(screen.getByRole("spinbutton", { name: "Stream limit" }), "12");
+    await user.click(screen.getByRole("button", { name: "Save capacity limits" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...buildSettingsUpdateRequest(inheritedSettings, {}),
+      proxyAccountStreamLimit: 12,
+    });
+    const payload = onSave.mock.calls[0]?.[0];
+    expect(payload).not.toHaveProperty("proxyAccountResponseCreateLimit");
+    expect(payload).not.toHaveProperty("proxyAccountStreamRecoveryReserve");
+    expect(payload).not.toHaveProperty("proxyApiKeyFairShareCongestionThresholdPct");
+  });
+
+  it("validates a cleared stream limit against its inherited environment value", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{
+          ...BASE_SETTINGS,
+          proxyAccountStreamLimit: 24,
+          proxyAccountStreamLimitEnvironmentValue: 2,
+          proxyAccountStreamLimitOverride: 24,
+          proxyAccountStreamRecoveryReserve: 3,
+          proxyAccountStreamRecoveryReserveOverride: 3,
+        }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.clear(screen.getByRole("spinbutton", { name: "Stream limit" }));
+
+    expect(screen.getByRole("button", { name: "Save capacity limits" })).toBeDisabled();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid account capacity limits before saving", async () => {
+    const user = userEvent.setup();
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    const streamLimit = screen.getByRole("spinbutton", { name: "Stream limit" });
+    const recoveryReserve = screen.getByRole("spinbutton", { name: "Stream recovery reserve" });
+    const fairShareThreshold = screen.getByRole("spinbutton", {
+      name: "API key fair-share threshold (%)",
+    });
+    const saveButton = screen.getByRole("button", { name: "Save capacity limits" });
+
+    await user.clear(streamLimit);
+    await user.type(streamLimit, "2");
+    await user.clear(recoveryReserve);
+    await user.type(recoveryReserve, "3");
+    expect(saveButton).toBeDisabled();
+
+    await user.clear(recoveryReserve);
+    await user.type(recoveryReserve, "1.5");
+    expect(saveButton).toBeDisabled();
+
+    await user.clear(recoveryReserve);
+    await user.type(recoveryReserve, "1");
+    expect(saveButton).toBeEnabled();
+
+    await user.clear(fairShareThreshold);
+    await user.type(fairShareThreshold, "101");
+    expect(saveButton).toBeDisabled();
+  });
+
   it("saves a new prompt-cache affinity ttl from the button and Enter key", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
@@ -85,6 +248,19 @@ describe("RoutingSettings", () => {
       stickyThreadsEnabled: true,
       openaiCacheAffinityMaxAgeSeconds: 300,
       guestAccessEnabled: false,
+    });
+  });
+
+  it("saves the Fast Mode prohibition toggle", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.click(screen.getByRole("switch", { name: "Prohibit Fast Mode" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      prohibitFastMode: true,
     });
   });
 
@@ -220,7 +396,7 @@ describe("RoutingSettings", () => {
     const warmupModelInput = screen.getByLabelText("Warmup model");
     await user.clear(warmupModelInput);
     await user.type(warmupModelInput, "gpt-5.4-pro");
-    await user.click(screen.getByRole("button", { name: "Save warmup model" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(onSave).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -318,8 +494,7 @@ describe("RoutingSettings", () => {
       />,
     );
 
-    await user.click(screen.getAllByRole("combobox")[1]);
-    await user.click(await screen.findByRole("option", { name: "Single account" }));
+    await user.click(screen.getByRole("button", { name: /Single account/i }));
 
     expect(onSave).toHaveBeenCalledWith({
       ...BASE_UPDATE_PAYLOAD,
@@ -329,13 +504,23 @@ describe("RoutingSettings", () => {
   });
 
   it("names limit warm-up controls for assistive technology", () => {
-    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
 
     expect(screen.getByRole("switch", { name: "Enable limit warm-up" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Enable staggered idle warm-up" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Prefer earlier reset accounts" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Reset preference window" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Warmup model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByLabelText("Warm-up model")).toHaveAttribute("maxLength", "128");
+    expect(screen.getByRole("combobox", { name: "Warm-up windows" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Pace gap average" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Model")).toHaveAttribute("maxLength", "128");
+    expect(screen.getByLabelText("Min usage percent")).toHaveAttribute("max", "100");
     expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute("maxLength", "512");
   });
 
@@ -370,16 +555,99 @@ describe("RoutingSettings", () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
-  it("does not silently truncate decimal warm-up cooldown values", async () => {
+  it("saves weekly pace smoothing changes", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
 
+    await user.click(screen.getByRole("combobox", { name: "Pace gap average" }));
+    await user.click(await screen.findByRole("option", { name: "2h" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      weeklyPaceSmoothingMinutes: 120,
+    });
+  });
+
+  it("does not silently truncate decimal warm-up cooldown values", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
     await user.clear(screen.getByLabelText("Warm-up cooldown"));
     await user.type(screen.getByLabelText("Warm-up cooldown"), "60.5");
 
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save warm-up settings" })).toBeDisabled();
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("saves warm-up exhausted threshold changes", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText("Min usage percent"));
+    await user.type(screen.getByLabelText("Min usage percent"), "98.5");
+    await user.click(screen.getByRole("button", { name: "Save warm-up settings" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      limitWarmupEnabled: true,
+      limitWarmupExhaustedThresholdPercent: 98.5,
+    });
+  });
+
+  it("rejects invalid warm-up exhausted thresholds", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText("Min usage percent"));
+    await user.type(screen.getByLabelText("Min usage percent"), "100.1");
+
+    expect(screen.getByRole("button", { name: "Save warm-up settings" })).toBeDisabled();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("saves staggered idle warm-up idle threshold changes", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true, limitWarmupStaggeredIdleEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText("Max usage percent"));
+    await user.type(screen.getByLabelText("Max usage percent"), "2.5");
+    await user.click(screen.getByRole("button", { name: "Save warm-up settings" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      limitWarmupEnabled: true,
+      limitWarmupStaggeredIdleEnabled: true,
+      limitWarmupIdleThresholdPercent: 2.5,
+    });
   });
 
   it("saves the reset preference window", async () => {
@@ -404,6 +672,20 @@ describe("RoutingSettings", () => {
     });
   });
 
+  it("renders and saves the HTTP client routing policy", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.click(screen.getByRole("combobox", { name: "HTTP client routing" }));
+    await user.click(await screen.findByRole("option", { name: "Prefer persistent sessions" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      httpDownstreamTransportPolicy: "always_websocket",
+    });
+  });
+
   it("offers Fill first as a routing strategy option", () => {
     render(
       <RoutingSettings
@@ -414,5 +696,92 @@ describe("RoutingSettings", () => {
     );
 
     expect(screen.getAllByText("Fill first").length).toBeGreaterThan(0);
+  });
+
+  it("explains routing strategy trade-offs and account-safety guidance", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(screen.getByText(/Good default for compliant mixed-account pools/i)).toBeInTheDocument();
+    expect(screen.getByText(/No strategy can guarantee account-safety outcomes/i)).toBeInTheDocument();
+  });
+
+  it("explains soft sticky routing versus hard Codex continuation affinity", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(
+      screen.getByText(/does not disable hard Codex continuation affinity/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/soft preference, not a guarantee/i)).toBeInTheDocument();
+  });
+
+  it("explains primary versus secondary quota windows and threshold units", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(screen.getByText("Primary vs secondary quota")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Primary quota is the short 5-hour usage window/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/5-hour \(primary\) window has been used/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/secondary window \(weekly, or monthly on monthly-only plans\) has been used/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the remaining-percent equivalent for sticky thresholds", async () => {
+    const user = userEvent.setup();
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    // Defaults: primary 95% used, secondary 100% used.
+    expect(screen.getByText("95% used · 5% remaining in quota terms")).toBeInTheDocument();
+    expect(screen.getByText("100% used · 0% remaining in quota terms")).toBeInTheDocument();
+
+    const secondary = screen.getByRole("spinbutton", { name: "Sticky secondary threshold" });
+    await user.clear(secondary);
+    await user.type(secondary, "70");
+
+    expect(screen.getByText("70% used · 30% remaining in quota terms")).toBeInTheDocument();
+
+    // Decimal thresholds keep the two displayed values complementary.
+    await user.clear(secondary);
+    await user.type(secondary, "12.5");
+
+    expect(screen.getByText("12.5% used · 87.5% remaining in quota terms")).toBeInTheDocument();
+  });
+
+  it("describes prefer-earlier-reset selection behavior", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(
+      screen.getByText(/prefer those whose selected quota window resets sooner/i),
+    ).toBeInTheDocument();
+  });
+
+  it("describes what limit warm-up sends and that probes consume quota", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(screen.getByText(/consume a small amount of quota/i)).toBeInTheDocument();
+  });
+
+  it("saves staggered idle warm-up when limit warm-up is enabled", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.click(screen.getByRole("switch", { name: "Enable staggered idle warm-up" }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      buildSettingsUpdateRequest(
+        { ...BASE_SETTINGS, limitWarmupEnabled: true },
+        { limitWarmupEnabled: true, limitWarmupStaggeredIdleEnabled: true },
+      ),
+    );
   });
 });

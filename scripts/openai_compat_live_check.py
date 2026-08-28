@@ -121,8 +121,10 @@ def _chat_image_part(url: str) -> ChatCompletionContentPartParam:
 
 def _chat_audio_format(value: str) -> Literal["wav", "mp3"]:
     normalized = value.strip().lower()
-    if normalized in ("wav", "mp3"):
-        return cast(Literal["wav", "mp3"], normalized)
+    if normalized == "wav":
+        return "wav"
+    if normalized == "mp3":
+        return "mp3"
     raise CaseSkipped("C.audio_input requires CODEX_TEST_AUDIO_FORMAT to be wav or mp3")
 
 

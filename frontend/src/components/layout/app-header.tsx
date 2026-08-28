@@ -1,19 +1,34 @@
-import { Eye, EyeOff, LogIn, LogOut, Menu } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { ChevronDown, Eye, EyeOff, LogIn, LogOut, Menu } from "lucide-react";
 import { useState } from "react";
-import { NavLink } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+import { Link, NavLink, useLocation } from "react-router-dom";
 
 import { CodexLogo } from "@/components/brand/codex-logo";
+import { LanguageToggle, LanguageToggleMobile } from "@/components/layout/language-toggle";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { listAccounts } from "@/features/accounts/api";
+import { getSettings } from "@/features/settings/api";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { cn } from "@/lib/utils";
 
-const NAV_ITEMS = [
-  { to: "/dashboard", label: "Dashboard" },
-  { to: "/reports", label: "Reports" },
-  { to: "/accounts", label: "Accounts" },
-  { to: "/apis", label: "APIs" },
-  { to: "/settings", label: "Settings" },
+const CORE_NAV_ITEMS = [
+  { to: "/dashboard", labelKey: "nav.dashboard" },
+  { to: "/reports", labelKey: "nav.reports" },
+  { to: "/accounts", labelKey: "nav.accounts" },
+  { to: "/apis", labelKey: "nav.apis" },
+  { to: "/settings", labelKey: "nav.settings" },
+] as const;
+
+const ADVANCED_NAV_ITEMS = [
+  { to: "/automations", labelKey: "nav.automations" },
 ] as const;
 
 export type AppHeaderProps = {
@@ -31,10 +46,40 @@ export function AppHeader({
   showLogout = true,
   className,
 }: AppHeaderProps) {
+  const { t } = useTranslation();
+  const { pathname } = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const advancedActive = ADVANCED_NAV_ITEMS.some(
+    (item) => pathname === item.to || pathname.startsWith(`${item.to}/`),
+  );
   const blurred = usePrivacyStore((s) => s.blurred);
   const togglePrivacy = usePrivacyStore((s) => s.toggle);
   const PrivacyIcon = blurred ? EyeOff : Eye;
+  const { data: accounts = [] } = useQuery({
+    queryKey: ["accounts", "list"],
+    queryFn: listAccounts,
+    select: (data) => data.accounts,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+    staleTime: 30_000,
+  });
+  const { data: settings } = useQuery({
+    queryKey: ["settings", "detail"],
+    queryFn: getSettings,
+  });
+  const showResetCreditBadges = settings?.showResetCreditBadges ?? true;
+  const totalAvailableResetCredits = accounts.reduce(
+    (total, account) => total + Math.max(0, account.availableResetCredits ?? 0),
+    0,
+  );
+  const accountsResetBadge = !showResetCreditBadges
+    ? null
+    : totalAvailableResetCredits > 99
+    ? "99+"
+    : totalAvailableResetCredits > 0
+      ? String(totalAvailableResetCredits)
+      : null;
+  const privacyLabel = blurred ? t("nav.showEmails") : t("nav.hideEmails");
 
   return (
     <header
@@ -45,18 +90,21 @@ export function AppHeader({
     >
       <div className="mx-auto flex w-full max-w-[1500px] items-center justify-between gap-4">
         {/* Brand */}
-        <div className="flex min-w-0 flex-1 items-center gap-2.5">
+        <Link
+          to="/dashboard"
+          className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg no-underline transition-colors hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-primary/15 to-primary/5">
             <CodexLogo size={20} className="text-primary" />
           </div>
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold tracking-tight">Codex LB</p>
           </div>
-        </div>
+        </Link>
 
         {/* Desktop nav pills */}
         <nav className="hidden items-center rounded-lg border border-border/50 bg-muted/40 p-0.5 sm:flex">
-          {NAV_ITEMS.map((item) => (
+          {CORE_NAV_ITEMS.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
@@ -69,19 +117,50 @@ export function AppHeader({
                 )
               }
             >
-              {item.label}
+              <span className="relative inline-flex items-center">
+                {t(item.labelKey)}
+                {item.to === "/accounts" && accountsResetBadge ? (
+                  <span className="absolute -top-2 -right-4 z-10 grid h-4 min-w-[1rem] place-items-center rounded-full bg-primary px-1 text-[10px] font-medium text-primary-foreground">
+                    {accountsResetBadge}
+                  </span>
+                ) : null}
+              </span>
             </NavLink>
           ))}
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              data-active={advancedActive}
+              className={cn(
+                "relative inline-flex h-7 items-center gap-1 rounded-md px-3.5 text-xs leading-none font-medium transition-colors duration-200",
+                advancedActive
+                  ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {t("nav.advanced")}
+              <ChevronDown className="h-3 w-3" aria-hidden="true" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {ADVANCED_NAV_ITEMS.map((item) => (
+                <DropdownMenuItem key={item.to} asChild>
+                  <NavLink to={item.to} className="cursor-pointer">
+                    {t(item.labelKey)}
+                  </NavLink>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </nav>
 
         {/* Actions */}
         <div className="flex flex-1 items-center justify-end gap-1.5">
+          <LanguageToggle />
           <Button
             type="button"
             size="sm"
             variant="ghost"
             onClick={togglePrivacy}
-            aria-label={blurred ? "Show emails" : "Hide emails"}
+            aria-label={privacyLabel}
             className="press-scale hidden h-8 w-8 rounded-lg text-muted-foreground hover:text-foreground sm:inline-flex"
           >
             <PrivacyIcon className="h-3.5 w-3.5" aria-hidden="true" />
@@ -95,7 +174,7 @@ export function AppHeader({
               className="press-scale hidden h-8 gap-1.5 rounded-lg text-xs text-muted-foreground hover:text-foreground sm:inline-flex"
             >
               <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
-              Logout
+              {t("common.logout")}
             </Button>
           )}
           {showAdminLogin && (
@@ -107,14 +186,14 @@ export function AppHeader({
               className="press-scale hidden h-8 gap-1.5 rounded-lg text-xs sm:inline-flex"
             >
               <LogIn className="h-3.5 w-3.5" aria-hidden="true" />
-              Admin
+              {t("nav.adminSignIn")}
             </Button>
           )}
 
           {/* Mobile menu */}
           <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
             <SheetTrigger asChild>
-              <Button type="button" size="icon" variant="ghost" aria-label="Open menu" className="h-8 w-8 rounded-lg sm:hidden">
+              <Button type="button" size="icon" variant="ghost" aria-label={t("nav.openMenu")} className="h-8 w-8 rounded-lg sm:hidden">
                 <Menu className="h-4 w-4" />
               </Button>
             </SheetTrigger>
@@ -128,18 +207,43 @@ export function AppHeader({
                 </SheetTitle>
               </SheetHeader>
               <nav className="flex flex-col gap-0.5 px-4 pt-2">
-                {NAV_ITEMS.map((item) => (
+                {CORE_NAV_ITEMS.map((item) => (
                   <NavLink key={item.to} to={item.to} onClick={() => setMobileOpen(false)}>
                     {({ isActive }) => (
                       <span
                         className={cn(
-                          "block w-full rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
+                          "relative block w-full rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
                           isActive
                             ? "bg-primary/10 text-primary"
                             : "text-muted-foreground hover:bg-muted hover:text-foreground",
                         )}
                       >
-                        {item.label}
+                        {t(item.labelKey)}
+                        {item.to === "/accounts" && accountsResetBadge ? (
+                          <span className="absolute right-2 top-1 z-10 grid h-5 min-w-[1.25rem] place-items-center rounded-full bg-primary px-1 text-[10px] font-medium text-primary-foreground">
+                            {accountsResetBadge}
+                          </span>
+                        ) : null}
+                      </span>
+                    )}
+                  </NavLink>
+                ))}
+                <div className="my-2 h-px bg-border" />
+                <p className="px-3 pb-1 text-[11px] font-medium tracking-wider text-muted-foreground uppercase">
+                  {t("nav.advanced")}
+                </p>
+                {ADVANCED_NAV_ITEMS.map((item) => (
+                  <NavLink key={item.to} to={item.to} onClick={() => setMobileOpen(false)}>
+                    {({ isActive }) => (
+                      <span
+                        className={cn(
+                          "relative block w-full rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
+                          isActive
+                            ? "bg-primary/10 text-primary"
+                            : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                        )}
+                      >
+                        {t(item.labelKey)}
                       </span>
                     )}
                   </NavLink>
@@ -151,8 +255,10 @@ export function AppHeader({
                   onClick={togglePrivacy}
                 >
                   <PrivacyIcon className="h-3.5 w-3.5" aria-hidden="true" />
-                  {blurred ? "Show Emails" : "Hide Emails"}
+                  {privacyLabel}
                 </button>
+                <div className="my-2 h-px bg-border" />
+                <LanguageToggleMobile />
                 {showLogout && (
                   <button
                     type="button"
@@ -163,7 +269,7 @@ export function AppHeader({
                     }}
                   >
                     <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
-                    Logout
+                    {t("common.logout")}
                   </button>
                 )}
                 {showAdminLogin && (
@@ -176,7 +282,7 @@ export function AppHeader({
                     }}
                   >
                     <LogIn className="h-3.5 w-3.5" aria-hidden="true" />
-                    Admin Sign In
+                    {t("nav.adminSignIn")}
                   </button>
                 )}
               </nav>

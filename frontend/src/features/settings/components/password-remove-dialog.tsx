@@ -1,5 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useEffect } from "react";
 import { useForm } from "react-hook-form";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { AlertMessage } from "@/components/alert-message";
@@ -12,7 +14,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { removePassword } from "@/features/auth/api";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
@@ -25,9 +34,24 @@ export type PasswordRemoveDialogProps = {
   disabled?: boolean;
 };
 
-export function PasswordRemoveDialog({ open, onOpenChange, disabled = false }: PasswordRemoveDialogProps) {
-  const passwordManagementEnabled = useAuthStore((s) => s.passwordManagementEnabled);
+export function PasswordRemoveDialog({
+  open,
+  onOpenChange,
+  disabled = false,
+}: PasswordRemoveDialogProps) {
+  const { t } = useTranslation();
+  const passwordManagementEnabled = useAuthStore(
+    (s) => s.passwordManagementEnabled,
+  );
   const refreshSession = useAuthStore((s) => s.refreshSession);
+
+  const resolveValidationMessage = (message?: string): string | undefined => {
+    if (!message) {
+      return undefined;
+    }
+    const translated = t(message);
+    return translated === message ? message : translated;
+  };
 
   const form = useForm({
     resolver: zodResolver(PasswordRemoveRequestSchema),
@@ -37,21 +61,20 @@ export function PasswordRemoveDialog({ open, onOpenChange, disabled = false }: P
   const busy = form.formState.isSubmitting;
   const lock = busy || disabled || !passwordManagementEnabled;
 
-  const handleOpenChange = (next: boolean) => {
-    if (!next) {
+  useEffect(() => {
+    if (!open) {
       form.reset();
       form.clearErrors();
     }
-    onOpenChange(next);
-  };
+  }, [open, form]);
 
   const handleSubmit = async (values: { password: string }) => {
     form.clearErrors("root");
     try {
       await removePassword(values);
       await refreshSession();
-      toast.success("Password removed");
-      handleOpenChange(false);
+      toast.success(t("settings.password.toasts.removed"));
+      onOpenChange(false);
     } catch (caught) {
       form.setError("root", { message: getErrorMessage(caught) });
     }
@@ -60,34 +83,61 @@ export function PasswordRemoveDialog({ open, onOpenChange, disabled = false }: P
   const rootError = form.formState.errors.root?.message;
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Remove password</DialogTitle>
-          <DialogDescription>Confirm your current password to remove it.</DialogDescription>
+          <DialogTitle>{t("settings.password.removeDialog.title")}</DialogTitle>
+          <DialogDescription>
+            {t("settings.password.removeDialog.description")}
+          </DialogDescription>
         </DialogHeader>
-        {rootError ? <AlertMessage variant="error">{rootError}</AlertMessage> : null}
+        {rootError ? (
+          <AlertMessage variant="error">{rootError}</AlertMessage>
+        ) : null}
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-4">
+          <form
+            onSubmit={form.handleSubmit(handleSubmit)}
+            className="space-y-4"
+          >
             <FormField
               control={form.control}
               name="password"
-              render={({ field }) => (
+              render={({ field, fieldState }) => (
                 <FormItem>
-                  <FormLabel>Current password</FormLabel>
+                  <FormLabel>
+                    {t("settings.password.removeDialog.currentLabel")}
+                  </FormLabel>
                   <FormControl>
-                    <Input {...field} type="password" autoComplete="current-password" placeholder="Enter current password" />
+                    <Input
+                      {...field}
+                      type="password"
+                      autoComplete="current-password"
+                      placeholder={t(
+                        "settings.password.removeDialog.currentPlaceholder",
+                      )}
+                    />
                   </FormControl>
-                  <FormMessage />
+                  {fieldState.error?.message ? (
+                    <FormMessage>
+                      {resolveValidationMessage(fieldState.error.message)}
+                    </FormMessage>
+                  ) : (
+                    <FormMessage />
+                  )}
                 </FormItem>
               )}
             />
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => handleOpenChange(false)} disabled={busy}>
-                Cancel
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+                disabled={busy}
+              >
+                {t("common.cancel")}
               </Button>
               <Button type="submit" variant="destructive" disabled={lock}>
-                Remove password
+                {t("settings.password.removeDialog.submit")}
               </Button>
             </DialogFooter>
           </form>

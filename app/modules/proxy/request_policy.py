@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
+from typing import NamedTuple
 
 from pydantic import ValidationError
 
 from app.core.errors import OpenAIErrorEnvelope, openai_error
-from app.core.exceptions import ProxyModelNotAllowed
+from app.core.exceptions import ProxyModelNotAllowed, ProxyReasoningEffortNotAllowed
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import ModelRegistry, get_model_registry
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning, ResponsesRequest
+from app.core.openai.requests import (
+    ResponsesCompactRequest,
+    ResponsesReasoning,
+    ResponsesRequest,
+    extract_input_file_ids,
+    normalize_reasoning_aliases,
+    responses_input_uses_lite_tools,
+)
 from app.core.openai.strict_schema import (
     validate_strict_function_tool_schema,
     validate_strict_json_schema,
@@ -17,7 +26,9 @@ from app.core.openai.v1_requests import V1ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.core.utils.request_id import get_request_id
+from app.db.models import ModelSource
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.model_sources.catalog import source_model_reasoning_levels
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +42,24 @@ logger = logging.getLogger(__name__)
 _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS: frozenset[str] = frozenset({"minimal"})
 _DEFAULT_REASONING_EFFORT_FALLBACK = "low"
 
+# Client-plane reasoning efforts the reference Codex client never sends on the
+# wire. GPT-5.6 Sol/Terra advertise ``ultra`` in their catalog entries, but the
+# official client rewrites it to ``max`` before building the Responses request
+# (``reasoning_effort_for_request`` in codex-rs ``core/src/client.rs`` at
+# rust-v0.144.1); ``ultra``'s extra effect (proactive multi-agent mode) is
+# purely client-side. Mirror that aliasing for API-key enforcement and raw
+# API callers so the upstream backend only ever sees wire-safe values.
+_REASONING_EFFORT_WIRE_ALIASES: dict[str, str] = {"ultra": "max"}
+
 # Cursor exposes GPT-5 family model labels with UI suffixes such as "Extra
 # High Fast". The ChatGPT/Codex upstream accepts the canonical GPT-5-family
 # slug plus request fields, not those synthetic suffixes in the model name.
 # Keep this deliberately narrow: only strip known Cursor-style suffix tokens
 # from known GPT-5 base model slugs, and leave every other model untouched.
 _GPT5_ALIAS_BASE_MODELS: tuple[str, ...] = (
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.4-mini",
     "gpt-5.3-codex",
     "gpt-5.2-codex",
@@ -83,6 +106,19 @@ _MODEL_ALIAS_TOKENS: frozenset[str] = frozenset(
 _UPSTREAM_OMIT_SERVICE_TIERS: frozenset[str] = frozenset({"auto", "default"})
 
 
+def resolve_wire_reasoning_effort(effort: str) -> str:
+    """Return the wire-safe value for a client-plane reasoning effort.
+
+    The reference Codex client rewrites client-plane efforts (``ultra`` ->
+    ``max``) before building the upstream Responses request; every codex-lb
+    code path that builds an upstream payload directly (proxy enforcement,
+    automation compact pings) applies the same aliasing so the upstream
+    backend never sees a client-plane literal. Unknown values pass through
+    unchanged.
+    """
+    return _REASONING_EFFORT_WIRE_ALIASES.get(effort.strip().lower(), effort)
+
+
 def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None:
     if api_key is None:
         return
@@ -95,26 +131,191 @@ def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None
     raise ProxyModelNotAllowed(f"This API key does not have access to model '{model}'")
 
 
+def validate_reasoning_effort_access(api_key: ApiKeyData | None, effort: str | None) -> None:
+    if api_key is None:
+        return
+    allowed_reasoning_efforts = getattr(api_key, "allowed_reasoning_efforts", None)
+    if allowed_reasoning_efforts is None or effort is None:
+        return
+    normalized_effort = effort.strip().lower()
+    if normalized_effort in allowed_reasoning_efforts:
+        return
+    logger.info(
+        "api_key_reasoning_effort_not_allowed request_id=%s key_id=%s reasoning_effort=%s",
+        get_request_id(),
+        api_key.id,
+        normalized_effort,
+    )
+    raise ProxyReasoningEffortNotAllowed(
+        f"This API key does not have access to reasoning effort '{normalized_effort}'",
+        param="reasoning.effort",
+    )
+
+
+def _client_reasoning_effort(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
+    """Return the effort selected by the client before wire normalization.
+
+    Cursor encodes its effort in an accepted model alias, where ``xhigh`` is
+    later lowered to the upstream's ``high`` value. API-key policies are an
+    operator-facing client-plane control, so they must compare against the
+    original selection rather than that wire representation.
+    """
+    model_effort = _client_reasoning_effort_from_model(payload.model)
+    if model_effort is not None:
+        return model_effort
+
+    reasoning = payload.reasoning.model_dump(mode="json", exclude_none=True) if payload.reasoning is not None else None
+    if is_json_mapping(reasoning):
+        effort = reasoning.get("effort")
+        if isinstance(effort, str) and effort.strip():
+            return effort.strip().lower()
+    return _client_reasoning_effort_from_provider_aliases(payload)
+
+
+def _client_reasoning_effort_from_provider_aliases(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+) -> str | None:
+    reasoning = payload.reasoning.model_dump(mode="json", exclude_none=True) if payload.reasoning is not None else None
+    extra = payload.model_extra
+    if isinstance(extra, dict):
+        alias_payload = dict(extra)
+        if reasoning is not None:
+            alias_payload["reasoning"] = reasoning
+        normalize_reasoning_aliases(alias_payload)
+        normalized_reasoning = alias_payload.get("reasoning")
+        if is_json_mapping(normalized_reasoning):
+            extra_effort = normalized_reasoning.get("effort")
+            if isinstance(extra_effort, str) and extra_effort.strip():
+                return extra_effort.strip().lower()
+
+    return None
+
+
+def _materialize_provider_reasoning_effort(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    effort: str | None,
+) -> None:
+    existing_effort = payload.reasoning.effort if payload.reasoning is not None else None
+    if effort is None or (isinstance(existing_effort, str) and existing_effort.strip()):
+        return
+    if payload.reasoning is None:
+        payload.reasoning = ResponsesReasoning(effort=effort)
+    else:
+        payload.reasoning.effort = effort
+    if isinstance(payload, ResponsesRequest):
+        payload._codex_lb_provider_reasoning_effort_materialized = True
+
+
+def _client_reasoning_effort_from_model(model: str | None) -> str | None:
+    alias = _resolve_model_alias_parts(model)
+    if alias is not None:
+        normalized_model = model.strip().lower() if isinstance(model, str) else ""
+        suffix = normalized_model[len(alias[0]) + 1 :]
+        tokens = {token for token in suffix.split("-") if token}
+        if "xhigh" in tokens or "extra" in tokens:
+            return "xhigh"
+        if alias[1] is not None:
+            return alias[1]
+    return None
+
+
+def normalize_source_reasoning_aliases(payload: dict[str, JsonValue]) -> None:
+    """Align effort-bearing aliases while preserving unrelated source controls."""
+    provider_thinking = payload.get("thinking")
+    preserve_provider_thinking = False
+    if "thinking" in payload:
+        probe: dict[str, JsonValue] = {"thinking": provider_thinking}
+        normalize_reasoning_aliases(probe)
+        normalized_reasoning = probe.get("reasoning")
+        normalized_effort = normalized_reasoning.get("effort") if is_json_mapping(normalized_reasoning) else None
+        thinking_mapping = provider_thinking if is_json_mapping(provider_thinking) else None
+        thinking_type = thinking_mapping.get("type") if thinking_mapping is not None else None
+        is_inactive = thinking_mapping is not None and (
+            thinking_mapping.get("enabled") is False
+            or (isinstance(thinking_type, str) and thinking_type.strip().lower() == "disabled")
+        )
+        preserve_provider_thinking = (
+            thinking_mapping is not None
+            and not is_inactive
+            and not (isinstance(normalized_effort, str) and bool(normalized_effort.strip()))
+        )
+    if preserve_provider_thinking:
+        payload.pop("thinking", None)
+    normalize_reasoning_aliases(payload)
+    if preserve_provider_thinking and thinking_mapping is not None:
+        preserved_thinking = dict(thinking_mapping.items())
+        preserved_effort = preserved_thinking.get("effort")
+        if isinstance(preserved_effort, str) and not preserved_effort.strip():
+            preserved_thinking.pop("effort")
+        payload["thinking"] = preserved_thinking
+
+
+class ApiKeyEnforcementResult(NamedTuple):
+    """What :func:`apply_api_key_enforcement` observed while mutating the payload.
+
+    ``pre_normalization_reasoning_effort`` carries the effort that
+    :func:`normalize_unsupported_reasoning_effort` replaced, so a caller that
+    later routes the request to an OpenAI-compatible model source can restore
+    it. It is the post-enforcement value: restoring it cannot resurrect an
+    effort an API key overrode.
+    """
+
+    service_tier_was_enforced: bool
+    pre_normalization_reasoning_effort: str | None
+
+
 def apply_api_key_enforcement(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
-) -> None:
-    normalize_upstream_model_alias(payload)
+    *,
+    registry: ModelRegistry | None = None,
+    prohibit_fast_mode: bool = False,
+) -> ApiKeyEnforcementResult:
+    """Apply API-key policy and report whether it supplied the service tier.
+
+    The returned provenance is captured before mutating ``payload``. Callers
+    must not infer it later by comparing values: an explicit client request can
+    equal the enforced value (including after ``fast`` canonicalizes to
+    ``priority``).
+    """
+    client_reasoning_effort = payload._codex_lb_client_reasoning_effort or _client_reasoning_effort(payload)
+    payload._codex_lb_client_reasoning_effort = client_reasoning_effort
+    provider_reasoning_effort = _client_reasoning_effort_from_provider_aliases(payload)
+    normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
 
     if api_key is None:
-        normalize_unsupported_reasoning_effort(payload)
-        return
+        _materialize_provider_reasoning_effort(payload, provider_reasoning_effort)
+        pre_normalization_effort = normalize_unsupported_reasoning_effort(payload, registry=registry)
+        return ApiKeyEnforcementResult(False, pre_normalization_effort)
 
-    if api_key.enforced_model and payload.model != api_key.enforced_model:
-        logger.info(
-            "api_key_model_enforced request_id=%s key_id=%s requested_model=%s enforced_model=%s",
-            get_request_id(),
-            api_key.id,
-            payload.model,
-            api_key.enforced_model,
-        )
+    if api_key.enforced_model:
+        enforced_model_reasoning_effort = _client_reasoning_effort_from_model(api_key.enforced_model)
+        requested_model = payload.model
+        if requested_model != api_key.enforced_model:
+            logger.info(
+                "api_key_model_enforced request_id=%s key_id=%s requested_model=%s enforced_model=%s",
+                get_request_id(),
+                api_key.id,
+                requested_model,
+                api_key.enforced_model,
+            )
         payload.model = api_key.enforced_model
-        normalize_upstream_model_alias(payload)
+        if enforced_model_reasoning_effort is not None:
+            client_reasoning_effort = enforced_model_reasoning_effort
+            payload._codex_lb_client_reasoning_effort = client_reasoning_effort
+        normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
+        if (
+            responses_input_uses_lite_tools(payload.input)
+            and _model_responses_lite_capability(
+                payload.model,
+                registry=registry or get_model_registry(),
+            )
+            is False
+        ):
+            raise ProxyModelNotAllowed(
+                f"API key enforced model '{payload.model}' does not support Responses Lite",
+                code="responses_lite_model_mismatch",
+            )
 
     if api_key.enforced_reasoning_effort is not None:
         requested_effort = payload.reasoning.effort if payload.reasoning else None
@@ -131,10 +332,23 @@ def apply_api_key_enforcement(
                 api_key.enforced_reasoning_effort,
             )
 
-    normalize_unsupported_reasoning_effort(payload)
+    _materialize_provider_reasoning_effort(payload, provider_reasoning_effort)
+    if client_reasoning_effort is not None:
+        validate_reasoning_effort_access(api_key, client_reasoning_effort)
+        if (
+            payload.reasoning is not None
+            and isinstance(payload.reasoning.effort, str)
+            and payload.reasoning.effort.strip().lower() == client_reasoning_effort
+        ):
+            payload.reasoning.effort = client_reasoning_effort
+    pre_normalization_effort = normalize_unsupported_reasoning_effort(payload, registry=registry)
 
+    service_tier_was_enforced = False
     if api_key.enforced_service_tier is not None:
         requested_service_tier = getattr(payload, "service_tier", None)
+        service_tier_was_enforced = requested_service_tier is None or (
+            requested_service_tier.strip().lower() in _UPSTREAM_OMIT_SERVICE_TIERS
+        )
         # ``auto``/``default`` are accepted at the API-key surface but
         # the ChatGPT/Codex backend rejects them as literal values. Map
         # them onto the wire-level absence of ``service_tier`` (which
@@ -157,6 +371,172 @@ def apply_api_key_enforcement(
                 api_key.enforced_service_tier,
                 effective_service_tier,
             )
+    return ApiKeyEnforcementResult(service_tier_was_enforced, pre_normalization_effort)
+
+
+def apply_enforced_service_tier_model_fallback(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    *,
+    service_tier_was_enforced: bool,
+    registry: ModelRegistry | None = None,
+) -> bool:
+    """Drop an enforced tier only when an account model truly lacks it.
+
+    This runs after model-source selection, and only on subscription-account
+    routes. Mutating the request at that boundary makes account selection,
+    bridge compatibility, API-key accounting, request logs, and the upstream
+    wire payload agree on the same effective tier.
+    """
+    service_tier = payload.service_tier
+    if not service_tier_was_enforced or service_tier is None:
+        return False
+
+    model_registry = registry or get_model_registry()
+    advertises_service_tier = getattr(model_registry, "model_advertises_service_tier", None)
+    if not callable(advertises_service_tier) or advertises_service_tier(payload.model, service_tier):
+        return False
+
+    logger.info(
+        "api_key_enforced_service_tier_model_fallback request_id=%s model=%s enforced_service_tier=%s",
+        get_request_id(),
+        payload.model,
+        service_tier,
+    )
+    payload.service_tier = None
+    return True
+
+
+def _model_responses_lite_capability(
+    model: str,
+    *,
+    registry: ModelRegistry,
+) -> bool | None:
+    normalized_model = model.strip().lower()
+    models = registry.get_models_for_metadata()
+    model_entry = models.get(model) or models.get(normalized_model)
+    if model_entry is None:
+        return None
+    capability = model_entry.raw.get("use_responses_lite")
+    return capability if isinstance(capability, bool) else None
+
+
+# Non-standard reasoning toggles some OpenAI-compatible clients attach
+# (OpenRouter/SGLang style). Forwarding them to a source whose model does not
+# support reasoning flips the upstream into reasoning-extraction mode: the
+# answer lands in ``message.reasoning`` instead of ``message.content``.
+_SOURCE_REASONING_TOGGLE_KEYS: tuple[str, ...] = (
+    "include_reasoning",
+    "separate_reasoning",
+    "stream_reasoning",
+    "reasoning",
+    "reasoning_effort",
+)
+
+
+def sanitize_source_chat_payload(
+    payload: dict[str, JsonValue],
+    *,
+    allow_reasoning: bool,
+) -> None:
+    """Clean a chat-completions wire payload before forwarding to a source.
+
+    ``ChatCompletionsRequest`` allows extra fields and defaults ``tools`` to an
+    empty list, so an unfiltered ``model_dump`` forwards ``"tools": []`` and any
+    client-side reasoning toggles verbatim.
+    """
+    tools = payload.get("tools")
+    if isinstance(tools, list) and not tools:
+        payload.pop("tools", None)
+        payload.pop("tool_choice", None)
+        payload.pop("parallel_tool_calls", None)
+    if not allow_reasoning:
+        for key in _SOURCE_REASONING_TOGGLE_KEYS:
+            payload.pop(key, None)
+
+
+def apply_api_key_enforcement_to_chat_payload(
+    payload: dict[str, JsonValue],
+    api_key: ApiKeyData | None,
+    *,
+    allowed_reasoning_effort: str | None = None,
+    materialize_allowed_reasoning_effort: bool = False,
+) -> None:
+    """Mirror :func:`apply_api_key_enforcement` onto a chat-completions wire payload.
+
+    Source-routed chat requests forward the original chat-shaped payload
+    instead of the converted ``ResponsesRequest``, so enforced fields must be
+    applied to the outbound dict as well or the upstream receives the
+    caller's values while accounting uses the enforced ones.
+    """
+    if allowed_reasoning_effort is not None:
+        wire_effort = resolve_wire_reasoning_effort(allowed_reasoning_effort)
+        # Chat requests can express the same setting through several provider
+        # aliases. Once the Responses conversion has authorized one effective
+        # choice, make every caller-supplied alias agree without adding fields
+        # that the selected source may not accept.
+        if "reasoning_effort" in payload:
+            payload["reasoning_effort"] = wire_effort
+        if "reasoningEffort" in payload:
+            payload["reasoningEffort"] = wire_effort
+        if "thinking" in payload:
+            thinking = payload["thinking"]
+            if isinstance(thinking, dict):
+                thinking_effort = thinking.get("effort")
+                if isinstance(thinking_effort, str) and not thinking_effort.strip():
+                    thinking = {**thinking}
+                    thinking.pop("effort")
+                    payload["thinking"] = thinking
+                if isinstance(thinking_effort, str) and thinking_effort.strip():
+                    aligned_thinking = {**thinking, "effort": wire_effort}
+                    thinking_type = aligned_thinking.get("type")
+                    if isinstance(thinking_type, str) and thinking_type.strip().lower() == "disabled":
+                        aligned_thinking.pop("type")
+                    if aligned_thinking.get("enabled") is False:
+                        aligned_thinking.pop("enabled")
+                    payload["thinking"] = aligned_thinking
+                else:
+                    thinking_type = thinking.get("type")
+                    is_inactive = thinking.get("enabled") is False or (
+                        isinstance(thinking_type, str) and thinking_type.strip().lower() == "disabled"
+                    )
+                    selects_implicit_medium = thinking.get("enabled") is True or (
+                        isinstance(thinking_type, str) and thinking_type.strip().lower() == "enabled"
+                    )
+                    if is_inactive or (selects_implicit_medium and wire_effort != "medium"):
+                        payload.pop("thinking")
+            else:
+                payload["thinking"] = wire_effort
+        if "enable_thinking" in payload:
+            if wire_effort == "medium":
+                payload["enable_thinking"] = True
+            else:
+                payload.pop("enable_thinking", None)
+        reasoning = payload.get("reasoning")
+        if isinstance(reasoning, dict):
+            payload["reasoning"] = {**reasoning, "effort": wire_effort}
+        if materialize_allowed_reasoning_effort and not any(
+            key in payload
+            for key in ("reasoning_effort", "reasoningEffort", "thinking", "enable_thinking", "reasoning")
+        ):
+            payload["reasoning_effort"] = wire_effort
+
+    if api_key is None:
+        return
+
+    if api_key.enforced_reasoning_effort is not None:
+        enforced_effort = resolve_wire_reasoning_effort(api_key.enforced_reasoning_effort)
+        payload["reasoning_effort"] = enforced_effort
+        reasoning = payload.get("reasoning")
+        if isinstance(reasoning, dict):
+            payload["reasoning"] = {**reasoning, "effort": enforced_effort}
+        else:
+            payload["reasoning"] = {"effort": enforced_effort}
+
+    if api_key.enforced_service_tier is not None:
+        if api_key.enforced_service_tier in _UPSTREAM_OMIT_SERVICE_TIERS:
+            payload.pop("service_tier", None)
+        else:
+            payload["service_tier"] = api_key.enforced_service_tier
 
 
 def resolve_model_alias(model: str | None) -> str | None:
@@ -166,13 +546,22 @@ def resolve_model_alias(model: str | None) -> str | None:
     return alias[0]
 
 
-def normalize_upstream_model_alias(payload: ResponsesRequest | ResponsesCompactRequest) -> None:
+def model_alias_requests_fast_mode(model: str | None) -> bool:
+    alias = _resolve_model_alias_parts(model)
+    return alias is not None and alias[3]
+
+
+def normalize_upstream_model_alias(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    *,
+    prohibit_fast_mode: bool = False,
+) -> None:
     requested_model = payload.model
     alias = _resolve_model_alias_parts(requested_model)
     if alias is None:
         return
 
-    canonical_model, alias_effort, alias_service_tier = alias
+    canonical_model, alias_effort, alias_service_tier, alias_requests_fast_mode = alias
     if payload.model != canonical_model:
         logger.info(
             "model_alias_normalized request_id=%s requested_model=%s normalized_model=%s",
@@ -200,6 +589,14 @@ def normalize_upstream_model_alias(payload: ResponsesRequest | ResponsesCompactR
             )
 
     if alias_service_tier is not None and getattr(payload, "service_tier", None) is None:
+        if prohibit_fast_mode and alias_requests_fast_mode:
+            logger.info(
+                "model_alias_fast_mode_prohibited request_id=%s requested_model=%s normalized_model=%s",
+                get_request_id(),
+                requested_model,
+                canonical_model,
+            )
+            return
         setattr(payload, "service_tier", alias_service_tier)
         logger.info(
             "model_alias_service_tier_normalized request_id=%s requested_model=%s "
@@ -211,7 +608,7 @@ def normalize_upstream_model_alias(payload: ResponsesRequest | ResponsesCompactR
         )
 
 
-def _resolve_model_alias_parts(model: str | None) -> tuple[str, str | None, str | None] | None:
+def _resolve_model_alias_parts(model: str | None) -> tuple[str, str | None, str | None, bool] | None:
     if not isinstance(model, str):
         return None
     normalized = model.strip().lower()
@@ -226,7 +623,12 @@ def _resolve_model_alias_parts(model: str | None) -> tuple[str, str | None, str 
         tokens = [token for token in suffix.split("-") if token]
         if not tokens or any(token not in _MODEL_ALIAS_TOKENS for token in tokens):
             return None
-        return base_model, _resolve_alias_reasoning_effort(tokens), _resolve_alias_service_tier(tokens)
+        return (
+            base_model,
+            _resolve_alias_reasoning_effort(tokens),
+            _resolve_alias_service_tier(tokens),
+            "fast" in tokens,
+        )
 
     return None
 
@@ -257,7 +659,7 @@ def normalize_unsupported_reasoning_effort(
     payload: ResponsesRequest | ResponsesCompactRequest,
     *,
     registry: ModelRegistry | None = None,
-) -> None:
+) -> str | None:
     """Rewrite ``reasoning.effort`` values the upstream backend rejects.
 
     Some efforts that codex-lb accepts at the API surface (notably
@@ -267,15 +669,48 @@ def normalize_unsupported_reasoning_effort(
     so clients (e.g. Codex CLI's ``--reasoning-effort minimal``) keep
     working. Mapping picks the model's lowest advertised effort, falling
     back to ``low`` when the registry has no metadata yet.
+
+    Client-plane efforts the reference Codex client aliases before sending
+    (``ultra`` -> ``max``) are rewritten the same way here.
+
+    Returns the effort that the unsupported-effort fallback replaced, in
+    normalized (trimmed, lowercased) form, or ``None`` when nothing restorable
+    was rewritten. Model sources do not have the backend quirk that fallback
+    works around, but whether a request is served by one is only known after
+    source selection, which happens later; callers that can reach a source
+    carry this value forward and restore it there (see
+    ``restore_source_reasoning_effort``).
+
+    The ``ultra`` -> ``max`` wire alias is never reported. That aliasing mirrors
+    the reference client and is required on every upstream surface, so it must
+    survive source routing too.
+
+    The reported value is the post-enforcement effort rather than the client's
+    original, so restoring it cannot resurrect an effort an API key overrode.
     """
 
     if payload.reasoning is None or payload.reasoning.effort is None:
-        return
+        return None
 
     requested_effort = payload.reasoning.effort
     normalized_effort = requested_effort.strip().lower()
+
+    wire_alias = _REASONING_EFFORT_WIRE_ALIASES.get(normalized_effort)
+    if wire_alias is not None:
+        payload.reasoning.effort = wire_alias
+        logger.info(
+            "reasoning_effort_wire_aliased request_id=%s model=%s requested_effort=%s aliased_effort=%s",
+            get_request_id(),
+            payload.model,
+            requested_effort,
+            wire_alias,
+        )
+        # Deliberately not reported as restorable: the ultra -> max alias must
+        # hold on every surface, source-routed payloads included.
+        return None
+
     if normalized_effort not in _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS:
-        return
+        return None
 
     fallback = _resolve_reasoning_effort_fallback(
         payload.model,
@@ -288,6 +723,50 @@ def normalize_unsupported_reasoning_effort(
         payload.model,
         requested_effort,
         fallback,
+    )
+    return normalized_effort
+
+
+def restore_source_reasoning_effort(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    source: ModelSource,
+    *,
+    pre_normalization_effort: str | None,
+) -> None:
+    """Undo :func:`normalize_unsupported_reasoning_effort` for a source-routed request.
+
+    The rewrite exists solely to work around a ChatGPT/Codex backend quirk, so
+    it must not reach an OpenAI-compatible model source. This runs at the point
+    where the source has actually been selected, which is the only place the
+    routing outcome is known -- inferring it earlier from registry membership
+    misfires in both directions (a subscription model missing from a populated
+    snapshot, and a source model whose slug shadows a subscription one).
+
+    The restore is gated on the operator having declared the effort for this
+    model: sources without reasoning metadata keep the pre-existing behaviour,
+    and an effort the backend never advertised is not sent to it.
+    """
+    if pre_normalization_effort is None or payload.reasoning is None:
+        return
+    if payload.model is None:
+        return
+    restored_effort = pre_normalization_effort.strip().lower()
+    declared = {level.effort for level in source_model_reasoning_levels(source, payload.model)}
+    if restored_effort not in declared:
+        return
+    current_effort = payload.reasoning.effort
+    # Normalized on assignment rather than trusting the caller: the sole
+    # producer already reports the normalized form, but that invariant is
+    # non-local and a casing variant must never reach the wire.
+    payload.reasoning.effort = restored_effort
+    logger.info(
+        "reasoning_effort_restored_for_source request_id=%s model=%s source_id=%s "
+        "normalized_effort=%s restored_effort=%s",
+        get_request_id(),
+        payload.model,
+        source.id,
+        current_effort,
+        restored_effort,
     )
 
 
@@ -363,18 +842,43 @@ def normalize_responses_request_payload(
     return responses
 
 
-def strip_terminal_compaction_trigger_input(payload: ResponsesRequest) -> list[JsonValue] | None:
+def validate_top_level_compaction_trigger_input_shape(payload: Mapping[str, JsonValue]) -> None:
+    input_value = payload.get("input")
+    if not is_json_list(input_value):
+        return
+    _validate_terminal_compaction_trigger_input_items(input_value)
+
+
+def strip_terminal_compaction_trigger_input(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    *,
+    strip_trigger: bool = True,
+) -> list[JsonValue] | None:
     input_value = payload.input
     if not is_json_list(input_value):
         return None
+    return _strip_terminal_compaction_trigger_input_items(input_value, strip_trigger=strip_trigger)
 
-    stripped_input: list[JsonValue] = []
+
+def _strip_terminal_compaction_trigger_input_items(
+    input_value: list[JsonValue],
+    *,
+    strip_trigger: bool,
+) -> list[JsonValue] | None:
+    trigger_seen = _validate_terminal_compaction_trigger_input_items(input_value)
+    if not trigger_seen:
+        return None
+    if not strip_trigger:
+        return input_value
+    return [item for item in input_value if not (is_json_mapping(item) and item.get("type") == "compaction_trigger")]
+
+
+def _validate_terminal_compaction_trigger_input_items(input_value: list[JsonValue]) -> bool:
     trigger_seen = False
     last_index = len(input_value) - 1
 
     for index, item in enumerate(input_value):
         if not (is_json_mapping(item) and item.get("type") == "compaction_trigger"):
-            stripped_input.append(item)
             continue
 
         if trigger_seen or index != last_index:
@@ -386,9 +890,30 @@ def strip_terminal_compaction_trigger_input(payload: ResponsesRequest) -> list[J
             )
         trigger_seen = True
 
-    if not trigger_seen:
-        return None
-    return stripped_input
+    return trigger_seen
+
+
+def responses_source_route_excluded(
+    payload: ResponsesRequest,
+    *,
+    exclude_compaction: bool = True,
+) -> bool:
+    """True when a Responses request must stay on subscription accounts.
+
+    A terminal compaction trigger is served by the upstream compact flow on
+    the turn's owner account (Codex path only — callers set
+    ``exclude_compaction=False`` on ``/v1/responses``, which has no Codex
+    compaction path). An ``input_file``/``input_image`` file reference is
+    pinned to the subscription account that received the upload. Previous
+    response ownership is resolved separately from recorded continuity
+    evidence because response identifier syntax is provider-opaque.
+
+    Raises ``ClientPayloadError`` for a malformed compaction trigger, exactly
+    like ``strip_terminal_compaction_trigger_input``.
+    """
+    if exclude_compaction and strip_terminal_compaction_trigger_input(payload) is not None:
+        return True
+    return bool(extract_input_file_ids(payload.input))
 
 
 def enforce_strict_text_format(request: ResponsesRequest) -> None:

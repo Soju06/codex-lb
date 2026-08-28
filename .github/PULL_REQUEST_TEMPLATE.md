@@ -49,6 +49,16 @@ Change directory: <!-- openspec/changes/<change>/ -->
 -
 -
 
+## Simplicity
+
+<!-- See PRINCIPLES.md. Delete this section if the PR adds no setting, no README
+     section, no dashboard nav item, and changes no default. -->
+
+- [ ] New feature defaults to **off** or works with **zero config**
+- [ ] No new required setup step (or maintainer approval via `simplicity-budget-approved` label)
+- New setting(s) and why each can't be a default: <!-- name → justification -->
+- [ ] README sections / `.env.example` / dashboard nav within budget (or `simplicity-budget-approved` label requested)
+
 ## Test plan
 
 <!--
@@ -61,9 +71,11 @@ Required: unit tests for new logic, integration tests for new endpoints.
 # uv run pytest tests/integration/test_<area>.py -q
 ```
 
-## Screenshots / output (optional)
+## Screenshots / output
 
-<!-- For dashboard / UI changes: before/after screenshots. For proxy behavior: example request + response, or a log excerpt. -->
+<!-- REQUIRED for dashboard-visible changes: before/after screenshots (or a short
+     recording). For proxy behavior: example request + response, or a log excerpt.
+     Delete only if this PR has no user-visible surface. -->
 
 ## Checklist
 
@@ -72,4 +84,5 @@ Required: unit tests for new logic, integration tests for new endpoints.
 - [ ] Added or updated tests covering the change.
 - [ ] Ran `uv run pre-commit run local-ci --hook-stage manual --all-files` or the relevant `make <target>` subset locally.
 - [ ] If touching specs: `openspec validate --specs` passes and `/opsx:verify` is clean.
+- [ ] Simplicity gates reviewed: the five simplicity rules (PRINCIPLES.md P1-P5).
 - [ ] CHANGELOG is **not** edited by hand (release-please handles it).

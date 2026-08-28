@@ -19,8 +19,26 @@ vi.mock("@/features/auth/api", () => ({
   disableTotp: vi.fn(),
 }));
 
-const baseSettings = createDashboardSettings({ totpConfigured: false });
-const baseUpdatePayload = buildSettingsUpdateRequest(baseSettings, {});
+const baseSettings = createDashboardSettings({
+  stickyThreadsEnabled: true,
+  upstreamStreamTransport: "default" as const,
+  upstreamProxyRoutingEnabled: false,
+  upstreamProxyDefaultPoolId: null,
+  preferEarlierResetAccounts: false,
+  preferEarlierResetWindow: "secondary" as const,
+  routingStrategy: "usage_weighted" as const,
+  relativeAvailabilityPower: 2,
+  relativeAvailabilityTopK: 5,
+  singleAccountId: null,
+  weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
+  openaiCacheAffinityMaxAgeSeconds: 300,
+  dashboardSessionTtlSeconds: 43200,
+  warmupModel: "gpt-5.4-mini",
+  importWithoutOverwrite: false,
+  totpRequiredOnLogin: false,
+  totpConfigured: false,
+  apiKeyAuthEnabled: true,
+});
 
 function renderWithClient(ui: React.ReactElement) {
   const queryClient = new QueryClient({
@@ -102,6 +120,30 @@ describe("TotpSettings", () => {
     });
   });
 
+  it("localizes setup validation errors", async () => {
+    const user = userEvent.setup();
+
+    vi.mocked(startTotpSetup).mockResolvedValue({
+      secret: "SECRET123",
+      otpauthUri: "otpauth://totp/app?secret=SECRET123",
+      qrSvgDataUri: "data:image/svg+xml;base64,PHN2Zy8+",
+    });
+
+    renderWithClient(
+      <TotpSettings settings={baseSettings} onSave={vi.fn().mockResolvedValue(undefined)} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Enable TOTP" }));
+    await screen.findByText("Secret: SECRET123");
+
+    await user.type(screen.getByLabelText("Verification code"), "123");
+    await user.click(screen.getByRole("button", { name: "Confirm setup" }));
+
+    expect(await screen.findByText("Enter a 6-digit code")).toBeInTheDocument();
+    expect(screen.queryByText("settings.totp.validation.codeLength")).not.toBeInTheDocument();
+    expect(confirmTotpSetup).not.toHaveBeenCalled();
+  });
+
   it("toggles require-on-login via switch", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
@@ -109,10 +151,9 @@ describe("TotpSettings", () => {
     renderWithClient(<TotpSettings settings={baseSettings} onSave={onSave} />);
 
     await user.click(screen.getByRole("switch"));
-    expect(onSave).toHaveBeenCalledWith({
-      ...baseUpdatePayload,
-      totpRequiredOnLogin: true,
-    });
+    expect(onSave).toHaveBeenCalledWith(
+      buildSettingsUpdateRequest(baseSettings, { totpRequiredOnLogin: true }),
+    );
   });
 
   it("supports disable flow via dialog", async () => {
@@ -136,5 +177,28 @@ describe("TotpSettings", () => {
     await user.type(screen.getByLabelText("TOTP code"), "654321");
     await user.click(screen.getByRole("button", { name: "Disable TOTP" }));
     expect(disableTotp).toHaveBeenCalledWith({ code: "654321" });
+  });
+
+  it("localizes disable validation errors", async () => {
+    const user = userEvent.setup();
+
+    renderWithClient(
+      <TotpSettings
+        settings={{
+          ...baseSettings,
+          totpConfigured: true,
+          totpRequiredOnLogin: true,
+        }}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Disable" }));
+    await user.type(screen.getByLabelText("TOTP code"), "123");
+    await user.click(screen.getByRole("button", { name: "Disable TOTP" }));
+
+    expect(await screen.findByText("Enter a 6-digit code")).toBeInTheDocument();
+    expect(screen.queryByText("settings.totp.validation.codeLength")).not.toBeInTheDocument();
+    expect(disableTotp).not.toHaveBeenCalled();
   });
 });

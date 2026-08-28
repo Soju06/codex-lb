@@ -1,5 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useEffect } from "react";
 import { useForm } from "react-hook-form";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { AlertMessage } from "@/components/alert-message";
@@ -26,7 +28,16 @@ export type PasswordChangeDialogProps = {
 };
 
 export function PasswordChangeDialog({ open, onOpenChange, disabled = false }: PasswordChangeDialogProps) {
+  const { t } = useTranslation();
   const passwordManagementEnabled = useAuthStore((s) => s.passwordManagementEnabled);
+
+  const resolveValidationMessage = (message?: string): string | undefined => {
+    if (!message) {
+      return undefined;
+    }
+    const translated = t(message);
+    return translated === message ? message : translated;
+  };
 
   const form = useForm({
     resolver: zodResolver(PasswordChangeRequestSchema),
@@ -36,20 +47,19 @@ export function PasswordChangeDialog({ open, onOpenChange, disabled = false }: P
   const busy = form.formState.isSubmitting;
   const lock = busy || disabled || !passwordManagementEnabled;
 
-  const handleOpenChange = (next: boolean) => {
-    if (!next) {
+  useEffect(() => {
+    if (!open) {
       form.reset();
       form.clearErrors();
     }
-    onOpenChange(next);
-  };
+  }, [open, form]);
 
   const handleSubmit = async (values: { currentPassword: string; newPassword: string }) => {
     form.clearErrors("root");
     try {
       await changePassword(values);
-      toast.success("Password changed");
-      handleOpenChange(false);
+      toast.success(t("settings.password.toasts.changed"));
+      onOpenChange(false);
     } catch (caught) {
       form.setError("root", { message: getErrorMessage(caught) });
     }
@@ -58,11 +68,11 @@ export function PasswordChangeDialog({ open, onOpenChange, disabled = false }: P
   const rootError = form.formState.errors.root?.message;
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Change password</DialogTitle>
-          <DialogDescription>Enter your current password and a new one.</DialogDescription>
+          <DialogTitle>{t("settings.password.changeDialog.title")}</DialogTitle>
+          <DialogDescription>{t("settings.password.changeDialog.description")}</DialogDescription>
         </DialogHeader>
         {rootError ? <AlertMessage variant="error">{rootError}</AlertMessage> : null}
         <Form {...form}>
@@ -70,35 +80,48 @@ export function PasswordChangeDialog({ open, onOpenChange, disabled = false }: P
             <FormField
               control={form.control}
               name="currentPassword"
-              render={({ field }) => (
+              render={({ field, fieldState }) => (
                 <FormItem>
-                  <FormLabel>Current password</FormLabel>
+                  <FormLabel>{t("settings.password.changeDialog.currentLabel")}</FormLabel>
                   <FormControl>
                     <Input {...field} type="password" autoComplete="current-password" />
                   </FormControl>
-                  <FormMessage />
+                  {fieldState.error?.message ? (
+                    <FormMessage>{resolveValidationMessage(fieldState.error.message)}</FormMessage>
+                  ) : (
+                    <FormMessage />
+                  )}
                 </FormItem>
               )}
             />
             <FormField
               control={form.control}
               name="newPassword"
-              render={({ field }) => (
+              render={({ field, fieldState }) => (
                 <FormItem>
-                  <FormLabel>New password</FormLabel>
+                  <FormLabel>{t("settings.password.changeDialog.newLabel")}</FormLabel>
                   <FormControl>
-                    <Input {...field} type="password" autoComplete="new-password" placeholder="Min. 8 characters" />
+                    <Input
+                      {...field}
+                      type="password"
+                      autoComplete="new-password"
+                      placeholder={t("settings.password.changeDialog.newPlaceholder")}
+                    />
                   </FormControl>
-                  <FormMessage />
+                  {fieldState.error?.message ? (
+                    <FormMessage>{resolveValidationMessage(fieldState.error.message)}</FormMessage>
+                  ) : (
+                    <FormMessage />
+                  )}
                 </FormItem>
               )}
             />
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => handleOpenChange(false)} disabled={busy}>
-                Cancel
+              <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+                {t("common.cancel")}
               </Button>
               <Button type="submit" disabled={lock}>
-                Change password
+                {t("settings.password.changeDialog.submit")}
               </Button>
             </DialogFooter>
           </form>

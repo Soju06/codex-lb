@@ -7,6 +7,7 @@ import json
 import logging
 import sys
 from collections import deque
+from contextlib import asynccontextmanager
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -14,16 +15,24 @@ from unittest.mock import AsyncMock, Mock
 import aiohttp
 import anyio
 import pytest
+from fastapi import WebSocket
+from httpx import ASGITransport, AsyncClient
+from starlette.testclient import TestClient
+from yarl import URL
 
 import app.core.tracing.otel as otel
 import app.modules.proxy.service as proxy_module
+from app.core.audit import service as audit_service_module
 from app.core.clients.proxy import ProxyResponseError
-from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.config.settings import Settings
 from app.core.runtime_logging import JsonFormatter
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
+from app.core.utils.time import utcnow
 from app.db.models import AccountStatus
 from app.dependencies import get_proxy_service_for_app
+from app.modules.api_keys.service import ApiKeyData
+from app.modules.fleet.schemas import FleetRefreshResponse
 from app.modules.usage import updater as usage_updater_module
 
 pytestmark = pytest.mark.unit
@@ -44,7 +53,9 @@ def _install_fake_otel(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         provider=None,
         exporter_endpoint=None,
         fastapi_instrumented=0,
+        fastapi_server_request_hook=None,
         aiohttp_instrumented=0,
+        aiohttp_url_filter=None,
         sqlalchemy_instrumented=0,
         resource_attributes=None,
     )
@@ -81,12 +92,19 @@ def _install_fake_otel(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
             self.endpoint = endpoint
 
     class FakeFastAPIInstrumentor:
-        def instrument(self) -> None:
+        @staticmethod
+        def instrument_app(_app: object, *, server_request_hook=None) -> None:
             state.fastapi_instrumented += 1
+            state.fastapi_server_request_hook = server_request_hook
+
+        def instrument(self, *, server_request_hook=None) -> None:
+            state.fastapi_instrumented += 1
+            state.fastapi_server_request_hook = server_request_hook
 
     class FakeAioHttpClientInstrumentor:
-        def instrument(self) -> None:
+        def instrument(self, *, url_filter=None) -> None:
             state.aiohttp_instrumented += 1
+            state.aiohttp_url_filter = url_filter
 
     class FakeSQLAlchemyInstrumentor:
         def instrument(self) -> None:
@@ -195,8 +213,314 @@ def test_init_tracing_returns_true_when_opentelemetry_modules_are_available(monk
     assert state.exporter_endpoint == "http://collector:4317"
     assert state.resource_attributes == {"service.name": "codex-lb"}
     assert state.fastapi_instrumented == 1
+    assert callable(state.fastapi_server_request_hook)
     assert state.aiohttp_instrumented == 1
+    assert callable(state.aiohttp_url_filter)
     assert state.sqlalchemy_instrumented == 1
+
+
+class _RecordingSpan:
+    def __init__(self, attributes: dict[str, str]) -> None:
+        self.attributes = attributes.copy()
+
+    def set_attribute(self, key: str, value: str) -> None:
+        self.attributes[key] = value
+
+
+def test_create_app_instruments_unbuilt_stack_before_testclient_lifespan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.main as main
+
+    state = _install_fake_otel(monkeypatch)
+    observed_spans: list[tuple[str, dict[str, str]]] = []
+    lifecycle: list[str] = []
+
+    class _StackPatchingFastAPIInstrumentor:
+        @staticmethod
+        def instrument_app(instrumented_app: Any, *, server_request_hook: Any) -> None:
+            state.fastapi_instrumented += 1
+            state.fastapi_server_request_hook = server_request_hook
+            state.middleware_stack_was_unbuilt = instrumented_app.middleware_stack is None
+            original_build_middleware_stack = instrumented_app.build_middleware_stack
+
+            def build_middleware_stack():
+                downstream = original_build_middleware_stack()
+
+                async def traced_stack(scope, receive, send) -> None:
+                    if scope["type"] in {"http", "websocket"}:
+                        path = scope["path"]
+                        query = scope.get("query_string", b"").decode("utf-8", errors="replace")
+                        raw_url = f"{scope['scheme']}://testserver{path}"
+                        if query:
+                            raw_url = f"{raw_url}?{query}"
+                        span = _RecordingSpan(
+                            {
+                                "http.target": path,
+                                "http.url": raw_url,
+                                "url.full": raw_url,
+                                "url.path": path,
+                                "url.query": query,
+                                "url.fragment": "",
+                            }
+                        )
+                        server_request_hook(span, scope)
+                        observed_spans.append((scope["type"], span.attributes.copy()))
+                    await downstream(scope, receive, send)
+
+                return traced_stack
+
+            instrumented_app.build_middleware_stack = build_middleware_stack
+
+        def instrument(self, *, server_request_hook: Any) -> None:
+            raise AssertionError("create_app must instrument its explicit FastAPI app")
+
+    fastapi_instrumentation = cast(Any, sys.modules["opentelemetry.instrumentation.fastapi"])
+    monkeypatch.setattr(
+        fastapi_instrumentation,
+        "FastAPIInstrumentor",
+        _StackPatchingFastAPIInstrumentor,
+    )
+
+    @asynccontextmanager
+    async def probe_lifespan(_app):
+        lifecycle.append("started")
+        yield
+        lifecycle.append("stopped")
+
+    settings = Settings(
+        otel_enabled=True,
+        otel_exporter_endpoint="",
+        metrics_enabled=False,
+        backpressure_max_concurrent_requests=0,
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "lifespan", probe_lifespan)
+
+    app = main.create_app()
+
+    async def http_probe() -> dict[str, bool]:
+        return {"ok": True}
+
+    async def websocket_probe(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.send_text("ok")
+        await websocket.close()
+
+    route_count = len(app.router.routes)
+    app.add_api_route("/__otel_probe/http", http_probe, methods=["GET"])
+    app.add_api_websocket_route("/v1/realtime", websocket_probe)
+    probe_routes = app.router.routes[route_count:]
+    del app.router.routes[route_count:]
+    app.router.routes[:0] = probe_routes
+
+    assert state.fastapi_instrumented == 1
+    assert state.middleware_stack_was_unbuilt is True
+    assert app.middleware_stack is None
+
+    with TestClient(app) as client:
+        assert lifecycle == ["started"]
+        response = client.get("/__otel_probe/http?mode=ordinary")
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+        with client.websocket_connect("/v1/realtime?call_id=rtc_one&call_id=rtc_two") as websocket:
+            assert websocket.receive_text() == "ok"
+
+    assert lifecycle == ["started", "stopped"]
+    assert [
+        (scope_type, attributes["url.path"], attributes["url.query"]) for scope_type, attributes in observed_spans
+    ] == [
+        ("http", "/__otel_probe/http", "mode=ordinary"),
+        ("websocket", "/v1/realtime", ""),
+    ]
+
+
+@pytest.mark.parametrize("explicit_app", [False, True], ids=["global", "explicit-app"])
+@pytest.mark.parametrize(
+    ("path", "query", "redacted_path"),
+    [
+        (
+            "/backend-api/codex/rtc_private",
+            "intent=quicksilver",
+            "/backend-api/codex/<redacted>",
+        ),
+        (
+            "/backend-api/codex/v1/rtc_private",
+            "intent=quicksilver",
+            "/backend-api/codex/v1/<redacted>",
+        ),
+        (
+            "/v1/live/rtc_private",
+            "intent=quicksilver",
+            "/v1/live/<redacted>",
+        ),
+        (
+            "/v1/realtime",
+            "",
+            "/v1/realtime",
+        ),
+        (
+            "/v1/realtime",
+            "call_id=rtc_one&call_id=rtc_two",
+            "/v1/realtime",
+        ),
+        (
+            "/v1/realtime",
+            "call_id=%ZZ",
+            "/v1/realtime",
+        ),
+        (
+            "/v1/realtime",
+            "CALL_ID=rtc_private",
+            "/v1/realtime",
+        ),
+    ],
+    ids=[
+        "backend-live",
+        "unsupported-duplicated-alias",
+        "v1-live",
+        "realtime-missing-query",
+        "realtime-duplicate-query",
+        "realtime-malformed-query",
+        "realtime-uppercase-query",
+    ],
+)
+def test_init_tracing_redacts_private_live_server_span_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_app: bool,
+    path: str,
+    query: str,
+    redacted_path: str,
+) -> None:
+    state = _install_fake_otel(monkeypatch)
+    raw_url = f"wss://codex-lb.test{path}?{query}#private-fragment"
+    span = _RecordingSpan(
+        {
+            "http.target": path,
+            "http.url": raw_url,
+            "url.full": raw_url,
+            "url.path": path,
+            "url.query": query,
+            "url.fragment": "private-fragment",
+        }
+    )
+    app = cast(Any, object()) if explicit_app else None
+
+    assert otel.init_tracing(app=app) is True
+    state.fastapi_server_request_hook(
+        span,
+        {
+            "type": "websocket",
+            "scheme": "wss",
+            "server": ("codex-lb.test", 443),
+            "headers": [(b"host", b"codex-lb.test")],
+            "path": path,
+            "query_string": query.encode(),
+        },
+    )
+
+    redacted_url = f"wss://codex-lb.test{redacted_path}"
+    assert span.attributes == {
+        "http.target": redacted_path,
+        "http.url": redacted_url,
+        "url.full": redacted_url,
+        "url.path": redacted_path,
+        "url.query": "",
+        "url.fragment": "",
+    }
+
+
+def test_init_tracing_keeps_ordinary_responses_server_span_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _install_fake_otel(monkeypatch)
+    path = "/backend-api/codex/responses"
+    query = "model=gpt-5.6"
+    raw_url = f"https://codex-lb.test{path}?{query}#ordinary-fragment"
+    attributes = {
+        "http.target": path,
+        "http.url": raw_url,
+        "url.full": raw_url,
+        "url.path": path,
+        "url.query": query,
+        "url.fragment": "ordinary-fragment",
+    }
+    span = _RecordingSpan(attributes)
+
+    assert otel.init_tracing() is True
+    state.fastapi_server_request_hook(
+        span,
+        {
+            "type": "http",
+            "scheme": "https",
+            "server": ("codex-lb.test", 443),
+            "headers": [(b"host", b"codex-lb.test")],
+            "path": path,
+            "query_string": query.encode(),
+        },
+    )
+
+    assert span.attributes == attributes
+
+
+@pytest.mark.parametrize(
+    ("raw_url", "filtered_url"),
+    [
+        (
+            "https://api.openai.com/v1/live/rtc_private?intent=quicksilver#private-fragment",
+            "https://api.openai.com/v1/live/<redacted>",
+        ),
+        (
+            "https://api.openai.com/v1/realtime#private-fragment",
+            "https://api.openai.com/v1/realtime",
+        ),
+        (
+            "https://api.openai.com/v1/realtime?call_id=rtc_one&call_id=rtc_two#private-fragment",
+            "https://api.openai.com/v1/realtime",
+        ),
+        (
+            "https://api.openai.com/v1/realtime?call_id=%ZZ#private-fragment",
+            "https://api.openai.com/v1/realtime",
+        ),
+        (
+            "https://api.openai.com/v1/realtime?CALL_ID=rtc_private#private-fragment",
+            "https://api.openai.com/v1/realtime",
+        ),
+        (
+            "https://api.openai.com/backend-api/codex/responses?model=gpt-5.6",
+            "https://api.openai.com/backend-api/codex/responses?model=gpt-5.6",
+        ),
+    ],
+    ids=[
+        "live-v3",
+        "realtime-missing-query",
+        "realtime-duplicate-query",
+        "realtime-malformed-query",
+        "realtime-uppercase-query",
+        "ordinary-responses",
+    ],
+)
+def test_init_tracing_filters_private_live_urls_only(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_url: str,
+    filtered_url: str,
+) -> None:
+    state = _install_fake_otel(monkeypatch)
+
+    assert otel.init_tracing() is True
+    assert state.aiohttp_url_filter(raw_url) == filtered_url
+
+
+def test_init_tracing_filters_yarl_live_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _install_fake_otel(monkeypatch)
+
+    assert otel.init_tracing() is True
+    assert (
+        state.aiohttp_url_filter(URL("https://api.openai.com/v1/live/rtc_private?intent=quicksilver"))
+        == "https://api.openai.com/v1/live/<redacted>"
+    )
 
 
 def test_get_current_trace_id_returns_none_when_opentelemetry_is_inactive(monkeypatch: pytest.MonkeyPatch):
@@ -245,15 +569,26 @@ class _DummyScheduler:
 
 
 @pytest.mark.asyncio
-async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.MonkeyPatch):
+async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_resource_close(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     import app.core.startup as startup_module
     import app.main as main
+    from app.core import shutdown as shutdown_state
+    from app.core.auth.dependencies import (
+        require_dashboard_write_access,
+        validate_dashboard_session,
+        validate_usage_api_key,
+    )
+    from app.dependencies import get_accounts_context
+    from app.modules.accounts.schemas import AccountImportResponse
 
     settings = Settings(
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
-        shutdown_drain_timeout_seconds=0,
+        shutdown_drain_timeout_seconds=5,
     )
     settings_cache = SimpleNamespace(
         invalidate=AsyncMock(),
@@ -264,13 +599,32 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     api_key_limit_reset_scheduler = _DummyScheduler()
     model_scheduler = _DummyScheduler()
     sticky_scheduler = _DummyScheduler()
+    call_order: list[str] = []
+    lifespan_entered = asyncio.Event()
+    begin_shutdown = asyncio.Event()
+    ring_marked_stale = asyncio.Event()
+    final_control_plane_drain_started = asyncio.Event()
+    audit_write_started = asyncio.Event()
+    allow_audit_write = asyncio.Event()
+    audit_route_started = asyncio.Event()
+    allow_audit_route_finish = asyncio.Event()
+    fleet_refresh_started = asyncio.Event()
+    allow_fleet_refresh = asyncio.Event()
+    fleet_refresh_finished = asyncio.Event()
+    audit_write_actions: list[str] = []
+
+    async def _mark_stale(*args, **kwargs) -> None:
+        _ = (args, kwargs)
+        call_order.append("mark_ring_stale")
+        ring_marked_stale.set()
+
     ring_service = SimpleNamespace(
         register=AsyncMock(),
-        mark_stale=AsyncMock(),
+        mark_stale=AsyncMock(side_effect=_mark_stale),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
-    call_order: list[str] = []
 
     async def _init_db() -> None:
         call_order.append("init_db")
@@ -278,12 +632,90 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     def _init_background_db() -> None:
         call_order.append("init_background_db")
 
+    async def _blocked_audit_write(
+        action: str,
+        actor_ip: str | None,
+        details: audit_service_module.AuditDetails | None,
+        request_id: str | None,
+    ) -> None:
+        _ = (action, actor_ip, details, request_id)
+        audit_write_actions.append(action)
+        audit_write_started.set()
+        await allow_audit_write.wait()
+
+    async def _blocked_fleet_refresh(_: list[str] | None) -> FleetRefreshResponse:
+        fleet_refresh_started.set()
+        await allow_fleet_refresh.wait()
+        fleet_refresh_finished.set()
+        return FleetRefreshResponse(
+            usage_written=False,
+            account_count=0,
+            attempted_count=0,
+            generated_at=utcnow(),
+        )
+
+    async def _close_http_client() -> None:
+        assert fleet_refresh_finished.is_set()
+        assert not shutdown_state.is_control_plane_task_admission_open()
+        call_order.append("close_http_client")
+
+    async def _close_db() -> None:
+        assert fleet_refresh_finished.is_set()
+        assert not shutdown_state.is_control_plane_task_admission_open()
+        call_order.append("close_db")
+
+    class _BlockedAccountsService:
+        async def import_account(self, raw: bytes) -> AccountImportResponse:
+            assert raw == b"{}"
+            audit_route_started.set()
+            await allow_audit_route_finish.wait()
+            return AccountImportResponse(
+                account_id="late-audit-account",
+                email="late-audit@example.com",
+                plan_type="plus",
+                status="active",
+            )
+
+    fleet_api_key = ApiKeyData(
+        id="lifespan-fleet-key",
+        name="lifespan fleet key",
+        key_prefix="lifespan-fleet",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    async def _allow_dashboard_access() -> None:
+        return None
+
+    async def _accounts_context_override() -> SimpleNamespace:
+        return SimpleNamespace(service=_BlockedAccountsService())
+
+    async def _fleet_api_key_override() -> ApiKeyData:
+        return fleet_api_key
+
+    async def _force_in_flight_timeout(*, timeout_seconds: float) -> bool:
+        assert 0 <= timeout_seconds <= 5
+        assert shutdown_state.get_in_flight() == 2
+        return False
+
+    original_control_plane_drain = main._drain_detached_control_plane_tasks
+
+    async def _track_control_plane_drain(timeout_seconds: float) -> None:
+        final_control_plane_drain_started.set()
+        await original_control_plane_drain(timeout_seconds)
+
     init_db = AsyncMock()
     init_db.side_effect = _init_db
     init_background_db = Mock(side_effect=_init_background_db)
     init_http_client = AsyncMock()
-    close_http_client = AsyncMock()
-    close_db = AsyncMock()
+    close_http_client = AsyncMock(side_effect=_close_http_client)
+    close_db = AsyncMock(side_effect=_close_db)
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
@@ -294,21 +726,96 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     monkeypatch.setattr(main, "init_background_db", init_background_db)
     monkeypatch.setattr(main, "init_http_client", init_http_client)
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
+    monkeypatch.setattr(audit_service_module, "_write_audit_log", _blocked_audit_write)
+    monkeypatch.setattr(main.fleet_api, "_refresh_fleet_usage_with_owned_session", _blocked_fleet_refresh)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
     monkeypatch.setattr(main, "build_api_key_limit_reset_scheduler", lambda: api_key_limit_reset_scheduler)
     monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
     monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
     monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
+    monkeypatch.setattr(shutdown_state, "wait_for_in_flight_drain", _force_in_flight_timeout)
+    monkeypatch.setattr(main, "_drain_detached_control_plane_tasks", _track_control_plane_drain)
+    monkeypatch.setitem(main.app.dependency_overrides, validate_dashboard_session, _allow_dashboard_access)
+    monkeypatch.setitem(main.app.dependency_overrides, require_dashboard_write_access, _allow_dashboard_access)
+    monkeypatch.setitem(main.app.dependency_overrides, get_accounts_context, _accounts_context_override)
+    monkeypatch.setitem(main.app.dependency_overrides, validate_usage_api_key, _fleet_api_key_override)
+    caplog.set_level(logging.WARNING, logger=audit_service_module.__name__)
 
-    async with main.lifespan(main.app):
+    async def _run_lifespan() -> None:
+        async with main.lifespan(main.app):
+            await asyncio.sleep(0)
+            lifespan_entered.set()
+            await begin_shutdown.wait()
+
+    assert audit_service_module._AUDIT_LOG_TASKS == set()
+    assert main.fleet_api._BACKGROUND_REFRESH_TASKS == set()
+    lifespan_task = asyncio.create_task(_run_lifespan())
+
+    await asyncio.wait_for(lifespan_entered.wait(), timeout=1)
+    assert startup_module._startup_complete is True
+    assert shutdown_state.is_control_plane_task_admission_open() is True
+    assert usage_scheduler.started is True
+    assert api_key_limit_reset_scheduler.started is True
+    assert model_scheduler.started is True
+    assert sticky_scheduler.started is True
+
+    audit_service_module.AuditService.log_async("lifespan_shutdown_test")
+    await asyncio.wait_for(audit_write_started.wait(), timeout=1)
+    audit_task = next(iter(audit_service_module._AUDIT_LOG_TASKS))
+
+    transport = ASGITransport(app=main.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        fleet_request_task = asyncio.create_task(client.post("/api/fleet/refresh"))
+        audit_request_task = asyncio.create_task(
+            client.post(
+                "/api/accounts/import",
+                files={"auth_json": ("auth.json", b"{}", "application/json")},
+            )
+        )
+        await asyncio.wait_for(fleet_refresh_started.wait(), timeout=1)
+        await asyncio.wait_for(audit_route_started.wait(), timeout=1)
+
+        assert shutdown_state.get_in_flight() == 2
+        assert len(main.fleet_api._BACKGROUND_REFRESH_TASKS) == 1
+        fleet_task = next(iter(main.fleet_api._BACKGROUND_REFRESH_TASKS))
+
+        begin_shutdown.set()
+        await asyncio.wait_for(ring_marked_stale.wait(), timeout=1)
+        await asyncio.wait_for(final_control_plane_drain_started.wait(), timeout=1)
+
+        assert shutdown_state.is_control_plane_task_admission_open() is False
+        assert not lifespan_task.done()
+        close_http_client.assert_not_awaited()
+        close_db.assert_not_awaited()
+
+        fleet_request_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await fleet_request_task
+        assert main.fleet_api._BACKGROUND_REFRESH_TASKS == {fleet_task}
+
+        allow_audit_route_finish.set()
+        audit_response = await asyncio.wait_for(audit_request_task, timeout=1)
+        assert audit_response.status_code == 200
+        assert audit_write_actions == ["lifespan_shutdown_test"]
+        assert "Audit log task rejected after shutdown admission closed: account_created" in caplog.text
+
+        assert not lifespan_task.done()
+        close_http_client.assert_not_awaited()
+        close_db.assert_not_awaited()
+
+        allow_audit_write.set()
+        await asyncio.wait_for(audit_task, timeout=1)
         await asyncio.sleep(0)
-        assert startup_module._startup_complete is True
-        assert usage_scheduler.started is True
-        assert api_key_limit_reset_scheduler.started is True
-        assert model_scheduler.started is True
-        assert sticky_scheduler.started is True
+        assert not lifespan_task.done()
+        close_http_client.assert_not_awaited()
+        close_db.assert_not_awaited()
+
+        allow_fleet_refresh.set()
+        await asyncio.wait_for(fleet_task, timeout=1)
+        await asyncio.wait_for(lifespan_task, timeout=1)
 
     init_db.assert_awaited_once()
     init_background_db.assert_called_once()
@@ -318,6 +825,11 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     settings_cache.invalidate.assert_awaited_once()
     rate_limit_cache.invalidate.assert_awaited_once()
     assert call_order[:2] == ["init_db", "init_background_db"]
+    assert call_order.index("mark_ring_stale") < call_order.index("close_http_client")
+    assert call_order.index("mark_ring_stale") < call_order.index("close_db")
+    assert shutdown_state.is_control_plane_task_admission_open() is False
+    assert audit_service_module._AUDIT_LOG_TASKS == set()
+    assert main.fleet_api._BACKGROUND_REFRESH_TASKS == set()
     assert usage_scheduler.stopped is True
     assert api_key_limit_reset_scheduler.stopped is True
     assert model_scheduler.stopped is True
@@ -328,6 +840,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
 async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: pytest.MonkeyPatch):
     import app.core.startup as startup_module
     import app.main as main
+    from app.core.cache.invalidation import get_cache_invalidation_poller
 
     settings = Settings(
         otel_enabled=False,
@@ -358,9 +871,11 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         mark_stale=AsyncMock(),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
+        prime=AsyncMock(),
         start=AsyncMock(),
         stop=AsyncMock(),
     )
@@ -374,6 +889,7 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     monkeypatch.setattr(main, "init_background_db", Mock())
     monkeypatch.setattr(main, "init_http_client", AsyncMock())
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -405,6 +921,10 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         grace_seconds=main.RING_STALE_GRACE_SECONDS,
     )
     ring_service.unregister.assert_not_called()
+    cache_poller.stop.assert_awaited_once()
+    # Shutdown must clear the process-global poller so bump_cache_invalidation
+    # is a no-op (not a call through this test's fake) after lifespan exit.
+    assert get_cache_invalidation_poller() is None
 
 
 @pytest.mark.asyncio
@@ -443,9 +963,11 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
         mark_stale=AsyncMock(),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
+        prime=AsyncMock(),
         start=AsyncMock(),
         stop=AsyncMock(),
     )
@@ -459,6 +981,7 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
     monkeypatch.setattr(main, "init_background_db", Mock())
     monkeypatch.setattr(main, "init_http_client", AsyncMock())
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -490,7 +1013,7 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
                 ),
                 request_model="gpt-5.4",
                 account=cast(Any, SimpleNamespace(id="acc-existing", status=AccountStatus.ACTIVE)),
-                upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+                upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
                 upstream_control=proxy_module._WebSocketUpstreamControl(),
                 pending_requests=deque(),
                 pending_lock=anyio.Lock(),
@@ -614,9 +1137,11 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
         mark_stale=AsyncMock(),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
+        prime=AsyncMock(),
         start=AsyncMock(),
         stop=AsyncMock(),
     )
@@ -630,6 +1155,7 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
     monkeypatch.setattr(main, "init_background_db", Mock())
     monkeypatch.setattr(main, "init_http_client", AsyncMock())
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -684,9 +1210,11 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
         mark_stale=AsyncMock(),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
+        prime=AsyncMock(),
         start=AsyncMock(),
         stop=AsyncMock(),
     )
@@ -702,6 +1230,7 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
     monkeypatch.setattr(main, "init_background_db", Mock())
     monkeypatch.setattr(main, "init_http_client", AsyncMock())
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -782,6 +1311,7 @@ async def test_lifespan_fails_fast_when_bridge_durable_schema_is_missing(monkeyp
     monkeypatch.setattr(
         main, "_ensure_bridge_durable_schema_ready", AsyncMock(side_effect=RuntimeError("missing schema"))
     )
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
 
     with pytest.raises(RuntimeError, match="missing schema"):
         async with main.lifespan(main.app):
@@ -809,9 +1339,13 @@ async def test_lifespan_allows_missing_bridge_schema_when_fail_fast_disabled(mon
     model_scheduler = _DummyScheduler()
     sticky_scheduler = _DummyScheduler()
     ring_service = SimpleNamespace(
-        register=AsyncMock(), mark_stale=AsyncMock(), unregister=AsyncMock(), heartbeat=AsyncMock()
+        register=AsyncMock(),
+        mark_stale=AsyncMock(),
+        unregister=AsyncMock(),
+        heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
-    cache_poller = SimpleNamespace(on_invalidation=Mock(), start=AsyncMock(), stop=AsyncMock())
+    cache_poller = SimpleNamespace(on_invalidation=Mock(), prime=AsyncMock(), start=AsyncMock(), stop=AsyncMock())
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
@@ -829,6 +1363,7 @@ async def test_lifespan_allows_missing_bridge_schema_when_fail_fast_disabled(mon
     monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
     monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock(return_value=False))
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "mark_process_dead", Mock())
     monkeypatch.setattr(
         "app.core.cache.invalidation.CacheInvalidationPoller",

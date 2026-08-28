@@ -1,5 +1,6 @@
-import { Activity, AlertTriangle, Coins, DollarSign, Flame, type LucideIcon } from "lucide-react";
+import { Activity, AlertTriangle, Coins, DollarSign, Flame, MessageSquare, type LucideIcon } from "lucide-react";
 
+import i18n from "@/i18n";
 import type {
   AccountSummary,
   DashboardOverview,
@@ -15,9 +16,14 @@ import {
   formatCachedTokensMeta,
   formatCompactNumber,
   formatCurrency,
+  formatNumber,
   formatRate,
   formatWindowMinutes,
 } from "@/utils/formatters";
+
+function t(key: string, options?: Record<string, unknown>): string {
+  return i18n.t(key, options);
+}
 
 export type RemainingItem = {
   accountId: string;
@@ -61,6 +67,9 @@ export type WeeklyCreditPace = {
   scheduledUsedPercent: number;
   deltaPercent: number;
   scheduleGapCredits: number;
+  smoothedDeltaPercent?: number;
+  smoothedScheduleGapCredits?: number;
+  paceGapSmoothingMinutes?: number;
   /** Legacy alias for scheduleGapCredits while older components migrate. */
   overPlanCredits: number;
   projectedShortfallCredits: number;
@@ -717,6 +726,9 @@ export function buildWeeklyCreditPace(
     scheduledUsedPercent,
     deltaPercent,
     scheduleGapCredits,
+    smoothedDeltaPercent: deltaPercent,
+    smoothedScheduleGapCredits: scheduleGapCredits,
+    paceGapSmoothingMinutes: 0,
     overPlanCredits: scheduleGapCredits,
     projectedShortfallCredits,
     pauseForBreakEvenHours,
@@ -756,12 +768,12 @@ export function buildDashboardView(
   const timeframeDays = overview.timeframe.windowMinutes / 1440;
   const requestMeta =
     timeframeHours <= 24
-      ? `Avg/hr ${formatCompactNumber(Math.round(avgPerUnit(metrics?.requests ?? 0, timeframeHours)))}`
-      : `Avg/day ${formatCompactNumber(Math.round(avgPerUnit(metrics?.requests ?? 0, timeframeDays)))}`;
+      ? t("dashboard.stats.avgPerHour", { value: formatCompactNumber(Math.round(avgPerUnit(metrics?.requests ?? 0, timeframeHours))) })
+      : t("dashboard.stats.avgPerDay", { value: formatCompactNumber(Math.round(avgPerUnit(metrics?.requests ?? 0, timeframeDays))) });
   const costAverage =
     timeframeHours <= 24
-      ? `Avg/hr ${formatCurrency(avgPerUnit(cost, timeframeHours))}`
-      : `Avg/day ${formatCurrency(avgPerUnit(cost, timeframeDays))}`;
+      ? t("dashboard.stats.avgPerHour", { value: formatCurrency(avgPerUnit(cost, timeframeHours)) })
+      : t("dashboard.stats.avgPerDay", { value: formatCurrency(avgPerUnit(cost, timeframeDays)) });
   const costMeta = costAverage;
   const trends = overview.trends;
   const primaryBurnLabel = formatBurnWindowLabel("primary", overview.summary.primaryWindow.windowMinutes);
@@ -777,7 +789,7 @@ export function buildDashboardView(
 
   const stats: DashboardStat[] = [
     {
-      label: `Requests (${timeframeLabel})`,
+      label: t("dashboard.stats.requests", { timeframe: timeframeLabel }),
       value: formatCompactNumber(metrics?.requests ?? 0),
       meta: requestMeta,
       comparison: buildStatComparison(metrics?.requests, comparison?.previous.requests ?? 0, canCompare),
@@ -786,7 +798,7 @@ export function buildDashboardView(
       trendColor: TREND_COLORS[0],
     },
     {
-      label: `Tokens (${timeframeLabel})`,
+      label: t("dashboard.stats.tokens", { timeframe: timeframeLabel }),
       value: formatCompactNumber(metrics?.tokens ?? 0),
       meta: formatCachedTokensMeta(metrics?.tokens, metrics?.cachedInputTokens),
       comparison: buildStatComparison(metrics?.tokens, comparison?.previous.tokens ?? 0, canCompare),
@@ -795,7 +807,7 @@ export function buildDashboardView(
       trendColor: TREND_COLORS[1],
     },
     {
-      label: `Est. API Cost (${timeframeLabel})`,
+      label: t("dashboard.stats.estimatedCost", { timeframe: timeframeLabel }),
       value: formatCurrency(cost),
       meta: costMeta,
       comparison: buildStatComparison(cost, comparison?.previous.costUsd ?? 0, canCompare),
@@ -805,11 +817,35 @@ export function buildDashboardView(
     },
   ];
 
+  const conversationCount = metrics?.conversations !== null && metrics?.conversations !== undefined ? metrics.conversations : null;
+  if (conversationCount !== null) {
+    const averageRequestsPerConversation =
+      conversationCount > 0
+        ? ((metrics?.conversationRequests ?? 0) / conversationCount).toFixed(1)
+        : "—";
+
+    stats.push({
+      label: t("dashboard.stats.conversations", { timeframe: timeframeLabel }),
+      value: formatNumber(conversationCount),
+      meta: t("dashboard.stats.avgRequestsPerConversation", {
+        value: averageRequestsPerConversation,
+      }),
+      icon: MessageSquare,
+      trend: trendPointsToValues(trends.conversations),
+      trendColor: TREND_COLORS[3],
+    });
+  }
+
   if (showAccountBurnrate) {
     stats.push({
-      label: `Account burn projection (${primaryBurnLabel}/${secondaryBurnLabel})`,
+      label: t("dashboard.stats.accountBurnProjection", { primary: primaryBurnLabel, secondary: secondaryBurnLabel }),
       value: `${formatBurnEquivalent(primaryBurnEquivalent)} / ${formatBurnEquivalent(secondaryBurnEquivalent)}`,
-      meta: `Projected account-equivalents: ${formatBurnEquivalent(primaryBurnEquivalent)}/${primaryBurnLabel} · ${formatBurnEquivalent(secondaryBurnEquivalent)}/${secondaryBurnLabel}`,
+      meta: t("dashboard.stats.projectedAccountEquivalents", {
+        primaryValue: formatBurnEquivalent(primaryBurnEquivalent),
+        primary: primaryBurnLabel,
+        secondaryValue: formatBurnEquivalent(secondaryBurnEquivalent),
+        secondary: secondaryBurnLabel,
+      }),
       icon: Flame,
       trend: buildBurnTrend(trends.tokens, combinedBurnEquivalent),
       trendColor: TREND_COLORS[3],
@@ -817,11 +853,14 @@ export function buildDashboardView(
   }
 
   stats.push({
-    label: `Error rate (${timeframeLabel})`,
+    label: t("dashboard.stats.errorRate", { timeframe: timeframeLabel }),
     value: formatRate(metrics?.errorRate ?? null),
     meta: metrics?.topError
-      ? `Top: ${metrics.topError}`
-      : `~${formatCompactNumber(metrics?.errorCount ?? Math.round((metrics?.errorRate ?? 0) * (metrics?.requests ?? 0)))} errors in ${timeframeLabel}`,
+      ? t("dashboard.stats.topError", { error: metrics.topError })
+      : t("dashboard.stats.errorsInTimeframe", {
+          count: formatCompactNumber(metrics?.errorCount ?? Math.round((metrics?.errorRate ?? 0) * (metrics?.requests ?? 0))),
+          timeframe: timeframeLabel,
+        }),
     icon: AlertTriangle,
     trend: trendPointsToValues(trends.errorRate),
     trendColor: TREND_COLORS[4],

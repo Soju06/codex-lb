@@ -2,9 +2,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 export function AccountsSkeleton() {
   return (
-    <div className="grid gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
+    <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)]">
       {/* Left: account list */}
-      <div className="rounded-xl border bg-card p-4 space-y-3">
+      <div className="min-w-0 rounded-xl border bg-card p-3 space-y-3 sm:p-4">
         <div className="flex items-center gap-2">
           <Skeleton className="h-8 flex-1 rounded-md" />
           <Skeleton className="h-8 w-32 rounded-md" />
@@ -25,7 +25,7 @@ export function AccountsSkeleton() {
       </div>
 
       {/* Right: account detail */}
-      <div className="rounded-xl border bg-card p-5 space-y-4">
+      <div className="min-w-0 rounded-xl border bg-card p-4 space-y-4 sm:p-5">
         <div className="space-y-1.5">
           <Skeleton className="h-5 w-40" />
           <Skeleton className="h-3 w-48" />
@@ -35,7 +35,7 @@ export function AccountsSkeleton() {
         <div className="space-y-4 rounded-lg border bg-muted/30 p-4">
           <Skeleton className="h-3 w-12" />
           {/* Quota rows - horizontal 2 columns */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             {Array.from({ length: 2 }).map((_, i) => (
               <div key={i} className="space-y-1.5">
                 <div className="flex items-center justify-between">

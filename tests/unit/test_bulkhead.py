@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any, cast
 
 import pytest
@@ -205,6 +206,55 @@ async def test_bulkhead_websocket_denies_with_http_response_when_lane_full():
 
 
 @pytest.mark.asyncio
+async def test_bulkhead_websocket_rejection_redacts_realtime_live_call_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bulkhead = _bulkhead()
+    private_call_id = "rtc_private_admission"
+    path = f"/backend-api/codex/{private_call_id}"
+    lane_name, sem = bulkhead.get_semaphore("websocket", path)
+    assert lane_name == "proxy_websocket"
+    assert sem is not None
+    await sem.acquire()
+
+    async def inner_app(scope, receive, send):
+        del scope, receive, send
+        raise AssertionError("overloaded request must not reach the application")
+
+    middleware = BulkheadMiddleware(cast(Any, inner_app), bulkhead=bulkhead)
+    connect_delivered = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal connect_delivered
+        if not connect_delivered:
+            connect_delivered = True
+            return {"type": "websocket.connect"}
+        return {"type": "websocket.disconnect", "code": 1000}
+
+    async def send(message: dict[str, object]) -> None:
+        del message
+
+    try:
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=bulkhead_module.__name__):
+            await middleware(
+                {"type": "websocket", "path": path},
+                cast(Any, receive),
+                cast(Any, send),
+            )
+    finally:
+        sem.release()
+
+    rejection_records = [
+        record for record in caplog.records if record.getMessage().startswith("proxy_admission_rejected ")
+    ]
+    assert len(rejection_records) == 1
+    message = rejection_records[0].getMessage()
+    assert private_call_id not in message
+    assert "path=/backend-api/codex/<redacted>" in message
+
+
+@pytest.mark.asyncio
 async def test_bulkhead_dashboard_websocket_uses_detail_payload_when_lane_full():
     bulkhead = _bulkhead(dashboard_limit=1)
     lane_name, sem = bulkhead.get_semaphore("websocket", "/api/status/socket")
@@ -245,6 +295,25 @@ async def test_bulkhead_dashboard_websocket_uses_detail_payload_when_lane_full()
     assert app_called is False
     payload = json.loads(cast(bytes, sent_events[1]["body"]).decode("utf-8"))
     assert payload == {"detail": "codex-lb is temporarily overloaded in the dashboard lane"}
+
+
+def test_bulkhead_semaphore_derives_per_class_limits_from_single_proxy_limit():
+    # Replaces the removed per-class settings (issue #1340): the single proxy
+    # limit drives http and websocket lanes, and compact derives min(http, 16).
+    bulkhead = BulkheadSemaphore(proxy_http_limit=40, proxy_websocket_limit=40, proxy_compact_limit=None)
+    _, http_sem = bulkhead.get_semaphore("http", "/v1/responses")
+    _, ws_sem = bulkhead.get_semaphore("websocket", "/v1/responses")
+    _, compact_sem = bulkhead.get_semaphore("http", "/v1/responses/compact")
+    assert http_sem is not None and http_sem._value == 40
+    assert ws_sem is not None and ws_sem._value == 40
+    assert compact_sem is not None and compact_sem._value == 16
+
+
+def test_bulkhead_semaphore_zero_proxy_limit_disables_all_proxy_lanes():
+    bulkhead = BulkheadSemaphore(proxy_http_limit=0, proxy_websocket_limit=0, proxy_compact_limit=None)
+    assert bulkhead.get_semaphore("http", "/v1/responses")[1] is None
+    assert bulkhead.get_semaphore("websocket", "/v1/responses")[1] is None
+    assert bulkhead.get_semaphore("http", "/v1/responses/compact")[1] is None
 
 
 def test_get_bulkhead_derives_compact_limit_from_http_limit(monkeypatch: pytest.MonkeyPatch):

@@ -14,6 +14,7 @@ LOCAL_OVERLOAD_CODES = frozenset(
         LOCAL_OVERLOAD_CODE,
         "account_response_create_cap",
         "account_stream_cap",
+        "api_key_stream_fair_share",
         "bridge_queue_full",
         "response_create_gate_timeout",
         "global_admission_timeout",

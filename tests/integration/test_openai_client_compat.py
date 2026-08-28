@@ -4,6 +4,7 @@ import base64
 import json
 
 import httpx
+import httpx2
 import openai
 import pytest
 from httpx import ASGITransport
@@ -52,7 +53,9 @@ async def test_openai_client_responses_create(app_instance, monkeypatch):
         response = await admin_client.post("/api/accounts/import", files=files)
         assert response.status_code == 200
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver/v1") as http_client:
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app_instance), base_url="http://testserver/v1"
+    ) as http_client:
         client = openai.AsyncOpenAI(api_key="test", base_url="http://testserver/v1", http_client=http_client)
         result = await client.responses.create(model="gpt-5.1", input="hi")
 
@@ -91,8 +94,8 @@ async def test_openai_client_responses_stream_backend_codex_base_url(app_instanc
         response = await admin_client.post("/api/accounts/import", files=files)
         assert response.status_code == 200
 
-    async with httpx.AsyncClient(
-        transport=transport,
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app_instance),
         base_url="http://testserver/backend-api/codex",
     ) as http_client:
         client = openai.AsyncOpenAI(
@@ -127,7 +130,9 @@ async def test_openai_client_chat_completions_create(app_instance, monkeypatch):
         response = await admin_client.post("/api/accounts/import", files=files)
         assert response.status_code == 200
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver/v1") as http_client:
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app_instance), base_url="http://testserver/v1"
+    ) as http_client:
         client = openai.AsyncOpenAI(api_key="test", base_url="http://testserver/v1", http_client=http_client)
         result = await client.chat.completions.create(
             model="gpt-5.2",

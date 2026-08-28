@@ -36,7 +36,7 @@ This repo uses **OpenSpec as the primary workflow and SSOT** for change-driven d
 
 ## Documentation & Release Notes
 
-- **Do not add/update feature or behavior documentation under `docs/`**. Use OpenSpec context docs under `openspec/specs/<capability>/context.md` (or change-level context under `openspec/changes/<change>/context.md`) as the SSOT.
+- **OpenSpec is the SSOT for feature/behavior documentation.** User-facing rendering lives under `docs/` (the published docs pages), and each spec-governed page MUST link back to the owning `openspec/specs/<capability>/` entry. Do not create `docs/` content that has no OpenSpec counterpart, and do not add feature docs as new README sections. Keep normative requirements in `openspec/specs/<capability>/spec.md` and free-form rationale in the capability's `context.md` (or change-level context under `openspec/changes/<change>/context.md`).
 - **Do not edit `CHANGELOG.md` directly.** Leave changelog updates to the release process; record change notes in OpenSpec artifacts instead.
 
 ### Documentation Model (Spec + Context)
@@ -67,9 +67,11 @@ in [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md). The sections
 an AI assistant most often needs are:
 
 - [Merge gates](.github/CONTRIBUTING.md#merge-gates) — CI green +
-  `@codex review` clean (or findings addressed) + `mergeable=CLEAN` +
+  actionable CodeRabbit findings addressed + `mergeable=CLEAN` +
   OpenSpec change folder for behavior changes + `Fixes #N` /
-  `Closes #N` for issue cover.
+  `Closes #N` for issue cover + the five simplicity rules
+  (PRINCIPLES.md P1-P5; see
+  [Simplicity gates](.github/CONTRIBUTING.md#simplicity-gates)).
 - [Collaborator rules](.github/CONTRIBUTING.md#collaborator-rules) —
   no self-merge by default; large PRs get split (≈1-concern per PR,
   ~800 net lines / scoped capability ceiling).
@@ -78,8 +80,8 @@ an AI assistant most often needs are:
   comment invoking the clause.
 
 An assistant preparing a merge MUST verify the gates against the
-actual GitHub state (status check rollup, codex review submissions,
-`mergeable` field) rather than asserting them from local history.
+actual GitHub state (status check rollup, current-head CodeRabbit review
+threads, `mergeable` field) rather than asserting them from local history.
 Local `uv run pytest` / `uv run ruff` / `codex review --base origin/main`
 are encouraged but not substitutes for the cloud gates.
 
@@ -94,12 +96,10 @@ These rules encode recurring review blockers observed across codex-lb PRs.
   examples in `context.md` or change notes, and run strict OpenSpec validation
   before calling the PR ready. Code/tests alone are not enough when OpenSpec is
   required.
-- Codex review state must come from current-head GitHub evidence. Check labels,
-  latest Codex review/comment/reaction, and GraphQL review threads before using
-  or claiming `🤖 codex: ok`. Usage-limit, environment, or missing-review
-  results mean missing evidence, not approval. Unresolved non-outdated P-level
-  Codex threads block readiness even when a top-level review comment looks
-  clean.
+- CodeRabbit review state must come from current-head GitHub evidence.
+  Unresolved, non-outdated actionable review threads block readiness until
+  their findings are fixed or explicitly addressed or dismissed in-thread;
+  a top-level summary does not override active thread evidence.
 - Proxy failover and retry patches must prove account ownership and settlement
   invariants. File-pinned requests must not cross accounts; API-key reservations
   must settle before error-health writes; excluded accounts must actually leave
@@ -128,3 +128,12 @@ These rules encode recurring review blockers observed across codex-lb PRs.
   behavior, external error envelopes, env-var semantics, and response-schema
   contracts. Update OpenSpec/context and tests together so docs cannot promise
   behavior the code does not implement.
+- Simplicity gates are a merge gate (`PRINCIPLES.md` +
+  [CONTRIBUTING.md Simplicity gates](.github/CONTRIBUTING.md#simplicity-gates)).
+  New features must default off or work zero-config; new `CODEX_LB_*` settings
+  need a why-not-a-default justification in the PR body; README top-level
+  sections, `.env.example`, and dashboard core-nav items are budgeted per
+  `.github/simplicity-budgets.toml` and exceptions need the maintainer-applied
+  `simplicity-budget-approved` label; feature documentation goes to `docs/` +
+  openspec (never new README sections); dashboard-visible PRs include
+  before/after screenshots.

@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import App from "@/App";
-import { createApiKey, createApiKeyUsage7Day } from "@/test/mocks/factories";
+import { createApiKey, createApiKeyCreateResponse, createApiKeyUsage7Day } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
@@ -52,6 +52,35 @@ describe("apis page integration", () => {
 
 		await user.click(getDialogFooterClose(dialog));
 		expect(await screen.findByRole("button", { name: /Created from APIs page/i })).toBeInTheDocument();
+	});
+
+	it("creates a key with a selectable reasoning-effort policy", async () => {
+		const user = userEvent.setup();
+		let requestBody: unknown;
+		server.use(
+				http.post("/api/api-keys/", async ({ request }) => {
+				requestBody = await request.json();
+				return HttpResponse.json(createApiKeyCreateResponse({ name: "Selectable effort key" }));
+			}),
+		);
+		renderWithProviders(<App />);
+
+		await user.click(await screen.findByRole("button", { name: "Create API Key" }));
+		const createDialog = await screen.findByRole("dialog", { name: "Create API key" });
+		await user.type(within(createDialog).getByLabelText("Name"), "Selectable effort key");
+		await user.click(within(createDialog).getByRole("button", { name: "Allowed efforts: All efforts" }));
+		await user.click(screen.getByRole("menuitemcheckbox", { name: /^Low$/ }));
+		await user.keyboard("{Escape}");
+
+		expect(within(createDialog).getByLabelText("Enforced Effort")).toBeDisabled();
+
+		await user.click(within(createDialog).getByRole("button", { name: "Create" }));
+		await waitFor(() => {
+			expect(requestBody).toMatchObject({
+				allowedReasoningEfforts: ["low"],
+				enforcedReasoningEffort: null,
+			});
+		});
 	});
 
 	it("edits, toggles, regenerates, and deletes the selected key", async () => {
@@ -119,7 +148,7 @@ describe("apis page integration", () => {
 		renderWithProviders(<App />);
 
 		expect(await screen.findByRole("heading", { name: "APIs" })).toBeInTheDocument();
-		expect(await screen.findByText("No matching API keys")).toBeInTheDocument();
+		expect(await screen.findByText("No API keys yet")).toBeInTheDocument();
 		expect(screen.getByText("Select an API key")).toBeInTheDocument();
 	});
 

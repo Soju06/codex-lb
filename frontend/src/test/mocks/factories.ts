@@ -25,6 +25,8 @@ import {
 	ApiKeyTrendsResponseSchema,
 	ApiKeyUsage7DayResponseSchema,
 } from "@/features/apis/schemas";
+import type { ModelSource } from "@/features/model-sources/schemas";
+import { ModelSourceSchema } from "@/features/model-sources/schemas";
 import type { AuthSession } from "@/features/auth/schemas";
 import { AuthSessionSchema } from "@/features/auth/schemas";
 import type {
@@ -36,6 +38,10 @@ import type {
 	OverviewTimeframe,
 } from "@/features/dashboard/schemas";
 import {
+	ConversationDetailsSchema,
+	ConversationEntrySchema,
+	ConversationsResponseSchema,
+	ConversationModelStatSchema,
 	DEFAULT_OVERVIEW_TIMEFRAME,
 	DashboardOverviewSchema,
 	DashboardProjectionsSchema,
@@ -43,8 +49,18 @@ import {
 	RequestLogSchema,
 	RequestLogsResponseSchema,
 } from "@/features/dashboard/schemas";
-import type { DashboardSettings, UpstreamProxyAdmin } from "@/features/settings/schemas";
-import { DashboardSettingsSchema, UpstreamProxyAdminSchema } from "@/features/settings/schemas";
+import type {
+	DashboardSettings,
+	TelemetryConsent,
+	TelemetrySnapshotEnvelope,
+	UpstreamProxyAdmin,
+} from "@/features/settings/schemas";
+import {
+	DashboardSettingsSchema,
+	TelemetryConsentSchema,
+	TelemetrySnapshotEnvelopeSchema,
+	UpstreamProxyAdminSchema,
+} from "@/features/settings/schemas";
 import type {
 	QuotaPlannerDecision,
 	QuotaPlannerForecast,
@@ -60,6 +76,10 @@ import {
 // Backward-compatible type aliases
 export type RequestLogEntry = RequestLog;
 export type DashboardAuthSession = AuthSession;
+export type ConversationEntry = z.infer<typeof ConversationEntrySchema>;
+export type ConversationsResponse = z.infer<typeof ConversationsResponseSchema>;
+export type ConversationDetails = z.infer<typeof ConversationDetailsSchema>;
+export type ConversationModelStat = z.infer<typeof ConversationModelStatSchema>;
 export type { QuotaPlannerDecision, QuotaPlannerForecast, QuotaPlannerSettings };
 export type QuotaPlannerWarmupActionResponse = z.infer<typeof QuotaPlannerWarmupActionResponseSchema>;
 export type OauthCompleteResponse = z.infer<typeof OauthCompleteResponseSchema>;
@@ -72,6 +92,7 @@ export type {
 	RequestLogsResponse,
 	RequestLogFilterOptions,
 	DashboardSettings,
+	TelemetryConsent,
 	UpstreamProxyAdmin,
 	OauthStartResponse,
 	OauthStatusResponse,
@@ -79,6 +100,7 @@ export type {
 	ApiKeyCreateResponse,
 	ApiKeyTrendsResponse,
 	ApiKeyUsage7DayResponse,
+	ModelSource,
 };
 
 const BASE_TIME = new Date("2026-01-01T12:00:00Z");
@@ -145,6 +167,53 @@ export function createDefaultAccounts(): AccountSummary[] {
 			},
 		}),
 	];
+}
+
+export function createModelSource(
+	overrides: Partial<ModelSource> = {},
+): ModelSource {
+	return ModelSourceSchema.parse({
+		id: "src_vllm",
+		name: "vLLM",
+		kind: "openai_compatible",
+		baseUrl: "http://localhost:8000/v1",
+		isEnabled: true,
+		healthStatus: "unknown",
+		supportsChatCompletions: true,
+		supportsResponses: false,
+		supportsAudioTranscriptions: false,
+		supportsEmbeddings: false,
+		timeoutSeconds: null,
+		maxConcurrency: null,
+		createdAt: offsetIso(-30),
+		updatedAt: offsetIso(-5),
+		models: [
+			{
+				id: 1,
+				sourceId: "src_vllm",
+				model: "local-coder",
+				displayName: "local-coder",
+				contextWindow: 8192,
+				maxOutputTokens: 1024,
+				supportsStreaming: true,
+				supportsTools: true,
+				supportsVision: false,
+				inputPer1M: null,
+				cachedInputPer1M: null,
+				outputPer1M: null,
+				audioPerMinute: null,
+				rawMetadataJson: null,
+				isEnabled: true,
+				createdAt: offsetIso(-30),
+				updatedAt: offsetIso(-5),
+			},
+		],
+		...overrides,
+	});
+}
+
+export function createDefaultModelSources(): ModelSource[] {
+	return [createModelSource()];
 }
 
 function createTrendPoints(
@@ -222,6 +291,7 @@ export function createDashboardOverview(
 				errorRate: 0.028,
 				errorCount: 6,
 				topError: "rate_limit_exceeded",
+				conversationRequests: 0,
 			},
 		},
 		windows: {
@@ -255,6 +325,7 @@ export function createDashboardOverview(
 			tokens: createTrendPoints(1600, timeframe.bucketCount, timeframe.bucketSeconds),
 			cost: createTrendPoints(0.065, timeframe.bucketCount, timeframe.bucketSeconds),
 			errorRate: createTrendPoints(0.03, timeframe.bucketCount, timeframe.bucketSeconds),
+			conversations: createTrendPoints(1, timeframe.bucketCount, timeframe.bucketSeconds),
 		},
 		depletionPrimary: {
 			risk: 0.55,
@@ -317,6 +388,8 @@ export function createRequestLogEntry(
 		transport: "http",
 		useragent: null,
 		useragentGroup: null,
+		clientIp: null,
+		conversationId: null,
 		serviceTier: null,
 		requestedServiceTier: null,
 		actualServiceTier: null,
@@ -428,17 +501,34 @@ export function createDashboardSettings(
 	return DashboardSettingsSchema.parse({
 		stickyThreadsEnabled: true,
 		upstreamStreamTransport: "default",
+		httpDownstreamTransportPolicy: "smart",
 		upstreamProxyRoutingEnabled: false,
 		upstreamProxyDefaultPoolId: null,
 		preferEarlierResetAccounts: false,
 		preferEarlierResetWindow: "secondary",
+		showResetCreditBadges: true,
+		autoRedeemResetCreditsBeforeExpiry: false,
+		showResetCreditExpiryBadge: true,
 		routingStrategy: "usage_weighted",
 		relativeAvailabilityPower: 2,
 		relativeAvailabilityTopK: 5,
 		singleAccountId: null,
+		proxyAccountResponseCreateLimit: 4,
+		proxyAccountResponseCreateLimitEnvironmentValue: 4,
+		proxyAccountResponseCreateLimitOverride: 4,
+		proxyAccountStreamLimit: 8,
+		proxyAccountStreamLimitEnvironmentValue: 8,
+		proxyAccountStreamLimitOverride: 8,
+		proxyAccountStreamRecoveryReserve: 1,
+		proxyAccountStreamRecoveryReserveEnvironmentValue: 1,
+		proxyAccountStreamRecoveryReserveOverride: 1,
+		proxyApiKeyFairShareCongestionThresholdPct: 0,
+		proxyApiKeyFairShareCongestionThresholdPctEnvironmentValue: 0,
+		proxyApiKeyFairShareCongestionThresholdPctOverride: 0,
 		weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
+		weeklyPaceSmoothingMinutes: 30,
 		openaiCacheAffinityMaxAgeSeconds: 300,
-		dashboardSessionTtlSeconds: 43200,
+		dashboardSessionTtlSeconds: 31536000,
 		stickyReallocationBudgetThresholdPct: 95,
 		stickyReallocationPrimaryBudgetThresholdPct: 95,
 		stickyReallocationSecondaryBudgetThresholdPct: 100,
@@ -447,16 +537,113 @@ export function createDashboardSettings(
 		totpRequiredOnLogin: false,
 		totpConfigured: true,
 		apiKeyAuthEnabled: true,
+		hideUpstreamQuotaFromApiKeys: false,
 		limitWarmupEnabled: false,
 		limitWarmupWindows: "both",
 		limitWarmupModel: "auto",
 		limitWarmupPrompt: "Say OK.",
 		limitWarmupCooldownSeconds: 3600,
+		limitWarmupExhaustedThresholdPercent: 99,
+		limitWarmupIdleThresholdPercent: 1,
 		limitWarmupMinAvailablePercent: 100,
 		guestAccessEnabled: false,
 		guestPasswordConfigured: false,
+		limitWarmupStaggeredIdleEnabled: false,
 		...overrides,
 	});
+}
+
+export function createTelemetrySnapshotEnvelope(): TelemetrySnapshotEnvelope {
+	return TelemetrySnapshotEnvelopeSchema.parse({
+		instance_id: "00000000-0000-4000-8000-000000000000",
+		timestamp: "2026-08-06T00:00:00Z",
+		metrics: {
+			schema_version: 1,
+			consent: "undecided",
+			instance_id: "00000000-0000-4000-8000-000000000000",
+			version: "1.23.0",
+			python: "3.13",
+			os: "linux",
+			arch: "x86_64",
+			uptime_hours: 168,
+			deploy: {
+				method: "docker",
+				db_backend: "sqlite",
+				db_size_bucket: "<100MB",
+				replicas: 1,
+				reverse_proxy: true,
+			},
+			accounts: {
+				pool_bucket: "2-5",
+				plan_mix: { plus: "2-5", pro: "0", team: "0", free: "0" },
+				workspace_accounts: false,
+				routing_policy: "usage_weighted",
+				limit_warmup_enabled: false,
+				egress_proxy_used: false,
+			},
+			usage_7d: {
+				requests: 1024,
+				success_rate: 0.99,
+				tokens_input: 1000000,
+				tokens_output: 50000,
+				tokens_cached_ratio: 0.8,
+				cost_usd_bucket: "<10",
+				request_kinds: { responses: 0.97, chat: 0.02, images: 0.01, unknown: 0.0 },
+				transport_mix: { ws: 0.6, http_bridge: 0.4 },
+				service_tier_mix: { default: 1.0, flex: 0.0, priority: 0.0 },
+				clients: { "codex-cli": 0.9, other: 0.1 },
+				clients_other_ratio: 0.1,
+				models: [
+					{
+						name: "gpt-5.4-codex",
+						share: 1.0,
+						reasoning: { high: 0.5, medium: 0.5 },
+						avg_output_tokens_bucket: "250-1k",
+					},
+				],
+				latency_ms_p50: 1200,
+				ttft_ms_p50: 800,
+				ttft_ms_p95: 3400,
+				rate_limit_429_ratio: 0.004,
+				top_upstream_errors: ["server_overloaded"],
+			},
+			features: {
+				api_firewall: false,
+				quota_planner: false,
+				sticky_sessions: true,
+				conversation_archive: false,
+				automations: false,
+				fleet: false,
+				model_sources_count: 0,
+				api_keys_bucket: "2-5",
+				prometheus: false,
+				otel: false,
+				dashboard_auth: true,
+				reset_credits: true,
+				image_api_used: false,
+			},
+		},
+	});
+}
+
+export function createTelemetryConsent(
+	overrides: Partial<TelemetryConsent> = {},
+): TelemetryConsent {
+	const base = {
+		state: "enabled",
+		source: "persisted",
+		active: true,
+		...overrides,
+	};
+	// Mirror the backend: the base GET attaches a preview envelope only for
+	// the undecided/default (consent dialog) case; explicit overrides win.
+	const preview =
+		"preview" in overrides
+			? overrides.preview
+			: base.state === "undecided" && base.source === "default"
+				? createTelemetrySnapshotEnvelope()
+				: null;
+	return TelemetryConsentSchema.parse({ ...base, preview });
 }
 
 export function createQuotaPlannerSettings(
@@ -609,10 +796,13 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
 		keyPrefix: "sk-test",
 		allowedModels: ["gpt-5.1"],
 		applyToCodexModel: false,
+		transportPolicyOverride: null,
 		expiresAt: null,
 		isActive: true,
 		accountAssignmentScopeEnabled: false,
+		sourceAssignmentScopeEnabled: false,
 		assignedAccountIds: [],
+		assignedSourceIds: [],
 		createdAt: offsetIso(-60),
 		lastUsedAt: offsetIso(-5),
 		usageSummary: {
@@ -720,6 +910,99 @@ export function createApiKeyUsage7Day(
 		cachedInputTokens: 45_000,
 		totalRequests: 350,
 		totalCostUsd: 2.47,
+		...overrides,
+	});
+}
+
+export function createConversationEntry(
+	overrides: Partial<ConversationEntry> = {},
+): ConversationEntry {
+	return ConversationEntrySchema.parse({
+		conversationId: "conv_abc",
+		firstRequest: offsetIso(-2),
+		lastRequest: offsetIso(-1),
+		requestCount: 1,
+		representativeAccount: "acc_primary",
+		remainingAccountCount: 1,
+		apiKeyId: "key_1",
+		apiKeyName: "Primary Key",
+		representativeModel: "gpt-5.1",
+		remainingModelCount: 1,
+		totalTokens: 1800,
+		cachedInputTokens: 320,
+		totalCostUsd: 0.0132,
+		...overrides,
+	});
+}
+
+export function createDefaultConversations(): ConversationEntry[] {
+	return [
+		createConversationEntry(),
+		createConversationEntry({
+			conversationId: "conv_def",
+			lastRequest: offsetIso(-2),
+			representativeAccount: "acc_secondary",
+			remainingAccountCount: 0,
+			apiKeyId: "key_2",
+			apiKeyName: "Secondary Key",
+			representativeModel: "gpt-5.1-codex",
+			remainingModelCount: 0,
+			totalTokens: 4200,
+			cachedInputTokens: 0,
+			totalCostUsd: 0.04,
+		}),
+	];
+}
+
+export function createConversationsResponse(
+	conversations: ConversationEntry[],
+	total: number,
+	hasMore: boolean,
+): ConversationsResponse {
+	return ConversationsResponseSchema.parse({
+		conversations,
+		total,
+		hasMore,
+	});
+}
+
+export function createConversationModelStat(
+	overrides: Partial<ConversationModelStat> = {},
+): ConversationModelStat {
+	return ConversationModelStatSchema.parse({
+		modelEffort: { model: "gpt-5.1", reasoningEffort: "high" },
+		reqs: 4,
+		totalElapsedTime: 1200,
+		totalInputTokens: 1000,
+		cachedInputTokens: 200,
+		totalOutputTokens: 300,
+		totalCostUsd: 0.05,
+		...overrides,
+	});
+}
+
+export function createConversationDetails(
+	overrides: Partial<ConversationDetails> = {},
+): ConversationDetails {
+	return ConversationDetailsSchema.parse({
+		conversationId: "conv_abc",
+		start: offsetIso(-10),
+		latest: offsetIso(-1),
+		accountCount: 2,
+		totalElapsedTime: 4200,
+		dominantUseragentGroup: "opencode",
+		modelStats: [
+			createConversationModelStat(),
+			createConversationModelStat({
+				modelEffort: { model: "gpt-5.1", reasoningEffort: null },
+				reqs: 2,
+				totalElapsedTime: 600,
+				totalInputTokens: 500,
+				cachedInputTokens: 0,
+				totalOutputTokens: 100,
+				totalCostUsd: 0.02,
+			}),
+		],
 		...overrides,
 	});
 }

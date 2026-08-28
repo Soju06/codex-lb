@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import {
   Area,
   AreaChart,
@@ -40,8 +41,7 @@ function mergePoints(
 }
 
 function formatXTick(isoStr: string): string {
-  const d = new Date(isoStr);
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return isoStr.slice(5, 10);
 }
 
 function formatCostTick(value: number): string {
@@ -76,6 +76,7 @@ type ChartTooltipProps = {
 };
 
 function CustomTooltip({ active, payload, label }: ChartTooltipProps) {
+  const { t } = useTranslation();
   if (!active || !payload?.length) return null;
   const heading = formatChartDateTime(label as string);
   return (
@@ -89,7 +90,7 @@ function CustomTooltip({ active, payload, label }: ChartTooltipProps) {
               className="inline-block h-2 w-2 rounded-full"
               style={{ backgroundColor: entry.color }}
             />
-            <span className="text-muted-foreground">{meta?.label}</span>
+            <span className="text-muted-foreground">{meta ? t(`apis.trend.series.${entry.dataKey}`, { defaultValue: meta.label }) : ""}</span>
             <span className="ml-auto tabular-nums font-medium">
               {meta?.formatter(entry.value ?? 0)}
             </span>
@@ -108,6 +109,7 @@ export type ApiTrendChartProps = {
 };
 
 export function ApiTrendChart({ cost, tokens }: ApiTrendChartProps) {
+  const { t } = useTranslation();
   const chartColors = useChartColors();
   const reducedMotion = useReducedMotion();
   const c1 = chartColors[0];
@@ -120,7 +122,7 @@ export function ApiTrendChart({ cost, tokens }: ApiTrendChartProps) {
   if (data.length === 0) {
     return (
       <div className="flex h-[280px] items-center justify-center text-xs text-muted-foreground">
-        No trend data available
+        {t("accounts.trend.empty")}
       </div>
     );
   }

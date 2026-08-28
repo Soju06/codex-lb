@@ -1,6 +1,9 @@
 import { Users } from "lucide-react";
+import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 
 import { EmptyState } from "@/components/empty-state";
+import { Button } from "@/components/ui/button";
 import { AccountCard, type AccountCardProps } from "@/features/dashboard/components/account-card";
 import type { AccountSummary } from "@/features/dashboard/schemas";
 
@@ -16,12 +19,19 @@ export type AccountCardsProps = {
 };
 
 export function AccountCards({ accounts, readOnly = false, onAction }: AccountCardsProps) {
+  const { t } = useTranslation();
+
   if (accounts.length === 0) {
     return (
       <EmptyState
         icon={Users}
-        title="No accounts connected yet"
-        description="Import or authenticate an account to get started."
+        title={t("dashboard.accounts.emptyTitle")}
+        description={t("dashboard.accounts.emptyDescription")}
+        action={
+          <Button asChild size="sm">
+            <Link to="/accounts">{t("dashboard.accounts.emptyAction")}</Link>
+          </Button>
+        }
       />
     );
   }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from app.core.config.settings import get_settings
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
@@ -14,10 +15,23 @@ from app.modules.usage.additional_quota_keys import (
 class DashboardSettingsData:
     sticky_threads_enabled: bool
     upstream_stream_transport: str
+    prohibit_fast_mode: bool
+    http_downstream_transport_policy: str
+    proxy_account_response_create_limit: int
+    proxy_account_response_create_limit_override: int | None
+    proxy_account_stream_limit: int
+    proxy_account_stream_limit_override: int | None
+    proxy_account_stream_recovery_reserve: int
+    proxy_account_stream_recovery_reserve_override: int | None
+    proxy_api_key_fair_share_congestion_threshold_pct: int
+    proxy_api_key_fair_share_congestion_threshold_pct_override: int | None
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
     prefer_earlier_reset_window: str
+    show_reset_credit_badges: bool
+    auto_redeem_reset_credits_before_expiry: bool
+    show_reset_credit_expiry_badge: bool
     routing_strategy: str
     relative_availability_power: float
     relative_availability_top_k: int
@@ -35,25 +49,48 @@ class DashboardSettingsData:
     totp_required_on_login: bool
     totp_configured: bool
     api_key_auth_enabled: bool
+    hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
     limit_warmup_windows: str
     limit_warmup_model: str
     limit_warmup_prompt: str
     limit_warmup_cooldown_seconds: int
+    limit_warmup_exhausted_threshold_percent: float
+    limit_warmup_idle_threshold_percent: float
     limit_warmup_min_available_percent: float
     weekly_pace_working_days: str
+    weekly_pace_smoothing_minutes: int
     guest_access_enabled: bool
     guest_password_configured: bool
+    limit_warmup_staggered_idle_enabled: bool
+    request_log_retention_days: int
+    usage_history_retention_days: int
+    request_log_retention_override_days: int | None
+    usage_history_retention_override_days: int | None
+    version: int
 
 
 @dataclass(frozen=True, slots=True)
 class DashboardSettingsUpdateData:
     sticky_threads_enabled: bool
     upstream_stream_transport: str
+    prohibit_fast_mode: bool
+    http_downstream_transport_policy: str
+    proxy_account_response_create_limit: int | None
+    clear_proxy_account_response_create_limit: bool
+    proxy_account_stream_limit: int | None
+    clear_proxy_account_stream_limit: bool
+    proxy_account_stream_recovery_reserve: int | None
+    clear_proxy_account_stream_recovery_reserve: bool
+    proxy_api_key_fair_share_congestion_threshold_pct: int | None
+    clear_proxy_api_key_fair_share_congestion_threshold_pct: bool
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
     prefer_earlier_reset_window: str
+    show_reset_credit_badges: bool
+    auto_redeem_reset_credits_before_expiry: bool
+    show_reset_credit_expiry_badge: bool
     routing_strategy: str
     relative_availability_power: float
     relative_availability_top_k: int
@@ -70,14 +107,25 @@ class DashboardSettingsUpdateData:
     import_without_overwrite: bool
     totp_required_on_login: bool
     api_key_auth_enabled: bool
+    hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
     limit_warmup_windows: str
     limit_warmup_model: str
     limit_warmup_prompt: str
     limit_warmup_cooldown_seconds: int
+    limit_warmup_exhausted_threshold_percent: float
+    limit_warmup_idle_threshold_percent: float
     limit_warmup_min_available_percent: float
     weekly_pace_working_days: str
+    weekly_pace_smoothing_minutes: int
     guest_access_enabled: bool
+    limit_warmup_staggered_idle_enabled: bool
+    # Tri-state retention overrides: value set = store, clear flag = reset to
+    # NULL (inherit the deprecated env alias), neither = leave untouched.
+    request_log_retention_override_days: int | None
+    usage_history_retention_override_days: int | None
+    clear_request_log_retention_override: bool
+    clear_usage_history_retention_override: bool
 
 
 class SettingsService:
@@ -89,10 +137,31 @@ class SettingsService:
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
             upstream_stream_transport=row.upstream_stream_transport,
+            prohibit_fast_mode=row.prohibit_fast_mode,
+            http_downstream_transport_policy=row.http_downstream_transport_policy,
+            proxy_account_response_create_limit=_effective_response_create_limit(
+                row.proxy_account_response_create_limit
+            ),
+            proxy_account_response_create_limit_override=row.proxy_account_response_create_limit,
+            proxy_account_stream_limit=_effective_stream_limit(row.proxy_account_stream_limit),
+            proxy_account_stream_limit_override=row.proxy_account_stream_limit,
+            proxy_account_stream_recovery_reserve=_effective_stream_recovery_reserve(
+                row.proxy_account_stream_recovery_reserve
+            ),
+            proxy_account_stream_recovery_reserve_override=row.proxy_account_stream_recovery_reserve,
+            proxy_api_key_fair_share_congestion_threshold_pct=_effective_api_key_fair_share_threshold_pct(
+                row.proxy_api_key_fair_share_congestion_threshold_pct
+            ),
+            proxy_api_key_fair_share_congestion_threshold_pct_override=(
+                row.proxy_api_key_fair_share_congestion_threshold_pct
+            ),
             upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=row.prefer_earlier_reset_window,
+            show_reset_credit_badges=row.show_reset_credit_badges,
+            auto_redeem_reset_credits_before_expiry=row.auto_redeem_reset_credits_before_expiry,
+            show_reset_credit_expiry_badge=row.show_reset_credit_expiry_badge,
             routing_strategy=row.routing_strategy,
             relative_availability_power=row.relative_availability_power,
             relative_availability_top_k=row.relative_availability_top_k,
@@ -114,28 +183,61 @@ class SettingsService:
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
             api_key_auth_enabled=row.api_key_auth_enabled,
+            hide_upstream_quota_from_api_keys=row.hide_upstream_quota_from_api_keys,
             limit_warmup_enabled=row.limit_warmup_enabled,
             limit_warmup_windows=row.limit_warmup_windows,
             limit_warmup_model=row.limit_warmup_model,
             limit_warmup_prompt=row.limit_warmup_prompt,
             limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
+            limit_warmup_exhausted_threshold_percent=row.limit_warmup_exhausted_threshold_percent,
+            limit_warmup_idle_threshold_percent=row.limit_warmup_idle_threshold_percent,
             limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
             weekly_pace_working_days=row.weekly_pace_working_days,
+            weekly_pace_smoothing_minutes=row.weekly_pace_smoothing_minutes,
             guest_access_enabled=row.guest_access_enabled,
             guest_password_configured=row.guest_password_hash is not None,
+            limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
+            request_log_retention_days=_effective_request_log_retention(row.request_log_retention_days),
+            usage_history_retention_days=_effective_usage_history_retention(row.usage_history_retention_days),
+            request_log_retention_override_days=row.request_log_retention_days,
+            usage_history_retention_override_days=row.usage_history_retention_days,
+            version=row.version,
         )
 
-    async def update_settings(self, payload: DashboardSettingsUpdateData) -> DashboardSettingsData:
+    async def update_settings(
+        self,
+        payload: DashboardSettingsUpdateData,
+        *,
+        expected_version: int | None = None,
+    ) -> DashboardSettingsData:
         current = await self._repository.get_or_create()
         if payload.totp_required_on_login and current.totp_secret_encrypted is None:
             raise ValueError("Configure TOTP before enabling login enforcement")
         row = await self._repository.update(
+            expected_version=expected_version,
             sticky_threads_enabled=payload.sticky_threads_enabled,
             upstream_stream_transport=payload.upstream_stream_transport,
+            prohibit_fast_mode=payload.prohibit_fast_mode,
+            http_downstream_transport_policy=payload.http_downstream_transport_policy,
+            proxy_account_response_create_limit=payload.proxy_account_response_create_limit,
+            clear_proxy_account_response_create_limit=payload.clear_proxy_account_response_create_limit,
+            proxy_account_stream_limit=payload.proxy_account_stream_limit,
+            clear_proxy_account_stream_limit=payload.clear_proxy_account_stream_limit,
+            proxy_account_stream_recovery_reserve=payload.proxy_account_stream_recovery_reserve,
+            clear_proxy_account_stream_recovery_reserve=payload.clear_proxy_account_stream_recovery_reserve,
+            proxy_api_key_fair_share_congestion_threshold_pct=(
+                payload.proxy_api_key_fair_share_congestion_threshold_pct
+            ),
+            clear_proxy_api_key_fair_share_congestion_threshold_pct=(
+                payload.clear_proxy_api_key_fair_share_congestion_threshold_pct
+            ),
             upstream_proxy_routing_enabled=payload.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=payload.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=payload.prefer_earlier_reset_window,
+            show_reset_credit_badges=payload.show_reset_credit_badges,
+            auto_redeem_reset_credits_before_expiry=payload.auto_redeem_reset_credits_before_expiry,
+            show_reset_credit_expiry_badge=payload.show_reset_credit_expiry_badge,
             routing_strategy=payload.routing_strategy,
             relative_availability_power=payload.relative_availability_power,
             relative_availability_top_k=payload.relative_availability_top_k,
@@ -156,22 +258,52 @@ class SettingsService:
             import_without_overwrite=payload.import_without_overwrite,
             totp_required_on_login=payload.totp_required_on_login,
             api_key_auth_enabled=payload.api_key_auth_enabled,
+            hide_upstream_quota_from_api_keys=payload.hide_upstream_quota_from_api_keys,
             limit_warmup_enabled=payload.limit_warmup_enabled,
             limit_warmup_windows=payload.limit_warmup_windows,
             limit_warmup_model=payload.limit_warmup_model,
             limit_warmup_prompt=payload.limit_warmup_prompt,
             limit_warmup_cooldown_seconds=payload.limit_warmup_cooldown_seconds,
+            limit_warmup_exhausted_threshold_percent=payload.limit_warmup_exhausted_threshold_percent,
+            limit_warmup_idle_threshold_percent=payload.limit_warmup_idle_threshold_percent,
             limit_warmup_min_available_percent=payload.limit_warmup_min_available_percent,
             weekly_pace_working_days=payload.weekly_pace_working_days,
+            weekly_pace_smoothing_minutes=payload.weekly_pace_smoothing_minutes,
             guest_access_enabled=payload.guest_access_enabled,
+            limit_warmup_staggered_idle_enabled=payload.limit_warmup_staggered_idle_enabled,
+            request_log_retention_days=payload.request_log_retention_override_days,
+            usage_history_retention_days=payload.usage_history_retention_override_days,
+            clear_request_log_retention=payload.clear_request_log_retention_override,
+            clear_usage_history_retention=payload.clear_usage_history_retention_override,
         )
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
             upstream_stream_transport=row.upstream_stream_transport,
+            prohibit_fast_mode=row.prohibit_fast_mode,
+            http_downstream_transport_policy=row.http_downstream_transport_policy,
+            proxy_account_response_create_limit=_effective_response_create_limit(
+                row.proxy_account_response_create_limit
+            ),
+            proxy_account_response_create_limit_override=row.proxy_account_response_create_limit,
+            proxy_account_stream_limit=_effective_stream_limit(row.proxy_account_stream_limit),
+            proxy_account_stream_limit_override=row.proxy_account_stream_limit,
+            proxy_account_stream_recovery_reserve=_effective_stream_recovery_reserve(
+                row.proxy_account_stream_recovery_reserve
+            ),
+            proxy_account_stream_recovery_reserve_override=row.proxy_account_stream_recovery_reserve,
+            proxy_api_key_fair_share_congestion_threshold_pct=_effective_api_key_fair_share_threshold_pct(
+                row.proxy_api_key_fair_share_congestion_threshold_pct
+            ),
+            proxy_api_key_fair_share_congestion_threshold_pct_override=(
+                row.proxy_api_key_fair_share_congestion_threshold_pct
+            ),
             upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=row.prefer_earlier_reset_window,
+            show_reset_credit_badges=row.show_reset_credit_badges,
+            auto_redeem_reset_credits_before_expiry=row.auto_redeem_reset_credits_before_expiry,
+            show_reset_credit_expiry_badge=row.show_reset_credit_expiry_badge,
             routing_strategy=row.routing_strategy,
             relative_availability_power=row.relative_availability_power,
             relative_availability_top_k=row.relative_availability_top_k,
@@ -193,19 +325,54 @@ class SettingsService:
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
             api_key_auth_enabled=row.api_key_auth_enabled,
+            hide_upstream_quota_from_api_keys=row.hide_upstream_quota_from_api_keys,
             limit_warmup_enabled=row.limit_warmup_enabled,
             limit_warmup_windows=row.limit_warmup_windows,
             limit_warmup_model=row.limit_warmup_model,
             limit_warmup_prompt=row.limit_warmup_prompt,
             limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
+            limit_warmup_exhausted_threshold_percent=row.limit_warmup_exhausted_threshold_percent,
+            limit_warmup_idle_threshold_percent=row.limit_warmup_idle_threshold_percent,
             limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
             weekly_pace_working_days=row.weekly_pace_working_days,
+            weekly_pace_smoothing_minutes=row.weekly_pace_smoothing_minutes,
             guest_access_enabled=row.guest_access_enabled,
             guest_password_configured=row.guest_password_hash is not None,
+            limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
+            request_log_retention_days=_effective_request_log_retention(row.request_log_retention_days),
+            usage_history_retention_days=_effective_usage_history_retention(row.usage_history_retention_days),
+            request_log_retention_override_days=row.request_log_retention_days,
+            usage_history_retention_override_days=row.usage_history_retention_days,
+            version=row.version,
         )
 
 
 _ROUTING_POLICIES = frozenset({"inherit", "normal", "burn_first", "preserve"})
+
+
+def _effective_response_create_limit(value: int | None) -> int:
+    return get_settings().proxy_account_response_create_limit if value is None else value
+
+
+def _effective_stream_limit(value: int | None) -> int:
+    return get_settings().proxy_account_stream_limit if value is None else value
+
+
+def _effective_stream_recovery_reserve(value: int | None) -> int:
+    return get_settings().proxy_account_stream_recovery_reserve if value is None else value
+
+
+def _effective_api_key_fair_share_threshold_pct(value: int | None) -> int:
+    return get_settings().proxy_api_key_fair_share_congestion_threshold_pct if value is None else value
+
+
+def _effective_request_log_retention(value: int | None) -> int:
+    # Dashboard value (non-NULL) wins; the deprecated env alias applies while unset.
+    return get_settings().request_log_retention_days if value is None else value
+
+
+def _effective_usage_history_retention(value: int | None) -> int:
+    return get_settings().usage_history_retention_days if value is None else value
 
 
 def _normalize_additional_quota_key(raw_quota_key: str) -> str | None:

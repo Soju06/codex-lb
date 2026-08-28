@@ -2,20 +2,39 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Collection
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from threading import RLock
+from typing import Any, Callable, cast
 
 from anyio import to_thread
-from sqlalchemy import Integer, and_, cast, delete, func, literal_column, or_, select, true
+from sqlalchemy import (
+    Integer,
+    String,
+    and_,
+    column,
+    delete,
+    func,
+    literal_column,
+    or_,
+    select,
+    text,
+    true,
+    tuple_,
+    union_all,
+    values,
+)
+from sqlalchemy import cast as sqlalchemy_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
+from app.db.account_identity_lock import lock_postgresql_account_identities
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
-from app.db.session import sqlite_writer_section
+from app.db.session import relax_commit_durability, sqlite_writer_section
 from app.db.sqlite_utils import sqlite_db_path_from_url
 from app.modules.usage.additional_quota_keys import (
     AdditionalQuotaQueryScope,
@@ -36,28 +55,104 @@ class UsageHistorySnapshot:
     window_minutes: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class UsageWindowWrite:
+    window: str
+    used_percent: float
+    reset_at: int | None = None
+    window_minutes: int | None = None
+    credits_has: bool | None = None
+    credits_unlimited: bool | None = None
+    credits_balance: float | None = None
+
+
+class LiveSnapshotOwnerIdentityRelockError(RuntimeError):
+    """The selected live-snapshot owner's identity changed twice."""
+
+
+def _account_snapshot_entries(
+    account_id: str,
+    windows: Collection[UsageWindowWrite],
+    *,
+    recorded_at: datetime | None = None,
+) -> list[UsageHistory]:
+    captured_at = recorded_at or utcnow()
+    return [
+        UsageHistory(
+            account_id=account_id,
+            used_percent=window.used_percent,
+            input_tokens=None,
+            output_tokens=None,
+            window=window.window,
+            reset_at=window.reset_at,
+            window_minutes=window.window_minutes,
+            credits_has=window.credits_has,
+            credits_unlimited=window.credits_unlimited,
+            credits_balance=window.credits_balance,
+            recorded_at=captured_at,
+        )
+        for window in windows
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class _BulkHistoryCacheMetadata:
+    row_count: int
+    max_id: int
+    content_digest: str
+
+
 @dataclass(slots=True)
 class _BulkHistoryCacheEntry:
     since: datetime
     max_id: int
-    fingerprint: _BulkHistoryFingerprint
+    metadata: _BulkHistoryCacheMetadata
     rows_by_account: dict[str, list[UsageHistorySnapshot]]
-
-
-@dataclass(frozen=True, slots=True)
-class _BulkHistoryFingerprint:
-    row_count: int
-    max_id: int
-    id_sum: int
-    used_percent_total: float
-    reset_at_total: float
-    window_minutes_sum: int
-    max_recorded_at: str
-    content_digest: str
 
 
 _BULK_HISTORY_SQLITE_CACHE: dict[tuple[str, tuple[str, ...], str], _BulkHistoryCacheEntry] = {}
 _BULK_HISTORY_SQLITE_CACHE_LOCK = RLock()
+_EMPTY_BULK_HISTORY_DIGEST = sha256().hexdigest()
+
+
+def _normalized_sqlite_datetime_text(value) -> str:
+    return str(_parse_sqlite_datetime(value))
+
+
+class _BulkHistoryDigestAggregate:
+    def __init__(self) -> None:
+        self._digest = sha256()
+
+    def step(
+        self,
+        row_id: int,
+        account_id: str,
+        used_percent: float,
+        recorded_at: str,
+        reset_at: float | None,
+        window_minutes: int | None,
+    ) -> None:
+        self._digest.update(str(int(row_id)).encode("utf-8"))
+        self._digest.update(b"\x1f")
+        account_bytes = str(account_id).encode("utf-8")
+        self._digest.update(str(len(account_bytes)).encode("ascii"))
+        self._digest.update(b":")
+        self._digest.update(account_bytes)
+        self._digest.update(b"\x1f")
+        self._digest.update(float(used_percent).hex().encode("ascii"))
+        self._digest.update(b"\x1f")
+        recorded_at_bytes = _normalized_sqlite_datetime_text(recorded_at).encode("utf-8")
+        self._digest.update(str(len(recorded_at_bytes)).encode("ascii"))
+        self._digest.update(b":")
+        self._digest.update(recorded_at_bytes)
+        self._digest.update(b"\x1f")
+        self._digest.update(b"NULL" if reset_at is None else float(reset_at).hex().encode("ascii"))
+        self._digest.update(b"\x1f")
+        self._digest.update(b"NULL" if window_minutes is None else str(int(window_minutes)).encode("ascii"))
+        self._digest.update(b"\x1e")
+
+    def finalize(self) -> str:
+        return self._digest.hexdigest()
 
 
 def _clear_bulk_history_since_sqlite_cache() -> None:
@@ -85,49 +180,33 @@ def _clone_filtered_history(
     return filtered_grouped
 
 
-def _max_snapshot_id(grouped: dict[str, list[UsageHistorySnapshot]]) -> int:
-    return max((row.id for rows in grouped.values() for row in rows), default=0)
-
-
-def _fingerprint_grouped_history(grouped: dict[str, list[UsageHistorySnapshot]]) -> _BulkHistoryFingerprint:
-    row_count = 0
-    max_id = 0
-    id_sum = 0
-    used_percent_total = 0.0
-    reset_at_total = 0.0
-    window_minutes_sum = 0
-    max_recorded_at = ""
+def _bulk_history_metadata_from_grouped(
+    grouped: dict[str, list[UsageHistorySnapshot]],
+) -> _BulkHistoryCacheMetadata:
     digest = sha256()
-    for account_id, rows in sorted(grouped.items()):
-        for row in rows:
-            row_count += 1
-            max_id = max(max_id, row.id)
-            id_sum += row.id
-            used_percent_total += row.used_percent
-            reset_at_total += row.reset_at or 0.0
-            window_minutes_sum += row.window_minutes or 0
-            recorded_at = row.recorded_at.isoformat(sep=" ")
-            max_recorded_at = max(max_recorded_at, recorded_at)
-            digest.update(
-                repr(
-                    (
-                        account_id,
-                        row.id,
-                        row.used_percent,
-                        recorded_at,
-                        row.reset_at,
-                        row.window_minutes,
-                    )
-                ).encode("utf-8")
-            )
-    return _BulkHistoryFingerprint(
-        row_count=row_count,
-        max_id=max_id,
-        id_sum=id_sum,
-        used_percent_total=used_percent_total,
-        reset_at_total=reset_at_total,
-        window_minutes_sum=window_minutes_sum,
-        max_recorded_at=max_recorded_at,
+    rows = sorted((row for rows in grouped.values() for row in rows), key=lambda row: (row.id, row.account_id))
+    for row in rows:
+        digest.update(str(int(row.id)).encode("utf-8"))
+        digest.update(b"\x1f")
+        account_bytes = str(row.account_id).encode("utf-8")
+        digest.update(str(len(account_bytes)).encode("ascii"))
+        digest.update(b":")
+        digest.update(account_bytes)
+        digest.update(b"\x1f")
+        digest.update(float(row.used_percent).hex().encode("ascii"))
+        digest.update(b"\x1f")
+        recorded_at_bytes = str(row.recorded_at).encode("utf-8")
+        digest.update(str(len(recorded_at_bytes)).encode("ascii"))
+        digest.update(b":")
+        digest.update(recorded_at_bytes)
+        digest.update(b"\x1f")
+        digest.update(b"NULL" if row.reset_at is None else float(row.reset_at).hex().encode("ascii"))
+        digest.update(b"\x1f")
+        digest.update(b"NULL" if row.window_minutes is None else str(int(row.window_minutes)).encode("ascii"))
+        digest.update(b"\x1e")
+    return _BulkHistoryCacheMetadata(
+        row_count=len(rows),
+        max_id=max((row.id for row in rows), default=0),
         content_digest=digest.hexdigest(),
     )
 
@@ -140,72 +219,6 @@ def _append_grouped_history(
         bucket = target.setdefault(account_id, [])
         bucket.extend(rows)
         bucket.sort(key=lambda row: (row.recorded_at, row.id))
-
-
-def _merged_grouped_history(
-    target: dict[str, list[UsageHistorySnapshot]],
-    source: dict[str, list[UsageHistorySnapshot]],
-) -> dict[str, list[UsageHistorySnapshot]]:
-    merged = {account_id: list(rows) for account_id, rows in target.items()}
-    _append_grouped_history(merged, source)
-    return merged
-
-
-def _bulk_history_fingerprint_sqlite(
-    conn: sqlite3.Connection,
-    account_ids: list[str],
-    window: str,
-    since: datetime,
-) -> _BulkHistoryFingerprint:
-    placeholders = ",".join("?" for _ in account_ids)
-    since_param = since.isoformat(sep=" ")
-    if window == "primary":
-        window_clause = "coalesce(window, 'primary') = 'primary'"
-        params = [*account_ids, since_param]
-    else:
-        window_clause = "window = ?"
-        params = [*account_ids, window, since_param]
-    sql = f"""
-        select id, account_id, used_percent, recorded_at, reset_at, window_minutes
-        from usage_history
-        where account_id in ({placeholders})
-          and {window_clause}
-          and recorded_at >= ?
-        order by account_id, recorded_at asc, id asc
-    """
-    row_count = 0
-    max_id = 0
-    id_sum = 0
-    used_percent_total = 0.0
-    reset_at_total = 0.0
-    window_minutes_sum = 0
-    max_recorded_at = ""
-    digest = sha256()
-    for row in conn.execute(sql, params):
-        row_id = int(row[0])
-        account_id = str(row[1])
-        used_percent = float(row[2])
-        recorded_at = _parse_sqlite_datetime(row[3]).isoformat(sep=" ")
-        reset_at = float(row[4]) if row[4] is not None else None
-        window_minutes = int(row[5]) if row[5] is not None else None
-        row_count += 1
-        max_id = max(max_id, row_id)
-        id_sum += row_id
-        used_percent_total += used_percent
-        reset_at_total += reset_at or 0.0
-        window_minutes_sum += window_minutes or 0
-        max_recorded_at = max(max_recorded_at, recorded_at)
-        digest.update(repr((account_id, row_id, used_percent, recorded_at, reset_at, window_minutes)).encode("utf-8"))
-    return _BulkHistoryFingerprint(
-        row_count=row_count,
-        max_id=max_id,
-        id_sum=id_sum,
-        used_percent_total=used_percent_total,
-        reset_at_total=reset_at_total,
-        window_minutes_sum=window_minutes_sum,
-        max_recorded_at=max_recorded_at,
-        content_digest=digest.hexdigest(),
-    )
 
 
 def _query_bulk_history_since_sqlite(
@@ -253,6 +266,53 @@ def _query_bulk_history_since_sqlite(
     return grouped
 
 
+def _query_bulk_history_metadata_sqlite(
+    conn: sqlite3.Connection,
+    account_ids: list[str],
+    window: str,
+    since: datetime,
+    *,
+    max_id: int | None = None,
+) -> _BulkHistoryCacheMetadata:
+    placeholders = ",".join("?" for _ in account_ids)
+    since_param = since.isoformat(sep=" ")
+    id_clause = ""
+    params: list[object]
+    if window == "primary":
+        window_clause = "coalesce(window, 'primary') = 'primary'"
+        params = [*account_ids, since_param]
+    else:
+        window_clause = "window = ?"
+        params = [*account_ids, window, since_param]
+    if max_id is not None:
+        id_clause = "and id <= ?"
+        params.append(max_id)
+    conn.create_aggregate("clb_bulk_history_digest", 6, cast(Any, _BulkHistoryDigestAggregate))
+    sql = f"""
+        select count(*),
+               coalesce(max(id), 0),
+               coalesce(
+                   clb_bulk_history_digest(id, account_id, used_percent, recorded_at, reset_at, window_minutes),
+                   '{_EMPTY_BULK_HISTORY_DIGEST}'
+               )
+        from (
+            select id, account_id, used_percent, recorded_at, reset_at, window_minutes
+            from usage_history
+            where account_id in ({placeholders})
+              and {window_clause}
+              and recorded_at >= ?
+              {id_clause}
+            order by id asc, account_id asc
+        )
+    """
+    row = conn.execute(sql, params).fetchone()
+    return _BulkHistoryCacheMetadata(
+        row_count=int(row[0]),
+        max_id=int(row[1]),
+        content_digest=str(row[2]),
+    )
+
+
 def _normalized_window_expr():
     return func.coalesce(UsageHistory.window, _PRIMARY_WINDOW_LITERAL)
 
@@ -261,6 +321,13 @@ def _window_clause(window: str | None):
     if not window or window == "primary":
         return _normalized_window_expr() == "primary"
     return UsageHistory.window == window
+
+
+def _sqlite_path_from_bind(bind) -> object | None:
+    bind_url = getattr(bind, "url", None)
+    if bind_url is not None:
+        return sqlite_db_path_from_url(str(bind_url))
+    return sqlite_db_path_from_url(get_settings().database_url)
 
 
 def _parse_sqlite_datetime(value) -> datetime:
@@ -283,6 +350,21 @@ def _usage_history_from_sqlite_row(row) -> UsageHistory:
         credits_has=bool(row[9]) if row[9] is not None else None,
         credits_unlimited=bool(row[10]) if row[10] is not None else None,
         credits_balance=float(row[11]) if row[11] is not None else None,
+    )
+
+
+def _additional_usage_history_from_sqlite_row(row) -> AdditionalUsageHistory:
+    return AdditionalUsageHistory(
+        id=int(row[0]),
+        account_id=str(row[1]),
+        quota_key=str(row[2]),
+        limit_name=str(row[3]),
+        metered_feature=str(row[4]),
+        window=str(row[5]),
+        used_percent=float(row[6]),
+        reset_at=int(row[7]) if row[7] is not None else None,
+        window_minutes=int(row[8]) if row[8] is not None else None,
+        recorded_at=_parse_sqlite_datetime(row[9]),
     )
 
 
@@ -319,7 +401,7 @@ def _latest_by_account_sqlite(
     """
 
     latest: dict[str, UsageHistory] = {}
-    with sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES) as conn:
+    with closing(sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)) as conn:
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA busy_timeout=30000")
         accounts = [str(row[0]) for row in conn.execute(account_sql, account_params)]
@@ -331,6 +413,74 @@ def _latest_by_account_sqlite(
     return latest
 
 
+def _additional_scope_sqlite_clause(scope: AdditionalQuotaQueryScope) -> tuple[str, list[object]]:
+    quota_values = tuple(scope.quota_key_match_values or {scope.quota_key})
+    clauses = [f"quota_key in ({','.join('?' for _ in quota_values)})"]
+    params: list[object] = list(quota_values)
+    if scope.limit_name_match_values:
+        clauses.append(f"lower(limit_name) in ({','.join('?' for _ in scope.limit_name_match_values)})")
+        params.extend(scope.limit_name_match_values)
+    if scope.metered_feature_match_values:
+        clauses.append(f"lower(metered_feature) in ({','.join('?' for _ in scope.metered_feature_match_values)})")
+        params.extend(scope.metered_feature_match_values)
+    return f"({' or '.join(clauses)})", params
+
+
+def _additional_latest_by_account_sqlite(
+    db_path: str,
+    scope: AdditionalQuotaQueryScope,
+    window: str,
+    account_ids: list[str] | None,
+    since: datetime | None,
+) -> dict[str, AdditionalUsageHistory]:
+    scope_clause, scope_params = _additional_scope_sqlite_clause(scope)
+    account_filter = ""
+    account_params: list[object] = []
+    if account_ids is not None:
+        if not account_ids:
+            return {}
+        account_filter = f"and account_id in ({','.join('?' for _ in account_ids)})"
+        account_params = list(account_ids)
+    since_filter = ""
+    since_params: list[object] = []
+    if since is not None:
+        since_filter = "and recorded_at >= ?"
+        since_params = [since.isoformat(sep=" ")]
+
+    accounts_sql = f"""
+        select distinct account_id
+        from additional_usage_history
+        where {scope_clause}
+          and window = ?
+          {account_filter}
+          {since_filter}
+    """
+    latest_sql = f"""
+        select id, account_id, quota_key, limit_name, metered_feature, window,
+               used_percent, reset_at, window_minutes, recorded_at
+        from additional_usage_history
+        where account_id = ?
+          and {scope_clause}
+          and window = ?
+          {since_filter}
+        order by recorded_at desc, used_percent desc, id desc
+        limit 1
+    """
+
+    latest: dict[str, AdditionalUsageHistory] = {}
+    with closing(sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
+        accounts_params = [*scope_params, window, *account_params, *since_params]
+        accounts = [str(row[0]) for row in conn.execute(accounts_sql, accounts_params)]
+        for account_id in accounts:
+            row = conn.execute(latest_sql, [account_id, *scope_params, window, *since_params]).fetchone()
+            if row is not None:
+                entry = _additional_usage_history_from_sqlite_row(row)
+                latest[entry.account_id] = entry
+    return latest
+
+
 def _bulk_history_since_sqlite(
     db_path: str,
     account_ids: list[str],
@@ -338,13 +488,26 @@ def _bulk_history_since_sqlite(
     since: datetime,
 ) -> dict[str, list[UsageHistorySnapshot]]:
     cache_key = _bulk_history_cache_key(db_path, account_ids, window)
-    with sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES) as conn:
+    with closing(sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)) as conn:
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA busy_timeout=30000")
         with _BULK_HISTORY_SQLITE_CACHE_LOCK:
             cached = _BULK_HISTORY_SQLITE_CACHE.get(cache_key)
             if cached is not None and cached.since <= since:
-                current_fingerprint = _bulk_history_fingerprint_sqlite(conn, account_ids, window, cached.since)
+                metadata = _query_bulk_history_metadata_sqlite(
+                    conn,
+                    account_ids,
+                    window,
+                    cached.since,
+                    max_id=cached.max_id,
+                )
+                if metadata != cached.metadata:
+                    grouped = _query_bulk_history_since_sqlite(conn, account_ids, window, cached.since)
+                    cached.metadata = _bulk_history_metadata_from_grouped(grouped)
+                    cached.max_id = cached.metadata.max_id
+                    cached.rows_by_account = grouped
+                    return _clone_filtered_history(grouped, since)
+
                 new_rows = _query_bulk_history_since_sqlite(
                     conn,
                     account_ids,
@@ -352,25 +515,18 @@ def _bulk_history_since_sqlite(
                     cached.since,
                     after_id=cached.max_id,
                 )
-                candidate_rows = _merged_grouped_history(cached.rows_by_account, new_rows)
-                candidate_fingerprint = _fingerprint_grouped_history(candidate_rows)
-                if current_fingerprint != candidate_fingerprint:
-                    grouped = _query_bulk_history_since_sqlite(conn, account_ids, window, cached.since)
-                    cached.max_id = _max_snapshot_id(grouped)
-                    cached.fingerprint = _fingerprint_grouped_history(grouped)
-                    cached.rows_by_account = grouped
-                    return _clone_filtered_history(grouped, since)
                 if new_rows:
                     _append_grouped_history(cached.rows_by_account, new_rows)
-                    cached.max_id = max(cached.max_id, _max_snapshot_id(new_rows))
-                    cached.fingerprint = current_fingerprint
+                    cached.metadata = _bulk_history_metadata_from_grouped(cached.rows_by_account)
+                    cached.max_id = cached.metadata.max_id
                 return _clone_filtered_history(cached.rows_by_account, since)
 
             grouped = _query_bulk_history_since_sqlite(conn, account_ids, window, since)
+            metadata = _bulk_history_metadata_from_grouped(grouped)
             _BULK_HISTORY_SQLITE_CACHE[cache_key] = _BulkHistoryCacheEntry(
                 since=since,
-                max_id=_max_snapshot_id(grouped),
-                fingerprint=_fingerprint_grouped_history(grouped),
+                max_id=metadata.max_id,
+                metadata=metadata,
                 rows_by_account=grouped,
             )
             return _clone_filtered_history(grouped, since)
@@ -405,15 +561,57 @@ def _resolve_additional_quota_query_scope(
     )
 
 
-def _additional_quota_match_clause(scope: AdditionalQuotaQueryScope):
+def _additional_quota_match_clause(scope: AdditionalQuotaQueryScope, *, canonical_only: bool = False):
     clauses = [AdditionalUsageHistory.quota_key.in_(tuple(scope.quota_key_match_values or {scope.quota_key}))]
+    if canonical_only:
+        return clauses[0]
+    alias_clause = _additional_quota_alias_match_clause(scope)
+    if alias_clause is not None:
+        clauses.append(alias_clause)
+    return or_(*clauses)
+
+
+def _additional_quota_alias_match_clause(scope: AdditionalQuotaQueryScope):
+    clauses = []
     if scope.limit_name_match_values:
         clauses.append(func.lower(AdditionalUsageHistory.limit_name).in_(tuple(scope.limit_name_match_values)))
     if scope.metered_feature_match_values:
         clauses.append(
             func.lower(AdditionalUsageHistory.metered_feature).in_(tuple(scope.metered_feature_match_values))
         )
+    if not clauses:
+        return None
     return or_(*clauses)
+
+
+def _newer_additional_usage_entry(
+    current: AdditionalUsageHistory | None,
+    candidate: AdditionalUsageHistory,
+) -> AdditionalUsageHistory:
+    if current is None:
+        return candidate
+    current_key = (
+        current.recorded_at,
+        current.used_percent,
+        current.id,
+    )
+    candidate_key = (
+        candidate.recorded_at,
+        candidate.used_percent,
+        candidate.id,
+    )
+    return candidate if candidate_key > current_key else current
+
+
+def _merge_latest_additional_usage_entries(
+    entries: dict[str, AdditionalUsageHistory],
+    candidates: Collection[AdditionalUsageHistory],
+) -> None:
+    for candidate in candidates:
+        entries[candidate.account_id] = _newer_additional_usage_entry(
+            entries.get(candidate.account_id),
+            candidate,
+        )
 
 
 class UsageRepository:
@@ -463,11 +661,164 @@ class UsageRepository:
             credits_balance=credits_balance,
             recorded_at=recorded_at or utcnow(),
         )
-        self._session.add(entry)
         async with sqlite_writer_section():
+            # Telemetry write: this transaction only appends usage-history
+            # rows, so its commit may skip the synchronous WAL flush.
+            await relax_commit_durability(self._session)
+            self._session.add(entry)
             await self._session.commit()
             await self._session.refresh(entry)
         return entry
+
+    async def add_account_snapshot(
+        self,
+        account_id: str,
+        windows: Collection[UsageWindowWrite],
+        *,
+        recorded_at: datetime | None = None,
+    ) -> list[UsageHistory]:
+        """Persist one account's standard usage windows atomically."""
+        if not windows:
+            return []
+        entries = _account_snapshot_entries(account_id, windows, recorded_at=recorded_at)
+        try:
+            async with sqlite_writer_section():
+                # Telemetry write: this transaction only appends usage-history
+                # rows, so its commit may skip the synchronous WAL flush.
+                await relax_commit_durability(self._session)
+                self._session.add_all(entries)
+                await self._session.commit()
+        except BaseException:
+            await self._session.rollback()
+            raise
+        return entries
+
+    async def _resolve_postgresql_live_snapshot_owner(
+        self,
+        account_id: str | None,
+        chatgpt_account_id: str | None,
+    ) -> str | None:
+        locked_identities = (chatgpt_account_id,)
+        fallback_identity = chatgpt_account_id
+        relocked = False
+
+        while True:
+            await lock_postgresql_account_identities(self._session, locked_identities)
+            locked_identity_values = frozenset(identity for identity in locked_identities if identity)
+            identity_to_relock: str | None = None
+
+            if account_id is not None:
+                # Read before taking the row lock so MVCC preserves the
+                # current recovery identity even when its writer has already
+                # deleted the local row but not committed yet.
+                observed = (
+                    await self._session.execute(
+                        select(Account.id, Account.chatgpt_account_id).where(Account.id == account_id)
+                    )
+                ).one_or_none()
+                if observed is not None:
+                    observed_identity = observed.chatgpt_account_id
+                    if observed_identity and observed_identity not in locked_identity_values:
+                        identity_to_relock = observed_identity
+                    else:
+                        locked = (
+                            await self._session.execute(
+                                select(Account.id, Account.chatgpt_account_id)
+                                .where(Account.id == account_id)
+                                .with_for_update(key_share=True)
+                            )
+                        ).one_or_none()
+                        if locked is not None:
+                            if locked.chatgpt_account_id and locked.chatgpt_account_id not in locked_identity_values:
+                                identity_to_relock = locked.chatgpt_account_id
+                            else:
+                                return locked.id
+
+            if identity_to_relock is not None:
+                if relocked:
+                    raise LiveSnapshotOwnerIdentityRelockError(
+                        "Live snapshot owner identity changed during PostgreSQL relock"
+                    )
+                # Release the first lock before adding another identity; the
+                # shared helper can then reacquire the full set in canonical
+                # order without inverting an account writer's lock order.
+                await self._session.rollback()
+                fallback_identity = identity_to_relock
+                locked_identities = (chatgpt_account_id, identity_to_relock)
+                relocked = True
+                continue
+
+            if fallback_identity:
+                upstream_stmt = (
+                    select(Account.id)
+                    .where(Account.chatgpt_account_id == fallback_identity)
+                    .with_for_update(key_share=True)
+                )
+                matches = list((await self._session.execute(upstream_stmt)).scalars().all())
+                if len(matches) == 1:
+                    return matches[0]
+            return None
+
+    async def settle_live_account_snapshot(
+        self,
+        *,
+        account_id: str | None,
+        chatgpt_account_id: str | None,
+        windows: Collection[UsageWindowWrite],
+        should_skip: Callable[[str], bool],
+    ) -> str | None:
+        """Resolve a live snapshot owner and atomically persist its windows."""
+        if not windows:
+            return None
+
+        try:
+            async with sqlite_writer_section():
+                bind = self._session.get_bind()
+                dialect_name = bind.dialect.name if bind is not None else "sqlite"
+                if dialect_name == "sqlite":
+                    # Acquire SQLite's database-wide writer slot before owner
+                    # lookup. Consolidation then commits before this lookup or
+                    # waits until the snapshot commit, so the chosen FK owner
+                    # cannot disappear between SELECT and INSERT.
+                    await self._session.execute(text("BEGIN IMMEDIATE"))
+                    resolved_account_id = None
+                    if account_id is not None:
+                        resolved_account_id = await self._session.scalar(
+                            select(Account.id).where(Account.id == account_id)
+                        )
+                    if resolved_account_id is None and chatgpt_account_id:
+                        matches = list(
+                            (
+                                await self._session.execute(
+                                    select(Account.id).where(Account.chatgpt_account_id == chatgpt_account_id)
+                                )
+                            )
+                            .scalars()
+                            .all()
+                        )
+                        if len(matches) == 1:
+                            resolved_account_id = matches[0]
+                else:
+                    resolved_account_id = await self._resolve_postgresql_live_snapshot_owner(
+                        account_id,
+                        chatgpt_account_id,
+                    )
+
+                if resolved_account_id is None or should_skip(resolved_account_id):
+                    await self._session.rollback()
+                    return None
+
+                entries = _account_snapshot_entries(resolved_account_id, windows)
+                # Telemetry write: this transaction only locks the owner and
+                # appends usage-history rows, so it may skip synchronous WAL
+                # flush just like add_account_snapshot().
+                await relax_commit_durability(self._session)
+                self._session.add_all(entries)
+                await self._session.commit()
+        except BaseException:
+            await self._session.rollback()
+            raise
+        return resolved_account_id
 
     async def aggregate_since(
         self,
@@ -520,7 +871,7 @@ class UsageRepository:
             conditions = and_(conditions, UsageHistory.account_id.in_(account_ids))
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
-        sqlite_path = sqlite_db_path_from_url(get_settings().database_url) if dialect == "sqlite" else None
+        sqlite_path = _sqlite_path_from_bind(bind) if dialect == "sqlite" else None
         if sqlite_path is not None:
             return await to_thread.run_sync(
                 _latest_by_account_sqlite,
@@ -584,7 +935,7 @@ class UsageRepository:
                 _window_clause(window),
                 UsageHistory.recorded_at >= since,
             )
-            .order_by(UsageHistory.recorded_at.asc())
+            .order_by(UsageHistory.recorded_at.asc(), UsageHistory.id.asc())
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
@@ -594,13 +945,44 @@ class UsageRepository:
         account_ids: list[str],
         window: str,
         since: datetime,
+        *,
+        cutoffs: dict[str, datetime] | None = None,
+        per_account_row_cap: int | None = None,
+        uncapped_recent_floor: datetime | None = None,
     ) -> dict[str, list[UsageHistorySnapshot]]:
-        """Fetch minimal usage history fields for multiple accounts in a single query."""
+        """Fetch minimal usage history fields for multiple accounts in a single query.
+
+        ``since`` is the global floor. ``cutoffs`` optionally tightens the
+        lookback per account: callers whose accounts have different window
+        lengths would otherwise widen the fetch to the longest window for
+        every account and discard the surplus in Python. The SQLite path
+        ignores ``cutoffs`` (its snapshot cache is keyed on the shared
+        floor); callers keep their own per-account trimming, so honoring the
+        bound here only changes how many rows are read, never the result.
+
+        ``per_account_row_cap`` additionally bounds each account's slice to
+        its newest rows inside the cutoff (PostgreSQL only). Live snapshot
+        ingestion appends usage rows per proxied request, so a busy account's
+        7-day window can hold tens of thousands of rows while the projection
+        consumers (EWMA depletion, weekly-pace burn/smoothing) only read the
+        recent tail. Each capped slice keeps oldest-first ordering. The
+        SQLite snapshot-cache path ignores the cap the same way it ignores
+        ``cutoffs``.
+
+        ``uncapped_recent_floor`` exempts rows at or after the given time
+        from the row cap: every in-cutoff row newer than the floor is always
+        returned, and the cap bounds only the older remainder. Consumers
+        whose math weighs every sample in a fixed time window equally (the
+        weekly-pace smoothing mean) pass their window start here so a
+        write-rate burst can never silently truncate that window, while
+        tail-weighted consumers (EWMA) stay covered by the cap alone.
+        Ignored unless ``per_account_row_cap`` is set on PostgreSQL.
+        """
         if not account_ids:
             return {}
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
-        sqlite_path = sqlite_db_path_from_url(get_settings().database_url) if dialect == "sqlite" else None
+        sqlite_path = _sqlite_path_from_bind(bind) if dialect == "sqlite" else None
         if sqlite_path is not None:
             return await to_thread.run_sync(
                 _bulk_history_since_sqlite,
@@ -610,6 +992,31 @@ class UsageRepository:
                 since,
             )
 
+        if per_account_row_cap is not None and dialect == "postgresql":
+            return await self._bulk_history_since_capped_postgresql(
+                account_ids,
+                window,
+                since,
+                cutoffs=cutoffs,
+                per_account_row_cap=per_account_row_cap,
+                uncapped_recent_floor=uncapped_recent_floor,
+            )
+
+        if cutoffs:
+            recency_clause = or_(
+                *(
+                    and_(
+                        UsageHistory.account_id == account_id,
+                        UsageHistory.recorded_at >= max(cutoffs.get(account_id, since), since),
+                    )
+                    for account_id in account_ids
+                )
+            )
+        else:
+            recency_clause = and_(
+                UsageHistory.account_id.in_(account_ids),
+                UsageHistory.recorded_at >= since,
+            )
         stmt = (
             select(
                 UsageHistory.id,
@@ -620,9 +1027,8 @@ class UsageRepository:
                 UsageHistory.window_minutes,
             )
             .where(
-                UsageHistory.account_id.in_(account_ids),
+                recency_clause,
                 _window_clause(window),
-                UsageHistory.recorded_at >= since,
             )
             .order_by(UsageHistory.account_id, UsageHistory.recorded_at.asc())
         )
@@ -640,6 +1046,103 @@ class UsageRepository:
             grouped.setdefault(snapshot.account_id, []).append(snapshot)
         return grouped
 
+    async def _bulk_history_since_capped_postgresql(
+        self,
+        account_ids: list[str],
+        window: str,
+        since: datetime,
+        *,
+        cutoffs: dict[str, datetime] | None,
+        per_account_row_cap: int,
+        uncapped_recent_floor: datetime | None,
+    ) -> dict[str, list[UsageHistorySnapshot]]:
+        """Per-account newest-first capped fetch (PostgreSQL).
+
+        One lateral top-N probe per account instead of one shared range scan:
+        the probe descends idx_usage_window_account_time_covering (or its
+        raw-window twin) backward and stops at the cap or the account's
+        cutoff, whichever comes first, so the read never touches the bulk of
+        a dense account's window. The OR-of-cutoffs shape this replaces
+        returned every in-window row (hundreds of thousands on dense
+        deployments) to Python only for the projection consumers to use the
+        recent tail.
+
+        With ``uncapped_recent_floor`` the probe splits into two disjoint
+        branches over the same covering index: rows at or after the floor are
+        returned in full (time-bounded, so still cheap), and the top-N cap
+        applies only to rows between the cutoff and the floor. Snapshot
+        ingestion writes per proxied request whenever the usage fingerprint
+        moves, so a fixed row cap alone cannot guarantee it out-lasts a
+        burst inside an equal-weight consumer window.
+        """
+        value_columns = [
+            column("account_id", String()),
+            column("cutoff", UsageHistory.recorded_at.type),
+        ]
+        if uncapped_recent_floor is not None:
+            value_columns.append(column("uncapped_floor", UsageHistory.recorded_at.type))
+        value_rows: list[tuple] = []
+        for account_id in account_ids:
+            cutoff = max(cutoffs.get(account_id, since), since) if cutoffs else since
+            if uncapped_recent_floor is None:
+                value_rows.append((account_id, cutoff))
+            else:
+                value_rows.append((account_id, cutoff, max(cutoff, uncapped_recent_floor)))
+        account_cutoffs = values(*value_columns, name="account_cutoffs").data(value_rows)
+        snapshot_columns = (
+            UsageHistory.id,
+            UsageHistory.account_id,
+            UsageHistory.used_percent,
+            UsageHistory.recorded_at,
+            UsageHistory.reset_at,
+            UsageHistory.window_minutes,
+        )
+        capped_tail = (
+            select(*snapshot_columns)
+            .where(
+                UsageHistory.account_id == account_cutoffs.c.account_id,
+                UsageHistory.recorded_at >= account_cutoffs.c.cutoff,
+                *(
+                    (UsageHistory.recorded_at < account_cutoffs.c.uncapped_floor,)
+                    if uncapped_recent_floor is not None
+                    else ()
+                ),
+                _window_clause(window),
+            )
+            .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+            .limit(per_account_row_cap)
+            .correlate(account_cutoffs)
+        )
+        if uncapped_recent_floor is not None:
+            uncapped_recent = (
+                select(*snapshot_columns)
+                .where(
+                    UsageHistory.account_id == account_cutoffs.c.account_id,
+                    UsageHistory.recorded_at >= account_cutoffs.c.uncapped_floor,
+                    _window_clause(window),
+                )
+                .correlate(account_cutoffs)
+            )
+            recent = union_all(uncapped_recent, capped_tail).lateral("recent")
+        else:
+            recent = capped_tail.lateral("recent")
+        stmt = select(recent).select_from(account_cutoffs.join(recent, true()))
+        result = await self._session.execute(stmt)
+        grouped: dict[str, list[UsageHistorySnapshot]] = {}
+        for row in result.all():
+            snapshot = UsageHistorySnapshot(
+                id=int(row.id),
+                account_id=row.account_id,
+                used_percent=float(row.used_percent),
+                recorded_at=row.recorded_at,
+                reset_at=float(row.reset_at) if row.reset_at is not None else None,
+                window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
+            )
+            grouped.setdefault(snapshot.account_id, []).append(snapshot)
+        for snapshots in grouped.values():
+            snapshots.sort(key=lambda snapshot: (snapshot.recorded_at, snapshot.id))
+        return grouped
+
     async def trends_by_bucket(
         self,
         since: datetime,
@@ -652,8 +1155,8 @@ class UsageRepository:
         if dialect == "postgresql":
             bucket_expr = func.floor(func.extract("epoch", UsageHistory.recorded_at) / bucket_seconds) * bucket_seconds
         else:
-            epoch_col = cast(func.strftime("%s", UsageHistory.recorded_at), Integer)
-            bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+            epoch_col = sqlalchemy_cast(func.strftime("%s", UsageHistory.recorded_at), Integer)
+            bucket_expr = sqlalchemy_cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
         bucket_col = bucket_expr.label("bucket_epoch")
 
         conditions: list = [UsageHistory.recorded_at >= since]
@@ -866,8 +1369,12 @@ class AdditionalUsageRepository:
             window_minutes=window_minutes,
             recorded_at=recorded_at or utcnow(),
         )
-        self._session.add(entry)
         async with sqlite_writer_section():
+            # Telemetry write: this transaction only appends one
+            # additional-usage-history row, so its commit may skip the
+            # synchronous WAL flush.
+            await relax_commit_durability(self._session)
+            self._session.add(entry)
             await self._session.commit()
 
     async def delete_for_account(self, account_id: str) -> None:
@@ -933,6 +1440,79 @@ class AdditionalUsageRepository:
         )
         if scope is None or window is None:
             raise ValueError("quota_key/limit_name and window are required")
+        bind = self._session.get_bind()
+        dialect = bind.dialect.name if bind else "sqlite"
+        if account_ids is not None:
+            account_ids = list(account_ids)
+            if not account_ids:
+                return {}
+        if dialect == "postgresql":
+            # Correlated top-1 probes per (account × match value) instead of
+            # DISTINCT ON: the scan shape costs one btree descent per probe
+            # (ix_additional_usage_quota_window_latest for canonical values,
+            # the lower(...) alias twins for registry aliases), so the read
+            # scales with the candidate account count rather than with how
+            # many history rows the quota key has accumulated. Merging the
+            # per-value winners under the same (recorded_at, used_percent,
+            # id) ordering reproduces the DISTINCT ON result exactly.
+            probe_targets: list[tuple[Any, str]] = [
+                (AdditionalUsageHistory.quota_key, value)
+                for value in sorted(scope.quota_key_match_values or {scope.quota_key})
+            ]
+            probe_targets.extend(
+                (func.lower(AdditionalUsageHistory.limit_name), value)
+                for value in sorted(scope.limit_name_match_values)
+            )
+            probe_targets.extend(
+                (func.lower(AdditionalUsageHistory.metered_feature), value)
+                for value in sorted(scope.metered_feature_match_values)
+            )
+            acct_stmt = select(Account.id)
+            if account_ids is not None:
+                acct_stmt = acct_stmt.where(Account.id.in_(account_ids))
+            acct_subq = acct_stmt.subquery("accts")
+            entries: dict[str, AdditionalUsageHistory] = {}
+            for column_expr, value in probe_targets:
+                lateral_conditions = [
+                    AdditionalUsageHistory.account_id == acct_subq.c.id,
+                    AdditionalUsageHistory.window == window,
+                    column_expr == value,
+                ]
+                if since is not None:
+                    lateral_conditions.append(AdditionalUsageHistory.recorded_at >= since)
+                lateral = (
+                    select(AdditionalUsageHistory.id)
+                    .where(*lateral_conditions)
+                    .order_by(
+                        AdditionalUsageHistory.recorded_at.desc(),
+                        AdditionalUsageHistory.used_percent.desc(),
+                        AdditionalUsageHistory.id.desc(),
+                    )
+                    .limit(1)
+                    .correlate(acct_subq)
+                    .lateral("latest")
+                )
+                id_query = (
+                    select(lateral.c.id)
+                    .select_from(acct_subq.outerjoin(lateral, true()))
+                    .where(lateral.c.id.is_not(None))
+                )
+                stmt = select(AdditionalUsageHistory).where(AdditionalUsageHistory.id.in_(id_query))
+                result = await self._session.execute(stmt)
+                _merge_latest_additional_usage_entries(entries, result.scalars().all())
+            # Probe/plan order is not deterministic; callers pick response
+            # metadata from the first entry, so restore the account order
+            # the DISTINCT ON shape used to guarantee.
+            return {account_id: entries[account_id] for account_id in sorted(entries)}
+
+        if dialect == "sqlite":
+            return await self._latest_by_scope_sqlite_probes(
+                scope,
+                window,
+                account_ids=account_ids,
+                since=since,
+            )
+
         conditions = [
             _additional_quota_match_clause(scope),
             AdditionalUsageHistory.window == window,
@@ -966,6 +1546,50 @@ class AdditionalUsageRepository:
         result = await self._session.execute(stmt)
         return {entry.account_id: entry for entry in result.scalars().all()}
 
+    async def _latest_by_scope_sqlite_probes(
+        self,
+        scope: AdditionalQuotaQueryScope,
+        window: str,
+        *,
+        account_ids: Collection[str] | None = None,
+        since: datetime | None = None,
+    ) -> dict[str, AdditionalUsageHistory]:
+        account_values = list(account_ids) if account_ids is not None else None
+        if account_values is not None and not account_values:
+            return {}
+        account_stmt = select(AdditionalUsageHistory.account_id).where(
+            _additional_quota_match_clause(scope),
+            AdditionalUsageHistory.window == window,
+        )
+        if account_values is not None:
+            account_stmt = account_stmt.where(AdditionalUsageHistory.account_id.in_(account_values))
+        if since is not None:
+            account_stmt = account_stmt.where(AdditionalUsageHistory.recorded_at >= since)
+        account_result = await self._session.execute(account_stmt.distinct())
+        latest: dict[str, AdditionalUsageHistory] = {}
+        for account_id in account_result.scalars().all():
+            latest_stmt = (
+                select(AdditionalUsageHistory)
+                .where(
+                    AdditionalUsageHistory.account_id == account_id,
+                    _additional_quota_match_clause(scope),
+                    AdditionalUsageHistory.window == window,
+                )
+                .order_by(
+                    AdditionalUsageHistory.recorded_at.desc(),
+                    AdditionalUsageHistory.used_percent.desc(),
+                    AdditionalUsageHistory.id.desc(),
+                )
+                .limit(1)
+            )
+            if since is not None:
+                latest_stmt = latest_stmt.where(AdditionalUsageHistory.recorded_at >= since)
+            row_result = await self._session.execute(latest_stmt)
+            entry = row_result.scalar_one_or_none()
+            if entry is not None:
+                latest[entry.account_id] = entry
+        return latest
+
     async def latest_by_quota_key(
         self,
         quota_key: str,
@@ -974,6 +1598,18 @@ class AdditionalUsageRepository:
         account_ids: Collection[str] | None = None,
         since: datetime | None = None,
     ) -> dict[str, AdditionalUsageHistory]:
+        bind = self._session.get_bind()
+        dialect = bind.dialect.name if bind else "sqlite"
+        if dialect == "sqlite":
+            scope = _resolve_additional_quota_query_scope(quota_key=quota_key)
+            if scope is None:
+                raise ValueError("quota_key and window are required")
+            return await self._latest_by_scope_sqlite_probes(
+                scope,
+                window,
+                account_ids=account_ids,
+                since=since,
+            )
         return await self.latest_by_account(
             quota_key=quota_key,
             window=window,
@@ -987,19 +1623,25 @@ class AdditionalUsageRepository:
         account_ids: Collection[str] | None = None,
         since: datetime | None = None,
     ) -> list[str]:
-        stmt = select(
-            AdditionalUsageHistory.quota_key,
-            AdditionalUsageHistory.limit_name,
-            AdditionalUsageHistory.metered_feature,
-        ).distinct()
-        if account_ids is not None:
-            stmt = stmt.where(AdditionalUsageHistory.account_id.in_(account_ids))
-        if since is not None:
-            stmt = stmt.where(AdditionalUsageHistory.recorded_at >= since)
-        result = await self._session.execute(stmt)
+        bind = self._session.get_bind()
+        dialect = bind.dialect.name if bind else "sqlite"
+        if dialect == "postgresql" and since is None:
+            label_rows = await self._distinct_label_tuples_postgres(account_ids=account_ids)
+        else:
+            stmt = select(
+                AdditionalUsageHistory.quota_key,
+                AdditionalUsageHistory.limit_name,
+                AdditionalUsageHistory.metered_feature,
+            ).distinct()
+            if account_ids is not None:
+                stmt = stmt.where(AdditionalUsageHistory.account_id.in_(account_ids))
+            if since is not None:
+                stmt = stmt.where(AdditionalUsageHistory.recorded_at >= since)
+            result = await self._session.execute(stmt)
+            label_rows = [(row[0], row[1], row[2]) for row in result.all()]
         resolved_keys = {
             resolved_key
-            for quota_key_value, limit_name_value, metered_feature_value in result.all()
+            for quota_key_value, limit_name_value, metered_feature_value in label_rows
             if (
                 resolved_key := canonicalize_additional_quota_key(
                     quota_key=quota_key_value,
@@ -1010,6 +1652,48 @@ class AdditionalUsageRepository:
             is not None
         }
         return sorted(resolved_keys)
+
+    async def _distinct_label_tuples_postgres(
+        self,
+        *,
+        account_ids: Collection[str] | None = None,
+    ) -> list[tuple[str, str, str]]:
+        """Loose-index-scan emulation for the distinct label listing.
+
+        PostgreSQL has no native loose index scan, so a plain ``DISTINCT``
+        over the label columns reads every history row. Row-value comparison
+        probes over ``ix_additional_usage_distinct_labels`` instead step
+        through the distinct ``(account_id, quota_key, limit_name,
+        metered_feature)`` tuples — one btree descent per distinct tuple
+        (the request-log facet listing emulates the same skip scan). Each
+        probe is strictly ascending, so the walk terminates after the last
+        distinct tuple.
+        """
+        columns = (
+            AdditionalUsageHistory.account_id,
+            AdditionalUsageHistory.quota_key,
+            AdditionalUsageHistory.limit_name,
+            AdditionalUsageHistory.metered_feature,
+        )
+        ordered = tuple_(*columns)
+        labels: list[tuple[str, str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        cursor: tuple[str, str, str, str] | None = None
+        while True:
+            stmt = select(*columns)
+            if account_ids is not None:
+                stmt = stmt.where(AdditionalUsageHistory.account_id.in_(account_ids))
+            if cursor is not None:
+                stmt = stmt.where(ordered > cursor)
+            stmt = stmt.order_by(*(column.asc() for column in columns)).limit(1)
+            row = (await self._session.execute(stmt)).first()
+            if row is None:
+                return labels
+            cursor = (row[0], row[1], row[2], row[3])
+            label = (row[1], row[2], row[3])
+            if label not in seen:
+                seen.add(label)
+                labels.append(label)
 
     async def list_limit_names(
         self,

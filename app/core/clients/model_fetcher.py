@@ -22,7 +22,6 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute
 logger = logging.getLogger(__name__)
 
 _FETCH_TIMEOUT_SECONDS = 15.0
-_FILTERED_FIELDS = {"model_messages"}
 
 
 class ModelFetchError(Exception):
@@ -68,7 +67,8 @@ def _parse_reasoning_level(value: JsonValue) -> ReasoningLevel | None:
 
 
 def _parse_upstream_model(data: dict[str, JsonValue]) -> UpstreamModel:
-    raw = {k: v for k, v in data.items() if k not in _FILTERED_FIELDS}
+    # preserve all upstream catalog fields verbatim
+    raw = dict(data)
 
     reasoning_levels = tuple(
         parsed_level

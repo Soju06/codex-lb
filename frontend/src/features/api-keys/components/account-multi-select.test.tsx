@@ -54,6 +54,14 @@ describe("AccountMultiSelect", () => {
     });
   });
 
+  it("pluralizes the selected account count", async () => {
+    renderWithProviders(
+      <AccountMultiSelect value={["acc_primary", "acc_secondary"]} onChange={vi.fn()} />,
+    );
+
+    expect(await screen.findByRole("button", { name: "2 accounts selected" })).toBeInTheDocument();
+  });
+
   it("excludes hard-blocked accounts from new selections", async () => {
     server.use(
       http.get("/api/accounts", () =>
@@ -98,6 +106,45 @@ describe("AccountMultiSelect", () => {
     expect(await screen.findByRole("menuitemcheckbox", { name: /active-picker@example\.com/i })).toBeInTheDocument();
     expect(screen.queryByRole("menuitemcheckbox", { name: /reauth-picker@example\.com/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitemcheckbox", { name: /paused-picker@example\.com/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitemcheckbox", { name: /deactivated-picker@example\.com/i })).not.toBeInTheDocument();
+  });
+
+  it("can include paused accounts while keeping other hard-blocked accounts hidden", async () => {
+    server.use(
+      http.get("/api/accounts", () =>
+        HttpResponse.json({
+          accounts: [
+            createAccountSummary({
+              accountId: "acc_paused_picker",
+              email: "paused-picker@example.com",
+              displayName: "Paused picker",
+              status: "paused",
+            }),
+            createAccountSummary({
+              accountId: "acc_reauth_picker",
+              email: "reauth-picker@example.com",
+              displayName: "Reauth picker",
+              status: "reauth_required",
+            }),
+            createAccountSummary({
+              accountId: "acc_deactivated_picker",
+              email: "deactivated-picker@example.com",
+              displayName: "Deactivated picker",
+              status: "deactivated",
+            }),
+          ],
+        }),
+      ),
+    );
+
+    const user = userEvent.setup();
+
+    renderWithProviders(<AccountMultiSelect value={[]} onChange={vi.fn()} allowPausedAccounts />);
+
+    await user.click(await screen.findByRole("button", { name: "All accounts" }));
+
+    expect(await screen.findByRole("menuitemcheckbox", { name: /paused-picker@example\.com/i })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitemcheckbox", { name: /reauth-picker@example\.com/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitemcheckbox", { name: /deactivated-picker@example\.com/i })).not.toBeInTheDocument();
   });
 

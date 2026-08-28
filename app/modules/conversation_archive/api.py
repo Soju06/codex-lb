@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.concurrency import run_in_threadpool
 
-from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.dependencies import require_dashboard_admin_access, set_dashboard_error_format
 from app.modules.conversation_archive import service
 from app.modules.conversation_archive.schemas import (
     ConversationArchiveFileResponse,
@@ -17,7 +17,7 @@ from app.modules.conversation_archive.schemas import (
 router = APIRouter(
     prefix="/api/conversation-archive",
     tags=["dashboard"],
-    dependencies=[Depends(validate_dashboard_session), Depends(set_dashboard_error_format)],
+    dependencies=[Depends(require_dashboard_admin_access), Depends(set_dashboard_error_format)],
 )
 
 

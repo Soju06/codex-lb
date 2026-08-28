@@ -6,23 +6,42 @@ from typing import Any, Mapping
 
 import aiohttp
 from aiohttp_socks import ProxyConnector
+from python_socks import ProxyType
 
-from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.resilience.network_recovery import (
+    PROCESS_NETWORK_UNAVAILABLE_CODE,
+    is_pre_dispatch_connection_failure,
+    is_process_network_failure,
+)
+from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 _RESERVED = frozenset({"akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy"})
 
 
 class CodexTransportError(RuntimeError):
-    """Sanitized upstream transport failure.
+    """Credential-safe routed transport failure.
 
-    Transport libraries can include proxy URLs in exception strings. Proxy URLs
-    may embed credentials, so callers should surface this sanitized exception
-    instead of the original transport message.
+    ``retryable_same_contract`` is provenance, not a synonym for transient:
+    callers may replay only when the failing layer proved dispatch never
+    happened.
     """
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_code: str | None = None,
+        retryable_same_contract: bool = False,
+        failure_phase: str | None = None,
+        is_tls_verification_failure: bool = False,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.error_code = error_code
+        self.retryable_same_contract = retryable_same_contract
+        self.failure_phase = failure_phase
+        self.is_tls_verification_failure = is_tls_verification_failure
 
 
 def require_route_or_direct_egress_opt_in(
@@ -163,18 +182,57 @@ class CodexClient:
                     response = await _request_via_socks_proxy(
                         method,
                         url,
-                        endpoint.proxy_url,
+                        endpoint,
                         buffer_response=buffer_response,
                         **kwargs,
                     )
                 else:
-                    response = await self._session.request(method, url, proxy=endpoint.proxy_url, **kwargs)
-                if buffer_response and not endpoint.scheme.startswith("socks"):
-                    response = await _buffer_response(response)
+                    try:
+                        response = await self._session.request(method, url, proxy=endpoint.proxy_url, **kwargs)
+                    except Exception as exc:
+                        raise _transport_error(
+                            "request",
+                            endpoint.id,
+                            exc,
+                            failure_phase="connect" if is_pre_dispatch_connection_failure(exc) else "request",
+                            retryable_same_contract=is_pre_dispatch_connection_failure(exc),
+                        ) from None
+                    if buffer_response:
+                        try:
+                            response = await _buffer_response(response)
+                        except Exception as exc:
+                            # Headers prove the POST reached the response phase;
+                            # a failed buffered read is neutral when classified
+                            # as host-network loss, but it is never replay-safe.
+                            raise _transport_error(
+                                "response body",
+                                endpoint.id,
+                                exc,
+                                failure_phase="body_read",
+                                retryable_same_contract=False,
+                            ) from None
                 return CodexRequestResult(response, candidate, index > 0)
+            except CodexTransportError as exc:
+                # A confirmed pre-dispatch connect failure proves the request
+                # never left for upstream, so trying the next endpoint in the
+                # same resolved pool is safe even for a non-idempotent POST.
+                # TLS verification failures are stable endpoint configuration
+                # errors rather than transient connect losses; they keep the
+                # idempotent-only rule.
+                if index == len(endpoints) - 1 or not (
+                    allow_fallback or (exc.retryable_same_contract and not exc.is_tls_verification_failure)
+                ):
+                    raise
             except Exception as exc:
-                if index == len(endpoints) - 1 or not allow_fallback:
-                    raise _transport_error("request", endpoint.id, exc) from None
+                pre_dispatch = is_pre_dispatch_connection_failure(exc) and not isinstance(exc, aiohttp.ClientSSLError)
+                if index == len(endpoints) - 1 or not (allow_fallback or pre_dispatch):
+                    raise _transport_error(
+                        "request",
+                        endpoint.id,
+                        exc,
+                        failure_phase="connect" if is_pre_dispatch_connection_failure(exc) else "request",
+                        retryable_same_contract=is_pre_dispatch_connection_failure(exc),
+                    ) from None
         raise RuntimeError("unreachable Codex client fallback state")
 
     async def ws_connect(self, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any) -> Any:
@@ -187,7 +245,13 @@ class CodexClient:
         return result
 
     async def open_ws_with_route_metadata(
-        self, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any
+        self,
+        url: str,
+        *,
+        route: ResolvedUpstreamRoute,
+        retry_handshake_status: bool = True,
+        retry_network_errors: bool = True,
+        **kwargs: Any,
     ) -> CodexWebSocketResult:
         if route is None:
             raise ValueError("Codex upstream calls require a resolved upstream proxy route")
@@ -196,9 +260,11 @@ class CodexClient:
         for index, endpoint in enumerate(endpoints):
             candidate = route.with_endpoint(endpoint, tuple(endpoints[index + 1 :]))
             context: Any | None = None
+            entered_context: Any | None = None
             try:
                 if endpoint.scheme.startswith("socks"):
-                    websocket, context = await _open_ws_via_socks_proxy(url, endpoint.proxy_url, **kwargs)
+                    websocket, context = await _open_ws_via_socks_proxy(url, endpoint, **kwargs)
+                    entered_context = context
                 else:
                     context = self._session.ws_connect(
                         url,
@@ -207,18 +273,47 @@ class CodexClient:
                     )
                     if asyncio.iscoroutine(context):
                         context = await context
-                    websocket = await context.__aenter__() if hasattr(context, "__aenter__") else context
+                    if hasattr(context, "__aenter__"):
+                        websocket = await context.__aenter__()
+                        entered_context = context
+                    else:
+                        websocket = context
                 return CodexWebSocketResult(
                     websocket,
-                    context if hasattr(context, "__aenter__") else None,
+                    entered_context,
                     candidate,
                     index > 0,
                 )
             except Exception as exc:
-                if context is not None and hasattr(context, "__aexit__"):
-                    await context.__aexit__(None, None, None)
+                if entered_context is not None and hasattr(entered_context, "__aexit__"):
+                    await entered_context.__aexit__(None, None, None)
+                handshake_status = _transport_error_status_code(exc)
+                if handshake_status is not None and not retry_handshake_status:
+                    raise _transport_error(
+                        "websocket",
+                        endpoint.id,
+                        exc,
+                        failure_phase="connect",
+                        retryable_same_contract=False,
+                    ) from None
+                if handshake_status is None and not retry_network_errors:
+                    raise _transport_error(
+                        "websocket",
+                        endpoint.id,
+                        exc,
+                        failure_phase="connect",
+                        retryable_same_contract=False,
+                    ) from None
                 if index == len(endpoints) - 1:
-                    raise _transport_error("websocket", endpoint.id, exc) from None
+                    raise _transport_error(
+                        "websocket",
+                        endpoint.id,
+                        exc,
+                        failure_phase="connect",
+                        # No response.create frame can be delivered before the
+                        # websocket open returns to its caller.
+                        retryable_same_contract=is_pre_dispatch_connection_failure(exc),
+                    ) from None
         raise RuntimeError("unreachable Codex client websocket fallback state")
 
     async def close(self) -> None:
@@ -242,23 +337,39 @@ def create_codex_session(*, max_clients: int = 10) -> Any:
 async def _request_via_socks_proxy(
     method: str,
     url: str,
-    proxy_url: str,
+    endpoint: ResolvedProxyEndpoint,
     *,
     buffer_response: bool,
     **kwargs: Any,
 ) -> Any:
-    from app.core.clients.http import _build_ssl_context
-
-    connector = ProxyConnector.from_url(proxy_url, ssl=_build_ssl_context())
+    connector = _socks_proxy_connector(endpoint)
     session = aiohttp.ClientSession(
         connector=connector,
         timeout=aiohttp.ClientTimeout(total=None),
         trust_env=False,
     )
     try:
-        response = await session.request(method, url, **kwargs)
+        try:
+            response = await session.request(method, url, **kwargs)
+        except Exception as exc:
+            raise _transport_error(
+                "request",
+                endpoint.id,
+                exc,
+                failure_phase="connect" if is_pre_dispatch_connection_failure(exc) else "request",
+                retryable_same_contract=is_pre_dispatch_connection_failure(exc),
+            ) from None
         if buffer_response:
-            return await _buffer_response(response)
+            try:
+                return await _buffer_response(response)
+            except Exception as exc:
+                raise _transport_error(
+                    "response body",
+                    endpoint.id,
+                    exc,
+                    failure_phase="body_read",
+                    retryable_same_contract=False,
+                ) from None
         return _SessionOwnedResponse(response, session)
     except Exception:
         await session.close()
@@ -268,10 +379,8 @@ async def _request_via_socks_proxy(
             await session.close()
 
 
-async def _open_ws_via_socks_proxy(url: str, proxy_url: str, **kwargs: Any) -> tuple[Any, Any]:
-    from app.core.clients.http import _build_ssl_context
-
-    connector = ProxyConnector.from_url(proxy_url, ssl=_build_ssl_context())
+async def _open_ws_via_socks_proxy(url: str, endpoint: ResolvedProxyEndpoint, **kwargs: Any) -> tuple[Any, Any]:
+    connector = _socks_proxy_connector(endpoint)
     session = aiohttp.ClientSession(
         connector=connector,
         timeout=aiohttp.ClientTimeout(total=None),
@@ -283,9 +392,24 @@ async def _open_ws_via_socks_proxy(url: str, proxy_url: str, **kwargs: Any) -> t
             context = await context
         websocket = await context.__aenter__() if hasattr(context, "__aenter__") else context
         return websocket, _SessionOwnedWebSocketContext(context, session)
-    except Exception:
+    except BaseException:
         await session.close()
         raise
+
+
+def _socks_proxy_connector(endpoint: ResolvedProxyEndpoint) -> ProxyConnector:
+    from app.core.clients.http import _build_ssl_context
+
+    proxy_scheme = endpoint.proxy_url.split(":", 1)[0]
+    return ProxyConnector(
+        host=endpoint.host,
+        port=endpoint.port,
+        proxy_type=ProxyType.SOCKS5,
+        username=endpoint.username,
+        password=endpoint.password,
+        rdns=proxy_scheme == "socks5h",
+        ssl=_build_ssl_context(),
+    )
 
 
 def _normalize_aiohttp_request_kwargs(kwargs: dict[str, Any]) -> None:
@@ -368,10 +492,26 @@ def _is_idempotent_method(method: str) -> bool:
     return method.upper() in {"GET", "HEAD", "OPTIONS", "TRACE"}
 
 
-def _transport_error(operation: str, endpoint_id: str, exc: Exception) -> CodexTransportError:
+def _transport_error(
+    operation: str,
+    endpoint_id: str,
+    exc: Exception,
+    *,
+    failure_phase: str,
+    retryable_same_contract: bool,
+) -> CodexTransportError:
+    process_network_failure = is_process_network_failure(exc, include_permanent_dns=False)
     return CodexTransportError(
         codex_transport_error_message(operation, endpoint_id, exc),
         status_code=_transport_error_status_code(exc),
+        # A missing proxy hostname is endpoint configuration, not evidence
+        # that the host lost DNS. Transient DNS and local route loss remain
+        # process-wide failures and are safe to classify without exposing the
+        # credential-bearing original exception.
+        error_code=PROCESS_NETWORK_UNAVAILABLE_CODE if process_network_failure else None,
+        retryable_same_contract=retryable_same_contract,
+        failure_phase=failure_phase,
+        is_tls_verification_failure=isinstance(exc, aiohttp.ClientSSLError),
     )
 
 

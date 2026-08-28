@@ -10,6 +10,50 @@ from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.types import JsonValue
 
 
+def test_chat_to_responses_omits_unset_tools() -> None:
+    req = ChatCompletionsRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+    )
+
+    responses = req.to_responses_request()
+
+    assert "tools" not in req.model_fields_set
+    assert "tools" not in responses.model_fields_set
+    assert "tools" not in responses.to_payload()
+
+
+def test_chat_to_responses_preserves_explicit_empty_tools() -> None:
+    req = ChatCompletionsRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [],
+        }
+    )
+
+    responses = req.to_responses_request()
+
+    assert responses.to_payload()["tools"] == []
+
+
+def test_chat_responses_shaped_payload_omits_unset_tools() -> None:
+    req = ChatCompletionsRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        }
+    )
+
+    responses = req.to_responses_request()
+
+    assert "tools" not in req.model_fields_set
+    assert "tools" not in responses.model_fields_set
+    assert "tools" not in responses.to_payload()
+
+
 def test_chat_messages_to_responses_mapping():
     payload = {
         "model": "gpt-5.2",
@@ -313,6 +357,23 @@ def test_chat_reasoning_effort_maps_to_responses_reasoning():
     assert isinstance(reasoning, Mapping)
     reasoning_map = cast(Mapping[str, JsonValue], reasoning)
     assert reasoning_map.get("effort") == "high"
+
+
+def test_chat_reasoning_effort_merges_with_reasoning_metadata():
+    request = ChatCompletionsRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "max",
+            "reasoning": {"summary": "auto"},
+        }
+    )
+
+    responses = request.to_responses_request()
+
+    assert responses.reasoning is not None
+    assert responses.reasoning.effort == "max"
+    assert responses.reasoning.summary == "auto"
 
 
 def test_chat_enable_thinking_maps_to_default_reasoning_effort():

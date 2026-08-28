@@ -16,6 +16,7 @@ from app.core.auth.dashboard_mode import (
     get_dashboard_request_auth,
     password_management_enabled,
 )
+from app.core.auth.dashboard_session_ttl import resolve_dashboard_session_ttl_seconds
 from app.core.auth.dependencies import require_dashboard_write_access, set_dashboard_error_format
 from app.core.bootstrap import (
     ensure_auto_bootstrap_token,
@@ -77,6 +78,7 @@ def _session_client_key(request: Request, *, prefix: str) -> str:
 
 
 async def _create_dashboard_session(
+    request: Request,
     *,
     password_verified: bool,
     totp_verified: bool,
@@ -84,7 +86,7 @@ async def _create_dashboard_session(
     guest_verified: bool = False,
 ) -> tuple[str, int]:
     settings = await get_settings_cache().get()
-    ttl_seconds = settings.dashboard_session_ttl_seconds
+    ttl_seconds = resolve_dashboard_session_ttl_seconds(request, settings.dashboard_session_ttl_seconds)
     session_id = get_dashboard_session_store().create(
         password_verified=password_verified,
         totp_verified=totp_verified,
@@ -296,7 +298,9 @@ async def setup_password(
         raise DashboardConflictError(str(exc), code="password_already_configured") from exc
 
     await get_settings_cache().invalidate()
-    session_id, session_ttl_seconds = await _create_dashboard_session(password_verified=True, totp_verified=False)
+    session_id, session_ttl_seconds = await _create_dashboard_session(
+        request, password_verified=True, totp_verified=False
+    )
     response = _decorate_session_response(
         await context.service.get_session_state(session_id),
         request=request,
@@ -347,6 +351,7 @@ async def login_guest(
     await limiter.clear_for_key(rate_key, context.session)
 
     session_id, session_ttl_seconds = await _create_dashboard_session(
+        request,
         password_verified=False,
         totp_verified=False,
         role=DashboardRole.GUEST,
@@ -401,7 +406,9 @@ async def login_password(
 
     await limiter.clear_for_key(rate_key, context.session)
 
-    session_id, session_ttl_seconds = await _create_dashboard_session(password_verified=True, totp_verified=False)
+    session_id, session_ttl_seconds = await _create_dashboard_session(
+        request, password_verified=True, totp_verified=False
+    )
     response = _decorate_session_response(
         await context.service.get_session_state(session_id),
         request=request,
@@ -564,7 +571,8 @@ async def verify_totp(
             code="totp_rate_limited",
         ) from exc
     try:
-        session_ttl_seconds = (await get_settings_cache().get()).dashboard_session_ttl_seconds
+        configured_ttl_seconds = (await get_settings_cache().get()).dashboard_session_ttl_seconds
+        session_ttl_seconds = resolve_dashboard_session_ttl_seconds(request, configured_ttl_seconds)
         session_id, applied_ttl_seconds = await context.service.verify_totp(
             session_id=current_session_id,
             code=payload.code,

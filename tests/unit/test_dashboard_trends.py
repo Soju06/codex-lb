@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.core.usage.types import BucketModelAggregate
+from app.core.usage.types import BucketConversationAggregate, BucketModelAggregate
 from app.modules.usage.builders import align_bucket_window_start, build_trends_from_buckets
 
 BUCKET_SECONDS = 21600  # 6 hours
@@ -24,6 +24,7 @@ def _make_row(
     cached_input_tokens: int = 50,
     reasoning_tokens: int = 0,
     cost_usd: float = 0.123,
+    cancelled_count: int = 0,
 ) -> BucketModelAggregate:
     return BucketModelAggregate(
         bucket_epoch=FIRST_SLOT_EPOCH + slot_index * BUCKET_SECONDS,
@@ -36,6 +37,7 @@ def _make_row(
         cached_input_tokens=cached_input_tokens,
         reasoning_tokens=reasoning_tokens,
         cost_usd=cost_usd,
+        cancelled_count=cancelled_count,
     )
 
 
@@ -58,17 +60,33 @@ class TestBuildTrendsFromBuckets:
         assert len(trends.tokens) == 28
         assert len(trends.cost) == 28
         assert len(trends.error_rate) == 28
+        assert len(trends.conversations) == 28
 
         assert all(p.v == 0 for p in trends.requests)
         assert all(p.v == 0 for p in trends.tokens)
         assert all(p.v == 0 for p in trends.cost)
         assert all(p.v == 0 for p in trends.error_rate)
+        assert all(p.v == 0 for p in trends.conversations)
 
         assert metrics.requests == 0
         assert metrics.tokens == 0
         assert metrics.error_rate is None
         assert metrics.error_count == 0
         assert cost.total_usd == 0.0
+
+    def test_conversations_are_aligned_and_zero_filled(self):
+        conversation_rows = [
+            BucketConversationAggregate(bucket_epoch=FIRST_SLOT_EPOCH + 2 * BUCKET_SECONDS, conversation_count=3),
+            BucketConversationAggregate(bucket_epoch=FIRST_SLOT_EPOCH + 5 * BUCKET_SECONDS, conversation_count=1),
+        ]
+
+        trends, _, _ = build_trends_from_buckets([], SINCE, conversation_rows=conversation_rows)
+
+        assert len(trends.conversations) == 28
+        assert trends.conversations[2].t == trends.requests[2].t
+        assert trends.conversations[2].v == 3
+        assert trends.conversations[5].v == 1
+        assert trends.conversations[0].v == 0
 
     def test_single_bucket_populates_correct_slot(self):
         rows = [_make_row(slot_index=2)]
@@ -103,6 +121,7 @@ class TestBuildTrendsFromBuckets:
                 input_tokens=1000,
                 output_tokens=500,
                 cached_input_tokens=100,
+                cancelled_count=4,
             ),
             _make_row(
                 slot_index=5,
@@ -111,6 +130,7 @@ class TestBuildTrendsFromBuckets:
                 input_tokens=2000,
                 output_tokens=1000,
                 cached_input_tokens=200,
+                cancelled_count=6,
             ),
         ]
         _, metrics, _ = build_trends_from_buckets(rows, SINCE)
@@ -118,8 +138,11 @@ class TestBuildTrendsFromBuckets:
         assert metrics.requests == 30
         assert metrics.tokens == 4500  # 1000+500+2000+1000
         assert metrics.cached_input_tokens == 300
+        # Cancelled terminals never join the error numerator (#1552); the
+        # denominator stays the full request total.
         assert metrics.error_rate == pytest.approx(5 / 30)
         assert metrics.error_count == 5
+        assert metrics.cancelled_count == 10
 
     def test_cost_is_computed_from_pricing(self):
         rows = [

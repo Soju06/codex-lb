@@ -1,9 +1,12 @@
+import { useTranslation } from "react-i18next";
+
 import { CodexLogo } from "@/components/brand/codex-logo";
 import { AlertMessage } from "@/components/alert-message";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 
 export function BootstrapSetupScreen() {
+  const { t } = useTranslation();
   const bootstrapTokenConfigured = useAuthStore((state) => state.bootstrapTokenConfigured);
 
   return (
@@ -20,9 +23,9 @@ export function BootstrapSetupScreen() {
             <CodexLogo size={28} className="text-primary" />
           </div>
           <div>
-            <h1 className="text-xl font-semibold tracking-tight">Complete Remote Setup</h1>
+            <h1 className="text-xl font-semibold tracking-tight">{t("auth.bootstrap.title")}</h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              Remote dashboard access stays locked until an admin password is configured.
+              {t("auth.bootstrap.subtitle")}
             </p>
           </div>
         </div>
@@ -30,12 +33,12 @@ export function BootstrapSetupScreen() {
         <div className="rounded-2xl border bg-card p-6 shadow-[var(--shadow-md)]">
           <div className="space-y-3">
             <p className="text-sm text-muted-foreground">
-              Use the password setup flow below to bootstrap dashboard access before loading the rest of the admin UI.
+              {t("auth.bootstrap.body")}
             </p>
             <AlertMessage variant="error">
               {bootstrapTokenConfigured
-                ? "Enter the configured bootstrap token below with your new password. Depending on your setup, it may come from your server logs or CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN."
-                : "Remote setup is blocked. Set CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN on the server or restart without a password to auto-generate one."}
+                ? t("auth.bootstrap.tokenConfigured")
+                : t("auth.bootstrap.tokenMissing")}
             </AlertMessage>
           </div>
         </div>

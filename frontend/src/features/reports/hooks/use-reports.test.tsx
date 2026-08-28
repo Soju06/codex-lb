@@ -12,6 +12,8 @@ vi.mock("@/lib/api-client", () => ({
       totalCostUsd: 0,
       totalInputTokens: 0,
       totalOutputTokens: 0,
+      totalReasoningTokens: 0,
+      reasoningUsageKnownRequests: 0,
       totalCachedTokens: 0,
       totalRequests: 0,
       totalErrors: 0,
@@ -29,6 +31,7 @@ vi.mock("@/lib/api-client", () => ({
     },
     daily: [],
     byModel: [],
+    byUseragent: [],
     byAccount: [],
   }),
 }));
@@ -74,6 +77,7 @@ describe("useReports", () => {
             endDate: "2030-01-15",
             accountId: ["acct_123"],
             model: "gpt-5.1",
+            useragent: "claude-code",
           },
           "America/Los_Angeles",
         ),
@@ -87,6 +91,7 @@ describe("useReports", () => {
     expect(searchParams.get("start_date")).toBe("2030-01-09");
     expect(searchParams.get("end_date")).toBe("2030-01-15");
     expect(searchParams.get("model")).toBe("gpt-5.1");
+    expect(searchParams.get("useragent_group")).toBe("claude-code");
     expect(searchParams.getAll("account_id")).toEqual(["acct_123"]);
     expect(searchParams.get("timezone")).toBe("America/Los_Angeles");
   });
@@ -98,6 +103,7 @@ describe("useReports", () => {
       endDate: "2030-01-15",
       accountId: ["acct_123"],
       model: "gpt-5.1",
+      useragent: "claude-code",
     };
 
     const { result, rerender } = renderHook(
@@ -136,6 +142,7 @@ describe("useReports", () => {
       endDate: "2030-01-15",
       accountId: ["acct_123"],
       model: "gpt-5.1",
+      useragent: "claude-code",
     };
 
     const { result } = renderHook(() => useReports(filters, "America/Los_Angeles"), {
@@ -168,11 +175,13 @@ describe("useReports", () => {
 
     const { result } = renderHook(
       () =>
-        useReports({
-          startDate: "2030-01-09",
+        useReports(
+          {
+            startDate: "2030-01-09",
             endDate: "2030-01-15",
             accountId: ["acct_123"],
             model: "gpt-5.1",
+            useragent: "claude-code",
           },
           undefined,
         ),
@@ -186,7 +195,115 @@ describe("useReports", () => {
     expect(searchParams.get("start_date")).toBe("2030-01-09");
     expect(searchParams.get("end_date")).toBe("2030-01-15");
     expect(searchParams.get("model")).toBe("gpt-5.1");
+    expect(searchParams.get("useragent_group")).toBe("claude-code");
     expect(searchParams.getAll("account_id")).toEqual(["acct_123"]);
     expect(searchParams.has("timezone")).toBe(false);
+  });
+
+  it("refetches when the useragent filter changes", async () => {
+    const queryClient = createTestQueryClient();
+
+    const { result, rerender } = renderHook(
+      ({ useragent }) =>
+        useReports(
+          {
+            startDate: "2030-01-09",
+            endDate: "2030-01-15",
+            accountId: ["acct_123"],
+            model: "gpt-5.1",
+            useragent,
+          },
+          "America/Los_Angeles",
+        ),
+      {
+        wrapper: createWrapper(queryClient),
+        initialProps: { useragent: "claude-code" },
+      },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    rerender({ useragent: "chatgpt-app" });
+
+    await waitFor(() => expect(getMock).toHaveBeenCalledTimes(2));
+
+    const [firstUrl] = getMock.mock.calls[0] ?? [];
+    const [secondUrl] = getMock.mock.calls[1] ?? [];
+    expect(
+      new URL(String(firstUrl), "http://localhost").searchParams.get(
+        "useragent_group",
+      ),
+    ).toBe("claude-code");
+    expect(
+      new URL(String(secondUrl), "http://localhost").searchParams.get(
+        "useragent_group",
+      ),
+    ).toBe("chatgpt-app");
+  });
+
+  it("includes api_key_id in reports requests when apiKeyId filter is provided", async () => {
+    const queryClient = createTestQueryClient();
+
+    const { result } = renderHook(
+      () =>
+        useReports(
+          {
+            startDate: "2030-01-09",
+            endDate: "2030-01-15",
+            accountId: ["acct_123"],
+            apiKeyId: ["key_456", "key_789"],
+            model: "gpt-5.1",
+          },
+          "America/Los_Angeles",
+        ),
+      { wrapper: createWrapper(queryClient) },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(getMock).toHaveBeenCalledTimes(1);
+    const searchParams = getRequestedSearchParams();
+    expect(searchParams.getAll("api_key_id")).toEqual(["key_456", "key_789"]);
+  });
+
+  it("refetches when the apiKeyId filter changes", async () => {
+    const queryClient = createTestQueryClient();
+
+    const { result, rerender } = renderHook(
+      ({ apiKeyId }) =>
+        useReports(
+          {
+            startDate: "2030-01-09",
+            endDate: "2030-01-15",
+            accountId: ["acct_123"],
+            apiKeyId,
+            model: "gpt-5.1",
+          },
+          "America/Los_Angeles",
+        ),
+      {
+        wrapper: createWrapper(queryClient),
+        initialProps: { apiKeyId: ["key_1"] },
+      },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    rerender({ apiKeyId: ["key_2"] });
+
+    await waitFor(() => expect(getMock).toHaveBeenCalledTimes(2));
+
+    const [firstUrl] = getMock.mock.calls[0] ?? [];
+    const [secondUrl] = getMock.mock.calls[1] ?? [];
+    expect(
+      new URL(String(firstUrl), "http://localhost").searchParams.getAll(
+        "api_key_id",
+      ),
+    ).toEqual(["key_1"]);
+    expect(
+      new URL(String(secondUrl), "http://localhost").searchParams.getAll(
+        "api_key_id",
+      ),
+    ).toEqual(["key_2"]);
   });
 });

@@ -47,8 +47,10 @@ def test_build_authorization_url_contains_required_params():
     assert query["originator"] == ["codex_chatgpt_desktop"]
 
 
-def test_build_authorization_url_uses_configured_originator(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("CODEX_LB_OAUTH_ORIGINATOR", "codex_chatgpt_desktop")
+def test_build_authorization_url_ignores_removed_originator_env(monkeypatch: pytest.MonkeyPatch):
+    # CODEX_LB_OAUTH_ORIGINATOR was removed from the settings surface
+    # (issue #1340); the originator is a fixed protocol constant now.
+    monkeypatch.setenv("CODEX_LB_OAUTH_ORIGINATOR", "codex_cli_rs")
     get_settings.cache_clear()
 
     try:
@@ -68,21 +70,16 @@ def test_build_authorization_url_uses_configured_originator(monkeypatch: pytest.
     assert query["originator"] == ["codex_chatgpt_desktop"]
 
 
-def test_build_authorization_url_allows_cli_override(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("CODEX_LB_OAUTH_ORIGINATOR", "codex_cli_rs")
-    get_settings.cache_clear()
-
-    try:
-        url = build_authorization_url(
-            state="state_123",
-            code_challenge="challenge_456",
-            base_url="https://auth.openai.com",
-            client_id="client_id",
-            redirect_uri="http://localhost:1455/auth/callback",
-            scope="openid profile email offline_access",
-        )
-    finally:
-        get_settings.cache_clear()
+def test_build_authorization_url_allows_explicit_originator_override():
+    url = build_authorization_url(
+        state="state_123",
+        code_challenge="challenge_456",
+        base_url="https://auth.openai.com",
+        client_id="client_id",
+        originator="codex_cli_rs",
+        redirect_uri="http://localhost:1455/auth/callback",
+        scope="openid profile email offline_access",
+    )
 
     parsed = urllib.parse.urlparse(url)
     query = urllib.parse.parse_qs(parsed.query)

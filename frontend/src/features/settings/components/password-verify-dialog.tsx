@@ -1,6 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { AlertMessage } from "@/components/alert-message";
@@ -29,10 +30,18 @@ export type PasswordVerifyDialogProps = {
 };
 
 export function PasswordVerifyDialog({ open, onOpenChange, disabled = false }: PasswordVerifyDialogProps) {
+  const { t } = useTranslation();
   const refreshSession = useAuthStore((s) => s.refreshSession);
 
   const [step, setStep] = useState<VerifyStep>("password");
   const [error, setError] = useState<string | null>(null);
+  const resolveValidationMessage = (message?: string): string | undefined => {
+    if (!message) {
+      return undefined;
+    }
+    const translated = t(message);
+    return translated === message ? message : translated;
+  };
 
   const passwordForm = useForm({
     resolver: zodResolver(PasswordRemoveRequestSchema),
@@ -63,6 +72,13 @@ export function PasswordVerifyDialog({ open, onOpenChange, disabled = false }: P
     [onOpenChange, resetAll],
   );
 
+  useEffect(() => {
+    if (!open) {
+      passwordForm.reset();
+      totpForm.reset();
+    }
+  }, [open, passwordForm, totpForm]);
+
   const handlePassword = async (values: { password: string }) => {
     setError(null);
     try {
@@ -72,7 +88,7 @@ export function PasswordVerifyDialog({ open, onOpenChange, disabled = false }: P
         return;
       }
       await refreshSession();
-      toast.success("Password session established");
+      toast.success(t("settings.password.toasts.sessionEstablished"));
       handleOpenChange(false);
     } catch (caught) {
       setError(getErrorMessage(caught));
@@ -84,7 +100,7 @@ export function PasswordVerifyDialog({ open, onOpenChange, disabled = false }: P
     try {
       await verifyTotp(values);
       await refreshSession();
-      toast.success("Password session established");
+      toast.success(t("settings.password.toasts.sessionEstablished"));
       handleOpenChange(false);
     } catch (caught) {
       setError(getErrorMessage(caught));
@@ -95,11 +111,13 @@ export function PasswordVerifyDialog({ open, onOpenChange, disabled = false }: P
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{step === "password" ? "Verify password" : "TOTP verification"}</DialogTitle>
+          <DialogTitle>
+            {step === "password" ? t("settings.password.verifyDialog.title") : t("settings.password.verifyDialog.totpTitle")}
+          </DialogTitle>
           <DialogDescription>
             {step === "password"
-              ? "Enter your password to unlock password and TOTP management."
-              : "Enter your TOTP code to complete verification."}
+              ? t("settings.password.verifyDialog.description")
+              : t("settings.password.verifyDialog.totpDescription")}
           </DialogDescription>
         </DialogHeader>
         {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
@@ -109,22 +127,31 @@ export function PasswordVerifyDialog({ open, onOpenChange, disabled = false }: P
               <FormField
                 control={passwordForm.control}
                 name="password"
-                render={({ field }) => (
+                render={({ field, fieldState }) => (
                   <FormItem>
-                    <FormLabel>Password</FormLabel>
+                    <FormLabel>{t("settings.password.verifyDialog.passwordLabel")}</FormLabel>
                     <FormControl>
-                      <Input {...field} type="password" autoComplete="current-password" placeholder="Enter current password" />
+                      <Input
+                        {...field}
+                        type="password"
+                        autoComplete="current-password"
+                        placeholder={t("settings.password.verifyDialog.passwordPlaceholder")}
+                      />
                     </FormControl>
-                    <FormMessage />
+                    {fieldState.error?.message ? (
+                      <FormMessage>{resolveValidationMessage(fieldState.error.message)}</FormMessage>
+                    ) : (
+                      <FormMessage />
+                    )}
                   </FormItem>
                 )}
               />
               <DialogFooter>
                 <Button type="button" variant="outline" onClick={() => handleOpenChange(false)} disabled={busy}>
-                  Cancel
+                  {t("common.cancel")}
                 </Button>
                 <Button type="submit" disabled={busy || disabled}>
-                  Verify
+                  {t("settings.password.verifyDialog.submit")}
                 </Button>
               </DialogFooter>
             </form>
@@ -135,22 +162,32 @@ export function PasswordVerifyDialog({ open, onOpenChange, disabled = false }: P
               <FormField
                 control={totpForm.control}
                 name="code"
-                render={({ field }) => (
+                render={({ field, fieldState }) => (
                   <FormItem>
-                    <FormLabel>TOTP code</FormLabel>
+                    <FormLabel>{t("settings.password.verifyDialog.totpLabel")}</FormLabel>
                     <FormControl>
-                      <Input {...field} type="text" inputMode="numeric" autoComplete="one-time-code" placeholder="6-digit code" />
+                      <Input
+                        {...field}
+                        type="text"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        placeholder={t("settings.password.verifyDialog.totpPlaceholder")}
+                      />
                     </FormControl>
-                    <FormMessage />
+                    {fieldState.error?.message ? (
+                      <FormMessage>{resolveValidationMessage(fieldState.error.message)}</FormMessage>
+                    ) : (
+                      <FormMessage />
+                    )}
                   </FormItem>
                 )}
               />
               <DialogFooter>
                 <Button type="button" variant="outline" onClick={() => handleOpenChange(false)} disabled={busy}>
-                  Cancel
+                  {t("common.cancel")}
                 </Button>
                 <Button type="submit" disabled={busy || disabled}>
-                  Verify
+                  {t("settings.password.verifyDialog.submit")}
                 </Button>
               </DialogFooter>
             </form>

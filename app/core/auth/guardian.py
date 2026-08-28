@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.utils.time import to_utc_naive, utcnow
@@ -22,9 +22,28 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 
 logger = logging.getLogger(__name__)
 
+# Guardian cadence and backoff tuning (fixed; issue #1340 / PRINCIPLES.md P2).
+# The guardian is a background refresher; these values are implementation
+# details, not operator contract. ``AuthGuardianScheduler`` keeps them as
+# constructor fields so tests can exercise the behavior.
+_INTERVAL_SECONDS = 21600
+_MAX_REFRESH_AGE_SECONDS = 43200
+_BATCH_SIZE = 100
+_CONCURRENCY = 3
+_JITTER_SECONDS = 300.0
+_FAILURE_BACKOFF_BASE_SECONDS = 300.0
+_FAILURE_BACKOFF_MAX_SECONDS = 3600.0
+
+# RATE_LIMITED and QUOTA_EXCEEDED recover to ACTIVE through usage-refresh
+# reconciliation, then become guardian-eligible within the max-age window.
+_AUTH_GUARDIAN_ELIGIBLE_STATUSES = frozenset({AccountStatus.ACTIVE, AccountStatus.PAUSED})
+
+
+_T = TypeVar("_T")
+
 
 class _LeaderElectionLike(Protocol):
-    async def try_acquire(self) -> bool: ...
+    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 class _AccountsRepositoryLike(Protocol):
@@ -59,6 +78,14 @@ class AuthGuardianScheduler:
     jitter_seconds: float
     failure_backoff_base_seconds: float = 300.0
     failure_backoff_max_seconds: float = 3600.0
+    # When leader election is disabled, each refresh pass first counts live
+    # bridge-ring replicas and skips the pass if more than one is registered
+    # (the static instance ring is empty in Helm/compose deployments, so the
+    # build-time guard alone cannot see dynamically registered replicas).
+    # Defaults to True so directly constructed schedulers skip the dynamic
+    # check; build_auth_guardian_scheduler wires the real setting.
+    leader_election_enabled: bool = True
+    live_replica_count: Callable[[], Awaitable[int]] = field(default_factory=lambda: _count_live_bridge_ring_members)
     leader_election_factory: _LeaderElectionFactory = field(default_factory=lambda: _get_leader_election)
     repo_factory: _RepoFactory = field(default_factory=lambda: _default_accounts_repo_factory)
     auth_manager_factory: _AuthManagerFactory = field(default_factory=lambda: _default_auth_manager_factory)
@@ -104,8 +131,19 @@ class AuthGuardianScheduler:
                 continue
 
     async def _refresh_once(self) -> None:
-        if not await self.leader_election_factory().try_acquire():
-            return
+        if not self.leader_election_enabled:
+            live_replicas = await self.live_replica_count()
+            if live_replicas > 1:
+                logger.warning(
+                    "Auth Guardian skipped refresh pass: %d live replicas registered in the bridge ring "
+                    "while leader election is disabled; set CODEX_LB_LEADER_ELECTION_ENABLED=true so a "
+                    "single elected replica performs proactive refresh work",
+                    live_replicas,
+                )
+                return
+        await self.leader_election_factory().run_if_leader(self._refresh_as_leader)
+
+    async def _refresh_as_leader(self) -> None:
         async with self._lock:
             async with self.repo_factory() as repo:
                 accounts = await repo.list_accounts(refresh_existing=True)
@@ -115,12 +153,12 @@ class AuthGuardianScheduler:
                     max_age_seconds=self.max_age_seconds,
                     limit=len(accounts),
                 )
-                candidates = [account for account in candidates if not self._in_backoff(account.id)]
-                candidates = candidates[: max(0, self.batch_size)]
-            if not candidates:
+                candidate_ids = [account.id for account in candidates if not self._in_backoff(account.id)]
+                candidate_ids = candidate_ids[: max(0, self.batch_size)]
+            if not candidate_ids:
                 return
             semaphore = asyncio.Semaphore(max(1, self.concurrency))
-            await asyncio.gather(*(self._refresh_candidate(account.id, semaphore) for account in candidates))
+            await asyncio.gather(*(self._refresh_candidate(account_id, semaphore) for account_id in candidate_ids))
 
     async def _refresh_candidate(self, account_id: str, semaphore: asyncio.Semaphore) -> None:
         if self._in_backoff(account_id):
@@ -131,7 +169,8 @@ class AuthGuardianScheduler:
                 if account is None:
                     self._failures.pop(account_id, None)
                     return
-                if not _auth_guardian_account_is_stale_active(
+                source_status = account.status.value
+                if not _auth_guardian_account_is_stale_eligible(
                     account,
                     now=self.now(),
                     max_age_seconds=self.max_age_seconds,
@@ -151,9 +190,11 @@ class AuthGuardianScheduler:
                     if exc.is_permanent:
                         get_account_selection_cache().invalidate()
                     logger.warning(
-                        "Auth Guardian refresh failed account_id=%s account_alias=%s code=%s permanent=%s transport=%s",
+                        "Auth Guardian refresh failed account_id=%s account_alias=%s status=%s code=%s permanent=%s "
+                        "transport=%s",
                         account.id,
                         _safe_account_alias(account),
+                        source_status,
                         exc.code,
                         exc.is_permanent,
                         exc.transport_error,
@@ -162,9 +203,10 @@ class AuthGuardianScheduler:
                 except Exception as exc:
                     self._record_failure(account_id)
                     logger.warning(
-                        "Auth Guardian refresh failed account_id=%s account_alias=%s error_type=%s",
+                        "Auth Guardian refresh failed account_id=%s account_alias=%s status=%s error_type=%s",
                         account.id,
                         _safe_account_alias(account),
+                        source_status,
                         exc.__class__.__name__,
                         exc_info=True,
                     )
@@ -172,9 +214,10 @@ class AuthGuardianScheduler:
                 self._failures.pop(account_id, None)
                 get_account_selection_cache().invalidate()
                 logger.info(
-                    "Auth Guardian refreshed account_id=%s account_alias=%s",
+                    "Auth Guardian refreshed account_id=%s account_alias=%s status=%s",
                     account.id,
                     _safe_account_alias(account),
+                    source_status,
                 )
 
     def _in_backoff(self, account_id: str) -> bool:
@@ -208,7 +251,7 @@ def select_auth_guardian_candidates(
     candidates = [
         account
         for account in accounts
-        if _auth_guardian_account_is_stale_active(
+        if _auth_guardian_account_is_stale_eligible(
             account,
             now=now,
             max_age_seconds=max_age_seconds,
@@ -223,25 +266,36 @@ def build_auth_guardian_scheduler() -> AuthGuardianScheduler:
 
     settings = get_settings()
     multi_replica = len(settings.http_responses_session_bridge_instance_ring) > 1
+    # Deliberate exception to the "disabled election means every replica is
+    # leader" escape hatch: concurrent force token refreshes across replicas
+    # can invalidate rotated refresh tokens, so without election the guardian
+    # must not run in a multi-replica ring at all.
+    enabled = settings.auth_guardian_enabled and (settings.leader_election_enabled or not multi_replica)
+    if settings.auth_guardian_enabled and not enabled:
+        logger.warning(
+            "Auth Guardian disabled: multi-replica deployment without leader election; "
+            "set CODEX_LB_LEADER_ELECTION_ENABLED=true to run it leader-gated"
+        )
     return AuthGuardianScheduler(
-        interval_seconds=settings.auth_guardian_interval_seconds,
-        enabled=settings.auth_guardian_enabled and (settings.leader_election_enabled or not multi_replica),
-        max_age_seconds=settings.auth_guardian_max_refresh_age_seconds,
-        batch_size=settings.auth_guardian_batch_size,
-        concurrency=settings.auth_guardian_concurrency,
-        jitter_seconds=settings.auth_guardian_jitter_seconds,
-        failure_backoff_base_seconds=settings.auth_guardian_failure_backoff_base_seconds,
-        failure_backoff_max_seconds=settings.auth_guardian_failure_backoff_max_seconds,
+        interval_seconds=_INTERVAL_SECONDS,
+        enabled=enabled,
+        max_age_seconds=_MAX_REFRESH_AGE_SECONDS,
+        batch_size=_BATCH_SIZE,
+        concurrency=_CONCURRENCY,
+        jitter_seconds=_JITTER_SECONDS,
+        failure_backoff_base_seconds=_FAILURE_BACKOFF_BASE_SECONDS,
+        failure_backoff_max_seconds=_FAILURE_BACKOFF_MAX_SECONDS,
+        leader_election_enabled=settings.leader_election_enabled,
     )
 
 
-def _auth_guardian_account_is_stale_active(
+def _auth_guardian_account_is_stale_eligible(
     account: Account,
     *,
     now: datetime,
     max_age_seconds: int,
 ) -> bool:
-    if account.status != AccountStatus.ACTIVE:
+    if account.status not in _AUTH_GUARDIAN_ELIGIBLE_STATUSES:
         return False
     age = to_utc_naive(now) - to_utc_naive(account.last_refresh)
     return age > timedelta(seconds=max_age_seconds)
@@ -250,6 +304,20 @@ def _auth_guardian_account_is_stale_active(
 def _get_leader_election() -> _LeaderElectionLike:
     module = importlib.import_module("app.core.scheduling.leader_election")
     return cast(_LeaderElectionLike, module.get_leader_election())
+
+
+async def _count_live_bridge_ring_members() -> int:
+    from sqlalchemy import func, select
+
+    from app.db.models import BridgeRingMember
+    from app.modules.proxy.ring_membership import RING_STALE_THRESHOLD_SECONDS
+
+    cutoff = utcnow() - timedelta(seconds=RING_STALE_THRESHOLD_SECONDS)
+    async with get_background_session() as session:
+        result = await session.execute(
+            select(func.count()).select_from(BridgeRingMember).where(BridgeRingMember.last_heartbeat_at >= cutoff)
+        )
+        return int(result.scalar_one() or 0)
 
 
 @asynccontextmanager

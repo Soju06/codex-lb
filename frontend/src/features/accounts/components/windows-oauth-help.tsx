@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { CopyButton } from "@/components/copy-button";
 import { getRuntimeConnectAddress } from "@/features/accounts/api";
@@ -19,6 +20,7 @@ function resolveConnectAddress(hostname: string, runtimeAddress: string | null):
 }
 
 export function WindowsOauthHelp() {
+  const { t } = useTranslation();
   const runtimeHost = typeof window !== "undefined" ? window.location.hostname : "";
   const [runtimeConnectAddress, setRuntimeConnectAddress] = useState<string | null>(null);
 
@@ -63,16 +65,17 @@ export function WindowsOauthHelp() {
   return (
     <div className="space-y-3 rounded-xl border bg-card p-4">
       <div>
-        <h2 className="text-sm font-semibold">Windows OAuth Help</h2>
+        <h2 className="text-sm font-semibold">{t("accounts.windowsOauth.title")}</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          If browser login fails on Windows, create a local port-forward so OAuth callbacks on
-          <code className="mx-1 rounded bg-muted px-1 py-0.5">localhost:1455</code>
-          reach this server.
+          <Trans
+            i18nKey="accounts.windowsOauth.description"
+            components={[<code className="mx-1 rounded bg-muted px-1 py-0.5" />]}
+          />
         </p>
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Runtime detected connect address:
+        {t("accounts.windowsOauth.connectAddress")}
         <code className="ml-1 rounded bg-muted px-1 py-0.5">{connectAddress}</code>
       </p>
 
@@ -81,8 +84,8 @@ export function WindowsOauthHelp() {
       </pre>
 
       <div className="flex flex-wrap items-center gap-2">
-        <CopyButton value={commands} label="Copy commands" />
-        <span className="text-xs text-muted-foreground">Run in PowerShell as Administrator.</span>
+        <CopyButton value={commands} label={t("accounts.windowsOauth.copyCommands")} />
+        <span className="text-xs text-muted-foreground">{t("accounts.windowsOauth.runAsAdmin")}</span>
       </div>
     </div>
   );

@@ -16,8 +16,13 @@ spec:
         - alert: CodexLBHighErrorRate
           expr: |
             (
-              rate(codex_lb_requests_total{status=~"5.."}[5m])
-              / rate(codex_lb_requests_total[5m])
+              sum by (namespace, job) (
+                rate(codex_lb_requests_total{status=~"5.."}[5m])
+              )
+              /
+              sum by (namespace, job) (
+                rate(codex_lb_requests_total[5m])
+              )
             ) > 0.05
           for: 5m
           labels:

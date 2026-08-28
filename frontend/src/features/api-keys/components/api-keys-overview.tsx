@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { ApiKey } from "@/features/api-keys/schemas";
 import { formatCompactNumber, formatCurrency } from "@/utils/formatters";
 
@@ -29,7 +31,7 @@ function formatSharePercent(share: number): string {
 
   const percent = share * 100;
   const maximumFractionDigits = percent < 10 ? 1 : 0;
-  return `${percent.toLocaleString("en-US", { maximumFractionDigits })}%`;
+  return `${percent.toLocaleString(undefined, { maximumFractionDigits })}%`;
 }
 
 function OverviewStat({ label, value, meta }: OverviewStatProps) {
@@ -94,6 +96,7 @@ function BreakdownPanel({
   metric: UsageMetric;
   apiKeys: ApiKey[];
 }) {
+  const { t } = useTranslation();
   const rows = buildBreakdownRows(apiKeys, metric);
   const hasRows = rows.length > 0;
 
@@ -106,7 +109,7 @@ function BreakdownPanel({
 
       {!hasRows ? (
         <div className="flex h-[12rem] items-center justify-center rounded-lg border border-dashed bg-muted/10 px-4 text-sm text-muted-foreground">
-          No usage recorded yet.
+          {t("apiKeys.overview.noUsage")}
         </div>
       ) : (
         <div
@@ -147,6 +150,7 @@ export type ApiKeysOverviewProps = {
 };
 
 export function ApiKeysOverview({ apiKeys }: ApiKeysOverviewProps) {
+  const { t } = useTranslation();
   const totalKeys = apiKeys.length;
   const activeKeys = apiKeys.filter((apiKey) => apiKey.isActive && !isExpired(apiKey)).length;
   const expiredKeys = apiKeys.filter((apiKey) => isExpired(apiKey)).length;
@@ -160,32 +164,32 @@ export function ApiKeysOverview({ apiKeys }: ApiKeysOverviewProps) {
   return (
     <section className="space-y-4">
       <div className="flex items-center gap-3">
-        <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">Overview</h2>
+        <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">{t("apiKeys.overview.title")}</h2>
         <div className="h-px flex-1 bg-border" />
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-        <OverviewStat label="API keys" value={formatCompactNumber(totalKeys)} meta={`${formatCompactNumber(expiredKeys)} expired`} />
-        <OverviewStat label="Active keys" value={formatCompactNumber(activeKeys)} meta={`${formatCompactNumber(inactiveKeys)} inactive`} />
-        <OverviewStat label="Used keys" value={formatCompactNumber(usedKeys)} meta={`${formatCompactNumber(idleKeys)} idle`} />
+        <OverviewStat label={t("apiKeys.overview.apiKeys")} value={formatCompactNumber(totalKeys)} meta={t("apiKeys.overview.expiredMeta", { count: formatCompactNumber(expiredKeys) })} />
+        <OverviewStat label={t("apiKeys.overview.activeKeys")} value={formatCompactNumber(activeKeys)} meta={t("apiKeys.overview.inactiveMeta", { count: formatCompactNumber(inactiveKeys) })} />
+        <OverviewStat label={t("apiKeys.overview.usedKeys")} value={formatCompactNumber(usedKeys)} meta={t("apiKeys.overview.idleMeta", { count: formatCompactNumber(idleKeys) })} />
         <OverviewStat
-          label="Lifetime requests"
+          label={t("apiKeys.overview.lifetimeRequests")}
           value={formatCompactNumber(totalRequests)}
-          meta={`${formatCompactNumber(totalTokens)} tokens`}
+          meta={t("apiKeys.overview.tokensMeta", { count: formatCompactNumber(totalTokens) })}
         />
-        <OverviewStat label="Lifetime cost" value={formatCurrency(totalCostUsd)} meta="Across all keys (lifetime)" />
+        <OverviewStat label={t("apiKeys.overview.lifetimeCost")} value={formatCurrency(totalCostUsd)} meta={t("apiKeys.overview.lifetimeCostMeta")} />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
         <BreakdownPanel
-          title="Lifetime Cost by API Key"
-          subtitle="Relative spend across all keys"
+          title={t("apiKeys.overview.costByKey")}
+          subtitle={t("apiKeys.overview.costByKeySubtitle")}
           metric="cost"
           apiKeys={apiKeys}
         />
         <BreakdownPanel
-          title="Lifetime Tokens by API Key"
-          subtitle="Relative token volume across all keys"
+          title={t("apiKeys.overview.tokensByKey")}
+          subtitle={t("apiKeys.overview.tokensByKeySubtitle")}
           metric="tokens"
           apiKeys={apiKeys}
         />

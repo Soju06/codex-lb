@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -75,13 +75,19 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
     assert payload["daily"] == [
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 0.55,
             "cachedInputTokens": 2,
             "date": start_at.date().isoformat(),
             "errorCount": 0,
+            "cancelledCount": 0,
             "requests": 2,
             "inputTokens": 15,
             "outputTokens": 5,
+            "reasoningTokens": None,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         }
     ]
     assert payload["byAccount"] == [
@@ -97,6 +103,268 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
             "costUsd": 0.2,
             "requests": 1,
         },
+    ]
+
+
+async def test_reports_api_aggregates_reasoning_tokens_for_unfiltered_window(async_client, db_setup):
+    async with SessionLocal() as session:
+        session.add(_make_account("acc_reports_reasoning", "reports-reasoning@example.com"))
+        session.add_all(
+            [
+                RequestLog(
+                    account_id="acc_reports_reasoning",
+                    request_id="report-reasoning-day-1",
+                    requested_at=datetime(2026, 6, 1, 10, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=10,
+                    output_tokens=40,
+                    reasoning_tokens=30,
+                ),
+                RequestLog(
+                    account_id="acc_reports_reasoning",
+                    request_id="report-reasoning-missing",
+                    requested_at=datetime(2026, 6, 1, 11, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=20,
+                    output_tokens=20,
+                    reasoning_tokens=None,
+                ),
+                RequestLog(
+                    account_id="acc_reports_reasoning",
+                    request_id="report-reasoning-zero",
+                    requested_at=datetime(2026, 6, 1, 12, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=5,
+                    output_tokens=10,
+                    reasoning_tokens=0,
+                ),
+                RequestLog(
+                    account_id="acc_reports_reasoning",
+                    request_id="report-reasoning-day-2",
+                    requested_at=datetime(2026, 6, 2, 10, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=30,
+                    output_tokens=80,
+                    reasoning_tokens=70,
+                ),
+                RequestLog(
+                    account_id="acc_reports_reasoning",
+                    request_id="report-reasoning-only-output-fallback",
+                    requested_at=datetime(2026, 6, 2, 11, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=5,
+                    output_tokens=None,
+                    reasoning_tokens=5,
+                ),
+                RequestLog(
+                    account_id="acc_reports_reasoning",
+                    request_id="report-reasoning-all-unknown-day",
+                    requested_at=datetime(2026, 6, 3, 10, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=10,
+                    output_tokens=20,
+                    reasoning_tokens=None,
+                ),
+                RequestLog(
+                    account_id="acc_reports_reasoning",
+                    request_id="report-reasoning-outside-window",
+                    requested_at=datetime(2026, 6, 4, 10, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=100,
+                    output_tokens=1000,
+                    reasoning_tokens=900,
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/reports",
+        params={"start_date": "2026-06-01", "end_date": "2026-06-03"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["totalReasoningTokens"] == 105
+    assert payload["summary"]["reasoningUsageKnownRequests"] == 4
+    assert payload["summary"]["totalOutputTokens"] == 175
+    assert [(row["date"], row["outputTokens"], row["reasoningTokens"]) for row in payload["daily"]] == [
+        ("2026-06-01", 70, 30),
+        ("2026-06-02", 85, 75),
+        ("2026-06-03", 20, None),
+    ]
+
+
+async def test_reports_api_reasoning_tokens_honor_filters_without_double_counting_comparison(
+    async_client,
+    db_setup,
+):
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                _make_account("acc_reports_reasoning_filter", "reports-reasoning-filter@example.com"),
+                _make_account("acc_reports_reasoning_other", "reports-reasoning-other@example.com"),
+            ]
+        )
+        session.add_all(
+            [
+                RequestLog(
+                    account_id="acc_reports_reasoning_filter",
+                    request_id="report-reasoning-filter-previous",
+                    requested_at=datetime(2026, 5, 31, 10, 0),
+                    model="gpt-5.1",
+                    useragent_group="opencode",
+                    status="success",
+                    input_tokens=50,
+                    output_tokens=None,
+                    reasoning_tokens=70,
+                ),
+                RequestLog(
+                    account_id="acc_reports_reasoning_filter",
+                    request_id="report-reasoning-filter-selected",
+                    requested_at=datetime(2026, 6, 1, 10, 0),
+                    model="gpt-5.1",
+                    useragent_group="opencode",
+                    status="success",
+                    input_tokens=10,
+                    output_tokens=40,
+                    reasoning_tokens=30,
+                ),
+                RequestLog(
+                    account_id="acc_reports_reasoning_filter",
+                    request_id="report-reasoning-filter-other-model",
+                    requested_at=datetime(2026, 6, 1, 11, 0),
+                    model="gpt-5.2",
+                    useragent_group="opencode",
+                    status="success",
+                    input_tokens=10,
+                    output_tokens=110,
+                    reasoning_tokens=100,
+                ),
+                RequestLog(
+                    account_id="acc_reports_reasoning_other",
+                    request_id="report-reasoning-filter-other-account",
+                    requested_at=datetime(2026, 6, 1, 12, 0),
+                    model="gpt-5.1",
+                    useragent_group="opencode",
+                    status="success",
+                    input_tokens=10,
+                    output_tokens=210,
+                    reasoning_tokens=200,
+                ),
+                RequestLog(
+                    account_id="acc_reports_reasoning_filter",
+                    request_id="report-reasoning-filter-other-useragent",
+                    requested_at=datetime(2026, 6, 1, 13, 0),
+                    model="gpt-5.1",
+                    useragent_group="CodexCLI",
+                    status="success",
+                    input_tokens=10,
+                    output_tokens=310,
+                    reasoning_tokens=300,
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "account_id": "acc_reports_reasoning_filter",
+            "model": "gpt-5.1",
+            "useragent_group": "opencode",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["totalReasoningTokens"] == 30
+    assert payload["summary"]["reasoningUsageKnownRequests"] == 1
+    assert payload["summary"]["totalOutputTokens"] == 40
+    assert payload["daily"][0]["reasoningTokens"] == 30
+    assert payload["comparison"]["previous"]["totalTokens"] == 120
+
+
+async def test_reports_api_returns_distinct_nonblank_conversation_counts(async_client, db_setup):
+    async with SessionLocal() as session:
+        session.add(_make_account("acc_reports_conversations", "reports-conversations@example.com"))
+        session.add_all(
+            [
+                RequestLog(
+                    account_id="acc_reports_conversations",
+                    request_id="report-api-conversation-1",
+                    requested_at=datetime(2026, 6, 1, 10, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    useragent_group="opencode",
+                    conversation_id="conv-api-span",
+                ),
+                RequestLog(
+                    account_id="acc_reports_conversations",
+                    request_id="report-api-conversation-2",
+                    requested_at=datetime(2026, 6, 2, 10, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    useragent_group="opencode",
+                    conversation_id="conv-api-span",
+                ),
+                RequestLog(
+                    account_id="acc_reports_conversations",
+                    request_id="report-api-conversation-null",
+                    requested_at=datetime(2026, 6, 2, 11, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    useragent_group="opencode",
+                    conversation_id=None,
+                ),
+                RequestLog(
+                    account_id="acc_reports_conversations",
+                    request_id="report-api-conversation-empty",
+                    requested_at=datetime(2026, 6, 2, 12, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    useragent_group="opencode",
+                    conversation_id="",
+                ),
+                RequestLog(
+                    account_id="acc_reports_conversations",
+                    request_id="report-api-conversation-whitespace",
+                    requested_at=datetime(2026, 6, 2, 13, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    useragent_group="opencode",
+                    conversation_id="   ",
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-02",
+            "account_id": "acc_reports_conversations",
+            "model": "gpt-5.1",
+            "useragent_group": "opencode",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["totalConversations"] == 1
+    assert [(row["date"], row["conversations"]) for row in payload["daily"]] == [
+        ("2026-06-01", 1),
+        ("2026-06-02", 1),
     ]
 
 
@@ -121,6 +389,64 @@ async def test_reports_api_rejects_oversized_date_ranges_with_default_end_date(a
     )
     assert response.status_code == 400
     assert response.json()["error"]["message"] == "report date range must be 730 days or less"
+
+
+async def test_reports_api_rejects_inverted_range_and_preserves_valid_one_day(
+    async_client,
+    db_setup,
+):
+    report_day = date(2026, 6, 3)
+    async with SessionLocal() as session:
+        session.add(_make_account("acc_reports_range", "reports-range@example.com"))
+        session.add(
+            RequestLog(
+                account_id="acc_reports_range",
+                request_id="report-range-request",
+                requested_at=datetime(2026, 6, 3, 12, 0, 0),
+                model="gpt-5.1",
+                status="success",
+                input_tokens=12,
+                output_tokens=4,
+                cached_input_tokens=2,
+                cost_usd=0.35,
+            )
+        )
+        await session.commit()
+
+    inverted_response = await async_client.get(
+        "/api/reports",
+        params={"start_date": "2026-06-07", "end_date": "2026-06-01"},
+    )
+    valid_response = await async_client.get(
+        "/api/reports",
+        params={"start_date": report_day.isoformat(), "end_date": report_day.isoformat()},
+    )
+
+    assert valid_response.status_code == 200
+    valid_payload = valid_response.json()
+    assert valid_payload["summary"]["totalRequests"] == 1
+    assert valid_payload["summary"]["totalCostUsd"] == 0.35
+    assert [row["date"] for row in valid_payload["daily"]] == [report_day.isoformat()]
+
+    assert inverted_response.status_code == 400
+    assert inverted_response.json() == {
+        "error": {
+            "code": "invalid_report_date_range",
+            "message": "start_date must be on or before end_date",
+        }
+    }
+
+
+async def test_reports_api_accepts_inclusive_730_day_range(async_client, db_setup):
+    end_date = date(2026, 1, 1)
+    start_date = end_date - timedelta(days=729)
+
+    response = await async_client.get(
+        "/api/reports",
+        params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
+    )
+
+    assert response.status_code == 200
 
 
 async def test_reports_api_includes_preserved_deleted_account_history(async_client, db_setup):
@@ -160,16 +486,22 @@ async def test_reports_api_includes_preserved_deleted_account_history(async_clie
     assert payload["daily"] == [
         {
             "activeAccounts": 0,
+            "conversations": 0,
             "costUsd": 0.42,
             "cachedInputTokens": 3,
             "date": start_at.date().isoformat(),
             "errorCount": 0,
+            "cancelledCount": 0,
             "requests": 1,
             "inputTokens": 13,
             "outputTokens": 7,
+            "reasoningTokens": None,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         }
     ]
-    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.42, "percentage": 100.0}]
+    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.42, "requests": 1, "percentage": 100.0}]
     assert payload["byAccount"] == [
         {
             "accountId": None,
@@ -299,13 +631,19 @@ async def test_reports_api_interprets_dates_in_requested_timezone(async_client, 
     assert payload["daily"] == [
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 0.5,
             "cachedInputTokens": 0,
             "date": "2026-06-01",
             "errorCount": 0,
+            "cancelledCount": 0,
             "requests": 2,
             "inputTokens": 5,
             "outputTokens": 2,
+            "reasoningTokens": None,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         }
     ]
 
@@ -545,23 +883,35 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
     assert payload["daily"] == [
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 0.7,
             "cachedInputTokens": 0,
             "date": "2026-06-01",
             "errorCount": 0,
+            "cancelledCount": 0,
             "requests": 1,
             "inputTokens": 5,
             "outputTokens": 1,
+            "reasoningTokens": None,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         },
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 1.4,
             "cachedInputTokens": 0,
             "date": "2026-06-07",
             "errorCount": 0,
+            "cancelledCount": 0,
             "requests": 1,
             "inputTokens": 5,
             "outputTokens": 1,
+            "reasoningTokens": None,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         },
     ]
 
@@ -640,13 +990,19 @@ async def test_reports_api_uses_dst_aware_boundaries_for_requested_timezone(asyn
     assert payload["daily"] == [
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 0.5,
             "cachedInputTokens": 0,
             "date": "2026-03-08",
             "errorCount": 0,
+            "cancelledCount": 0,
             "requests": 2,
             "inputTokens": 5,
             "outputTokens": 2,
+            "reasoningTokens": None,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         }
     ]
 
@@ -1024,7 +1380,7 @@ async def test_reports_api_excludes_warmup_logs(async_client, db_setup):
     assert payload["summary"]["totalRequests"] == 1
     assert payload["summary"]["totalInputTokens"] == 6
     assert payload["summary"]["totalCostUsd"] == 0.4
-    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.4, "percentage": 100.0}]
+    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.4, "requests": 1, "percentage": 100.0}]
     assert payload["byAccount"] == [
         {
             "accountId": "acc_reports_warmup",
@@ -1105,7 +1461,7 @@ async def test_reports_api_applies_account_and_model_filters(async_client, db_se
             "requests": 1,
         }
     ]
-    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.8, "percentage": 100.0}]
+    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.8, "requests": 1, "percentage": 100.0}]
 
 
 async def test_reports_api_includes_unpriced_models_in_model_breakdown(async_client, db_setup):
@@ -1149,8 +1505,8 @@ async def test_reports_api_includes_unpriced_models_in_model_breakdown(async_cli
     payload = response.json()
     assert payload["summary"]["totalRequests"] == 2
     assert payload["byModel"] == [
-        {"model": "gpt-priced", "costUsd": 0.8, "percentage": 100.0},
-        {"model": "gpt-unpriced", "costUsd": 0.0, "percentage": 0.0},
+        {"model": "gpt-priced", "costUsd": 0.8, "requests": 1, "percentage": 100.0},
+        {"model": "gpt-unpriced", "costUsd": 0.0, "requests": 1, "percentage": 0.0},
     ]
     assert payload["byAccount"] == [
         {
@@ -1210,6 +1566,149 @@ async def test_reports_api_summary_counts_range_accounts_and_calendar_days(async
     assert payload["summary"]["avgRequestsPerDay"] == 0.67
 
 
+async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_client, db_setup):
+    start_at = _naive_utc(datetime(2026, 6, 1, 16, 0, 0, tzinfo=timezone.utc))
+    async with SessionLocal() as session:
+        session.add(_make_account("acc_reports_useragent", "reports-useragent@example.com"))
+        session.add_all(
+            [
+                RequestLog(
+                    account_id="acc_reports_useragent",
+                    request_id="report-useragent-match-1",
+                    requested_at=start_at,
+                    model="gpt-5.1",
+                    useragent_group="opencode",
+                    status="success",
+                    input_tokens=8,
+                    output_tokens=2,
+                    cached_input_tokens=0,
+                    cost_usd=0.8,
+                ),
+                RequestLog(
+                    account_id="acc_reports_useragent",
+                    request_id="report-useragent-match-2",
+                    requested_at=start_at,
+                    model="gpt-5.2",
+                    useragent_group="CodexCLI",
+                    status="success",
+                    input_tokens=7,
+                    output_tokens=2,
+                    cached_input_tokens=0,
+                    cost_usd=0.7,
+                ),
+                RequestLog(
+                    account_id="acc_reports_useragent",
+                    request_id="report-useragent-real-unknown",
+                    requested_at=start_at,
+                    model="gpt-5.0",
+                    useragent_group="Unknown",
+                    status="success",
+                    input_tokens=7,
+                    output_tokens=1,
+                    cached_input_tokens=0,
+                    cost_usd=0.4,
+                ),
+                RequestLog(
+                    account_id="acc_reports_useragent",
+                    request_id="report-useragent-blank",
+                    requested_at=start_at,
+                    model="gpt-5.3",
+                    useragent_group="",
+                    status="success",
+                    input_tokens=6,
+                    output_tokens=2,
+                    cached_input_tokens=0,
+                    cost_usd=0.6,
+                ),
+                RequestLog(
+                    account_id="acc_reports_useragent",
+                    request_id="report-useragent-null",
+                    requested_at=start_at,
+                    model="gpt-5.4",
+                    useragent_group=None,
+                    status="success",
+                    input_tokens=5,
+                    output_tokens=2,
+                    cached_input_tokens=0,
+                    cost_usd=0.5,
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/reports",
+        params={"start_date": "2026-06-01", "end_date": "2026-06-01"},
+    )
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["byUseragent"] == [
+        {"useragent": "opencode", "costUsd": 0.8, "requests": 1, "percentage": 33.3},
+        {"useragent": "CodexCLI", "costUsd": 0.7, "requests": 1, "percentage": 29.2},
+        {"useragent": "Missing User-Agent", "costUsd": 0.5, "requests": 1, "percentage": 20.8},
+        {"useragent": "Unknown", "costUsd": 0.4, "requests": 1, "percentage": 16.7},
+    ]
+
+    filtered_response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "useragent_group": "opencode",
+        },
+    )
+    assert filtered_response.status_code == 200
+
+    filtered_payload = filtered_response.json()
+    assert filtered_payload["summary"]["totalRequests"] == 1
+    assert filtered_payload["summary"]["totalCostUsd"] == 0.8
+    assert filtered_payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.8, "requests": 1, "percentage": 100.0}]
+    assert filtered_payload["byUseragent"] == [
+        {"useragent": "opencode", "costUsd": 0.8, "requests": 1, "percentage": 100.0}
+    ]
+
+    unknown_filtered_response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "useragent_group": "Unknown",
+        },
+    )
+    assert unknown_filtered_response.status_code == 200
+
+    unknown_filtered_payload = unknown_filtered_response.json()
+    assert unknown_filtered_payload["summary"]["totalRequests"] == 1
+    assert unknown_filtered_payload["summary"]["totalCostUsd"] == 0.4
+    assert unknown_filtered_payload["byModel"] == [
+        {"model": "gpt-5.0", "costUsd": 0.4, "requests": 1, "percentage": 100.0}
+    ]
+    assert unknown_filtered_payload["byUseragent"] == [
+        {"useragent": "Unknown", "costUsd": 0.4, "requests": 1, "percentage": 100.0}
+    ]
+
+    missing_useragent_filtered_response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "useragent_group": "Missing User-Agent",
+        },
+    )
+    assert missing_useragent_filtered_response.status_code == 200
+
+    missing_useragent_filtered_payload = missing_useragent_filtered_response.json()
+    assert missing_useragent_filtered_payload["summary"]["totalRequests"] == 1
+    assert missing_useragent_filtered_payload["summary"]["totalCostUsd"] == 0.5
+    assert missing_useragent_filtered_payload["byModel"] == [
+        {"model": "gpt-5.4", "costUsd": 0.5, "requests": 1, "percentage": 100.0}
+    ]
+    assert missing_useragent_filtered_payload["byUseragent"] == [
+        {"useragent": "Missing User-Agent", "costUsd": 0.5, "requests": 1, "percentage": 100.0}
+    ]
+
+
 async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(async_client, db_setup):
     async with SessionLocal() as session:
         session.add(_make_account("acc_reports_summary_sql", "reports-summary-sql@example.com"))
@@ -1264,32 +1763,129 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
     assert payload["daily"] == [
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 0.0,
             "cachedInputTokens": 0,
             "date": "2026-06-01",
             "errorCount": 0,
+            "cancelledCount": 0,
             "requests": 1,
             "inputTokens": 1,
             "outputTokens": 1,
+            "reasoningTokens": None,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         },
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 0.0,
             "cachedInputTokens": 0,
             "date": "2026-06-02",
             "errorCount": 0,
+            "cancelledCount": 0,
             "requests": 1,
             "inputTokens": 1,
             "outputTokens": 1,
+            "reasoningTokens": None,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         },
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 0.0,
             "cachedInputTokens": 0,
             "date": "2026-06-03",
             "errorCount": 0,
+            "cancelledCount": 0,
             "requests": 1,
             "inputTokens": 1,
             "outputTokens": 1,
+            "reasoningTokens": None,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         },
     ]
+
+
+async def test_reports_api_filters_by_api_key_id(async_client, db_setup):
+    start_at = _naive_utc(datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc))
+    async with SessionLocal() as session:
+        session.add(_make_account("acc_key_filter", "key-filter@example.com"))
+        session.add_all(
+            [
+                RequestLog(
+                    account_id="acc_key_filter",
+                    api_key_id="key-1",
+                    request_id="req-key-1",
+                    requested_at=start_at,
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=10,
+                    output_tokens=5,
+                    cached_input_tokens=0,
+                    cost_usd=0.50,
+                ),
+                RequestLog(
+                    account_id="acc_key_filter",
+                    api_key_id="key-2",
+                    request_id="req-key-2",
+                    requested_at=start_at,
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=20,
+                    output_tokens=10,
+                    cached_input_tokens=0,
+                    cost_usd=1.00,
+                ),
+            ]
+        )
+        await session.commit()
+
+    # Test filtering by single key-1
+    response1 = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "api_key_id": ["key-1"],
+        },
+    )
+    assert response1.status_code == 200
+    payload1 = response1.json()
+    assert payload1["summary"]["totalRequests"] == 1
+    assert payload1["summary"]["totalCostUsd"] == 0.50
+    assert payload1["daily"][0]["requests"] == 1
+    assert payload1["byAccount"][0]["requests"] == 1
+
+    # Test filtering by multiple keys (key-1 and key-2)
+    response2 = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "api_key_id": ["key-1", "key-2"],
+        },
+    )
+    assert response2.status_code == 200
+    payload2 = response2.json()
+    assert payload2["summary"]["totalRequests"] == 2
+    assert payload2["summary"]["totalCostUsd"] == 1.50
+
+    # Test filtering by non-matching key returns 0 metrics
+    response3 = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "api_key_id": ["nonexistent-key"],
+        },
+    )
+    assert response3.status_code == 200
+    payload3 = response3.json()
+    assert payload3["summary"]["totalRequests"] == 0
+    assert payload3["summary"]["totalCostUsd"] == 0.0

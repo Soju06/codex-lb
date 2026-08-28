@@ -3,9 +3,15 @@ import { describe, expect, it } from "vitest";
 import {
   AccountSummarySchema,
   AccountAdditionalQuotaSchema,
+  ConversationDetailsSchema,
+  ConversationEntrySchema,
+  ConversationFilterStateSchema,
+  ConversationsResponseSchema,
   DEFAULT_OVERVIEW_TIMEFRAME,
   DashboardOverviewSchema,
   DepletionSchema,
+  FilterStateSchema,
+  parseDashboardView,
   parseOverviewTimeframe,
   RequestLogFilterOptionsSchema,
   RequestLogsResponseSchema,
@@ -51,6 +57,7 @@ describe("DashboardOverviewSchema", () => {
           cachedInputTokens: 300,
           errorRate: 0.02,
           errorCount: 10,
+          cancelledCount: 3,
           topError: null,
         },
         comparison: {
@@ -75,6 +82,7 @@ describe("DashboardOverviewSchema", () => {
 
     expect(parsed.accounts).toHaveLength(0);
     expect(parsed.summary.comparison?.previous.requests).toBe(250);
+    expect(parsed.summary.metrics?.cancelledCount).toBe(3);
   });
 
   it("drops legacy request_logs field from parse result", () => {
@@ -187,10 +195,18 @@ describe("RequestLogsResponseSchema", () => {
           apiKeyName: "Key A",
           apiKeyId: "key-1",
           requestId: "req-1",
+          archiveRequestId: "archive-req-1",
+          connectionRequestKind: "prewarm",
           model: "gpt-5.1",
           transport: "websocket",
+          upstreamProxyRouteMode: "account_bound",
+          upstreamProxyPoolId: "pool-1",
+          upstreamProxyEndpointId: "endpoint-1",
+          upstreamProxyFallbackUsed: true,
+          upstreamProxyFailClosedReason: null,
           useragent: "Mozilla/5.0",
           useragentGroup: "Mozilla",
+          clientIp: "203.0.113.7",
           status: "ok",
           errorCode: null,
           errorMessage: null,
@@ -203,6 +219,8 @@ describe("RequestLogsResponseSchema", () => {
           tokens: 10,
           inputTokens: 8,
           outputTokens: 2,
+          outputTokensRaw: 2,
+          reasoningTokens: 1,
           cachedInputTokens: 0,
           reasoningEffort: null,
           costUsd: 0.001,
@@ -221,11 +239,19 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(parsed.requests[0]?.apiKeyName).toBe("Key A");
     expect(parsed.requests[0]?.apiKeyId).toBe("key-1");
+    expect(parsed.requests[0]?.archiveRequestId).toBe("archive-req-1");
     expect(parsed.requests[0]?.requestKind).toBe("normal");
+    expect(parsed.requests[0]?.connectionRequestKind).toBe("prewarm");
     expect(parsed.requests[0]?.planType).toBe("plus");
     expect(parsed.requests[0]?.transport).toBe("websocket");
+    expect(parsed.requests[0]?.upstreamProxyRouteMode).toBe("account_bound");
+    expect(parsed.requests[0]?.upstreamProxyPoolId).toBe("pool-1");
+    expect(parsed.requests[0]?.upstreamProxyEndpointId).toBe("endpoint-1");
+    expect(parsed.requests[0]?.upstreamProxyFallbackUsed).toBe(true);
+    expect(parsed.requests[0]?.upstreamProxyFailClosedReason).toBeNull();
     expect(parsed.requests[0]?.useragent).toBe("Mozilla/5.0");
     expect(parsed.requests[0]?.useragentGroup).toBe("Mozilla");
+    expect(parsed.requests[0]?.clientIp).toBe("203.0.113.7");
     expect(parsed.requests[0]?.failurePhase).toBe("status");
     expect(parsed.requests[0]?.failureDetail).toBe("upstream_5xx");
     expect(parsed.requests[0]?.failureExceptionType).toBe("ProxyResponseError");
@@ -234,7 +260,34 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.bridgeStage).toBe("owner_forward_status");
     expect(parsed.requests[0]?.inputTokens).toBe(8);
     expect(parsed.requests[0]?.outputTokens).toBe(2);
+    expect(parsed.requests[0]?.outputTokensRaw).toBe(2);
+    expect(parsed.requests[0]?.reasoningTokens).toBe(1);
     expect(parsed.requests[0]?.costBreakdown?.totalUsd).toBe(0.001);
+  });
+
+  it("keeps archiveRequestId optional for older request-log responses", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          requestId: "req-1",
+          model: "gpt-5.1",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 10,
+          cachedInputTokens: null,
+          reasoningEffort: null,
+          costUsd: null,
+          latencyMs: 42,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.requests[0]?.archiveRequestId).toBeUndefined();
   });
 
   it("accepts legacy limit warmup request kind rows", () => {
@@ -267,6 +320,62 @@ describe("RequestLogsResponseSchema", () => {
     });
 
     expect(parsed.requests[0]?.requestKind).toBe("limit_warmup");
+  });
+
+  it("accepts realtime live websocket request rows", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-live",
+          planType: "plus",
+          apiKeyName: "Voice Key",
+          apiKeyId: "key-live",
+          requestId: "req-live",
+          archiveRequestId: null,
+          requestKind: "realtime_live",
+          model: "gpt-5.1-codex",
+          source: "codex",
+          modelSourceId: null,
+          modelSourceKind: null,
+          transport: "websocket",
+          upstreamTransport: "websocket",
+          useragent: "Codex Desktop",
+          useragentGroup: "Codex",
+          clientIp: "203.0.113.8",
+          conversationId: null,
+          serviceTier: null,
+          requestedServiceTier: null,
+          actualServiceTier: null,
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          failurePhase: null,
+          failureDetail: null,
+          failureExceptionType: null,
+          upstreamStatusCode: 101,
+          upstreamErrorCode: null,
+          bridgeStage: "realtime_live",
+          tokens: null,
+          inputTokens: null,
+          outputTokens: null,
+          outputTokensRaw: null,
+          reasoningTokens: null,
+          cachedInputTokens: null,
+          reasoningEffort: null,
+          costUsd: null,
+          costBreakdown: null,
+          latencyMs: 12,
+          latencyFirstTokenMs: null,
+          latencyQueueMs: null,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.requests[0]?.requestKind).toBe("realtime_live");
+    expect(parsed.requests[0]?.transport).toBe("websocket");
   });
 
   it("defaults omitted cost fields to null for backward compatibility", () => {
@@ -302,6 +411,7 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.apiKeyName).toBeNull();
     expect(parsed.requests[0]?.useragent).toBeNull();
     expect(parsed.requests[0]?.useragentGroup).toBeNull();
+    expect(parsed.requests[0]?.clientIp).toBeNull();
   });
 
   it("accepts nullable user agent fields", () => {
@@ -318,6 +428,7 @@ describe("RequestLogsResponseSchema", () => {
           transport: "websocket",
           useragent: null,
           useragentGroup: null,
+          clientIp: null,
           status: "ok",
           errorCode: null,
           errorMessage: null,
@@ -334,6 +445,105 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(parsed.requests[0]?.useragent).toBeNull();
     expect(parsed.requests[0]?.useragentGroup).toBeNull();
+    expect(parsed.requests[0]?.clientIp).toBeNull();
+  });
+
+  it("parses row-level conversationId and response-level conversation", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          requestId: "req-cid",
+          model: "gpt-5.1",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 10,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0.001,
+          latencyMs: 42,
+          conversationId: "conv_abc123",
+        },
+        {
+          requestedAt: ISO,
+          accountId: null,
+          requestId: "req-no-cid",
+          model: "gpt-5.1",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 5,
+          cachedInputTokens: null,
+          reasoningEffort: null,
+          costUsd: null,
+          latencyMs: 30,
+        },
+      ],
+      total: 2,
+      hasMore: false,
+      conversation: {
+        requestCount: 2,
+        aggregatedCostUsd: 0.001,
+      },
+    });
+
+    expect(parsed.requests[0]?.conversationId).toBe("conv_abc123");
+    expect(parsed.requests[1]?.conversationId).toBeNull();
+    expect(parsed.conversation?.requestCount).toBe(2);
+    expect(parsed.conversation?.aggregatedCostUsd).toBe(0.001);
+  });
+
+  it("accepts null response-level conversation", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          requestId: "req-cid-null",
+          model: "gpt-5.1",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 10,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0.001,
+          latencyMs: 42,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+      conversation: null,
+    });
+
+    expect(parsed.conversation).toBeNull();
+  });
+
+  it("omits response-level conversation when absent", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          requestId: "req-no-conv-key",
+          model: "gpt-5.1",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 10,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0.001,
+          latencyMs: 42,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.conversation).toBeNull();
   });
 
   it("defaults omitted nested cost breakdown fields to null", () => {
@@ -384,6 +594,39 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(parsed.apiKeys[0]?.id).toBe("key-1");
     expect(parsed.apiKeys[0]?.keyPrefix).toBe("sk-key-a");
+  });
+});
+
+describe("FilterStateSchema", () => {
+  it("parses optional string conversationId from URL params", () => {
+    const state = {
+      search: "",
+      timeframe: "all" as const,
+      accountIds: [],
+      apiKeyIds: [],
+      modelOptions: [],
+      statuses: [],
+      conversationId: "conv_abc123",
+      limit: 25,
+      offset: 0,
+    };
+    const parsed = FilterStateSchema.parse(state);
+    expect(parsed.conversationId).toBe("conv_abc123");
+  });
+
+  it("defaults conversationId to null when absent", () => {
+    const state = {
+      search: "",
+      timeframe: "all" as const,
+      accountIds: [],
+      apiKeyIds: [],
+      modelOptions: [],
+      statuses: [],
+      limit: 25,
+      offset: 0,
+    };
+    const parsed = FilterStateSchema.parse(state);
+    expect(parsed.conversationId).toBeNull();
   });
 });
 
@@ -637,5 +880,252 @@ describe("DashboardOverviewSchema with additional quotas", () => {
     });
 
     expect(parsed.additionalQuotas).toEqual([]);
+  });
+});
+
+describe("ConversationsResponseSchema", () => {
+  it("parses a conversation row with nullable representative/key fields", () => {
+    const parsed = ConversationsResponseSchema.parse({
+      conversations: [
+        {
+          conversationId: "conv_abc",
+          firstRequest: ISO,
+          lastRequest: ISO,
+          requestCount: 1,
+          representativeAccount: null,
+          remainingAccountCount: 0,
+          apiKeyId: null,
+          apiKeyName: null,
+          representativeModel: "gpt-5.1",
+          remainingModelCount: 2,
+          totalTokens: 1800,
+          cachedInputTokens: 320,
+          totalCostUsd: 0.0132,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.conversations).toHaveLength(1);
+    expect(parsed.conversations[0]?.conversationId).toBe("conv_abc");
+    expect(parsed.conversations[0]?.representativeAccount).toBeNull();
+    expect(parsed.conversations[0]?.apiKeyName).toBeNull();
+    expect(parsed.conversations[0]?.remainingModelCount).toBe(2);
+    expect(parsed.conversations[0]?.cachedInputTokens).toBe(320);
+  });
+
+  it("requires pagination metadata", () => {
+    const result = ConversationsResponseSchema.safeParse({
+      conversations: [],
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("parses a populated row with all fields present", () => {
+    const parsed = ConversationsResponseSchema.parse({
+      conversations: [
+        {
+          conversationId: "conv_full",
+          firstRequest: ISO,
+          lastRequest: ISO,
+          requestCount: 1,
+          representativeAccount: "acc_primary",
+          remainingAccountCount: 1,
+          apiKeyId: "key_1",
+          apiKeyName: "Primary Key",
+          representativeModel: "gpt-5.1",
+          remainingModelCount: 0,
+          totalTokens: 100,
+          cachedInputTokens: 0,
+          totalCostUsd: 0,
+        },
+      ],
+      total: 1,
+      hasMore: true,
+    });
+
+    expect(parsed.conversations[0]?.representativeAccount).toBe("acc_primary");
+    expect(parsed.conversations[0]?.apiKeyName).toBe("Primary Key");
+    expect(parsed.hasMore).toBe(true);
+  });
+});
+
+describe("ConversationEntrySchema", () => {
+  it("keeps representative account/id as nullable", () => {
+    const parsed = ConversationEntrySchema.parse({
+      conversationId: "c",
+      firstRequest: ISO,
+      lastRequest: ISO,
+      requestCount: 1,
+      representativeAccount: null,
+      remainingAccountCount: 0,
+      apiKeyId: null,
+      apiKeyName: null,
+      representativeModel: null,
+      remainingModelCount: 0,
+      totalTokens: 0,
+      cachedInputTokens: 0,
+      totalCostUsd: 0,
+    });
+
+    expect(parsed.representativeAccount).toBeNull();
+    expect(parsed.apiKeyId).toBeNull();
+    expect(parsed.representativeModel).toBeNull();
+  });
+
+  it("accepts null cached input totals from the list endpoint", () => {
+    const parsed = ConversationEntrySchema.parse({
+      conversationId: "c-null-cache",
+      firstRequest: ISO,
+      lastRequest: ISO,
+      requestCount: 1,
+      representativeAccount: "acc-1",
+      remainingAccountCount: 0,
+      apiKeyId: null,
+      apiKeyName: null,
+      representativeModel: "gpt-5.1",
+      remainingModelCount: 0,
+      totalTokens: 0,
+      cachedInputTokens: null,
+      totalCostUsd: 0,
+    });
+
+    expect(parsed.cachedInputTokens).toBeNull();
+  });
+});
+
+describe("ConversationDetailsSchema", () => {
+  it("parses metadata and model/effort rows", () => {
+    const parsed = ConversationDetailsSchema.parse({
+      conversationId: "conv_d",
+      start: ISO,
+      latest: ISO,
+      accountCount: 3,
+      totalElapsedTime: 4200,
+      dominantUseragentGroup: "opencode",
+      modelStats: [
+        {
+          modelEffort: { model: "gpt-5.1", reasoningEffort: "high" },
+          reqs: 4,
+          totalElapsedTime: 1200,
+          totalInputTokens: 1000,
+          cachedInputTokens: 200,
+          totalOutputTokens: 300,
+          totalCostUsd: 0.05,
+        },
+      ],
+    });
+
+    expect(parsed.accountCount).toBe(3);
+    expect(parsed.totalElapsedTime).toBe(4200);
+    expect(parsed.dominantUseragentGroup).toBe("opencode");
+    expect(parsed.modelStats[0]?.modelEffort.model).toBe("gpt-5.1");
+    expect(parsed.modelStats[0]?.modelEffort.reasoningEffort).toBe("high");
+    expect(parsed.modelStats[0]?.reqs).toBe(4);
+    expect(parsed.modelStats[0]?.cachedInputTokens).toBe(200);
+  });
+
+  it("accepts nullable dominant user-agent and reasoning effort", () => {
+    const parsed = ConversationDetailsSchema.parse({
+      conversationId: "conv_null",
+      start: ISO,
+      latest: ISO,
+      accountCount: 1,
+      totalElapsedTime: 0,
+      dominantUseragentGroup: null,
+      modelStats: [
+        {
+          modelEffort: { model: "gpt-5.1", reasoningEffort: null },
+          reqs: 1,
+          totalElapsedTime: 0,
+          totalInputTokens: 0,
+          cachedInputTokens: 0,
+          totalOutputTokens: 0,
+          totalCostUsd: 0,
+        },
+      ],
+    });
+
+    expect(parsed.dominantUseragentGroup).toBeNull();
+    expect(parsed.modelStats[0]?.modelEffort.reasoningEffort).toBeNull();
+  });
+
+  it("accepts null cached input totals from the detail endpoint", () => {
+    const parsed = ConversationDetailsSchema.parse({
+      conversationId: "conv-null-cache",
+      start: ISO,
+      latest: ISO,
+      accountCount: 1,
+      totalElapsedTime: 0,
+      dominantUseragentGroup: null,
+      modelStats: [
+        {
+          modelEffort: { model: "gpt-5.1", reasoningEffort: null },
+          reqs: 1,
+          totalElapsedTime: 0,
+          totalInputTokens: 0,
+          cachedInputTokens: null,
+          totalOutputTokens: 0,
+          totalCostUsd: 0,
+        },
+      ],
+    });
+
+    expect(parsed.modelStats[0]?.cachedInputTokens).toBeNull();
+  });
+
+  it("defaults modelStats to an empty array", () => {
+    const parsed = ConversationDetailsSchema.parse({
+      conversationId: "conv_empty",
+      start: ISO,
+      latest: ISO,
+      accountCount: 0,
+      totalElapsedTime: 0,
+      dominantUseragentGroup: null,
+    });
+
+    expect(parsed.modelStats).toEqual([]);
+  });
+});
+
+describe("ConversationFilterStateSchema", () => {
+  it("parses search, limit, offset, and timeframe", () => {
+    const parsed = ConversationFilterStateSchema.parse({
+      search: "opencode",
+      limit: 25,
+      offset: 0,
+      timeframe: "7d",
+    });
+
+    expect(parsed.search).toBe("opencode");
+    expect(parsed.limit).toBe(25);
+    expect(parsed.offset).toBe(0);
+    expect(parsed.timeframe).toBe("7d");
+  });
+
+  it("rejects invalid timeframe values and strips other request-log keys", () => {
+    const result = ConversationFilterStateSchema.safeParse({
+      search: "x",
+      limit: 25,
+      offset: 0,
+      timeframe: "24h",
+      accountId: ["acc_1"],
+    });
+
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("parseDashboardView", () => {
+  it("defaults to request-logs", () => {
+    expect(parseDashboardView(null)).toBe("request-logs");
+    expect(parseDashboardView(undefined)).toBe("request-logs");
+    expect(parseDashboardView("unknown")).toBe("request-logs");
+  });
+
+  it("returns conversations for the conversations value", () => {
+    expect(parseDashboardView("conversations")).toBe("conversations");
   });
 });

@@ -101,6 +101,31 @@ describe("useOauth", () => {
     expect(completeOauthMock).not.toHaveBeenCalled();
   });
 
+  it("passes the selected local account id for targeted reauthentication", async () => {
+    startOauthMock.mockResolvedValue({
+      flowId: "flow-reauth",
+      method: "browser",
+      authorizationUrl: "https://auth.example.com/authorize",
+      callbackUrl: "http://127.0.0.1:1455/auth/callback",
+      verificationUrl: null,
+      userCode: null,
+      deviceAuthId: null,
+      intervalSeconds: null,
+      expiresInSeconds: null,
+    });
+
+    const { result } = renderUseOauth();
+
+    await act(async () => {
+      await result.current.start("browser", "team-seat-a");
+    });
+
+    expect(startOauthMock).toHaveBeenCalledWith({
+      forceMethod: "browser",
+      accountId: "team-seat-a",
+    });
+  });
+
   it("invalidates account and dashboard queries after browser OAuth completion", async () => {
     completeOauthMock.mockResolvedValue({ status: "success" });
     const { queryClient, result } = renderUseOauth();

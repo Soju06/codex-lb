@@ -7,6 +7,14 @@
       "minimum": 1,
       "description": "Number of replicas"
     },
+    "terminationGracePeriodSeconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "preStopSleepSeconds": {
+      "type": "integer",
+      "minimum": 0
+    },
     "image": {
       "type": "object",
       "properties": {
@@ -83,7 +91,36 @@
     "gatewayApi": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" }
+        "enabled": { "type": "boolean" },
+        "gateway": {
+          "type": "object",
+          "properties": {
+            "create": { "type": "boolean" },
+            "gatewayClassName": { "type": "string" },
+            "annotations": { "type": "object" },
+            "listeners": {
+              "type": "array",
+              "items": { "type": "object" }
+            }
+          }
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "matches": {
+                "type": "array",
+                "items": { "type": "object" }
+              },
+              "filters": {
+                "type": "array",
+                "items": { "type": "object" }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
       }
     },
     "metrics": {
@@ -130,7 +167,26 @@
     "externalSecrets": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" }
+        "enabled": { "type": "boolean" },
+        "remoteRefs": {
+          "type": "object",
+          "properties": {
+            "databaseUrl": {
+              "type": "object",
+              "properties": {
+                "key": { "type": "string" },
+                "property": { "type": "string" }
+              }
+            },
+            "encryptionKey": {
+              "type": "object",
+              "properties": {
+                "key": { "type": "string" },
+                "property": { "type": "string" }
+              }
+            }
+          }
+        }
       }
     },
     "rollout": {
@@ -149,7 +205,13 @@
       "type": "object"
     },
     "config": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "shutdownDrainTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
     },
     "podSecurityContext": {
       "type": "object"

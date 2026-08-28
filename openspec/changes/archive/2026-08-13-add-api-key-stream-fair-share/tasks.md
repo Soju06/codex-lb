@@ -1,0 +1,13 @@
+# Tasks
+
+- [x] Pure fair-share module `app/modules/proxy/fair_share.py` (`FairShareDecision`, `effective_stream_pool_capacity`, `evaluate_stream_fair_share`, `fair_share_denial_message`, `API_KEY_STREAM_FAIR_SHARE_ERROR_CODE`, `MIN_GUARANTEE_STREAMS`) + `tests/unit/test_fair_share.py`
+- [x] Lease attribution: `AccountLease.api_key_id`, `RuntimeState.stream_key_inflight` (`app/modules/proxy/_load_balancer/types.py`); maintain per-key counts in `_acquire_account_lease_locked` / `_release_account_lease_locked` (delete-at-zero) — `tests/unit/test_load_balancer_concurrency.py` lifecycle cases incl. stale reclaim and concurrency
+- [x] Balancer gate helper `_api_key_stream_fair_share_denial_locked` + pool gauge / rejection metric emit helpers (`app/modules/proxy/load_balancer.py`); `select_account` kwargs `api_key_id` / `api_key_stream_fair_share_threshold_pct` forwarded to both request dataclasses
+- [x] Sticky path wiring: request fields + `StickySelectionOwner` protocol, filter-phase evaluation, denial branch ahead of the cap-exhaustion branch, commit-phase re-check in the `_account_lease_allowed_locked` elif chain, `api_key_id` on the commit acquire (`_load_balancer/sticky_selection.py`)
+- [x] Unbound path wiring: request fields, single-lock gate evaluation before `_filter_states_for_account_caps`, denial branch, `api_key_id` on acquire (`_load_balancer/unbound_selection.py`)
+- [x] Service threading: resolve threshold (dashboard-null-inherits-env; forced 0 for reattach / non-stream) and pass `api_key.id` into both `select_account` calls (`app/modules/proxy/service.py`)
+- [x] Register `api_key_stream_fair_share` in `_LOCAL_ACCOUNT_CAP_ERROR_CODES` (`_service/support.py`) and `LOCAL_OVERLOAD_CODES` (`app/core/resilience/overload.py`); transport park/429 tests
+- [x] Metrics: `codex_lb_stream_pool_capacity` / `codex_lb_stream_pool_inflight` gauges + `codex_lb_api_key_fair_share_rejections_total` counter in both branches of `app/core/metrics/prometheus.py`
+- [x] Setting `proxy_api_key_fair_share_congestion_threshold_pct` (env default 0, ge=0 le=100) + nullable `DashboardSettings` column + Alembic migration + settings schemas/repository/service/api plumbing + audit trace list + `docs/reference/settings.md` regen
+- [x] Frontend: settings schema/payload/routing-settings field (+ tests), mock factories, en/ko/zh-CN locale keys, before/after screenshots
+- [x] Contract guards: `test_load_balancer.py` / `test_load_balancer_contract.py` unchanged-defaults + denial-shape cases; settings round-trip/null-inherit/range tests; `openspec validate add-api-key-stream-fair-share --strict`

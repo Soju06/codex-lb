@@ -2,10 +2,15 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { createElement, type PropsWithChildren, useEffect } from "react";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import {
+  MemoryRouter,
+  useLocation,
+  useNavigate,
+  type NavigateFunction,
+} from "react-router-dom";
 import { describe, expect, it } from "vitest";
 
-import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
+import { requestLogFiltersApplied, useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { server } from "@/test/mocks/server";
 
 function createTestQueryClient(): QueryClient {
@@ -19,12 +24,23 @@ function createTestQueryClient(): QueryClient {
   });
 }
 
-function LocationSpy({ onChange }: { onChange?: (search: string) => void }) {
+function LocationSpy({
+  onChange,
+  onNavigateReady,
+}: {
+  onChange?: (search: string) => void;
+  onNavigateReady?: (navigate: NavigateFunction) => void;
+}) {
   const routeLocation = useLocation();
+  const navigate = useNavigate();
 
   useEffect(() => {
     onChange?.(routeLocation.search);
   }, [routeLocation.search, onChange]);
+
+  useEffect(() => {
+    onNavigateReady?.(navigate);
+  }, [navigate, onNavigateReady]);
 
   return null;
 }
@@ -33,6 +49,7 @@ function createWrapper(
   queryClient: QueryClient,
   initialEntry = "/dashboard",
   onLocationChange?: (search: string) => void,
+  onNavigateReady?: (navigate: NavigateFunction) => void,
 ) {
   return function Wrapper({ children }: PropsWithChildren) {
     return createElement(
@@ -41,7 +58,7 @@ function createWrapper(
       createElement(
         MemoryRouter,
         { initialEntries: [initialEntry] },
-        createElement(LocationSpy, { onChange: onLocationChange }),
+        createElement(LocationSpy, { onChange: onLocationChange, onNavigateReady }),
         children,
       ),
     );
@@ -103,6 +120,87 @@ describe("useRequestLogs", () => {
     await waitFor(() => expect(result.current.filters.search).toBe("quota"));
     expect(locationSearch).toContain("overviewTimeframe=30d");
     expect(locationSearch).toContain("search=quota");
+  });
+
+  it("keeps filtered-empty semantics while clearing a filter", async () => {
+    let releaseUnfiltered: (() => void) | undefined;
+    const unfilteredResponse = new Promise<void>((resolve) => {
+      releaseUnfiltered = resolve;
+    });
+    server.use(
+      http.get("/api/request-logs", async ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get("search")) {
+          return HttpResponse.json({ requests: [], total: 0, hasMore: false });
+        }
+        await unfilteredResponse;
+        return HttpResponse.json({ requests: [], total: 1, hasMore: false });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const wrapper = createWrapper(queryClient, "/dashboard?search=missing");
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+    expect(result.current.emptyStateFiltersApplied).toBe(true);
+
+    act(() => {
+      result.current.updateFilters({ search: "", offset: 0 });
+    });
+
+    await waitFor(() => expect(result.current.filters.search).toBe(""));
+    expect(result.current.logsQuery.isPlaceholderData).toBe(true);
+    expect(result.current.logsQuery.data?.total).toBe(0);
+    expect(result.current.emptyStateFiltersApplied).toBe(true);
+
+    releaseUnfiltered?.();
+    await waitFor(() => expect(result.current.logsQuery.data?.total).toBe(1));
+    expect(result.current.emptyStateFiltersApplied).toBe(false);
+  });
+
+  it("keeps filtered-empty semantics when route navigation clears filters", async () => {
+    let releaseUnfiltered: (() => void) | undefined;
+    let navigate: NavigateFunction | undefined;
+    const unfilteredResponse = new Promise<void>((resolve) => {
+      releaseUnfiltered = resolve;
+    });
+    server.use(
+      http.get("/api/request-logs", async ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get("search")) {
+          return HttpResponse.json({ requests: [], total: 0, hasMore: false });
+        }
+        await unfilteredResponse;
+        return HttpResponse.json({ requests: [], total: 1, hasMore: false });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const wrapper = createWrapper(
+      queryClient,
+      "/dashboard?search=missing",
+      undefined,
+      (routerNavigate) => {
+        navigate = routerNavigate;
+      },
+    );
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+    await waitFor(() => expect(navigate).toBeDefined());
+
+    act(() => {
+      navigate?.("/dashboard");
+    });
+
+    await waitFor(() => expect(result.current.filters.search).toBe(""));
+    expect(result.current.logsQuery.isPlaceholderData).toBe(true);
+    expect(result.current.emptyStateFiltersApplied).toBe(true);
+
+    releaseUnfiltered?.();
+    await waitFor(() => expect(result.current.logsQuery.data?.total).toBe(1));
+    expect(result.current.emptyStateFiltersApplied).toBe(false);
   });
 
   it("supports pagination updates with total/hasMore response", async () => {
@@ -242,5 +340,218 @@ describe("useRequestLogs", () => {
     await waitFor(() =>
       expect(apiKeyCalls[apiKeyCalls.length - 1]).toEqual(["key_1", "key_2"]),
     );
+  });
+
+  it("parses conversationId from URL and maps to conversation_id in API", async () => {
+    const apiCallParams: string[] = [];
+    server.use(
+      http.get("/api/request-logs", ({ request }) => {
+        const url = new URL(request.url);
+        apiCallParams.push(url.searchParams.get("conversation_id") ?? "");
+        return HttpResponse.json({
+          requests: [],
+          total: 0,
+          hasMore: false,
+        });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const wrapper = createWrapper(queryClient, "/dashboard?conversationId=conv_abc123&limit=25&offset=0");
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+    expect(result.current.filters.conversationId).toBe("conv_abc123");
+    expect(apiCallParams.some((p) => p === "conv_abc123")).toBe(true);
+  });
+
+  it("maps null/empty conversationId to no conversation_id param in API", async () => {
+    const apiCallParams: string[] = [];
+    server.use(
+      http.get("/api/request-logs", ({ request }) => {
+        const url = new URL(request.url);
+        apiCallParams.push(url.searchParams.get("conversation_id") ?? "-missing-");
+        return HttpResponse.json({
+          requests: [],
+          total: 0,
+          hasMore: false,
+        });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const wrapper = createWrapper(queryClient, "/dashboard?limit=25&offset=0");
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+    expect(result.current.filters.conversationId).toBeNull();
+    expect(apiCallParams.some((p) => p === "-missing-")).toBe(true);
+  });
+
+  it("resets offset when conversationId is set", async () => {
+    const queryClient = createTestQueryClient();
+    const wrapper = createWrapper(queryClient, "/dashboard?limit=25&offset=10");
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+    expect(result.current.filters.offset).toBe(10);
+
+    act(() => {
+      result.current.updateFilters({ conversationId: "conv_test", offset: 0 });
+    });
+
+    await waitFor(() => {
+      expect(result.current.filters.conversationId).toBe("conv_test");
+      expect(result.current.filters.offset).toBe(0);
+    });
+  });
+
+  it("resets offset when conversationId is cleared", async () => {
+    const queryClient = createTestQueryClient();
+    const wrapper = createWrapper(queryClient, "/dashboard?conversationId=conv_abc123&limit=25&offset=5");
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+    expect(result.current.filters.offset).toBe(5);
+
+    act(() => {
+      result.current.updateFilters({ conversationId: null, offset: 0 });
+    });
+
+    await waitFor(() => {
+      expect(result.current.filters.conversationId).toBeNull();
+      expect(result.current.filters.offset).toBe(0);
+    });
+  });
+
+  it("preserves unrelated search params when conversationId is set or cleared", async () => {
+    const queryClient = createTestQueryClient();
+    let locationSearch = "";
+    const wrapper = createWrapper(
+      queryClient,
+      "/dashboard?overviewTimeframe=30d&limit=25&offset=0",
+      (search) => {
+        locationSearch = search;
+      },
+    );
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+
+    act(() => {
+      result.current.updateFilters({ conversationId: "conv_preserve", offset: 0 });
+    });
+
+    await waitFor(() => expect(result.current.filters.conversationId).toBe("conv_preserve"));
+    expect(locationSearch).toContain("overviewTimeframe=30d");
+    expect(locationSearch).toContain("conversationId=conv_preserve");
+
+    act(() => {
+      result.current.updateFilters({ conversationId: null, offset: 0 });
+    });
+
+    await waitFor(() => expect(result.current.filters.conversationId).toBeNull());
+    expect(locationSearch).toContain("overviewTimeframe=30d");
+    expect(locationSearch).not.toContain("conversationId");
+  });
+
+  it("writes and clears conversationId in browser URL", async () => {
+    const queryClient = createTestQueryClient();
+    let locationSearch = "";
+    const wrapper = createWrapper(
+      queryClient,
+      "/dashboard?limit=25&offset=0",
+      (search) => {
+        locationSearch = search;
+      },
+    );
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+
+    act(() => {
+      result.current.updateFilters({ conversationId: "conv_write_clear", offset: 0 });
+    });
+
+    await waitFor(() => {
+      expect(locationSearch).toContain("conversationId=conv_write_clear");
+    });
+
+    act(() => {
+      result.current.updateFilters({ conversationId: null, offset: 0 });
+    });
+
+    await waitFor(() => {
+      expect(locationSearch).not.toContain("conversationId");
+    });
+  });
+
+  it("round-trips conversation IDs with special characters through URL", async () => {
+    const specialIds = [
+      "conv/a&b+c",
+      "conv has spaces",
+      "conv_utf8_\u2603",
+    ];
+    const queryClient = createTestQueryClient();
+
+    for (const rawId of specialIds) {
+      const encoded = encodeURIComponent(rawId);
+      const wrapper = createWrapper(
+        queryClient,
+        `/dashboard?conversationId=${encoded}&limit=25&offset=0`,
+      );
+      const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+      await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+      expect(result.current.filters.conversationId).toBe(rawId);
+    }
+  });
+
+  it("maps special-character conversationId to conversation_id in API", async () => {
+    const apiParams: string[] = [];
+    server.use(
+      http.get("/api/request-logs", ({ request }) => {
+        const url = new URL(request.url);
+        apiParams.push(url.searchParams.get("conversation_id") ?? "missing");
+        return HttpResponse.json({ requests: [], total: 0, hasMore: false });
+      }),
+    );
+
+    const rawId = "conv/a&b+c";
+    const queryClient = createTestQueryClient();
+    const wrapper = createWrapper(
+      queryClient,
+      `/dashboard?conversationId=${encodeURIComponent(rawId)}&limit=25&offset=0`,
+    );
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+    const decoded = result.current.filters.conversationId;
+    expect(decoded).toBe(rawId);
+    expect(apiParams.some((p) => p === rawId)).toBe(true);
+  });
+});
+
+describe("requestLogFiltersApplied", () => {
+  const defaults = {
+    search: "",
+    timeframe: "all" as const,
+    accountIds: [],
+    apiKeyIds: [],
+    modelOptions: [],
+    statuses: [],
+    conversationId: null,
+    limit: 25,
+    offset: 0,
+  };
+
+  it("is false for default request-log filters", () => {
+    expect(requestLogFiltersApplied(defaults)).toBe(false);
+  });
+
+  it("is true when a narrowing filter is set", () => {
+    expect(requestLogFiltersApplied({ ...defaults, timeframe: "24h" })).toBe(true);
+    expect(requestLogFiltersApplied({ ...defaults, search: "rate" })).toBe(true);
+    expect(requestLogFiltersApplied({ ...defaults, conversationId: "conv-1" })).toBe(true);
   });
 });

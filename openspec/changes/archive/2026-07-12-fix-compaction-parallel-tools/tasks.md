@@ -1,0 +1,3 @@
+- [x] 1. Preserve compact request normalization for unsupported tool fields.
+- [x] 2. Send `parallel_tool_calls: false` on compact upstream payloads.
+- [x] 3. Update tests and OpenSpec text for the new compact payload contract.

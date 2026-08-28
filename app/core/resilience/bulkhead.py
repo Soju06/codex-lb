@@ -6,6 +6,7 @@ from asyncio import Semaphore
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.core.middleware.path_rewrite import redact_realtime_live_path
 from app.core.resilience.memory_monitor import is_memory_pressure, is_memory_warning
 from app.core.resilience.overload import (
     deny_websocket_with_http_response,
@@ -72,6 +73,7 @@ class BulkheadMiddleware:
             return
 
         path = scope.get("path", "")
+        diagnostic_path = redact_realtime_live_path(path)
 
         if path.startswith("/health"):
             await self.app(scope, receive, send)
@@ -87,7 +89,7 @@ class BulkheadMiddleware:
         if is_memory_pressure():
             message = "codex-lb is temporarily unavailable due to local memory pressure"
             await self._log_rejection(
-                path=path,
+                path=diagnostic_path,
                 scope_type=scope["type"],
                 lane="memory",
                 status_code=503,
@@ -119,7 +121,7 @@ class BulkheadMiddleware:
         if sem.locked():
             message = f"codex-lb is temporarily overloaded in the {lane} lane"
             await self._log_rejection(
-                path=path,
+                path=diagnostic_path,
                 scope_type=scope["type"],
                 lane=lane,
                 status_code=429,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,6 +41,27 @@ from app.modules.usage.additional_quota_keys import clear_additional_quota_regis
 
 def _db_url(path: Path) -> str:
     return f"sqlite+aiosqlite:///{path}"
+
+
+def test_parse_args_rejects_explicit_empty_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["codex-lb-db", "--db-url", "", "current"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        migrate_module._parse_args()
+
+    assert exc_info.value.code == 2
+    assert "argument --db-url: database URL must not be empty" in capsys.readouterr().err
+
+
+def test_parse_args_preserves_omitted_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["codex-lb-db", "current"])
+
+    args = migrate_module._parse_args()
+
+    assert args.db_url is None
 
 
 def test_check_schema_drift_disposes_sync_engine(monkeypatch) -> None:
@@ -202,6 +224,57 @@ def test_schema_migration_contract_matches_after_upgrade(tmp_path: Path) -> None
     assert check_schema_drift(url) == ()
 
 
+def test_accounts_codex_installation_id_migration_backfills_existing_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "codex-installation-id.db"
+    url = _db_url(db_path)
+    parent_revision = "20260607_000000_merge_weekly_monthly_useragent_heads"
+    target_revision = "20260613_000000_add_accounts_codex_installation_id"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO accounts "
+                    "(id, email, plan_type, access_token_encrypted, refresh_token_encrypted, "
+                    "id_token_encrypted, last_refresh, status, deactivation_reason) "
+                    "VALUES (:id, :email, :plan_type, :access_token, :refresh_token, "
+                    ":id_token, :last_refresh, :status, :deactivation_reason)"
+                ),
+                {
+                    "id": "acc_codex_installation_backfill",
+                    "email": "codex-installation@example.com",
+                    "plan_type": "plus",
+                    "access_token": b"access",
+                    "refresh_token": b"refresh",
+                    "id_token": b"id",
+                    "last_refresh": "2026-06-10 00:00:00",
+                    "status": "active",
+                    "deactivation_reason": None,
+                },
+            )
+    finally:
+        engine.dispose()
+
+    run_upgrade(url, target_revision, bootstrap_legacy=False)
+
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        with engine.begin() as connection:
+            columns = {column["name"]: column for column in inspect(connection).get_columns("accounts")}
+            value = connection.execute(
+                text("SELECT codex_installation_id FROM accounts WHERE id = :id"),
+                {"id": "acc_codex_installation_backfill"},
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert columns["codex_installation_id"]["nullable"] is False
+    assert isinstance(value, str)
+    assert len(value) == 36
+
+
 def test_reauth_required_status_migration_downgrade_remaps_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "reauth-status.db"
     url = _db_url(db_path)
@@ -314,6 +387,59 @@ def test_reauth_required_status_migration_downgrade_remaps_rows(tmp_path: Path) 
     assert inspect_migration_state(url).current_revision == parent_revision
 
 
+def test_http_downstream_transport_policy_migration_round_trips_with_default_null_api_key(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "http-transport-policy.db"
+    url = _db_url(db_path)
+    parent_revision = "20260611_000000_merge_dashboard_guest_and_weekly_useragent_heads"
+    revision = "20260626_000000_add_http_downstream_transport_policy"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO api_keys "
+                    "(id, name, key_hash, key_prefix, is_active, created_at) "
+                    "VALUES (:id, :name, :key_hash, :key_prefix, :is_active, CURRENT_TIMESTAMP)"
+                ),
+                {
+                    "id": "key_transport_policy_migration",
+                    "name": "transport policy migration",
+                    "key_hash": "hash_transport_policy_migration",
+                    "key_prefix": "sk-migration",
+                    "is_active": True,
+                },
+            )
+
+        config = _build_alembic_config(url)
+        command.upgrade(config, revision)
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT transport_policy_override FROM api_keys WHERE id = 'key_transport_policy_migration'")
+                ).scalar_one()
+                is None
+            )
+            inspector = inspect(connection)
+            assert "transport_policy_override" in {column["name"] for column in inspector.get_columns("api_keys")}
+            assert "http_downstream_transport_policy" in {
+                column["name"] for column in inspector.get_columns("dashboard_settings")
+            }
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            assert "transport_policy_override" not in {column["name"] for column in inspector.get_columns("api_keys")}
+            assert "http_downstream_transport_policy" not in {
+                column["name"] for column in inspector.get_columns("dashboard_settings")
+            }
+    finally:
+        engine.dispose()
+
+
 def test_base_revision_does_not_depend_on_live_metadata(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "base.db"
     url = _db_url(db_path)
@@ -347,6 +473,194 @@ def test_request_logs_transport_stays_in_additive_migration_chain(tmp_path: Path
     with create_engine(sync_url, future=True).connect() as connection:
         columns = {column["name"] for column in inspect(connection).get_columns("request_logs")}
         assert "transport" in columns
+
+
+def test_hourly_rollup_cancelled_count_migration_round_trips_with_default_zero(tmp_path: Path) -> None:
+    """#1552: the cancelled_count measure is additive on the current head —
+    rows folded before the migration read 0 via the server default (no
+    backfill) and the downgrade drops only the new columns. The fold-state
+    row is stamped with the migration-time watermark as the legacy-suspect
+    repair start (`upgrade_repair_from`), while rows inserted WITHOUT the
+    column afterwards (an old replica's bootstrap) default to the epoch."""
+    db_path = tmp_path / "rollup-cancelled-count.db"
+    url = _db_url(db_path)
+    parent_revision = "20260806_120000_add_http_bridge_owner_process_epoch"
+    cancelled_revision = "20260811_000000_add_hourly_rollup_cancelled_count"
+    watermark = "2026-08-10 07:00:00"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.begin() as connection:
+            # A pre-migration folded row: error_count still holds the legacy
+            # status != 'success' fold (cancelled rows included).
+            connection.execute(
+                text(
+                    "INSERT INTO request_usage_hourly_rollups "
+                    "(bucket_epoch, account_id, api_key_id, model, service_tier, request_kind, is_deleted, "
+                    "request_count, error_count, input_tokens, output_tokens, reasoning_tokens, "
+                    "output_or_reasoning_tokens, cached_input_tokens, cached_input_tokens_clamped, "
+                    "cost_usd, cost_count) "
+                    "VALUES (:bucket_epoch, :account_id, :api_key_id, :model, :service_tier, :request_kind, 0, "
+                    ":request_count, :error_count, 0, 0, 0, 0, 0, 0, 0.0, 0)"
+                ),
+                {
+                    "bucket_epoch": 1_753_300_800,
+                    "account_id": "acc_legacy",
+                    "api_key_id": "\x1f",
+                    "model": "gpt-5.1-codex",
+                    "service_tier": "\x1f",
+                    "request_kind": "normal",
+                    "request_count": 10,
+                    "error_count": 7,
+                },
+            )
+            # The fold-state row (seeded by an earlier migration) sits
+            # mid-history at migration time.
+            connection.execute(
+                text("UPDATE account_usage_rollup_state SET hourly_folded_through = :hourly WHERE id = 1"),
+                {"hourly": watermark},
+            )
+
+        result = run_upgrade(url, cancelled_revision, bootstrap_legacy=False)
+        assert result.current_revision == cancelled_revision
+
+        with engine.begin() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("request_usage_hourly_rollups")}
+            assert "cancelled_count" in columns
+            row = connection.execute(
+                text(
+                    "SELECT request_count, error_count, cancelled_count "
+                    "FROM request_usage_hourly_rollups WHERE account_id = 'acc_legacy'"
+                )
+            ).one()
+            assert tuple(row) == (10, 7, 0)
+            # Existing state row: suspect range starts at the migration-time
+            # watermark.
+            marker = connection.execute(
+                text("SELECT upgrade_repair_from FROM account_usage_rollup_state WHERE id = 1")
+            ).scalar_one()
+            assert str(marker) == watermark
+            # An old replica's bootstrap after the migration omits the new
+            # column: the epoch server default marks its whole backfill
+            # legacy-suspect.
+            connection.execute(
+                text(
+                    "INSERT INTO account_usage_rollup_state (id, folded_through, hourly_folded_through) "
+                    "VALUES (2, :folded_through, :hourly)"
+                ),
+                {"folded_through": watermark, "hourly": watermark},
+            )
+            legacy_bootstrap_marker = connection.execute(
+                text("SELECT upgrade_repair_from FROM account_usage_rollup_state WHERE id = 2")
+            ).scalar_one()
+            assert str(legacy_bootstrap_marker) == "1970-01-01 00:00:00"
+
+        command.downgrade(_build_alembic_config(url), parent_revision)
+
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("request_usage_hourly_rollups")}
+            assert "cancelled_count" not in columns
+            state_columns = {column["name"] for column in inspect(connection).get_columns("account_usage_rollup_state")}
+            assert "upgrade_repair_from" not in state_columns
+            row = connection.execute(
+                text(
+                    "SELECT request_count, error_count "
+                    "FROM request_usage_hourly_rollups WHERE account_id = 'acc_legacy'"
+                )
+            ).one()
+            assert tuple(row) == (10, 7)
+    finally:
+        engine.dispose()
+
+    assert inspect_migration_state(url).current_revision == parent_revision
+
+
+def test_request_log_useragent_family_migration_backfills_only_slash_values(tmp_path: Path) -> None:
+    db_path = tmp_path / "request-log-useragent-families.db"
+    url = _db_url(db_path)
+    parent_revision = "20260720_000000_add_request_log_conversation_id"
+    target_revision = "20260722_000000_backfill_request_log_useragent_families"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO request_logs (request_id, model, status, useragent, useragent_group) "
+                    "VALUES (:request_id, :model, :status, :useragent, :useragent_group)"
+                ),
+                [
+                    {
+                        "request_id": "slash",
+                        "model": "gpt-5",
+                        "status": "success",
+                        "useragent": "Codex Desktop/0.142.4",
+                        "useragent_group": "Codex",
+                    },
+                    {
+                        "request_id": "whitespace",
+                        "model": "gpt-5",
+                        "status": "success",
+                        "useragent": " Codex Desktop/0.142.4",
+                        "useragent_group": "Codex",
+                    },
+                    {
+                        "request_id": "slash-free",
+                        "model": "gpt-5",
+                        "status": "success",
+                        "useragent": "CodexCLI",
+                        "useragent_group": "sentinel-slash-free",
+                    },
+                    {
+                        "request_id": "null",
+                        "model": "gpt-5",
+                        "status": "success",
+                        "useragent": None,
+                        "useragent_group": "sentinel-null",
+                    },
+                ],
+            )
+    finally:
+        engine.dispose()
+
+    run_upgrade(url, target_revision, bootstrap_legacy=False)
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        with engine.begin() as connection:
+            groups = {
+                row.request_id: row.useragent_group
+                for row in connection.execute(text("SELECT request_id, useragent_group FROM request_logs")).all()
+            }
+    finally:
+        engine.dispose()
+
+    assert groups == {
+        "slash": "Codex Desktop",
+        "whitespace": " Codex Desktop",
+        "slash-free": "sentinel-slash-free",
+        "null": "sentinel-null",
+    }
+
+
+def test_request_log_useragent_family_migration_selects_postgresql_expression(monkeypatch) -> None:
+    migration = importlib.import_module(
+        "app.db.alembic.versions.20260722_000000_backfill_request_log_useragent_families"
+    )
+    fake_bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+    selected_statements: list[object] = []
+
+    monkeypatch.setattr(migration.op, "get_bind", lambda: fake_bind)
+    monkeypatch.setattr(migration.op, "execute", selected_statements.append)
+
+    migration.upgrade()
+
+    assert len(selected_statements) == 1
+    sql = str(selected_statements[0])
+    assert "substring(useragent from 1 for position('/' in useragent) - 1)" in sql
+    assert "WHERE useragent IS NOT NULL AND position('/' in useragent) > 0" in sql
+    assert "trim" not in sql.lower()
 
 
 def test_request_logs_response_lookup_migration_handles_preexisting_session_id_column(tmp_path: Path) -> None:
@@ -421,6 +735,716 @@ def test_quota_planner_migration_repairs_preexisting_request_kind_column(tmp_pat
     ]
     assert request_kind_column["nullable"] is False
     assert request_kind_column["default"] is not None
+
+
+def test_automation_run_cycle_snapshot_migration_normalizes_legacy_manual_keys(tmp_path: Path) -> None:
+    db_path = tmp_path / "automation-cycle-snapshots.db"
+    url = _db_url(db_path)
+    pre_revision = "20260419_000000_add_automation_run_cycle_metadata"
+    target_revision = "20260419_020000_add_automation_run_cycles_snapshot_tables"
+
+    run_upgrade(url, pre_revision, bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    created_at = datetime(2026, 4, 19, 3, 0, 0)
+    with create_engine(sync_url, future=True).begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO accounts (
+                    id,
+                    email,
+                    plan_type,
+                    access_token_encrypted,
+                    refresh_token_encrypted,
+                    id_token_encrypted,
+                    last_refresh,
+                    status,
+                    deactivation_reason,
+                    chatgpt_account_id,
+                    reset_at
+                ) VALUES (
+                    :id,
+                    :email,
+                    :plan_type,
+                    :access_token_encrypted,
+                    :refresh_token_encrypted,
+                    :id_token_encrypted,
+                    :last_refresh,
+                    :status,
+                    :deactivation_reason,
+                    :chatgpt_account_id,
+                    :reset_at
+                )
+                """
+            ),
+            [
+                {
+                    "id": "acc_snapshot_a",
+                    "email": "snapshot-a@example.com",
+                    "plan_type": "plus",
+                    "access_token_encrypted": b"access-a",
+                    "refresh_token_encrypted": b"refresh-a",
+                    "id_token_encrypted": b"id-a",
+                    "last_refresh": created_at,
+                    "status": "active",
+                    "deactivation_reason": None,
+                    "chatgpt_account_id": None,
+                    "reset_at": None,
+                },
+                {
+                    "id": "acc_snapshot_b",
+                    "email": "snapshot-b@example.com",
+                    "plan_type": "plus",
+                    "access_token_encrypted": b"access-b",
+                    "refresh_token_encrypted": b"refresh-b",
+                    "id_token_encrypted": b"id-b",
+                    "last_refresh": created_at,
+                    "status": "active",
+                    "deactivation_reason": None,
+                    "chatgpt_account_id": None,
+                    "reset_at": None,
+                },
+            ],
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO automation_jobs (
+                    id,
+                    name,
+                    enabled,
+                    schedule_type,
+                    schedule_time,
+                    schedule_timezone,
+                    schedule_days,
+                    schedule_threshold_minutes,
+                    include_paused_accounts,
+                    model,
+                    reasoning_effort,
+                    prompt,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    :id,
+                    :name,
+                    :enabled,
+                    :schedule_type,
+                    :schedule_time,
+                    :schedule_timezone,
+                    :schedule_days,
+                    :schedule_threshold_minutes,
+                    :include_paused_accounts,
+                    :model,
+                    :reasoning_effort,
+                    :prompt,
+                    :created_at,
+                    :updated_at
+                )
+                """
+            ),
+            {
+                "id": "job_snapshot",
+                "name": "Snapshot job",
+                "enabled": True,
+                "schedule_type": "daily",
+                "schedule_time": "05:00",
+                "schedule_timezone": "UTC",
+                "schedule_days": "mon,tue,wed,thu,fri,sat,sun",
+                "schedule_threshold_minutes": 5,
+                "include_paused_accounts": False,
+                "model": "gpt-5.4-mini",
+                "reasoning_effort": None,
+                "prompt": "ping",
+                "created_at": created_at,
+                "updated_at": created_at,
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO automation_runs (
+                    id,
+                    job_id,
+                    trigger,
+                    slot_key,
+                    cycle_key,
+                    cycle_expected_accounts,
+                    cycle_window_end,
+                    scheduled_for,
+                    started_at,
+                    finished_at,
+                    status,
+                    account_id,
+                    error_code,
+                    error_message,
+                    attempt_count,
+                    created_at
+                ) VALUES (
+                    :id,
+                    :job_id,
+                    :trigger,
+                    :slot_key,
+                    :cycle_key,
+                    :cycle_expected_accounts,
+                    :cycle_window_end,
+                    :scheduled_for,
+                    :started_at,
+                    :finished_at,
+                    :status,
+                    :account_id,
+                    :error_code,
+                    :error_message,
+                    :attempt_count,
+                    :created_at
+                )
+                """
+            ),
+            [
+                {
+                    "id": "run_snapshot_a",
+                    "job_id": "job_snapshot",
+                    "trigger": "manual",
+                    "slot_key": "manual:job_snapshot:cycle-1:digest-a",
+                    "cycle_key": "manual:job_snapshot:cycle-1:digest-a",
+                    "cycle_expected_accounts": 0,
+                    "cycle_window_end": created_at + timedelta(minutes=5),
+                    "scheduled_for": created_at,
+                    "started_at": created_at,
+                    "finished_at": created_at + timedelta(seconds=5),
+                    "status": "success",
+                    "account_id": "acc_snapshot_a",
+                    "error_code": None,
+                    "error_message": None,
+                    "attempt_count": 0,
+                    "created_at": created_at,
+                },
+                {
+                    "id": "run_snapshot_b",
+                    "job_id": "job_snapshot",
+                    "trigger": "manual",
+                    "slot_key": "manual:job_snapshot:cycle-1:digest-b",
+                    "cycle_key": "manual:job_snapshot:cycle-1:digest-b",
+                    "cycle_expected_accounts": 99,
+                    "cycle_window_end": created_at + timedelta(minutes=5),
+                    "scheduled_for": created_at + timedelta(minutes=1),
+                    "started_at": created_at + timedelta(minutes=1),
+                    "finished_at": created_at + timedelta(minutes=1, seconds=5),
+                    "status": "success",
+                    "account_id": "acc_snapshot_b",
+                    "error_code": None,
+                    "error_message": None,
+                    "attempt_count": 0,
+                    "created_at": created_at + timedelta(minutes=1),
+                },
+            ],
+        )
+
+    result = run_upgrade(url, target_revision, bootstrap_legacy=False)
+    assert result.current_revision == target_revision
+
+    with create_engine(sync_url, future=True).connect() as connection:
+        cycle_rows = connection.execute(
+            text(
+                """
+                SELECT cycle_key, job_id, trigger, cycle_expected_accounts
+                FROM automation_run_cycles
+                ORDER BY cycle_key
+                """
+            )
+        ).all()
+        assert cycle_rows == [("manual:job_snapshot:cycle-1", "job_snapshot", "manual", 2)]
+
+        account_rows = connection.execute(
+            text(
+                """
+                SELECT cycle_key, account_id, position, scheduled_for
+                FROM automation_run_cycle_accounts
+                ORDER BY cycle_key, position
+                """
+            )
+        ).all()
+        normalized_account_rows = [
+            (
+                cycle_key,
+                account_id,
+                position,
+                datetime.fromisoformat(scheduled_for) if isinstance(scheduled_for, str) else scheduled_for,
+            )
+            for cycle_key, account_id, position, scheduled_for in account_rows
+        ]
+        assert normalized_account_rows == [
+            ("manual:job_snapshot:cycle-1", "acc_snapshot_a", 0, created_at),
+            ("manual:job_snapshot:cycle-1", "acc_snapshot_b", 1, created_at + timedelta(minutes=1)),
+        ]
+
+
+def test_automation_run_cycle_repair_migration_normalizes_legacy_cycle_keys_for_existing_head(tmp_path: Path) -> None:
+    db_path = tmp_path / "automation-cycle-key-repair.db"
+    url = _db_url(db_path)
+    pre_revision = "20260421_130000_merge_automation_and_request_log_heads"
+    target_revision = "20260422_103000_normalize_legacy_automation_run_cycle_keys"
+
+    run_upgrade(url, pre_revision, bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    created_at = datetime(2026, 4, 22, 3, 0, 0)
+    scheduled_due_slot = created_at + timedelta(hours=1)
+    scheduled_window_end = scheduled_due_slot + timedelta(minutes=60)
+    scheduled_digest_a = "b32d81b774f1e6d05dfe"
+    scheduled_digest_b = "53c9867d6d99b6ffc226"
+    with create_engine(sync_url, future=True).begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO accounts (
+                    id,
+                    email,
+                    plan_type,
+                    access_token_encrypted,
+                    refresh_token_encrypted,
+                    id_token_encrypted,
+                    last_refresh,
+                    status,
+                    deactivation_reason,
+                    chatgpt_account_id,
+                    reset_at
+                ) VALUES (
+                    :id,
+                    :email,
+                    :plan_type,
+                    :access_token_encrypted,
+                    :refresh_token_encrypted,
+                    :id_token_encrypted,
+                    :last_refresh,
+                    :status,
+                    :deactivation_reason,
+                    :chatgpt_account_id,
+                    :reset_at
+                )
+                """
+            ),
+            [
+                {
+                    "id": "acc_cycle_manual_a",
+                    "email": "manual-a@example.com",
+                    "plan_type": "plus",
+                    "access_token_encrypted": b"access-a",
+                    "refresh_token_encrypted": b"refresh-a",
+                    "id_token_encrypted": b"id-a",
+                    "last_refresh": created_at,
+                    "status": "active",
+                    "deactivation_reason": None,
+                    "chatgpt_account_id": None,
+                    "reset_at": None,
+                },
+                {
+                    "id": "acc_cycle_manual_b",
+                    "email": "manual-b@example.com",
+                    "plan_type": "plus",
+                    "access_token_encrypted": b"access-b",
+                    "refresh_token_encrypted": b"refresh-b",
+                    "id_token_encrypted": b"id-b",
+                    "last_refresh": created_at,
+                    "status": "active",
+                    "deactivation_reason": None,
+                    "chatgpt_account_id": None,
+                    "reset_at": None,
+                },
+                {
+                    "id": "acc_cycle_scheduled_a",
+                    "email": "scheduled-a@example.com",
+                    "plan_type": "plus",
+                    "access_token_encrypted": b"access-c",
+                    "refresh_token_encrypted": b"refresh-c",
+                    "id_token_encrypted": b"id-c",
+                    "last_refresh": created_at,
+                    "status": "active",
+                    "deactivation_reason": None,
+                    "chatgpt_account_id": None,
+                    "reset_at": None,
+                },
+                {
+                    "id": "acc_cycle_scheduled_b",
+                    "email": "scheduled-b@example.com",
+                    "plan_type": "plus",
+                    "access_token_encrypted": b"access-d",
+                    "refresh_token_encrypted": b"refresh-d",
+                    "id_token_encrypted": b"id-d",
+                    "last_refresh": created_at,
+                    "status": "active",
+                    "deactivation_reason": None,
+                    "chatgpt_account_id": None,
+                    "reset_at": None,
+                },
+                {
+                    "id": "acc_cycle_scheduled_c",
+                    "email": "scheduled-c@example.com",
+                    "plan_type": "plus",
+                    "access_token_encrypted": b"access-e",
+                    "refresh_token_encrypted": b"refresh-e",
+                    "id_token_encrypted": b"id-e",
+                    "last_refresh": created_at,
+                    "status": "active",
+                    "deactivation_reason": None,
+                    "chatgpt_account_id": None,
+                    "reset_at": None,
+                },
+            ],
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO automation_jobs (
+                    id,
+                    name,
+                    enabled,
+                    schedule_type,
+                    schedule_time,
+                    schedule_timezone,
+                    schedule_days,
+                    schedule_threshold_minutes,
+                    include_paused_accounts,
+                    model,
+                    reasoning_effort,
+                    prompt,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    :id,
+                    :name,
+                    :enabled,
+                    :schedule_type,
+                    :schedule_time,
+                    :schedule_timezone,
+                    :schedule_days,
+                    :schedule_threshold_minutes,
+                    :include_paused_accounts,
+                    :model,
+                    :reasoning_effort,
+                    :prompt,
+                    :created_at,
+                    :updated_at
+                )
+                """
+            ),
+            [
+                {
+                    "id": "job_cycle_manual",
+                    "name": "Manual legacy job",
+                    "enabled": True,
+                    "schedule_type": "daily",
+                    "schedule_time": "05:00",
+                    "schedule_timezone": "UTC",
+                    "schedule_days": "mon,tue,wed,thu,fri,sat,sun",
+                    "schedule_threshold_minutes": 0,
+                    "include_paused_accounts": False,
+                    "model": "gpt-5.4-mini",
+                    "reasoning_effort": None,
+                    "prompt": "ping",
+                    "created_at": created_at,
+                    "updated_at": created_at,
+                },
+                {
+                    "id": "job_cycle_scheduled",
+                    "name": "Scheduled legacy job",
+                    "enabled": True,
+                    "schedule_type": "daily",
+                    "schedule_time": "05:00",
+                    "schedule_timezone": "UTC",
+                    "schedule_days": "mon,tue,wed,thu,fri,sat,sun",
+                    "schedule_threshold_minutes": 5,
+                    "include_paused_accounts": False,
+                    "model": "gpt-5.4-mini",
+                    "reasoning_effort": None,
+                    "prompt": "ping",
+                    "created_at": created_at,
+                    "updated_at": created_at,
+                },
+            ],
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO automation_runs (
+                    id,
+                    job_id,
+                    trigger,
+                    slot_key,
+                    cycle_key,
+                    cycle_expected_accounts,
+                    cycle_window_end,
+                    scheduled_for,
+                    started_at,
+                    finished_at,
+                    status,
+                    account_id,
+                    error_code,
+                    error_message,
+                    attempt_count,
+                    created_at
+                ) VALUES (
+                    :id,
+                    :job_id,
+                    :trigger,
+                    :slot_key,
+                    :cycle_key,
+                    :cycle_expected_accounts,
+                    :cycle_window_end,
+                    :scheduled_for,
+                    :started_at,
+                    :finished_at,
+                    :status,
+                    :account_id,
+                    :error_code,
+                    :error_message,
+                    :attempt_count,
+                    :created_at
+                )
+                """
+            ),
+            [
+                {
+                    "id": "run_manual_repair_a",
+                    "job_id": "job_cycle_manual",
+                    "trigger": "manual",
+                    "slot_key": "manual:job_cycle_manual:cycle-1:digest-a",
+                    "cycle_key": "manual:job_cycle_manual:cycle-1:digest-a",
+                    "cycle_expected_accounts": 99,
+                    "cycle_window_end": created_at + timedelta(minutes=5),
+                    "scheduled_for": created_at,
+                    "started_at": created_at,
+                    "finished_at": created_at + timedelta(seconds=5),
+                    "status": "success",
+                    "account_id": "acc_cycle_manual_a",
+                    "error_code": None,
+                    "error_message": None,
+                    "attempt_count": 1,
+                    "created_at": created_at,
+                },
+                {
+                    "id": "run_manual_repair_b",
+                    "job_id": "job_cycle_manual",
+                    "trigger": "manual",
+                    "slot_key": "manual:job_cycle_manual:cycle-1:digest-b",
+                    "cycle_key": "manual:job_cycle_manual:cycle-1:digest-b",
+                    "cycle_expected_accounts": 99,
+                    "cycle_window_end": created_at + timedelta(minutes=5),
+                    "scheduled_for": created_at + timedelta(minutes=1),
+                    "started_at": created_at + timedelta(minutes=1),
+                    "finished_at": created_at + timedelta(minutes=1, seconds=5),
+                    "status": "failed",
+                    "account_id": "acc_cycle_manual_b",
+                    "error_code": "boom",
+                    "error_message": "boom",
+                    "attempt_count": 1,
+                    "created_at": created_at + timedelta(minutes=1),
+                },
+                {
+                    "id": "run_scheduled_repair_a",
+                    "job_id": "job_cycle_scheduled",
+                    "trigger": "scheduled",
+                    "slot_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_a}",
+                    "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_a}",
+                    "cycle_expected_accounts": 2,
+                    "cycle_window_end": scheduled_due_slot,
+                    "scheduled_for": scheduled_due_slot,
+                    "started_at": scheduled_due_slot,
+                    "finished_at": scheduled_due_slot + timedelta(seconds=5),
+                    "status": "success",
+                    "account_id": "acc_cycle_scheduled_a",
+                    "error_code": None,
+                    "error_message": None,
+                    "attempt_count": 1,
+                    "created_at": scheduled_due_slot,
+                },
+                {
+                    "id": "run_scheduled_repair_b",
+                    "job_id": "job_cycle_scheduled",
+                    "trigger": "scheduled",
+                    "slot_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_b}",
+                    "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_b}",
+                    "cycle_expected_accounts": 2,
+                    "cycle_window_end": scheduled_due_slot + timedelta(minutes=60),
+                    "scheduled_for": scheduled_due_slot + timedelta(minutes=60),
+                    "started_at": scheduled_due_slot + timedelta(minutes=60),
+                    "finished_at": scheduled_due_slot + timedelta(minutes=60, seconds=5),
+                    "status": "success",
+                    "account_id": "acc_cycle_scheduled_b",
+                    "error_code": None,
+                    "error_message": None,
+                    "attempt_count": 1,
+                    "created_at": scheduled_due_slot + timedelta(minutes=60),
+                },
+            ],
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO automation_run_cycles (
+                    cycle_key,
+                    job_id,
+                    trigger,
+                    cycle_expected_accounts,
+                    cycle_window_end,
+                    created_at
+                ) VALUES (
+                    :cycle_key,
+                    :job_id,
+                    :trigger,
+                    :cycle_expected_accounts,
+                    :cycle_window_end,
+                    :created_at
+                )
+                """
+            ),
+            [
+                {
+                    "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_a}",
+                    "job_id": "job_cycle_scheduled",
+                    "trigger": "scheduled",
+                    "cycle_expected_accounts": 1,
+                    "cycle_window_end": scheduled_window_end,
+                    "created_at": scheduled_due_slot,
+                },
+                {
+                    "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_b}",
+                    "job_id": "job_cycle_scheduled",
+                    "trigger": "scheduled",
+                    "cycle_expected_accounts": 1,
+                    "cycle_window_end": scheduled_window_end,
+                    "created_at": scheduled_due_slot + timedelta(minutes=60),
+                },
+            ],
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO automation_run_cycle_accounts (
+                    cycle_key,
+                    account_id,
+                    position,
+                    scheduled_for,
+                    created_at
+                ) VALUES (
+                    :cycle_key,
+                    :account_id,
+                    :position,
+                    :scheduled_for,
+                    :created_at
+                )
+                """
+            ),
+            [
+                {
+                    "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_a}",
+                    "account_id": "acc_cycle_scheduled_a",
+                    "position": 0,
+                    "scheduled_for": scheduled_due_slot,
+                    "created_at": scheduled_due_slot,
+                },
+                {
+                    "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_a}",
+                    "account_id": "acc_cycle_scheduled_c",
+                    "position": 1,
+                    "scheduled_for": scheduled_due_slot + timedelta(minutes=3),
+                    "created_at": scheduled_due_slot,
+                },
+                {
+                    "cycle_key": f"scheduled:job_cycle_scheduled:{scheduled_digest_b}",
+                    "account_id": "acc_cycle_scheduled_b",
+                    "position": 0,
+                    "scheduled_for": scheduled_due_slot + timedelta(minutes=60),
+                    "created_at": scheduled_due_slot + timedelta(minutes=60),
+                },
+            ],
+        )
+
+    result = run_upgrade(url, target_revision, bootstrap_legacy=False)
+    assert result.current_revision == target_revision
+
+    with create_engine(sync_url, future=True).connect() as connection:
+        run_rows = connection.execute(
+            text(
+                """
+                SELECT id, cycle_key, cycle_expected_accounts, cycle_window_end
+                FROM automation_runs
+                ORDER BY id
+                """
+            )
+        ).all()
+        run_rows = [
+            (
+                run_id,
+                cycle_key,
+                cycle_expected_accounts,
+                datetime.fromisoformat(cycle_window_end) if isinstance(cycle_window_end, str) else cycle_window_end,
+            )
+            for run_id, cycle_key, cycle_expected_accounts, cycle_window_end in run_rows
+        ]
+        assert run_rows == [
+            ("run_manual_repair_a", "manual:job_cycle_manual:cycle-1", 2, created_at + timedelta(minutes=5)),
+            ("run_manual_repair_b", "manual:job_cycle_manual:cycle-1", 2, created_at + timedelta(minutes=5)),
+            (
+                "run_scheduled_repair_a",
+                f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}",
+                3,
+                scheduled_window_end,
+            ),
+            (
+                "run_scheduled_repair_b",
+                f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}",
+                3,
+                scheduled_window_end,
+            ),
+        ]
+
+        cycle_rows = connection.execute(
+            text(
+                """
+                SELECT cycle_key, job_id, trigger, cycle_expected_accounts, cycle_window_end
+                FROM automation_run_cycles
+                ORDER BY cycle_key
+                """
+            )
+        ).all()
+        cycle_rows = [
+            (
+                cycle_key,
+                job_id,
+                trigger,
+                cycle_expected_accounts,
+                datetime.fromisoformat(cycle_window_end) if isinstance(cycle_window_end, str) else cycle_window_end,
+            )
+            for cycle_key, job_id, trigger, cycle_expected_accounts, cycle_window_end in cycle_rows
+        ]
+        assert cycle_rows == [
+            ("manual:job_cycle_manual:cycle-1", "job_cycle_manual", "manual", 2, created_at + timedelta(minutes=5)),
+            (
+                f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}",
+                "job_cycle_scheduled",
+                "scheduled",
+                3,
+                scheduled_window_end,
+            ),
+        ]
+
+        account_rows = connection.execute(
+            text(
+                """
+                SELECT cycle_key, account_id, position
+                FROM automation_run_cycle_accounts
+                ORDER BY cycle_key, position
+                """
+            )
+        ).all()
+        assert account_rows == [
+            ("manual:job_cycle_manual:cycle-1", "acc_cycle_manual_a", 0),
+            ("manual:job_cycle_manual:cycle-1", "acc_cycle_manual_b", 1),
+            (f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}", "acc_cycle_scheduled_a", 0),
+            (f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}", "acc_cycle_scheduled_c", 1),
+            (f"scheduled:job_cycle_scheduled:{scheduled_due_slot.isoformat()}", "acc_cycle_scheduled_b", 2),
+        ]
 
 
 def test_check_schema_drift_detects_rogue_table(tmp_path: Path) -> None:
@@ -848,7 +1872,7 @@ def test_run_upgrade_fails_for_unsupported_alembic_version_id(tmp_path: Path) ->
     with create_engine(sync_url, future=True).begin() as connection:
         connection.execute(text("UPDATE alembic_version SET version_num = 'legacy_custom_999'"))
 
-    with pytest.raises(MigrationBootstrapError, match="Unsupported alembic_version revision ids"):
+    with pytest.raises(MigrationBootstrapError, match="not known to this build"):
         run_upgrade(url, "head", bootstrap_legacy=False)
 
 
@@ -1003,7 +2027,7 @@ def test_ensure_alembic_version_table_capacity_creates_table_when_missing(monkey
     _ensure_alembic_version_table_capacity_for_connection(cast(Connection, connection), required_length=64)
 
     assert connection.executed_sql == [
-        "CREATE TABLE alembic_version ( version_num VARCHAR(64) NOT NULL, PRIMARY KEY (version_num) )"
+        "CREATE TABLE IF NOT EXISTS alembic_version ( version_num VARCHAR(64) NOT NULL, PRIMARY KEY (version_num) )"
     ]
 
 
@@ -1049,3 +2073,473 @@ def test_routing_policy_persistence_downgrade_does_not_drop_shared_columns(monke
     monkeypatch.setattr(migration, "op", _OpMustNotAlter())
 
     migration.downgrade()
+
+
+def test_replica_guardrails_migration_round_trips_with_version_backfill(tmp_path: Path) -> None:
+    from alembic.script import ScriptDirectory
+
+    db_path = tmp_path / "replica-guardrails.db"
+    url = _db_url(db_path)
+    parent_revision = "20260712_020000_add_api_key_usage_rollups"
+    target_revision = "20260713_040000_add_replica_guardrails"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    config = _build_alembic_config(url)
+
+    script_directory = ScriptDirectory.from_config(config)
+    # The replica-guardrails migration now sits beneath later revisions (e.g.
+    # the reset-credit redeem tables re-parented onto it), so it is an ancestor
+    # of the single graph head rather than the head itself.
+    heads = script_directory.get_heads()
+    assert len(heads) == 1
+    ancestry = {script.revision for script in script_directory.walk_revisions()}
+    assert target_revision in ancestry
+
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.connect() as connection:
+            # The parent revision already seeds the singleton settings row.
+            assert connection.execute(text("SELECT COUNT(*) FROM dashboard_settings")).scalar_one() == 1
+
+        command.upgrade(config, target_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            assert inspector.has_table("runtime_sentinels")
+            sentinel_columns = {column["name"] for column in inspector.get_columns("runtime_sentinels")}
+            assert {"name", "value", "created_at", "updated_at"} <= sentinel_columns
+            # Historical rows are backfilled to version 1 via the server default.
+            assert connection.execute(text("SELECT version FROM dashboard_settings WHERE id = 1")).scalar_one() == 1
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            assert not inspector.has_table("runtime_sentinels")
+            assert "version" not in {column["name"] for column in inspector.get_columns("dashboard_settings")}
+            assert connection.execute(text("SELECT COUNT(*) FROM dashboard_settings")).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+def test_capability_lineage_migration_is_additive_reversible_and_single_head(tmp_path: Path) -> None:
+    from alembic.script import ScriptDirectory
+
+    db_path = tmp_path / "capability-lineage.db"
+    url = _db_url(db_path)
+    parent_revision = "20260725_000000_add_http_bridge_pending_tool_calls"
+    target_revision = "20260731_000000_add_capability_lineage_markers"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    config = _build_alembic_config(url)
+    script_directory = ScriptDirectory.from_config(config)
+    heads = script_directory.get_heads()
+    assert len(heads) == 1
+    ancestry = {script.revision for script in script_directory.walk_revisions()}
+    assert target_revision in ancestry
+
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            existing_columns = {
+                table: tuple(column["name"] for column in inspector.get_columns(table))
+                for table in ("accounts", "sticky_sessions", "usage_history", "http_bridge_sessions")
+            }
+
+        command.upgrade(config, target_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            assert inspector.has_table("capability_lineage_markers")
+            assert {column["name"] for column in inspector.get_columns("capability_lineage_markers")} == {
+                "marker_hash",
+                "created_at",
+                "last_seen_at",
+            }
+            assert connection.execute(text("SELECT COUNT(*) FROM capability_lineage_markers")).scalar_one() == 0
+            assert {
+                table: tuple(column["name"] for column in inspector.get_columns(table)) for table in existing_columns
+            } == existing_columns
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            assert not inspector.has_table("capability_lineage_markers")
+            assert {
+                table: tuple(column["name"] for column in inspector.get_columns(table)) for table in existing_columns
+            } == existing_columns
+    finally:
+        engine.dispose()
+
+
+def test_connection_request_kind_migration_is_additive_without_backfill(tmp_path: Path) -> None:
+    db_path = tmp_path / "connection-request-kind.db"
+    url = _db_url(db_path)
+    parent_revision = "20260727_000000_add_sticky_session_continuity_abandoned_at"
+    target_revision = "20260804_230000_add_request_log_connection_request_kind"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    config = _build_alembic_config(url)
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO request_logs (request_id, model, status, request_kind, output_tokens)
+                    VALUES ('req_existing_prewarm', 'gpt-5.6-sol', 'success', 'prewarm', 42)
+                    """
+                )
+            )
+
+        command.upgrade(config, target_revision)
+        with engine.connect() as connection:
+            columns = {column["name"]: column for column in inspect(connection).get_columns("request_logs")}
+            assert columns["connection_request_kind"]["nullable"] is True
+            row = connection.execute(
+                text(
+                    """
+                    SELECT request_kind, connection_request_kind
+                    FROM request_logs
+                    WHERE request_id = 'req_existing_prewarm'
+                    """
+                )
+            ).one()
+            assert row == ("prewarm", None)
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("request_logs")}
+            assert "connection_request_kind" not in columns
+            assert (
+                connection.execute(
+                    text("SELECT request_kind FROM request_logs WHERE request_id = 'req_existing_prewarm'")
+                ).scalar_one()
+                == "prewarm"
+            )
+    finally:
+        engine.dispose()
+
+
+def test_api_key_reasoning_policy_migration_round_trips_from_current_parent(tmp_path: Path) -> None:
+    from alembic.script import ScriptDirectory
+
+    db_path = tmp_path / "api-key-reasoning-policy.db"
+    url = _db_url(db_path)
+    parent_revision = "20260816_000000_add_account_pending_deletion"
+    target_revision = "20260806_030000_add_api_key_allowed_reasoning_efforts"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    config = _build_alembic_config(url)
+    script_directory = ScriptDirectory.from_config(config)
+    assert script_directory.get_revision(target_revision).down_revision == parent_revision
+    # Assert reachability from the single head rather than "is the head": every
+    # later migration would otherwise have to edit this test.
+    heads = script_directory.get_heads()
+    assert len(heads) == 1
+    assert target_revision in {revision.revision for revision in script_directory.iterate_revisions(heads[0], "base")}
+
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.connect() as connection:
+            before = {column["name"] for column in inspect(connection).get_columns("api_keys")}
+            assert "allowed_reasoning_efforts" not in before
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO api_keys "
+                    "(id, name, key_hash, key_prefix, is_active, created_at) "
+                    "VALUES (:id, :name, :key_hash, :key_prefix, :is_active, CURRENT_TIMESTAMP)"
+                ),
+                {
+                    "id": "key_reasoning_policy_migration",
+                    "name": "reasoning policy migration",
+                    "key_hash": "hash_reasoning_policy_migration",
+                    "key_prefix": "sk-migration",
+                    "is_active": True,
+                },
+            )
+
+        command.upgrade(config, target_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            columns = {column["name"] for column in inspector.get_columns("api_keys")}
+            assert "allowed_reasoning_efforts" in columns
+            assert "ck_api_keys_reasoning_policy_exclusive" in {
+                constraint["name"]
+                for constraint in inspector.get_check_constraints("api_keys")
+                if constraint.get("name")
+            }
+            assert (
+                connection.execute(
+                    text("SELECT allowed_reasoning_efforts FROM api_keys WHERE id = 'key_reasoning_policy_migration'")
+                ).scalar_one()
+                is None
+            )
+            connection.execute(
+                text(
+                    "UPDATE api_keys SET allowed_reasoning_efforts = :allowed "
+                    "WHERE id = 'key_reasoning_policy_migration'"
+                ),
+                {"allowed": '["low"]'},
+            )
+            connection.commit()
+            assert (
+                connection.execute(
+                    text("SELECT key_hash FROM api_keys WHERE id = 'key_reasoning_policy_migration'")
+                ).scalar_one()
+                == "hash_reasoning_policy_migration"
+            )
+            with pytest.raises(sa_exc.IntegrityError):
+                connection.execute(
+                    text(
+                        "UPDATE api_keys SET enforced_reasoning_effort = 'high' "
+                        "WHERE id = 'key_reasoning_policy_migration'"
+                    )
+                )
+            connection.rollback()
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("api_keys")}
+            assert "allowed_reasoning_efforts" not in columns
+            assert (
+                connection.execute(
+                    text("SELECT key_hash FROM api_keys WHERE id = 'key_reasoning_policy_migration'")
+                ).scalar_one()
+                == "hash_reasoning_policy_migration"
+            )
+
+        command.upgrade(config, target_revision)
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("api_keys")}
+            assert "allowed_reasoning_efforts" in columns
+            assert (
+                connection.execute(
+                    text("SELECT allowed_reasoning_efforts FROM api_keys WHERE id = 'key_reasoning_policy_migration'")
+                ).scalar_one()
+                is None
+            )
+    finally:
+        engine.dispose()
+
+
+def test_http_bridge_operation_migrations_round_trip_existing_rows_and_rebuild_sqlite_defaults(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "http-bridge-operation-round-trip.db"
+    url = _db_url(db_path)
+    parent_revision = "20260804_000001_add_global_http_bridge_operation_fingerprint"
+    spool_revision = "20260805_000001_finalize_http_bridge_operation_spool"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    config = _build_alembic_config(url)
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_sessions (
+                        id, session_key_kind, session_key_value, session_key_hash, api_key_scope,
+                        owner_epoch, state, last_seen_at, created_at, updated_at
+                    )
+                    VALUES (
+                        'migration-operation-session', 'session_header', 'migration-operation-key',
+                        'migration-operation-hash', '__anonymous__', 1, 'active', CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_operations (
+                        operation_id, session_id, request_fingerprint, account_id, model,
+                        parent_response_id, state, response_id
+                    )
+                    VALUES (
+                        'migration-operation', 'migration-operation-session', 'migration-fingerprint',
+                        NULL, 'gpt-5.6', 'migration-parent', 'submitted', NULL
+                    )
+                    """
+                )
+            )
+
+        command.upgrade(config, spool_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            operation_columns = {column["name"]: column for column in inspector.get_columns("http_bridge_operations")}
+            assert {"request_text", "event_bytes", "event_spool_complete"} <= operation_columns.keys()
+            row = connection.execute(
+                text(
+                    """
+                    SELECT request_text, event_bytes, event_spool_complete
+                    FROM http_bridge_operations
+                    WHERE operation_id = 'migration-operation'
+                    """
+                )
+            ).one()
+            assert row == (None, 0, False)
+            assert inspector.has_table("http_bridge_operation_events")
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            assert inspector.has_table("http_bridge_operations")
+            assert not inspector.has_table("http_bridge_operation_events")
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT request_fingerprint FROM http_bridge_operations "
+                        "WHERE operation_id = 'migration-operation'"
+                    )
+                ).scalar_one()
+                == "migration-fingerprint"
+            )
+
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            operation_columns = {column["name"] for column in inspector.get_columns("http_bridge_operations")}
+            assert {"request_text", "event_bytes", "event_spool_complete"} <= operation_columns
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT event_spool_complete FROM http_bridge_operations "
+                        "WHERE operation_id = 'migration-operation'"
+                    )
+                ).scalar_one()
+                == 0
+            )
+            assert inspector.has_table("http_bridge_operation_events")
+    finally:
+        engine.dispose()
+
+
+def test_sticky_abandonment_scope_migration_is_additive_and_reversible(tmp_path: Path) -> None:
+    db_path = tmp_path / "sticky-abandonment-scope.db"
+    url = _db_url(db_path)
+    parent_revision = "20260813_000000_add_file_account_pins"
+    target_revision = "20260812_120000_add_sticky_abandonment_scope"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    config = _build_alembic_config(url)
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("sticky_sessions")}
+            assert "continuity_abandonment_scope" not in columns
+
+        command.upgrade(config, target_revision)
+        with engine.connect() as connection:
+            columns = {column["name"]: column for column in inspect(connection).get_columns("sticky_sessions")}
+            assert columns["continuity_abandonment_scope"]["nullable"] is True
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("sticky_sessions")}
+            assert "continuity_abandonment_scope" not in columns
+    finally:
+        engine.dispose()
+
+
+def test_check_schema_drift_detects_missing_dashboard_hot_path_indexes(tmp_path: Path) -> None:
+    db_path = tmp_path / "missing-hot-path-indexes.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        connection.execute(text("DROP INDEX idx_logs_dash_usage_covering"))
+        connection.execute(text("DROP INDEX ix_additional_usage_distinct_labels"))
+        connection.commit()
+
+    drift = check_schema_drift(url)
+    assert any("idx_logs_dash_usage_covering" in diff for diff in drift)
+    assert any("ix_additional_usage_distinct_labels" in diff for diff in drift)
+
+
+def test_dashboard_hot_path_index_migration_is_idempotent(tmp_path: Path) -> None:
+    db_path = tmp_path / "hot-path-indexes.db"
+    url = _db_url(db_path)
+    pre_revision = "20260716_010000_add_dashboard_retention_settings"
+    target_revision = "20260717_000000_optimize_dashboard_hot_path_indexes"
+
+    run_upgrade(url, pre_revision, bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE INDEX idx_logs_dash_usage_covering
+                ON request_logs (requested_at)
+                WHERE deleted_at IS NULL
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX ix_additional_usage_distinct_labels
+                ON additional_usage_history (account_id, quota_key, limit_name, metered_feature)
+                """
+            )
+        )
+        connection.commit()
+
+    result = run_upgrade(url, target_revision, bootstrap_legacy=False)
+    assert result.current_revision == target_revision
+
+    with create_engine(sync_url, future=True).connect() as connection:
+        log_indexes = {str(row[1]) for row in connection.execute(text('PRAGMA index_list("request_logs")')).fetchall()}
+        usage_indexes = {
+            str(row[1]) for row in connection.execute(text('PRAGMA index_list("additional_usage_history")')).fetchall()
+        }
+
+    assert "idx_logs_dash_usage_covering" in log_indexes
+    assert "ix_additional_usage_distinct_labels" in usage_indexes
+
+
+def test_dashboard_hot_path_postgresql_indexes_build_concurrently() -> None:
+    revision_path = (
+        Path(__file__).resolve().parents[2]
+        / "app/db/alembic/versions/20260717_000000_optimize_dashboard_hot_path_indexes.py"
+    )
+    source = revision_path.read_text(encoding="utf-8")
+
+    assert "autocommit_block" in source
+    assert source.count("CREATE INDEX CONCURRENTLY IF NOT EXISTS") == 2
+    assert "_COVERING_INDEX_NAME" in source
+    assert "_LABELS_INDEX_NAME" in source
+    # Redundant indexes are dropped without blocking writers, and leftover
+    # invalid indexes from an interrupted concurrent build are rebuilt instead
+    # of being silently accepted by IF NOT EXISTS.
+    assert source.count("DROP INDEX CONCURRENTLY IF EXISTS") >= 2
+    assert "indisvalid" in source
+
+
+def test_dashboard_hot_path_index_migration_drops_redundant_indexes(tmp_path: Path) -> None:
+    db_path = tmp_path / "hot-path-redundant-indexes.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        log_indexes = {str(row[1]) for row in connection.execute(text('PRAGMA index_list("request_logs")')).fetchall()}
+        usage_indexes = {
+            str(row[1]) for row in connection.execute(text('PRAGMA index_list("additional_usage_history")')).fetchall()
+        }
+
+    assert "idx_logs_requested_at" not in log_indexes
+    assert "idx_logs_api_key_time_account" not in log_indexes
+    assert "ix_additional_usage_history_account_id" not in usage_indexes
+    # Kept: the sessionless response-owner fallback needs its ordered retrieval.
+    assert "idx_logs_request_status_api_key_time" in log_indexes
+    assert "idx_logs_dash_usage_covering" in log_indexes
+    assert "ix_additional_usage_distinct_labels" in usage_indexes
+
+    assert check_schema_drift(url) == ()

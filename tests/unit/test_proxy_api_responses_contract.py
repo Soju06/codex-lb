@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
+import anyio
 import pytest
 
 import app.modules.proxy.api as proxy_api_module
@@ -17,6 +19,366 @@ async def _iter_blocks(*blocks: str) -> AsyncIterator[str]:
         yield block
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError], ids=["error", "cancelled"])
+@pytest.mark.parametrize(("owns_reservation", "expected_releases"), [(True, 1), (False, 0)])
+async def test_rate_limit_header_failure_releases_only_owned_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+    owns_reservation: bool,
+    expected_releases: int,
+) -> None:
+    reservation = object()
+    failure = failure_type("rate-limit header failure")
+    releases: list[object] = []
+
+    async def fail_headers(*_args: object) -> dict[str, str]:
+        raise failure
+
+    async def release_reservation(value: object) -> None:
+        releases.append(value)
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_for_request", fail_headers)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", release_reservation)
+
+    with pytest.raises(failure_type) as caught:
+        await proxy_api_module._rate_limit_headers_with_reservation_cleanup(
+            cast(Any, object()),
+            None,
+            cast(Any, reservation if owns_reservation else None),
+        )
+
+    assert caught.value is failure
+    assert releases == ([reservation] if expected_releases else [])
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_header_cancellation_shields_reservation_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reservation = object()
+    failure = asyncio.CancelledError("rate-limit header cancellation")
+    releases: list[object] = []
+    release_started = asyncio.Event()
+    release_finished = asyncio.Event()
+
+    async def cancel_headers(*_args: object) -> dict[str, str]:
+        raise failure
+
+    async def release_reservation(value: object) -> None:
+        releases.append(value)
+        release_started.set()
+        await asyncio.sleep(0)
+        release_finished.set()
+
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_for_request", cancel_headers)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", release_reservation)
+
+    with anyio.CancelScope() as cancel_scope:
+        cancel_scope.cancel()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await proxy_api_module._rate_limit_headers_with_reservation_cleanup(
+                cast(Any, object()),
+                None,
+                cast(Any, reservation),
+            )
+
+    assert caught.value is failure
+    assert release_started.is_set()
+    assert release_finished.is_set()
+    assert releases == [reservation]
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_header_failure_defers_repeated_cancellation_until_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reservation = object()
+    failure = RuntimeError("rate-limit header failure")
+    releases: list[object] = []
+    release_started = asyncio.Event()
+    release_continue = asyncio.Event()
+    release_finished = asyncio.Event()
+
+    async def fail_headers(*_args: object) -> dict[str, str]:
+        raise failure
+
+    async def release_reservation(value: object) -> None:
+        releases.append(value)
+        release_started.set()
+        await release_continue.wait()
+        release_finished.set()
+
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_for_request", fail_headers)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", release_reservation)
+
+    caller = asyncio.create_task(
+        proxy_api_module._rate_limit_headers_with_reservation_cleanup(
+            cast(Any, object()),
+            None,
+            cast(Any, reservation),
+        )
+    )
+    await release_started.wait()
+    caller.cancel()
+    await asyncio.sleep(0)
+    caller.cancel()
+    release_continue.set()
+
+    with pytest.raises(RuntimeError) as caught:
+        await caller
+
+    assert caught.value is failure
+    assert release_finished.is_set()
+    assert releases == [reservation]
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_header_failure_survives_release_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    reservation = object()
+    header_failure = RuntimeError("rate-limit header failure")
+    releases: list[object] = []
+
+    async def fail_headers(*_args: object) -> dict[str, str]:
+        raise header_failure
+
+    async def fail_release(value: object) -> None:
+        releases.append(value)
+        raise ValueError("release persistence failed")
+
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_for_request", fail_headers)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", fail_release)
+
+    with pytest.raises(RuntimeError) as caught:
+        await proxy_api_module._rate_limit_headers_with_reservation_cleanup(
+            cast(Any, object()),
+            None,
+            cast(Any, reservation),
+        )
+
+    assert caught.value is header_failure
+    assert releases == [reservation]
+    assert "Failed to release API key reservation after rate-limit header failure" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_header_failure_uses_reservation_cleanup_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reservation = object()
+    header_failure = RuntimeError("rate-limit header failure")
+    released: list[str] = []
+
+    async def fail_headers(*_args: object) -> dict[str, str]:
+        raise header_failure
+
+    async def record_release(
+        value: object,
+        *,
+        action: str,
+        scheduler: object,
+        request_id: str,
+    ) -> None:
+        del value, scheduler, request_id
+        released.append(action)
+
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_for_request", fail_headers)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation_best_effort", record_release)
+    cleanup = proxy_api_module._ResponsesReservationCleanup(
+        owns_reservation=True,
+        reservation=cast(Any, reservation),
+        scheduler=None,
+        request_id="req_header_cleanup",
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        await proxy_api_module._rate_limit_headers_with_reservation_cleanup(
+            cast(Any, object()),
+            None,
+            cast(Any, reservation),
+            reservation_cleanup=cleanup,
+        )
+
+    assert caught.value is header_failure
+    assert released == ["rate limit headers"]
+
+
+def test_strip_blank_reasoning_comment_preserves_unmatched_whitespace_and_inline_comments() -> None:
+    assert proxy_api_module._strip_blank_html_comment_lines("Need more steps\n") == "Need more steps\n"
+    assert proxy_api_module._strip_blank_html_comment_lines("Hard break  \n") == "Hard break  \n"
+    assert proxy_api_module._strip_blank_html_comment_lines("<!-- -->some text") == "<!-- -->some text"
+    assert proxy_api_module._strip_blank_html_comment_lines("Plan\n\n<!-- -->") == "Plan"
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_removes_split_placeholder_delta() -> None:
+    source = _iter_blocks(
+        proxy_api_module.format_sse_event(
+            {"type": "response.created", "response": {"id": "resp_1", "status": "in_progress", "output": []}}
+        ),
+        proxy_api_module.format_sse_event(
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 0,
+                "delta": "Plan\n\n<!",
+            }
+        ),
+        proxy_api_module.format_sse_event(
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 0,
+                "delta": "-- -->",
+            }
+        ),
+        proxy_api_module.format_sse_event(
+            {
+                "type": "response.reasoning_summary_text.done",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 0,
+                "text": "Plan\n\n<!-- -->",
+            }
+        ),
+        proxy_api_module.format_sse_event(
+            {"type": "response.completed", "response": {"id": "resp_1", "status": "completed", "output": []}}
+        ),
+    )
+
+    blocks = [block async for block in proxy_api_module._normalize_public_responses_stream(source)]
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    deltas = [
+        payload for payload in payloads if payload and payload.get("type") == "response.reasoning_summary_text.delta"
+    ]
+
+    assert [payload["delta"] for payload in deltas] == ["Plan"]
+    assert "<!-- -->" not in "".join(blocks)
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_does_not_delay_less_than_text() -> None:
+    first = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "x < y",
+        }
+    )
+    second = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 1,
+            "part": {"type": "summary_text", "text": "next"},
+        }
+    )
+
+    blocks = [
+        block async for block in proxy_api_module._normalize_reasoning_summary_stream(_iter_blocks(first, second))
+    ]
+
+    assert blocks == [first, second]
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_keeps_candidate_across_telemetry() -> None:
+    first = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "<",
+        }
+    )
+    second = proxy_api_module.format_sse_event({"type": "codex.rate_limits", "limits": {}})
+
+    blocks = [
+        block async for block in proxy_api_module._normalize_reasoning_summary_stream(_iter_blocks(first, second))
+    ]
+
+    assert blocks == [second, first]
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_removes_split_placeholder_across_telemetry() -> None:
+    first = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "Plan\n\n<!",
+        }
+    )
+    telemetry = proxy_api_module.format_sse_event({"type": "codex.rate_limits", "limits": {}})
+    progress = proxy_api_module.format_sse_event({"type": "response.in_progress", "response": {"id": "resp_1"}})
+    final = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "-- -->",
+        }
+    )
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_reasoning_summary_stream(
+            _iter_blocks(first, telemetry, progress, final)
+        )
+    ]
+
+    assert blocks[:2] == [telemetry, progress]
+    payload = proxy_api_module._parse_sse_payload(blocks[-1])
+    assert payload is not None
+    assert payload["delta"] == "Plan"
+    assert "<!-- -->" not in "".join(blocks)
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_cleans_complete_marker_inside_one_delta() -> None:
+    source = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "Plan\n<!-- -->\nNext",
+        }
+    )
+
+    blocks = [block async for block in proxy_api_module._normalize_reasoning_summary_stream(_iter_blocks(source))]
+    payload = proxy_api_module._parse_sse_payload(blocks[0])
+
+    assert payload is not None
+    assert payload["delta"] == "Plan\nNext"
+
+
+def test_normalize_reasoning_summary_part_removes_only_standalone_placeholder() -> None:
+    payload, violation = proxy_api_module._normalize_public_stream_payload(
+        {
+            "type": "response.reasoning_summary_part.done",
+            "part": {"type": "summary_text", "text": "Plan\n\n<!-- -->"},
+        }
+    )
+
+    assert violation is None
+    assert payload is not None
+    assert payload["part"] == {"type": "summary_text", "text": "Plan"}
+
+
 def test_compact_response_output_item_accepts_modeled_output_field() -> None:
     class ModeledCompactPayload(CompactResponsePayload):
         output: list[dict[str, JsonValue]] | None = None
@@ -26,6 +388,7 @@ def test_compact_response_output_item_accepts_modeled_output_field() -> None:
             "object": "response.compaction",
             "output": [
                 {
+                    "id": "cmp_modeled_context",
                     "type": "compaction",
                     "encrypted_content": "MODELED_CONTEXT",
                 }
@@ -34,8 +397,49 @@ def test_compact_response_output_item_accepts_modeled_output_field() -> None:
     )
 
     assert proxy_api_module._compact_response_output_item(payload) == {
+        "id": "cmp_modeled_context",
         "type": "compaction",
         "encrypted_content": "MODELED_CONTEXT",
+    }
+
+
+def test_compact_response_output_item_preserves_summary_item_id() -> None:
+    payload = CompactResponsePayload.model_validate(
+        {
+            "object": "response.compaction",
+            "compaction_summary": {
+                "id": "cmp_summary_context",
+                "status": "completed",
+                "encrypted_content": "SUMMARY_CONTEXT",
+            },
+        }
+    )
+
+    assert proxy_api_module._compact_response_output_item(payload) == {
+        "id": "cmp_summary_context",
+        "type": "compaction",
+        "status": "completed",
+        "encrypted_content": "SUMMARY_CONTEXT",
+    }
+
+
+def test_compact_response_output_item_drops_invalid_id_prefix() -> None:
+    payload = CompactResponsePayload.model_validate(
+        {
+            "object": "response.compaction",
+            "output": [
+                {
+                    "id": "msg_compact_context",
+                    "type": "compaction",
+                    "encrypted_content": "COMPACT_CONTEXT",
+                }
+            ],
+        }
+    )
+
+    assert proxy_api_module._compact_response_output_item(payload) == {
+        "type": "compaction",
+        "encrypted_content": "COMPACT_CONTEXT",
     }
 
 
@@ -62,11 +466,67 @@ async def test_synthetic_compaction_stream_preserves_mapping_usage() -> None:
         )
     ]
 
-    completed = proxy_api_module._parse_sse_payload(blocks[1])
+    completed = proxy_api_module._parse_sse_payload(blocks[3])
     assert completed is not None
     response = completed["response"]
     assert isinstance(response, dict)
     assert response["usage"] == {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+
+
+@pytest.mark.asyncio
+async def test_synthetic_compaction_stream_emits_complete_lifecycle() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._synthetic_compaction_response_stream(
+            {
+                "id": "cmp_authoritative",
+                "type": "compaction",
+                "status": "completed",
+                "encrypted_content": "SUMMARY",
+            },
+            response_id="resp_compaction",
+            usage=None,
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks[:-1]]
+    assert all(payload is not None for payload in payloads)
+    assert [payload["type"] for payload in payloads if payload is not None] == [
+        "response.created",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert [payload["sequence_number"] for payload in payloads if payload is not None] == [0, 1, 2, 3]
+
+    created, added, done, completed = payloads
+    assert created is not None
+    assert added is not None
+    assert done is not None
+    assert completed is not None
+    assert created["response"] == {
+        "id": "resp_compaction",
+        "object": "response",
+        "status": "in_progress",
+        "output": [],
+    }
+    assert added["item"] == {
+        "id": "cmp_authoritative",
+        "type": "compaction",
+        "status": "in_progress",
+        "encrypted_content": "SUMMARY",
+    }
+    terminal_item = {
+        "id": "cmp_authoritative",
+        "type": "compaction",
+        "status": "completed",
+        "encrypted_content": "SUMMARY",
+    }
+    assert done["item"] == terminal_item
+    completed_response = completed["response"]
+    assert isinstance(completed_response, dict)
+    assert completed_response["output"] == [terminal_item]
+    assert blocks[-1] == "data: [DONE]\n\n"
 
 
 @pytest.mark.asyncio
@@ -77,6 +537,64 @@ async def test_collect_responses_payload_returns_contract_error_on_truncated_str
 
     body = result.model_dump(mode="json", exclude_none=True)
     assert body["error"]["code"] == "upstream_stream_truncated"
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_payload_captures_turn_state_metadata_before_failed_response() -> None:
+    captured_headers: dict[str, str] = {}
+
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks(
+            'data: {"type":"response.metadata","headers":{"X-Codex-Turn-State":" turn-owner "}}\n\n',
+            'data: {"type":"response.failed","response":{"error":{"code":"upstream_error",'
+            '"message":"failed","type":"server_error"}}}\n\n',
+        ),
+        captured_turn_state_headers=captured_headers,
+    )
+
+    assert result.error is not None
+    assert captured_headers == {"x-codex-turn-state": "turn-owner"}
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_preserves_captured_turn_state_when_stream_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.core.clients.proxy import ProxyResponseError
+    from app.core.openai.requests import ResponsesRequest
+
+    async def failing_stream():
+        yield 'data: {"type":"response.metadata","headers":{"X-Codex-Turn-State":"turn-owner"}}\n\n'
+        raise ProxyResponseError(
+            502,
+            {"error": {"code": "upstream_error", "message": "failed", "type": "server_error"}},
+        )
+
+    service = SimpleNamespace(stream_responses=lambda *_args, **_kwargs: failing_stream())
+    context = SimpleNamespace(service=service)
+    request = SimpleNamespace(
+        headers={},
+        method="POST",
+        url=SimpleNamespace(path="/backend-api/codex/responses"),
+        client=None,
+    )
+    monkeypatch.setattr(proxy_api_module, "_opportunistic_admission_denial", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", AsyncMock())
+
+    response = await proxy_api_module._collect_responses(
+        cast(Any, request),
+        ResponsesRequest.model_validate({"model": "gpt-5.5", "instructions": "test", "input": []}),
+        cast(Any, context),
+        None,
+    )
+
+    assert response.status_code == 502
+    assert response.headers["x-codex-turn-state"] == "turn-owner"
 
 
 @pytest.mark.asyncio
@@ -118,9 +636,11 @@ async def test_normalize_public_responses_stream_appends_response_failed_on_inva
     created_payload = proxy_api_module._parse_sse_payload(blocks[0])
     assert created_payload is not None
     assert created_payload["type"] == "response.created"
+    assert created_payload["sequence_number"] == 0
     payload = proxy_api_module._parse_sse_payload(blocks[1])
     assert payload is not None
     assert payload["type"] == "response.failed"
+    assert payload["sequence_number"] == 1
     response = payload["response"]
     assert isinstance(response, dict)
     error = response["error"]
@@ -145,6 +665,7 @@ async def test_normalize_public_responses_stream_preserves_initial_error_details
     payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
     payloads = [payload for payload in payloads if payload is not None]
     assert [payload["type"] for payload in payloads] == ["response.created", "response.failed"]
+    assert [payload["sequence_number"] for payload in payloads] == [0, 1]
     response = payloads[1]["response"]
     assert isinstance(response, dict)
     error = response["error"]
@@ -624,6 +1145,120 @@ async def test_normalize_public_responses_stream_synthesizes_response_created_on
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_sequences_created_before_unsequenced_leading_failure() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                'data: {"type":"response.failed","response":{"id":"resp_err","object":"response",'
+                '"status":"failed","error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    created = next(payload for payload in payloads if payload and payload.get("type") == "response.created")
+    failed = next(payload for payload in payloads if payload and payload.get("type") == "response.failed")
+    assert created["sequence_number"] == 0
+    assert failed["sequence_number"] == 1
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_replaces_non_integer_failure_sequence() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.created","sequence_number":7,'
+                    '"response":{"id":"resp_err","object":"response","status":"in_progress","output":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.failed","sequence_number":"error",'
+                    '"response":{"id":"resp_err","object":"response","status":"failed",'
+                    '"error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    failed = next(payload for payload in payloads if payload and payload.get("type") == "response.failed")
+    assert failed["sequence_number"] == 8
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_sequences_failure_after_reasoning() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.created","sequence_number":7,'
+                    '"response":{"id":"resp_err","object":"response","status":"in_progress","output":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.reasoning_summary_text.delta","sequence_number":8,'
+                    '"item_id":"rs_1","output_index":0,"summary_index":0,"delta":"Checking."}\n\n'
+                ),
+                (
+                    'data: {"type":"response.failed","response":{"id":"resp_err","object":"response",'
+                    '"status":"failed","error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    failed = next(payload for payload in payloads if payload and payload.get("type") == "response.failed")
+    assert failed["sequence_number"] == 9
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("failure_sequence", "created_sequence"), [(12, 11), (0, -1)])
+async def test_normalize_public_responses_stream_preserves_failure_sequence(
+    failure_sequence: int,
+    created_sequence: int,
+) -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    f'data: {{"type":"response.failed","sequence_number":{failure_sequence},'
+                    '"response":{"id":"resp_err","object":"response","status":"failed",'
+                    '"error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+                )
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    created = next(payload for payload in payloads if payload and payload.get("type") == "response.created")
+    failed = next(payload for payload in payloads if payload and payload.get("type") == "response.failed")
+    assert created["sequence_number"] == created_sequence
+    assert failed["sequence_number"] == failure_sequence
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_codex_route_preserves_unsequenced_failure() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                'data: {"type":"response.failed","response":{"id":"resp_err","object":"response",'
+                '"status":"failed","error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+            ),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    failed = proxy_api_module._parse_sse_payload(blocks[0])
+    assert failed is not None
+    assert "sequence_number" not in failed
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_drops_precreated_output_when_envelope_arrives() -> None:
     """A: public /v1 must never attach anonymous pre-created output to a later response.
 
@@ -882,6 +1517,23 @@ async def test_normalize_public_responses_stream_codex_route_preserves_codex_eve
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_codex_route_preserves_raw_error_frame() -> None:
+    raw_error = (
+        'data: {"type":"error","sequence_number":"error","error_type":"server_error",'
+        '"message":"OpenCode stream failed"}\n\n'
+    )
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(raw_error),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert blocks == [raw_error, "data: [DONE]\n\n"]
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_codex_route_truncated_stream_does_not_synthesize_created() -> None:
     """`enforce_openai_sdk_contract=False` appends a terminal failure for
     truncated upstream streams without injecting an SDK-only created envelope."""
@@ -1004,10 +1656,12 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
         origin_instance="origin-a",
         target_instance="owner-b",
         codex_session_affinity=True,
-        downstream_turn_state=None,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
         original_affinity_kind="session",
         original_affinity_key="sid-abc",
         reservation=None,
+        signature_version="2",
     )
     fake_forwarded = bridge_module.HTTPBridgeForwardedRequest(context=fake_context)
 
@@ -1022,6 +1676,7 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
         AsyncMock(return_value=(None, None)),
     )
     monkeypatch.setattr(proxy_api_module, "_strip_internal_bridge_headers", lambda h: dict(h))
+    monkeypatch.setattr(proxy_api_module, "_prohibit_fast_mode_enabled", AsyncMock(return_value=False))
 
     # Minimal payload + request stubs.
     from app.core.openai.requests import ResponsesRequest
@@ -1031,7 +1686,7 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
     class _StubRequest:
         @property
         def headers(self) -> dict[str, str]:
-            return {}
+            return {"x-codex-turn-state": "http_turn_generated"}
 
     response = await proxy_api_module.internal_bridge_responses(
         request=cast(Any, _StubRequest()),
@@ -1051,3 +1706,179 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
     assert kwargs.get("enforce_openai_sdk_contract") is False, (
         f"internal_bridge_responses must pass enforce_openai_sdk_contract=False; got kwargs={kwargs!r}"
     )
+    assert kwargs.get("forwarded_downstream_turn_state") == "http_turn_generated"
+    assert kwargs.get("forwarded_original_request_unanchored") is True
+    assert kwargs.get("forwarded_legacy_signature") is False
+    forwarded_headers = kwargs.get("forwarded_headers")
+    assert isinstance(forwarded_headers, dict)
+    assert "x-codex-turn-state" not in forwarded_headers
+
+
+@pytest.mark.asyncio
+async def test_internal_bridge_rejects_unknown_legacy_anchor_before_terminal_compaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.core.clients.proxy import ProxyResponseError
+    from app.core.openai.requests import ResponsesRequest
+    from app.modules.proxy import http_bridge_forwarding as bridge_module
+
+    fake_context = bridge_module.HTTPBridgeForwardContext(
+        origin_instance="origin-old",
+        target_instance="owner-current",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_unknown",
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-shared",
+        signature_version=None,
+    )
+    monkeypatch.setattr(
+        proxy_api_module,
+        "parse_forwarded_request",
+        lambda headers, *, payload, current_instance: (
+            bridge_module.HTTPBridgeForwardedRequest(context=fake_context),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_api_module,
+        "_validate_internal_bridge_api_key",
+        AsyncMock(return_value=(None, None)),
+    )
+    unexpected_stream = AsyncMock(side_effect=AssertionError("streaming must not start before legacy proof"))
+    monkeypatch.setattr(proxy_api_module, "_stream_responses", unexpected_stream)
+    service = SimpleNamespace(
+        validate_http_bridge_legacy_forward_anchor=AsyncMock(
+            side_effect=ProxyResponseError(
+                409,
+                {
+                    "error": {
+                        "message": "Legacy owner forwarding requires a registered turn-state continuity anchor",
+                        "type": "server_error",
+                        "code": "bridge_forward_upgrade_required",
+                    }
+                },
+            )
+        )
+    )
+    request = cast(
+        Any,
+        SimpleNamespace(
+            headers={"x-codex-turn-state": "http_turn_unknown"},
+            method="POST",
+            url=SimpleNamespace(path="/internal/responses"),
+            client=None,
+        ),
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "compact",
+            "input": [{"role": "user", "content": "hi"}, {"type": "compaction_trigger"}],
+        }
+    )
+
+    response = await proxy_api_module.internal_bridge_responses(
+        request=request,
+        payload=payload,
+        context=cast(Any, SimpleNamespace(service=service)),
+    )
+
+    assert response.status_code == 409
+    assert b'"code":"bridge_forward_upgrade_required"' in response.body
+    unexpected_stream.assert_not_awaited()
+    service.validate_http_bridge_legacy_forward_anchor.assert_awaited_once_with(
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-shared",
+        downstream_turn_state="http_turn_unknown",
+        previous_response_id=None,
+        api_key=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_stream_passes_canonical_unmutated_blocks_verbatim() -> None:
+    """Unmutated events that already carry canonical `event:` framing pass
+    through byte-identically instead of being re-serialized."""
+    created = proxy_api_module.format_sse_event(
+        {"type": "response.created", "response": {"id": "resp_pt", "output": []}}
+    )
+    delta = proxy_api_module.format_sse_event(
+        {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": "hi"}
+    )
+    completed_payload: dict[str, Any] = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_pt",
+            "output": [{"type": "message", "id": "msg_1", "content": [{"type": "output_text", "text": "hi"}]}],
+        },
+    }
+    completed = proxy_api_module.format_sse_event(completed_payload)
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(_iter_blocks(created, delta, completed))
+    ]
+
+    assert blocks[0] == created
+    assert delta in blocks
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_stream_passes_raw_utf8_verbatim_blocks_byte_identically() -> None:
+    """Upstream-verbatim delta blocks (raw UTF-8, upstream key spacing — not
+    the ensure_ascii canonical re-encode) still satisfy the identity
+    pass-through gate: it compares parsed-payload object identity plus the
+    `event:` framing prefix, never re-serialized bytes."""
+    created = proxy_api_module.format_sse_event(
+        {"type": "response.created", "response": {"id": "resp_utf8", "output": []}}
+    )
+    verbatim_delta = (
+        "event: response.output_text.delta\n"
+        'data: {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": "안녕"}\n\n'
+    )
+    completed_payload: dict[str, Any] = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_utf8",
+            "output": [{"type": "message", "id": "msg_1", "content": [{"type": "output_text", "text": "안녕"}]}],
+        },
+    }
+    completed = proxy_api_module.format_sse_event(completed_payload)
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(created, verbatim_delta, completed)
+        )
+    ]
+
+    assert verbatim_delta in blocks
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_stream_reframes_data_only_blocks_with_event_name() -> None:
+    """A data-only block (e.g. bridge-rewritten terminal event) must regain
+    the canonical `event: <type>` line so named-event clients see it."""
+    payload = {
+        "type": "response.output_text.delta",
+        "item_id": "msg_d",
+        "output_index": 0,
+        "delta": "x",
+    }
+    import json as _json
+
+    data_only = "data: " + _json.dumps(payload, separators=(",", ":")) + "\n\n"
+
+    created = proxy_api_module.format_sse_event(
+        {"type": "response.created", "response": {"id": "resp_df", "output": []}}
+    )
+    blocks = [
+        block async for block in proxy_api_module._normalize_public_responses_stream(_iter_blocks(created, data_only))
+    ]
+
+    reframed = [block for block in blocks if '"delta":"x"' in block]
+    assert reframed
+    assert reframed[0].startswith("event: response.output_text.delta\n")

@@ -15,6 +15,13 @@ PRO_WEEKLY_CAPACITY_CREDITS = 50_400.0
 RECENT_BURN_WINDOW = timedelta(hours=6)
 MIN_FRESHNESS_SECONDS = 300.0
 FRESHNESS_MISSED_REFRESH_CYCLES = 3.0
+PACE_ELIGIBLE_ACCOUNT_STATUSES = frozenset(
+    (
+        AccountStatus.ACTIVE,
+        AccountStatus.RATE_LIMITED,
+        AccountStatus.QUOTA_EXCEEDED,
+    )
+)
 
 
 @dataclass
@@ -50,6 +57,7 @@ def build_weekly_credit_pace(
     now: datetime,
     usage_refresh_interval_seconds: int,
     working_days: set[int] | None = None,
+    smoothing_window_minutes: int = 30,
 ) -> WeeklyCreditPaceResponse | None:
     """Build server-side weekly quota pace from active, fresh weekly usage rows.
 
@@ -75,6 +83,7 @@ def build_weekly_credit_pace(
     rate_sample_count = 0
     total_full_credits = 0.0
     total_actual_remaining_credits = 0.0
+    total_smoothed_remaining_credits = 0.0
     total_expected_remaining_credits = 0.0
     scheduled_burn_rate_credits_per_hour = 0.0
     forecast_burn_rate_credits_per_hour = 0.0
@@ -85,7 +94,7 @@ def build_weekly_credit_pace(
             continue
 
         account = accounts_by_id.get(summary.account_id)
-        if account is None or account.status != AccountStatus.ACTIVE:
+        if account is None or account.status not in PACE_ELIGIBLE_ACCOUNT_STATUSES:
             inactive_account_count += 1
             continue
 
@@ -104,9 +113,17 @@ def build_weekly_credit_pace(
         )
         expected_remaining_credits = full_credits * (1.0 - used_schedule_fraction)
         account_rate = _recent_burn_rate_credits_per_hour(rows, full_credits, now)
+        smoothed_remaining_credits = _smoothed_remaining_credits(
+            rows=rows,
+            full_credits=full_credits,
+            current_remaining_credits=actual_remaining_credits,
+            now=now,
+            smoothing_window_minutes=smoothing_window_minutes,
+        )
 
         total_full_credits += full_credits
         total_actual_remaining_credits += actual_remaining_credits
+        total_smoothed_remaining_credits += smoothed_remaining_credits
         total_expected_remaining_credits += expected_remaining_credits
         scheduled_burn_rate_credits_per_hour += full_credits * _working_schedule_share_per_hour(
             reset_at_ms=effective_reset_at_ms,
@@ -135,6 +152,9 @@ def build_weekly_credit_pace(
     scheduled_used_percent = 100.0 * (total_full_credits - total_expected_remaining_credits) / total_full_credits
     delta_percent = actual_used_percent - scheduled_used_percent
     schedule_gap_credits = max(0.0, total_expected_remaining_credits - total_actual_remaining_credits)
+    smoothed_used_percent = 100.0 * (total_full_credits - total_smoothed_remaining_credits) / total_full_credits
+    smoothed_delta_percent = smoothed_used_percent - scheduled_used_percent
+    smoothed_schedule_gap_credits = max(0.0, total_expected_remaining_credits - total_smoothed_remaining_credits)
 
     forecast_rate = forecast_burn_rate_credits_per_hour if rate_sample_count > 0 else None
     projection = _project_weekly_pool(pace_accounts, now_ms, forecast_rate)
@@ -171,6 +191,9 @@ def build_weekly_credit_pace(
         scheduled_used_percent=scheduled_used_percent,
         delta_percent=delta_percent,
         schedule_gap_credits=schedule_gap_credits,
+        smoothed_delta_percent=smoothed_delta_percent,
+        smoothed_schedule_gap_credits=smoothed_schedule_gap_credits,
+        pace_gap_smoothing_minutes=smoothing_window_minutes,
         over_plan_credits=schedule_gap_credits,
         projected_shortfall_credits=projected_shortfall_credits,
         pause_for_break_even_hours=pause_for_break_even_hours,
@@ -183,7 +206,7 @@ def build_weekly_credit_pace(
         projected_minimum_remaining_credits=projection.projected_minimum_remaining_credits,
         forecast_burn_rate_credits_per_hour=forecast_rate,
         scheduled_burn_rate_credits_per_hour=scheduled_burn_rate_credits_per_hour,
-        status=_weekly_pace_status(delta_percent, projected_shortfall_credits),
+        status=_weekly_pace_status(smoothed_delta_percent, projected_shortfall_credits),
         account_count=len(pace_accounts),
         stale_account_count=stale_account_count,
         inactive_account_count=inactive_account_count,
@@ -245,6 +268,43 @@ def _recent_burn_rate_credits_per_hour(
     if state is None or state.rate is None:
         return None
     return max(0.0, state.rate * full_credits * 36.0)
+
+
+def _smoothed_remaining_credits(
+    *,
+    rows: list[UsageHistory],
+    full_credits: float,
+    current_remaining_credits: float,
+    now: datetime,
+    smoothing_window_minutes: int,
+) -> float:
+    smoothing_start = now - timedelta(minutes=smoothing_window_minutes)
+    latest = rows[-1] if rows else None
+    latest_reset_at = latest.reset_at if latest is not None else None
+    latest_window_minutes = latest.window_minutes if latest is not None else None
+    recent_rows = [
+        row
+        for row in rows
+        if row.recorded_at >= smoothing_start
+        and row.recorded_at <= now
+        and (latest_reset_at is None or row.reset_at == latest_reset_at)
+        and (latest_window_minutes is None or row.window_minutes == latest_window_minutes)
+    ]
+    if not recent_rows:
+        return current_remaining_credits
+
+    total_remaining = 0.0
+    sample_count = 0
+    for row in recent_rows:
+        if not isinstance(row.used_percent, int | float) or not isfinite(row.used_percent):
+            continue
+        used_percent = _clamp(float(row.used_percent), 0.0, 100.0)
+        total_remaining += full_credits * (1.0 - used_percent / 100.0)
+        sample_count += 1
+
+    if sample_count == 0:
+        return current_remaining_credits
+    return _clamp(total_remaining / sample_count, 0.0, full_credits)
 
 
 def _project_weekly_pool(

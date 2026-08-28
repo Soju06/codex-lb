@@ -179,7 +179,6 @@ def _validate_default(**overrides: object) -> None:
         "n": 1,
         "partial_images": None,
         "output_compression": 100,
-        "images_max_partial_images": 3,
     }
     kwargs.update(overrides)
     validate_image_request_parameters(**kwargs)  # type: ignore[arg-type]

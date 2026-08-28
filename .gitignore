@@ -7,6 +7,7 @@ poc/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.hypothesis/
 .mypy_cache/
 .ruff_cache/
 
@@ -20,6 +21,7 @@ __pycache__/
 # Build artifacts
 build/
 dist/
+site/
 app/static/
 deploy/helm/*/charts/
 
@@ -56,4 +58,6 @@ certs/
 .omx/
 PROMPT.md
 SUMMARY.md
+DECISIONS.md
 .superpowers/
+.agents/worktrees/

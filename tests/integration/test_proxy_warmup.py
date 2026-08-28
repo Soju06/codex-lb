@@ -11,11 +11,13 @@ from sqlalchemy import select, update
 
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
+from app.core.auth.refresh import RefreshError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
-from app.core.exceptions import ProxyRateLimitError
+from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
+from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.time import utcnow
 from app.db.models import ApiKeyLimit, RequestLog
 from app.db.session import SessionLocal
@@ -190,6 +192,358 @@ async def test_warmup_normal_mode_uses_configured_model_and_logs_warmup_kind(asy
 
 
 @pytest.mark.asyncio
+async def test_warmup_compact_keeps_local_account_and_upstream_route_separate(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+            "warmupModel": "gpt-5.4-nano",
+        },
+    )
+    assert settings_response.status_code == 200
+    upstream_account_id = "acc-warmup-upstream-route"
+    eligible_id = await _import_account(async_client, upstream_account_id, "warmup-route@example.com")
+    await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
+    _, key = await _create_api_key(async_client, name="warmup-route")
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    captured: dict[str, object] = {}
+
+    async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        return account
+
+    async def _fake_route(self, account, *, operation):
+        del self
+        captured["route_account_id"] = account.id
+        captured["route_operation"] = operation
+        return route
+
+    async def _fake_compact(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        session=None,
+        *,
+        route=None,
+        route_trace=None,
+        chatgpt_account_id=None,
+        allow_direct_egress=True,
+    ):
+        del headers, access_token, session
+        captured["model"] = payload.model
+        captured["account_id"] = account_id
+        captured["route"] = route
+        captured["chatgpt_account_id"] = chatgpt_account_id
+        captured["allow_direct_egress"] = allow_direct_egress
+        if route_trace is not None and route is not None:
+            route_trace.record(route=route, fallback_used=False)
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compact",
+                "id": "resp-warmup-route",
+                "status": "completed",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_upstream_route_for_account", _fake_route)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _fake_compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "normal"},
+    )
+
+    assert response.status_code == 200
+    assert captured["model"] == "gpt-5.4-nano"
+    assert captured["account_id"] == upstream_account_id
+    assert captured["chatgpt_account_id"] == upstream_account_id
+    assert captured["route"] is route
+    assert captured["allow_direct_egress"] is False
+    assert captured["route_account_id"] == eligible_id
+    assert captured["route_operation"] == "warmup"
+
+    async with SessionLocal() as session:
+        row = (await session.execute(select(RequestLog).where(RequestLog.request_kind == "warmup"))).scalar_one()
+
+    assert row.upstream_proxy_route_mode == "account_bound"
+    assert row.upstream_proxy_pool_id == "pool_1"
+    assert row.upstream_proxy_endpoint_id == "ep_1"
+    assert row.upstream_proxy_fallback_used is False
+
+
+@pytest.mark.asyncio
+async def test_warmup_compact_omits_filtered_upstream_account_header(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+            "warmupModel": "gpt-5.4-nano",
+        },
+    )
+    assert settings_response.status_code == 200
+    eligible_id = await _import_account(async_client, "acc-warmup-local-filter", "warmup-local-filter@example.com")
+    async with SessionLocal() as session:
+        await session.execute(
+            update(proxy_module.Account)
+            .where(proxy_module.Account.id == eligible_id)
+            .values(chatgpt_account_id="local_warmup_filter")
+        )
+        await session.commit()
+    await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
+    _, key = await _create_api_key(async_client, name="warmup-local-filter")
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    captured: dict[str, object] = {}
+
+    async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        return account
+
+    async def _fake_route(self, account, *, operation):
+        del self
+        captured["route_account_id"] = account.id
+        captured["route_operation"] = operation
+        return route
+
+    async def _fake_compact(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        session=None,
+        *,
+        route=None,
+        route_trace=None,
+        chatgpt_account_id=None,
+        allow_direct_egress=True,
+    ):
+        del payload, headers, access_token, session, allow_direct_egress
+        captured["account_id"] = account_id
+        captured["route"] = route
+        captured["chatgpt_account_id"] = chatgpt_account_id
+        if route_trace is not None and route is not None:
+            route_trace.record(route=route, fallback_used=False)
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compact",
+                "id": "resp-warmup-local-filter",
+                "status": "completed",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_upstream_route_for_account", _fake_route)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _fake_compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "normal"},
+    )
+
+    assert response.status_code == 200
+    assert captured["account_id"] is None
+    assert captured["chatgpt_account_id"] is None
+    assert captured["route"] is route
+    assert captured["route_account_id"] == eligible_id
+    assert captured["route_operation"] == "warmup"
+
+
+@pytest.mark.asyncio
+async def test_warmup_route_failure_records_fail_closed_reason(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+            "warmupModel": "gpt-5.4-nano",
+        },
+    )
+    assert settings_response.status_code == 200
+    upstream_account_id = "acc-warmup-route-fail"
+    eligible_id = await _import_account(async_client, upstream_account_id, "warmup-route-fail@example.com")
+    await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
+    _, key = await _create_api_key(async_client, name="warmup-route-fail")
+
+    async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        return account
+
+    async def _fake_route(self, account, *, operation):
+        del self, account, operation
+        raise UpstreamProxyRouteError("no_healthy_endpoint", account_id=eligible_id)
+
+    compact = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_upstream_route_for_account", _fake_route)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "normal"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["submitted"] == []
+    assert payload["failed"][0]["account_id"] == eligible_id
+    assert payload["failed"][0]["error_code"] == "upstream_proxy_unavailable"
+    compact.assert_not_awaited()
+
+    async with SessionLocal() as session:
+        row = (await session.execute(select(RequestLog).where(RequestLog.request_kind == "warmup"))).scalar_one()
+
+    assert row.status == "error"
+    assert row.error_code == "upstream_proxy_unavailable"
+    assert row.upstream_proxy_fail_closed_reason == "no_healthy_endpoint"
+
+
+@pytest.mark.asyncio
+async def test_warmup_refresh_claim_contention_surfaces_upstream_unavailable(async_client, monkeypatch):
+    """Regression (finding #6): a cross-replica refresh-claim contention on the
+    warmup path (a peer replica holds the account's refresh claim) is NOT an auth
+    failure -- the account's OAuth credentials are healthy. Warmup previously
+    squashed every non-permanent RefreshError into ``invalid_api_key``, presenting
+    a healthy account as an auth failure in the warmup result and request log. It
+    MUST instead surface the retryable ``upstream_unavailable`` (matching the five
+    core proxy request paths) via ``is_refresh_claim_contention``."""
+    await _enable_api_key_auth(async_client)
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+            "warmupModel": "gpt-5.4-nano",
+        },
+    )
+    assert settings_response.status_code == 200
+    upstream_account_id = "acc-warmup-claim-contention"
+    eligible_id = await _import_account(async_client, upstream_account_id, "warmup-claim@example.com")
+    await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
+    _, key = await _create_api_key(async_client, name="warmup-claim")
+
+    async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, account, force, timeout_seconds
+        raise RefreshError(
+            "refresh_claim_timeout",
+            "peer replica holds the refresh claim",
+            False,
+            transport_error=True,
+        )
+
+    compact = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "normal"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["submitted"] == []
+    assert payload["failed"][0]["account_id"] == eligible_id
+    # Retryable upstream-unavailable, NOT a bogus invalid_api_key auth failure.
+    assert payload["failed"][0]["error_code"] == "upstream_unavailable"
+    compact.assert_not_awaited()
+
+    async with SessionLocal() as session:
+        row = (await session.execute(select(RequestLog).where(RequestLog.request_kind == "warmup"))).scalar_one()
+
+    assert row.status == "error"
+    assert row.error_code == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_warmup_post_exchange_persist_conflict_surfaces_upstream_unavailable_and_logs_distinctly(
+    async_client, monkeypatch, caplog
+):
+    """A post-exchange ``token_persist_conflict`` shares the SAME external outcome
+    as benign claim contention (retryable ``upstream_unavailable``, no health
+    penalty, no bogus ``invalid_api_key``) but MUST be logged DISTINCTLY -- it
+    signals a rarer, more-serious internal race than benign contention."""
+    await _enable_api_key_auth(async_client)
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+            "warmupModel": "gpt-5.4-nano",
+        },
+    )
+    assert settings_response.status_code == 200
+    upstream_account_id = "acc-warmup-persist-conflict"
+    eligible_id = await _import_account(async_client, upstream_account_id, "warmup-persist@example.com")
+    await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
+    _, key = await _create_api_key(async_client, name="warmup-persist")
+
+    async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, account, force, timeout_seconds
+        raise RefreshError(
+            "token_persist_conflict",
+            "guarded persist CAS never landed",
+            False,
+            transport_error=True,
+        )
+
+    compact = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
+
+    with caplog.at_level("WARNING"):
+        response = await async_client.post(
+            "/v1/warmup",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"mode": "normal"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["failed"][0]["account_id"] == eligible_id
+    # Same external outcome as benign claim contention: retryable, unpenalized.
+    assert payload["failed"][0]["error_code"] == "upstream_unavailable"
+    compact.assert_not_awaited()
+
+    # Distinct observability: the post-exchange persist conflict is logged with a
+    # message that names it, unlike benign claim contention.
+    assert any(
+        "persist conflict" in record.getMessage() and "token_persist_conflict" in record.getMessage()
+        for record in caplog.records
+    )
+
+    async with SessionLocal() as session:
+        row = (await session.execute(select(RequestLog).where(RequestLog.request_kind == "warmup"))).scalar_one()
+
+    assert row.status == "error"
+    assert row.error_code == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_warmup_normalizes_model_alias_before_upstream(async_client, monkeypatch):
     _set_warmup_model_env(monkeypatch, "gpt-5.4-mini-high")
     await _enable_api_key_auth(async_client)
@@ -240,6 +594,57 @@ async def test_warmup_normalizes_model_alias_before_upstream(async_client, monke
     captured_request_payload = captured_payloads[0]
     assert captured_request_payload["model"] == "gpt-5.4-mini"
     assert captured_request_payload["reasoning"] == {"effort": "high"}
+
+
+@pytest.mark.asyncio
+async def test_warmup_prohibits_fast_model_alias_priority_tier(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+            "warmupModel": "gpt-5.6-sol-xhigh-fast",
+            "prohibitFastMode": True,
+        },
+    )
+    assert settings_response.status_code == 200
+    eligible_id = await _import_account(async_client, "acc-warmup-prohibit-fast", "warmup-prohibit-fast@example.com")
+    await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
+    _, key = await _create_api_key(async_client, name="warmup-prohibit-fast")
+    captured_payloads: list[dict[str, object]] = []
+
+    async def _fake_compact(payload, headers, access_token, account_id, session=None):
+        del headers, access_token, account_id, session
+        captured_payloads.append(payload.model_dump(mode="json", by_alias=True, exclude_none=True))
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compact",
+                "id": "resp-warmup-prohibit-fast",
+                "status": "completed",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+
+    async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        return account
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _fake_compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "normal"},
+    )
+
+    assert response.status_code == 200
+    captured_request_payload = captured_payloads[0]
+    assert captured_request_payload["model"] == "gpt-5.6-sol"
+    assert captured_request_payload["reasoning"] == {"effort": "high"}
+    assert "service_tier" not in captured_request_payload
 
 
 @pytest.mark.asyncio
@@ -558,6 +963,62 @@ async def test_warmup_runs_parallel_with_max_five_accounts(async_client, monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "error_code", "error_message"),
+    [
+        (ProxyAuthError, "auth_error", "account unauthorized"),
+        (ProxyRateLimitError, "rate_limit_exceeded", "account limited"),
+    ],
+    ids=["auth", "rate-limit"],
+)
+async def test_single_account_pre_submit_failure_returns_summary(
+    async_client,
+    monkeypatch,
+    error_type,
+    error_code,
+    error_message,
+):
+    await _enable_api_key_auth(async_client)
+    raw_account_id = "acc-warmup-single-failure"
+    account_id = await _import_account(async_client, raw_account_id, "warmup-single-failure@example.com")
+    await _add_primary_usage(account_id, used_percent=0.0, window_minutes=300)
+    _, key = await _create_api_key(async_client, name="warmup-single-failure")
+
+    async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        return account
+
+    async def _fake_compact(payload, headers, access_token, upstream_account_id, session=None):
+        del payload, headers, access_token, session
+        assert upstream_account_id == raw_account_id
+        raise error_type(error_message)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _fake_compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "force"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "mode": "force",
+        "total_accounts": 1,
+        "submitted": [],
+        "skipped": [],
+        "failed": [
+            {
+                "account_id": account_id,
+                "error_code": error_code,
+                "error_message": error_message,
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
 async def test_warmup_account_rate_limit_failure_does_not_abort_summary(async_client, monkeypatch):
     await _enable_api_key_auth(async_client)
     first_raw_id = "acc-warmup-rate-limit-a"
@@ -573,6 +1034,7 @@ async def test_warmup_account_rate_limit_failure_does_not_abort_summary(async_cl
 
     async def _fake_compact(payload, headers, access_token, account_id, session=None):
         del payload, headers, access_token, session
+        assert account_id not in {first_id, second_id}
         if account_id == first_raw_id:
             raise ProxyRateLimitError("account limited")
         return CompactResponsePayload.model_validate(

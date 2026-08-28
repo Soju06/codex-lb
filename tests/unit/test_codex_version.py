@@ -101,7 +101,7 @@ async def test_rejects_invalid_version_name():
         version = await cache.get_version()
 
     # Invalid name falls back to settings default
-    assert version == "0.101.0"
+    assert version == "0.144.0"
 
 
 @pytest.mark.asyncio
@@ -113,7 +113,7 @@ async def test_rejects_alpha_version_name():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session):
         version = await cache.get_version()
 
-    assert version == "0.101.0"
+    assert version == "0.144.0"
 
 
 @pytest.mark.asyncio
@@ -149,7 +149,7 @@ async def test_fallback_to_settings_default_when_no_cache():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session_fail):
         version = await cache.get_version()
 
-    assert version == "0.101.0"
+    assert version == "0.144.0"
 
 
 @pytest.mark.asyncio
@@ -162,7 +162,7 @@ async def test_fallback_on_network_exception():
     ):
         version = await cache.get_version()
 
-    assert version == "0.101.0"
+    assert version == "0.144.0"
 
 
 @pytest.mark.asyncio
@@ -193,7 +193,7 @@ async def test_missing_name_field_falls_back():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session):
         version = await cache.get_version()
 
-    assert version == "0.101.0"
+    assert version == "0.144.0"
 
 
 def test_ttl_must_be_positive():
@@ -239,7 +239,7 @@ async def test_npm_invalid_version_falls_back_to_settings_default():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session):
         version = await cache.get_version()
 
-    assert version == "0.101.0"
+    assert version == "0.144.0"
 
 
 @pytest.mark.asyncio
@@ -252,7 +252,7 @@ async def test_npm_missing_version_field_falls_back_to_settings_default():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session):
         version = await cache.get_version()
 
-    assert version == "0.101.0"
+    assert version == "0.144.0"
 
 
 @pytest.mark.asyncio
@@ -294,3 +294,27 @@ async def test_falls_back_to_stale_cache_when_both_sources_fail():
         v2 = await cache.get_version()
 
     assert v2 == "1.5.0"
+
+
+def test_cached_version_or_default_returns_cached_value_without_io():
+    cache = CodexVersionCache(ttl_seconds=60)
+    cache._cached_version = "0.142.0"
+
+    # Must not touch the network or require an event loop.
+    with patch("app.core.clients.codex_version.aiohttp.ClientSession") as client_session_cls:
+        result = cache.cached_version_or_default()
+
+    assert result == "0.142.0"
+    client_session_cls.assert_not_called()
+
+
+def test_cached_version_or_default_falls_back_to_settings_default_when_empty():
+    cache = CodexVersionCache(ttl_seconds=60)
+    assert cache._cached_version is None
+
+    fake_settings = MagicMock()
+    fake_settings.model_registry_client_version = "0.101.0"
+    with patch("app.core.clients.codex_version.get_settings", return_value=fake_settings):
+        result = cache.cached_version_or_default()
+
+    assert result == "0.101.0"

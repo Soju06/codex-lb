@@ -5,7 +5,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
+from app.core.usage.types import BucketConversationAggregate, BucketModelAggregate, RequestActivityAggregate
 from app.db.models import (
     Account,
     AccountLimitWarmup,
@@ -49,8 +49,19 @@ class DashboardRepository:
         account_ids: list[str],
         window: str,
         since: datetime,
+        *,
+        cutoffs: dict[str, datetime] | None = None,
+        per_account_row_cap: int | None = None,
+        uncapped_recent_floor: datetime | None = None,
     ) -> dict[str, list[UsageHistorySnapshot]]:
-        return await self._usage_repo.bulk_history_since(account_ids, window, since)
+        return await self._usage_repo.bulk_history_since(
+            account_ids,
+            window,
+            since,
+            cutoffs=cutoffs,
+            per_account_row_cap=per_account_row_cap,
+            uncapped_recent_floor=uncapped_recent_floor,
+        )
 
     async def latest_window_minutes(self, window: str) -> int | None:
         return await self._usage_repo.latest_window_minutes(window)
@@ -64,6 +75,13 @@ class DashboardRepository:
         bucket_seconds: int = 21600,
     ) -> list[BucketModelAggregate]:
         return await self._logs_repo.aggregate_by_bucket(since, bucket_seconds)
+
+    async def aggregate_conversations_by_bucket(
+        self,
+        since: datetime,
+        bucket_seconds: int = 21600,
+    ) -> list[BucketConversationAggregate]:
+        return await self._logs_repo.aggregate_conversations_by_bucket(since, bucket_seconds)
 
     async def aggregate_activity_since(self, since: datetime) -> RequestActivityAggregate:
         return await self._logs_repo.aggregate_activity_since(since)

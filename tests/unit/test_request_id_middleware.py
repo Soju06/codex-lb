@@ -1,53 +1,86 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from typing import cast
+import asyncio
 
 import pytest
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
-from starlette.types import Message
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 
 from app.core.middleware.request_id import add_request_id_middleware
-from app.core.utils.request_id import get_request_id
+from app.core.utils.request_id import get_request_id, get_request_scope_id
 
 pytestmark = pytest.mark.unit
 
-_Dispatch = Callable[[Request, Callable[[Request], Awaitable[Response]]], Awaitable[Response]]
+
+def _build_app(request_ids: list[str | None], scope_ids: list[str | None]) -> FastAPI:
+    app = FastAPI()
+    add_request_id_middleware(app)
+
+    @app.get("/health")
+    async def health() -> dict[str, bool]:
+        request_ids.append(get_request_id())
+        scope_ids.append(get_request_scope_id())
+        return {"ok": True}
+
+    return app
 
 
 @pytest.mark.asyncio
 async def test_request_id_middleware_resets_context_on_success():
-    app = FastAPI()
-    add_request_id_middleware(app)
-    dispatch = cast(_Dispatch, app.user_middleware[0].kwargs["dispatch"])
+    request_ids: list[str | None] = []
+    scope_ids: list[str | None] = []
+    transport = ASGITransport(app=_build_app(request_ids, scope_ids))
 
-    request = Request(
-        {
-            "type": "http",
-            "http_version": "1.1",
-            "method": "GET",
-            "scheme": "http",
-            "path": "/health",
-            "raw_path": b"/health",
-            "query_string": b"",
-            "root_path": "",
-            "headers": [(b"x-request-id", b"req-test-123")],
-            "client": ("testclient", 50000),
-            "server": ("testserver", 80),
-        },
-        receive=_empty_receive,
-    )
-
-    async def call_next(_: Request) -> JSONResponse:
-        assert get_request_id() == "req-test-123"
-        return JSONResponse({"ok": True})
-
-    response = await dispatch(request, call_next)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/health", headers={"x-request-id": "req-test-123"})
 
     assert response.headers["x-request-id"] == "req-test-123"
+    assert request_ids == ["req-test-123"]
+    assert scope_ids[0] not in {None, "req-test-123"}
     assert get_request_id() is None
+    assert get_request_scope_id() is None
 
 
-async def _empty_receive() -> Message:
-    return {"type": "http.request", "body": b"", "more_body": False}
+@pytest.mark.asyncio
+async def test_request_id_middleware_generates_id_when_missing():
+    request_ids: list[str | None] = []
+    scope_ids: list[str | None] = []
+    transport = ASGITransport(app=_build_app(request_ids, scope_ids))
+
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/health")
+
+    generated = response.headers["x-request-id"]
+    assert generated
+    assert request_ids == [generated]
+
+
+@pytest.mark.asyncio
+async def test_request_id_middleware_falls_back_to_request_id_header():
+    request_ids: list[str | None] = []
+    scope_ids: list[str | None] = []
+    transport = ASGITransport(app=_build_app(request_ids, scope_ids))
+
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/health", headers={"request-id": "legacy-456"})
+
+    assert response.headers["x-request-id"] == "legacy-456"
+    assert request_ids == ["legacy-456"]
+
+
+@pytest.mark.asyncio
+async def test_request_id_middleware_uses_distinct_server_scopes_for_duplicate_client_ids():
+    request_ids: list[str | None] = []
+    scope_ids: list[str | None] = []
+    transport = ASGITransport(app=_build_app(request_ids, scope_ids))
+
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        first, second = await asyncio.gather(
+            client.get("/health", headers={"x-request-id": "duplicate-client-id"}),
+            client.get("/health", headers={"x-request-id": "duplicate-client-id"}),
+        )
+
+    assert first.headers["x-request-id"] == "duplicate-client-id"
+    assert second.headers["x-request-id"] == "duplicate-client-id"
+    assert request_ids == ["duplicate-client-id", "duplicate-client-id"]
+    assert len(set(scope_ids)) == 2

@@ -1,0 +1,10 @@
+- [x] Extend `frontend/src/i18n/locales/en.json` and `frontend/src/i18n/locales/zh-CN.json` with the full `settings.*` namespace and a `common.cancel` key.
+- [x] Migrate `SettingsPage` (title, subtitle, trusted-header notice, disabled notice, saving overlay label) to `useTranslation`.
+- [x] Migrate `AppearanceSettings` (theme, time-format, account-rows sections; option titles/tooltips) to `useTranslation`.
+- [x] Migrate `RoutingSettings` (upstream transport, routing strategy, sticky threads, prefer-earlier reset, prompt-cache TTL) to `useTranslation`, including all `<SelectItem>` labels.
+- [x] Migrate `ImportSettings` (allow-duplicates row) to `useTranslation`.
+- [x] Migrate `SessionSettings` (lifetime form, hours suffix, save button, invalid-input warning, long-session warning) to `useTranslation`. Render the invalid-input warning with `<Trans>` so the inline `<code>1.5</code>` example is preserved across locales.
+- [x] Migrate `PasswordSettings` (status copy, action buttons, Setup/Change/Remove/Verify dialogs, toast strings) to `useTranslation`.
+- [x] Migrate `TotpSettings` (status copy, Enable/Disable buttons, require-on-login switch row, Setup/Disable dialogs, QR alt text, secret label, toast strings) to `useTranslation`.
+- [x] Replace the literal English message in the TOTP code-length zod validator with the translation key `settings.totp.validation.codeLength` and resolve it via `t()` at the `FormMessage` render site for both setup and disable forms.
+- [x] Verify with `bun run typecheck`, `bun run lint`, `bun run test`, and `bun run build`.

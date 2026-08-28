@@ -387,18 +387,20 @@ class DashboardAuthService:
         AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "totp"})
         # Honor the existing password-session expiry so that a TTL change
         # mid-flow (between password login and TOTP submission) cannot extend
-        # or shorten an already-issued session. We use the state captured by
+        # an already-issued session, while still applying the TTL cap resolved
+        # for the current TOTP request. We use the state captured by
         # _require_active_password_session_with_state above so a second
         # store.get() race cannot turn a near-expiry password session into a
         # full-length ttl_seconds session.
         now = int(time())
         inherited_ttl = max(1, existing_state.expires_at - now)
+        applied_ttl = min(inherited_ttl, ttl_seconds)
         new_session_id = self._session_store.create(
             password_verified=True,
             totp_verified=True,
-            ttl_seconds=inherited_ttl,
+            ttl_seconds=applied_ttl,
         )
-        return new_session_id, inherited_ttl
+        return new_session_id, applied_ttl
 
     async def disable_totp(self, *, session_id: str | None, code: str, actor_ip: str | None = None) -> None:
         settings = await self._require_totp_verified_session(session_id)

@@ -5,10 +5,12 @@ from datetime import datetime
 
 import pytest
 from cryptography.fernet import Fernet
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
+from app.core.upstream_proxy.resolver import _is_missing_upstream_proxy_schema
 from app.db.models import (
     Account,
     AccountProxyBinding,
@@ -51,6 +53,16 @@ def _account(encryptor: TokenEncryptor, account_id: str = "acc_1") -> Account:
         last_refresh=datetime(2026, 1, 1),
         status=AccountStatus.ACTIVE,
     )
+
+
+def test_missing_upstream_proxy_schema_matches_unquoted_postgres_column_message() -> None:
+    exc = OperationalError(
+        "SELECT dashboard_settings.upstream_proxy_routing_enabled",
+        {},
+        Exception("column dashboard_settings.upstream_proxy_routing_enabled does not exist"),
+    )
+
+    assert _is_missing_upstream_proxy_schema(exc) is True
 
 
 async def _pool_with_endpoints(session: AsyncSession, encryptor: TokenEncryptor, pool_id: str) -> None:

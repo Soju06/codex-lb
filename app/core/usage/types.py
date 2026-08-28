@@ -72,6 +72,9 @@ class UsageMetricsSummary:
     cached_tokens_secondary_window: int | None = None
     error_rate_7d: float | None = None
     top_error: str | None = None
+    # Cancelled (client-disconnect) terminals in the window; excluded from
+    # the error-rate numerator, surfaced so the breakdown stays visible.
+    cancelled_7d: int | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +126,13 @@ class BucketModelAggregate:
     cached_input_tokens: int
     reasoning_tokens: int
     cost_usd: float = 0.0
+    cancelled_count: int = 0
+
+
+@dataclass(frozen=True)
+class BucketConversationAggregate:
+    bucket_epoch: int
+    conversation_count: int
 
 
 @dataclass(frozen=True)
@@ -133,3 +143,26 @@ class RequestActivityAggregate:
     output_tokens: int
     cached_input_tokens: int
     cost_usd: float
+    cancelled_count: int = 0
+    conversation_count: int = 0
+    conversation_request_count: int = 0
+
+
+@dataclass(frozen=True)
+class UsageSummaryLogsAggregate:
+    """SQL-side replacement for summing a window of RequestLog ORM rows in
+    Python; field semantics mirror the log helpers exactly (reasoning-token
+    fallback for output, per-row cached<=input clamp, None-cost rows excluded
+    from per-model cost)."""
+
+    request_count: int
+    error_count: int
+    total_tokens: int
+    cached_input_tokens: int
+    top_error: str | None
+    cost_by_model: list[tuple[str, float]]
+    cancelled_count: int = 0
+
+    @property
+    def cost_total_usd(self) -> float:
+        return sum(cost for _, cost in self.cost_by_model)

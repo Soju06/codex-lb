@@ -223,4 +223,67 @@ describe("AccountListItem", () => {
     expect(screen.queryByText(/Legacy Workspace/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Personal \/ unknown workspace/)).not.toBeInTheDocument();
   });
+
+  it("shows a reset-credit badge capped at 99+", () => {
+    const account = createAccountSummary({ availableResetCredits: 120 });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("99+")).toBeInTheDocument();
+  });
+
+  it("shows the reset-credit badge count when below the cap", () => {
+    const account = createAccountSummary({ availableResetCredits: 3 });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("3")).toBeInTheDocument();
+  });
+
+  it("hides the reset-credit badge when no credits are available", () => {
+    const account = createAccountSummary({ availableResetCredits: 0 });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.queryByText("99+")).not.toBeInTheDocument();
+  });
+
+  it("explains that Active is the displayed status, not per-request eligibility", () => {
+    const account = createAccountSummary({ status: "active" });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    // The hint lives on the focusable row (accessible description for
+    // keyboard/screen-reader users) and on the badge for pointer hover.
+    const hints = screen.getAllByTitle(/Active is the account's displayed status/i);
+    expect(hints.length).toBeGreaterThan(0);
+    expect(screen.getByRole("button")).toHaveAttribute(
+      "title",
+      expect.stringMatching(/Active is the account's displayed status/i),
+    );
+  });
+
+  it("omits the eligibility hint for non-active statuses", () => {
+    const account = createAccountSummary({ status: "paused" });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.queryByTitle(/Active is the account's displayed status/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button")).not.toHaveAttribute("title");
+  });
+
+  it("hides the reset-credit badge when badge display is disabled", () => {
+    const account = createAccountSummary({ availableResetCredits: 3 });
+
+    render(
+      <AccountListItem
+        account={account}
+        selected={false}
+        showResetCreditBadge={false}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("3")).not.toBeInTheDocument();
+  });
 });

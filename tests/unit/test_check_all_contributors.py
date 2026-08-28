@@ -87,3 +87,43 @@ def test_pull_request_commit_authors_fail_when_github_endpoint_is_capped(tmp_pat
         assert "more than 250 commits" in str(exc)
     else:
         raise AssertionError("expected capped PR commit list to fail closed")
+
+
+def test_pull_request_commit_authors_fail_closed_when_retries_exhaust(tmp_path, monkeypatch):
+    import pytest
+
+    checker = _load_checker_module()
+    event_path = tmp_path / "event.json"
+    event_path.write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "commits_url": "https://api.github.test/repos/example/codex-lb/pulls/1/commits",
+                    "user": {"login": "opener", "type": "User"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def failing_request_json(url, token):
+        raise checker.GitHubApiError("503 after retries")
+
+    monkeypatch.setattr(checker, "_request_json", failing_request_json)
+
+    with pytest.raises(SystemExit, match="cannot validate all-contributors coverage"):
+        checker.pull_request_commit_author_logins(str(event_path), "token")
+
+
+def test_fetch_contributor_logins_fail_closed_when_retries_exhaust(monkeypatch):
+    import pytest
+
+    checker = _load_checker_module()
+
+    def failing_request_json(url, token):
+        raise checker.GitHubApiError("503 after retries")
+
+    monkeypatch.setattr(checker, "_request_json", failing_request_json)
+
+    with pytest.raises(SystemExit, match="cannot validate all-contributors coverage"):
+        checker.fetch_contributor_logins("example/codex-lb", "token")

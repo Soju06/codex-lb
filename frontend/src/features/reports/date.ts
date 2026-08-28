@@ -1,3 +1,6 @@
+import type { DateDisplayFormat } from "@/hooks/use-date-format";
+import { formatTimeLong } from "@/utils/formatters";
+
 const REPORTS_TIMEZONE_STORAGE_KEY = "codex-lb-reports-timezone";
 
 function isValidTimeZone(timeZone: string | undefined): timeZone is string {
@@ -51,10 +54,20 @@ export function daysAgoLocalISO(days: number, date: Date = new Date()): string {
   return localDateISO(shifted);
 }
 
-export function formatReportBucketDate(date: string): string {
+export function isReportDateRangeValid(
+  startDate: string | undefined,
+  endDate: string | undefined,
+): boolean {
+  return !startDate || !endDate || startDate <= endDate;
+}
+
+export function formatReportBucketDate(
+  date: string,
+  displayFormat: DateDisplayFormat,
+): string {
   const [year, month, day] = date.split("-");
   if (!year || !month || !day) {
     return date;
   }
-  return `${year}-${month}-${day}`;
+  return formatTimeLong(`${year}-${month}-${day}T00:00:00`, displayFormat).date;
 }

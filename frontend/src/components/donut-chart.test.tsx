@@ -1,7 +1,38 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DonutChart } from "@/components/donut-chart";
+import i18n from "@/i18n";
+
+vi.mock("@/components/lazy-recharts", () => ({
+  Cell: () => null,
+  PieChart: ({ children }: { children: ReactNode }) => <svg>{children}</svg>,
+  Pie: ({
+    children,
+    data,
+    onMouseEnter,
+    onMouseLeave,
+  }: {
+    children: ReactNode;
+    data: Array<{ id: string }>;
+    onMouseEnter?: (entry: { payload: { id: string } }, index: number) => void;
+    onMouseLeave?: () => void;
+  }) => (
+    <>
+      {data.map((entry, index) => (
+        <g
+          key={entry.id}
+          className="recharts-pie-sector"
+          onMouseEnter={() => onMouseEnter?.({ payload: entry }, index)}
+          onMouseLeave={() => onMouseLeave?.()}
+        />
+      ))}
+      {children}
+    </>
+  ),
+  Sector: () => <path />,
+}));
 
 const BASE_ITEMS = [
   { label: "Account A", value: 120, color: "#7bb661" },
@@ -85,6 +116,29 @@ describe("DonutChart", () => {
     expect(screen.getByTestId("donut-used-value")).toHaveTextContent("300");
   });
 
+  it("keeps compact values in K/M/B notation for zh-CN", async () => {
+    await i18n.changeLanguage("zh-CN");
+    try {
+      render(
+        <DonutChart
+          title="每周积分"
+          total={146_160}
+          centerLayout="credits"
+          items={[
+            { label: "账户 A", value: 46_400, color: "#7bb661" },
+            { label: "账户 B", value: 42_300, color: "#d9a441" },
+          ]}
+        />,
+      );
+
+      expect(screen.getByTestId("donut-legend-0")).toHaveTextContent("46.4K");
+      expect(screen.getByTestId("donut-caption")).toHaveTextContent("146.16K");
+      expect(screen.getByTestId("donut-used-value")).toHaveTextContent("57.46K");
+    } finally {
+      await i18n.changeLanguage("en");
+    }
+  });
+
   it("can show remaining in the center while consumed uses full capacity", () => {
     render(
       <DonutChart
@@ -158,9 +212,8 @@ describe("DonutChart", () => {
       />,
     );
 
-    expect(screen.getByTestId("donut-legend-list")).toHaveStyle({
-      maxHeight: "calc(5 * 1.75rem)",
-    });
+    // jsdom 30 simplifies calc() during serialization; authored: calc(5 * 1.75rem)
+    expect(screen.getByTestId("donut-legend-list").style.maxHeight).toBe("calc(8.75rem)");
   });
 
   it("scrolls the hovered pie item into view in the legend list", async () => {

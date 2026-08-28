@@ -64,6 +64,9 @@ _BACKGROUND_VALUES: Final[frozenset[str]] = frozenset({"transparent", "opaque", 
 _OUTPUT_FORMATS: Final[frozenset[str]] = frozenset({"png", "jpeg", "webp"})
 _MODERATION_VALUES: Final[frozenset[str]] = frozenset({"auto", "low"})
 _INPUT_FIDELITY_VALUES: Final[frozenset[str]] = frozenset({"low", "high"})
+# Upstream streams at most 3 partial image frames per generation; the cap is
+# an upstream contract, not a deployment tunable (issue #1340).
+_MAX_PARTIAL_IMAGES: Final[int] = 3
 
 # gpt-image-2 size limits (per the upstream image_generation tool contract).
 _GPT_IMAGE_2_MAX_EDGE: Final[int] = 3840
@@ -163,7 +166,6 @@ def validate_image_request_parameters(
     n: int,
     partial_images: int | None,
     output_compression: int,
-    images_max_partial_images: int,
 ) -> None:
     """Apply the cross-field per-model validation matrix.
 
@@ -218,9 +220,9 @@ def validate_image_request_parameters(
         )
 
     if partial_images is not None:
-        if partial_images < 0 or partial_images > images_max_partial_images:
+        if partial_images < 0 or partial_images > _MAX_PARTIAL_IMAGES:
             raise _images_invalid(
-                f"partial_images must be between 0 and {images_max_partial_images}",
+                f"partial_images must be between 0 and {_MAX_PARTIAL_IMAGES}",
                 param="partial_images",
             )
 

@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import {
   Area,
   AreaChart,
@@ -46,8 +47,7 @@ function mergePoints(
 }
 
 function formatXTick(isoStr: string): string {
-  const d = new Date(isoStr);
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return isoStr.slice(5, 10);
 }
 
 const SERIES_META: Record<string, { label: string }> = {
@@ -69,6 +69,7 @@ type ChartTooltipProps = {
 };
 
 function CustomTooltip({ active, payload, label }: ChartTooltipProps) {
+  const { t } = useTranslation();
   if (!active || !payload?.length) return null;
   const heading = formatChartDateTime(label as string);
   return (
@@ -82,7 +83,7 @@ function CustomTooltip({ active, payload, label }: ChartTooltipProps) {
               className="inline-block h-2 w-2 rounded-full"
               style={{ backgroundColor: entry.color }}
             />
-            <span className="text-muted-foreground">{meta?.label}</span>
+            <span className="text-muted-foreground">{meta ? t(`accounts.trend.series.${entry.dataKey}`, { defaultValue: meta.label }) : ""}</span>
             <span className="ml-auto tabular-nums font-medium">{entry.value?.toFixed(1)}%</span>
           </div>
         );
@@ -106,6 +107,7 @@ export function AccountTrendChart({
   secondary,
   secondaryScheduled = EMPTY_TREND_POINTS,
 }: AccountTrendChartProps) {
+  const { t } = useTranslation();
   const chartColors = useChartColors();
   const reducedMotion = useReducedMotion();
   const c1 = chartColors[0];
@@ -118,7 +120,7 @@ export function AccountTrendChart({
   if (data.length === 0) {
     return (
       <div className="flex h-[200px] items-center justify-center text-xs text-muted-foreground">
-        No trend data available
+        {t("accounts.trend.empty")}
       </div>
     );
   }

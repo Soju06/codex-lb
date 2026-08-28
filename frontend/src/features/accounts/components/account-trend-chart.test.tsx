@@ -1,20 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ReactNode } from "react";
 import { render, screen } from "@testing-library/react";
 
 import { AccountTrendChart } from "@/features/accounts/components/account-trend-chart";
 
-// Mock recharts to avoid SVG rendering issues in jsdom
-vi.mock("recharts", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("recharts")>();
-  return {
-    ...actual,
-    ResponsiveContainer: ({ children }: { children: React.ReactNode }) => (
-      <div data-testid="responsive-container" style={{ width: 400, height: 200 }}>
-        {children}
-      </div>
-    ),
-  };
-});
+vi.mock("@/components/lazy-recharts", () => ({
+  Area: () => null,
+  AreaChart: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  CartesianGrid: () => null,
+  Line: () => null,
+  ResponsiveContainer: ({ children }: { children: ReactNode }) => (
+    <div data-testid="responsive-container" style={{ width: 400, height: 200 }}>
+      {children}
+    </div>
+  ),
+  Tooltip: () => null,
+  XAxis: () => null,
+  YAxis: () => null,
+}));
 
 const BASE = new Date("2026-01-15T00:00:00Z");
 

@@ -98,3 +98,50 @@ async def test_missing_static_asset_returns_not_found(async_client):
     assert response.status_code == 404
     assert response.json()["detail"] == "Not Found"
     assert response.headers["X-App-Version"] == __version__
+
+
+def test_ensure_web_asset_mime_types_overrides_poisoned_registry():
+    """Simulates the Windows HKCR poisoning from issue #1698.
+
+    ``mimetypes.add_type`` mutates the global table, so this test re-runs the
+    startup registration after poisoning and leaves the correct mappings in
+    place for the rest of the suite.
+    """
+    import mimetypes
+
+    from app.main import _WEB_ASSET_MIME_TYPES, _ensure_web_asset_mime_types
+
+    for extension in _WEB_ASSET_MIME_TYPES:
+        mimetypes.add_type("text/plain", extension)
+    assert mimetypes.guess_type("x.js")[0] == "text/plain"
+
+    _ensure_web_asset_mime_types()
+
+    for extension, expected in _WEB_ASSET_MIME_TYPES.items():
+        assert mimetypes.guess_type(f"x{extension}")[0] == expected, extension
+
+
+@pytest.mark.asyncio
+async def test_assets_js_served_as_javascript_despite_poisoned_registry(async_client):
+    """Product-path regression for issue #1698: /assets/*.js must serve
+    text/javascript even when the OS mimetypes sources map .js to text/plain,
+    or strict browser MIME checking rejects every dashboard module script."""
+    import mimetypes
+
+    from app.main import _ensure_web_asset_mime_types
+
+    asset_name = next(
+        (candidate.name for candidate in sorted((_STATIC_DIR / "assets").glob("*.js"))),
+        None,
+    )
+    assert asset_name is not None, "built dashboard assets missing; run cd frontend && bun run build"
+
+    mimetypes.add_type("text/plain", ".js")
+    try:
+        _ensure_web_asset_mime_types()
+        response = await async_client.get(f"/assets/{asset_name}")
+    finally:
+        _ensure_web_asset_mime_types()
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/javascript")

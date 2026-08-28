@@ -62,6 +62,21 @@ async def _set_migration_inconsistent_totp_only_mode() -> None:
     await get_settings_cache().invalidate()
 
 
+async def _set_api_key_auth_enabled(enabled: bool) -> None:
+    settings_cache = get_settings_cache()
+    await settings_cache.get()
+
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        settings.api_key_auth_enabled = enabled
+        await session.commit()
+
+    await settings_cache.invalidate()
+    refreshed_settings = await settings_cache.get()
+    assert refreshed_settings.api_key_auth_enabled is enabled
+
+
 def _set_dashboard_auth_env(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -132,12 +147,20 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
     assert blocked_limit_warmup.status_code == 403
     assert blocked_limit_warmup.json()["error"]["code"] == "read_only_access"
 
+    blocked_usage_reset = await client.post("/api/accounts/missing/usage-reset-credits/consume")
+    assert blocked_usage_reset.status_code == 403
+    assert blocked_usage_reset.json()["error"]["code"] == "read_only_access"
+
     blocked_proxy_endpoint = await client.post(
         "/api/settings/upstream-proxy/endpoints",
         json={"name": "Guest Proxy", "scheme": "http", "host": "proxy.internal", "port": 8080},
     )
     assert blocked_proxy_endpoint.status_code == 403
     assert blocked_proxy_endpoint.json()["error"]["code"] == "read_only_access"
+
+    blocked_proxy_probe = await client.post("/api/settings/upstream-proxy/endpoints/missing-endpoint/test")
+    assert blocked_proxy_probe.status_code == 403
+    assert blocked_proxy_probe.json()["error"]["code"] == "read_only_access"
 
     blocked_proxy_pool = await client.post(
         "/api/settings/upstream-proxy/pools",
@@ -174,6 +197,38 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
     blocked_quota_planner_cancel = await client.post("/api/quota-planner/decisions/missing/cancel")
     assert blocked_quota_planner_cancel.status_code == 403
     assert blocked_quota_planner_cancel.json()["error"]["code"] == "read_only_access"
+
+
+async def _assert_guest_archive_read_denied(client: AsyncClient) -> None:
+    blocked_archive = await client.get("/api/conversation-archive/files")
+    assert blocked_archive.status_code == 403
+    assert blocked_archive.json()["error"]["code"] == "admin_access_required"
+
+    blocked_archive_records = await client.get(
+        "/api/conversation-archive/records",
+        params={"requestId": "guest-hidden"},
+    )
+    assert blocked_archive_records.status_code == 403
+    blocked_archive_payload = blocked_archive_records.json()
+    assert blocked_archive_payload["error"]["code"] == "admin_access_required"
+    assert not {"records", "payload", "headers"} & blocked_archive_payload.keys()
+
+
+@pytest.mark.asyncio
+async def test_conversation_archive_routes_remain_available_to_admin(async_client):
+    files = await async_client.get("/api/conversation-archive/files")
+    assert files.status_code == 200
+    assert isinstance(files.json(), list)
+
+    records = await async_client.get(
+        "/api/conversation-archive/records",
+        params={"requestId": "admin-fixture"},
+    )
+    assert records.status_code == 200
+    payload = records.json()
+    assert payload["records"] == []
+    assert payload["total"] == 0
+    assert payload["hasMore"] is False
 
 
 @pytest.mark.asyncio
@@ -216,6 +271,70 @@ async def test_remote_proxy_denied_before_auth_is_configured(app_instance):
 
 
 @pytest.mark.asyncio
+async def test_untrusted_loopback_proxy_hint_does_not_bypass_proxy_auth(app_instance, monkeypatch):
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.STANDARD,
+        trust_proxy_headers=True,
+        trusted_proxy_cidrs="10.0.0.0/8",
+    )
+
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50001))
+        async with AsyncClient(transport=transport, base_url="http://localhost") as proxied_client:
+            response = await proxied_client.get(
+                "/v1/models",
+                headers={"X-Forwarded-For": "203.0.113.24"},
+            )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.parametrize(
+    ("forwarded_value", "expected_status"),
+    [("for=127.0.0.1", 200), ("for=203.0.113.24", 401)],
+    ids=["agreement", "conflict"],
+)
+@pytest.mark.asyncio
+async def test_proxy_family_consensus_controls_local_proxy_and_dashboard_access(
+    app_instance,
+    monkeypatch,
+    forwarded_value: str,
+    expected_status: int,
+) -> None:
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "10.0.0.2")
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.STANDARD,
+        trust_proxy_headers=True,
+        trusted_proxy_cidrs="10.0.0.0/8",
+    )
+
+    async with app_instance.router.lifespan_context(app_instance):
+        await _set_api_key_auth_enabled(False)
+        transport = ASGITransport(app=app_instance, client=("10.0.0.2", 50000))
+        async with AsyncClient(transport=transport, base_url="http://localhost") as client:
+            headers = [
+                ("X-Forwarded-For", "127.0.0.1"),
+                ("Forwarded", forwarded_value),
+            ]
+            proxy_response = await client.get("/v1/models", headers=headers)
+            dashboard_response = await client.post(
+                "/api/dashboard-auth/password/setup",
+                headers=headers,
+                json={"password": "password123"},
+            )
+
+    assert proxy_response.status_code == expected_status
+    assert dashboard_response.status_code == expected_status
+    if expected_status == 401:
+        assert proxy_response.json()["error"]["code"] == "invalid_api_key"
+        assert dashboard_response.json()["error"]["code"] == "invalid_bootstrap_token"
+
+
+@pytest.mark.asyncio
 async def test_proxy_unauthenticated_client_cidr_allows_explicit_remote_proxy_peer(app_instance, monkeypatch):
     _set_proxy_unauthenticated_client_cidrs_env(
         monkeypatch,
@@ -250,6 +369,86 @@ async def test_proxy_unauthenticated_client_cidr_does_not_allow_other_remote_pee
             spoofed = await remote_client.get("/v1/models", headers={"Host": "localhost"})
             assert spoofed.status_code == 401
             assert spoofed.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
+async def test_proxy_unauthenticated_client_cidr_rejects_projected_client_when_raw_peer_is_not_allowlisted(
+    app_instance,
+    monkeypatch,
+):
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    _set_proxy_unauthenticated_client_cidrs_env(
+        monkeypatch,
+        cidrs="192.168.65.1/32",
+    )
+
+    async with app_instance.router.lifespan_context(app_instance):
+        await _set_api_key_auth_enabled(False)
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50001))
+        async with AsyncClient(transport=transport, base_url="http://lb.example") as proxied_client:
+            response = await proxied_client.get(
+                "/v1/models",
+                headers={"X-Forwarded-For": "192.168.65.1"},
+            )
+
+    assert response.status_code == 401
+    payload = response.json()
+    assert payload["error"]["code"] == "invalid_api_key"
+    assert payload["error"]["message"] == "Proxy authentication must be configured before remote access is allowed"
+
+
+@pytest.mark.asyncio
+async def test_untrusted_loopback_proxy_hint_does_not_bypass_dashboard_bootstrap(app_instance, monkeypatch):
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.STANDARD,
+        trust_proxy_headers=True,
+        trusted_proxy_cidrs="10.0.0.0/8",
+    )
+    await get_settings_cache().invalidate()
+
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
+        async with AsyncClient(transport=transport, base_url="http://localhost") as proxied_client:
+            response = await proxied_client.post(
+                "/api/dashboard-auth/password/setup",
+                headers={"X-Forwarded-For": "203.0.113.24"},
+                json={"password": "password123"},
+            )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_bootstrap_token"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_forwarded_hint_does_not_bypass_direct_local_auth(app_instance, monkeypatch):
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.STANDARD,
+        trust_proxy_headers=False,
+    )
+    await get_settings_cache().invalidate()
+    forwarded_headers = [
+        ("X-Forwarded-For", ""),
+        ("X-Forwarded-For", "203.0.113.24"),
+    ]
+
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
+        async with AsyncClient(transport=transport, base_url="http://localhost") as proxied_client:
+            proxy_response = await proxied_client.get("/v1/models", headers=forwarded_headers)
+            bootstrap_response = await proxied_client.post(
+                "/api/dashboard-auth/password/setup",
+                headers=forwarded_headers,
+                json={"password": "password123"},
+            )
+
+    assert proxy_response.status_code == 401
+    assert proxy_response.json()["error"]["code"] == "invalid_api_key"
+    assert bootstrap_response.status_code == 401
+    assert bootstrap_response.json()["error"]["code"] == "invalid_bootstrap_token"
 
 
 @pytest.mark.asyncio
@@ -314,6 +513,59 @@ async def test_remote_first_run_requires_bootstrap_token(app_instance, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_separate_forwarded_field_cannot_spoof_local_first_run(app_instance, monkeypatch):
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.STANDARD,
+        trust_proxy_headers=True,
+    )
+    await get_settings_cache().invalidate()
+
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
+        async with AsyncClient(transport=transport, base_url="http://localhost") as proxied_client:
+            blocked = await proxied_client.post(
+                "/api/dashboard-auth/password/setup",
+                headers=[
+                    ("Forwarded", "for=127.0.0.1"),
+                    ("Forwarded", "for=203.0.113.24"),
+                ],
+                json={"password": "password123"},
+            )
+
+    assert blocked.status_code == 401
+    assert blocked.json()["error"]["code"] == "invalid_bootstrap_token"
+
+
+@pytest.mark.asyncio
+async def test_repeated_singleton_proxy_header_cannot_spoof_local_first_run(app_instance, monkeypatch):
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.STANDARD,
+        trust_proxy_headers=True,
+    )
+    await get_settings_cache().invalidate()
+
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
+        async with AsyncClient(transport=transport, base_url="http://localhost") as proxied_client:
+            blocked = await proxied_client.post(
+                "/api/dashboard-auth/password/setup",
+                headers=[
+                    ("X-Forwarded-For", "127.0.0.1"),
+                    ("X-Real-IP", "127.0.0.1"),
+                    ("X-Real-IP", "203.0.113.24"),
+                ],
+                json={"password": "password123"},
+            )
+
+    assert blocked.status_code == 401
+    assert blocked.json()["error"]["code"] == "invalid_bootstrap_token"
+
+
+@pytest.mark.asyncio
 async def test_passwordless_guest_access_allows_remote_reads_and_blocks_writes(app_instance):
     async with app_instance.router.lifespan_context(app_instance):
         local_transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
@@ -333,6 +585,7 @@ async def test_passwordless_guest_access_allows_remote_reads_and_blocks_writes(a
             assert session_payload["guestPasswordRequired"] is False
 
             await _assert_guest_write_denied(remote_client)
+            await _assert_guest_archive_read_denied(remote_client)
 
             passwordless_login = await remote_client.post("/api/dashboard-auth/guest/login", json={})
             assert passwordless_login.status_code == 200
@@ -451,6 +704,7 @@ async def test_guest_password_login_allows_remote_reads_and_blocks_writes(app_in
             assert refresh_payload["guestPasswordRequired"] is True
 
             await _assert_guest_write_denied(remote_client)
+            await _assert_guest_archive_read_denied(remote_client)
 
             totp_setup = await remote_client.post("/api/dashboard-auth/totp/setup/start", json={})
             assert totp_setup.status_code == 401

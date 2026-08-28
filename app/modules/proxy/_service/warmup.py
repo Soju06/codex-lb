@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -11,19 +12,26 @@ from uuid import uuid4
 
 import aiohttp
 
-from app.core.auth.refresh import RefreshError
-from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
+from app.core.auth.refresh import (
+    RefreshError,
+    is_transient_refresh_contention,
+    refresh_contention_kind,
+)
+from app.core.clients.proxy import ProxyResponseError, UpstreamProxyRouteTrace, filter_inbound_headers
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
+from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.db.models import Account, AccountStatus
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
-from app.modules.proxy._service.support import _request_log_useragent_fields
+from app.modules.proxy._service.support import _call_with_supported_optional_kwargs, _request_log_client_fields
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.request_policy import normalize_upstream_model_alias, validate_model_access
+
+logger = logging.getLogger(__name__)
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _WARMUP_MODES = frozenset({"normal", "strict", "force"})
@@ -43,6 +51,8 @@ class _WarmupServiceProtocol(Protocol):
     async def _ensure_fresh_with_budget(self, account: Account, *, timeout_seconds: float) -> Account: ...
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None: ...
+
+    async def _resolve_upstream_route_for_account(self, account: Account, *, operation: str) -> Any: ...
 
     async def _write_request_log(self, **kwargs: Any) -> None: ...
 
@@ -223,6 +233,7 @@ class _WarmupMixin:
 
         dashboard_settings = await get_settings_cache().get()
         configured_model = dashboard_settings.warmup_model
+        prohibit_fast_mode = dashboard_settings.prohibit_fast_mode
         effective_model = api_key.enforced_model if api_key and api_key.enforced_model else configured_model
         validate_model_access(api_key, effective_model)
         filtered_headers = filter_inbound_headers(headers)
@@ -236,7 +247,7 @@ class _WarmupMixin:
                     api_key=api_key,
                     headers=filtered_headers,
                     warmup_model=effective_model,
-                    allow_pre_submit_errors_as_result=len(accounts_to_submit) > 1,
+                    prohibit_fast_mode=prohibit_fast_mode,
                 )
 
         submission_results = await asyncio.gather(*(_submit_account_warmup(account) for account in accounts_to_submit))
@@ -287,10 +298,10 @@ class _WarmupMixin:
         api_key: ApiKeyData | None,
         headers: Mapping[str, str],
         warmup_model: str,
-        allow_pre_submit_errors_as_result: bool = False,
+        prohibit_fast_mode: bool,
     ) -> _WarmupSubmitResult:
         started_at = time.monotonic()
-        useragent, useragent_group = _request_log_useragent_fields(headers)
+        useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         live_account = _materialize_warmup_account(account)
         request_id = str(uuid4())
         upstream_headers = {
@@ -305,6 +316,11 @@ class _WarmupMixin:
         cached_input_tokens: int | None = None
         reasoning_tokens: int | None = None
         reservation: ApiKeyUsageReservationData | None = None
+        upstream_proxy_route_mode: str | None = None
+        upstream_proxy_pool_id: str | None = None
+        upstream_proxy_endpoint_id: str | None = None
+        upstream_proxy_fallback_used: bool | None = None
+        upstream_proxy_fail_closed_reason: str | None = None
         proxy = cast(_WarmupServiceProtocol, self)
 
         try:
@@ -312,19 +328,37 @@ class _WarmupMixin:
             live_account = await proxy._ensure_fresh_with_budget(live_account, timeout_seconds=refresh_timeout)
             access_token = proxy._encryptor.decrypt(live_account.access_token_encrypted)
             account_header_id = _header_account_id(live_account.chatgpt_account_id)
+            route = await proxy._resolve_upstream_route_for_account(live_account, operation="warmup")
+            if route is not None:
+                upstream_proxy_route_mode = route.mode
+                upstream_proxy_pool_id = route.pool_id
+                upstream_proxy_endpoint_id = route.endpoint_id
+            route_trace = UpstreamProxyRouteTrace()
             payload = ResponsesCompactRequest(
                 model=warmup_model,
                 instructions="Warmup request.",
                 input="warmup",
                 store=False,
             )
-            normalize_upstream_model_alias(payload)
-            response = await _service_core_compact_responses()(
+            normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
+            response = await _call_with_supported_optional_kwargs(
+                _service_core_compact_responses(),
                 payload,
                 upstream_headers,
                 access_token,
                 account_header_id,
+                optional_kwargs={
+                    "route": route,
+                    "allow_direct_egress": route is None,
+                    "route_trace": route_trace,
+                    "chatgpt_account_id": account_header_id,
+                },
             )
+            if route_trace.mode is not None:
+                upstream_proxy_route_mode = route_trace.mode
+                upstream_proxy_pool_id = route_trace.pool_id
+                upstream_proxy_endpoint_id = route_trace.endpoint_id
+                upstream_proxy_fallback_used = route_trace.fallback_used
             await proxy._load_balancer.record_success(live_account)
             status = "success"
             request_id = response.id or request_id
@@ -340,8 +374,39 @@ class _WarmupMixin:
         except RefreshError as exc:
             if exc.is_permanent:
                 await proxy._load_balancer.mark_permanent_failure(live_account, exc.code)
-            error_code = "invalid_api_key"
+                error_code = "invalid_api_key"
+            elif is_transient_refresh_contention(exc):
+                # Transient CROSS-REPLICA refresh contention. This covers BOTH
+                # benign claim contention (``refresh_claim_timeout``: a peer
+                # replica held the account's refresh claim past the wait budget)
+                # AND a post-exchange guarded-write CAS conflict
+                # (``token_persist_conflict`` / ``status_downgrade_conflict``).
+                # In every case the account's OAuth credentials are healthy, so it
+                # MUST surface as a retryable ``upstream_unavailable`` (matching
+                # the five core proxy request paths) rather than a bogus
+                # ``invalid_api_key`` that presents a healthy account as an auth
+                # failure in the warmup result and request log. No health penalty
+                # is applied (mirroring those paths). A post-exchange persist
+                # conflict is the rarer, more-serious race, so it is logged
+                # distinctly from benign contention.
+                if refresh_contention_kind(exc) == "persist_conflict":
+                    logger.warning(
+                        "Warmup refresh post-exchange persist conflict code=%s request_id=%s account_id=%s",
+                        exc.code,
+                        request_id,
+                        live_account.id,
+                    )
+                error_code = "upstream_unavailable"
+            else:
+                # A genuine OAuth transport failure (``code == "transport_error"``)
+                # or any other non-permanent refresh failure keeps the prior
+                # ``invalid_api_key`` classification.
+                error_code = "invalid_api_key"
             error_message = exc.message
+        except UpstreamProxyRouteError as exc:
+            upstream_proxy_fail_closed_reason = exc.reason
+            error_code = "upstream_proxy_unavailable"
+            error_message = str(exc) or "Warmup upstream proxy route is unavailable"
         except ProxyResponseError as exc:
             await proxy._handle_proxy_error(live_account, exc)
             error = _parse_openai_error(exc.payload)
@@ -356,13 +421,9 @@ class _WarmupMixin:
         except ProxyAuthError as exc:
             error_code = "auth_error"
             error_message = str(exc) or "Warmup authentication failed"
-            if not allow_pre_submit_errors_as_result:
-                raise
         except ProxyRateLimitError as exc:
             error_code = "rate_limit_exceeded"
             error_message = str(exc) or "Warmup request was rate limited"
-            if not allow_pre_submit_errors_as_result:
-                raise
         except Exception as exc:
             error_code = "upstream_error"
             error_message = str(exc) or "Warmup request failed"
@@ -383,8 +444,14 @@ class _WarmupMixin:
                     reasoning_tokens=reasoning_tokens,
                     transport=_REQUEST_TRANSPORT_HTTP,
                     request_kind="warmup",
+                    upstream_proxy_route_mode=upstream_proxy_route_mode,
+                    upstream_proxy_pool_id=upstream_proxy_pool_id,
+                    upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
+                    upstream_proxy_fallback_used=upstream_proxy_fallback_used,
+                    upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
                     useragent=useragent,
                     useragent_group=useragent_group,
+                    conversation_id=conversation_id,
                 )
             finally:
                 await proxy._release_websocket_reservation(reservation)

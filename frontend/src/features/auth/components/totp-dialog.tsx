@@ -1,5 +1,6 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
+import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,7 @@ export type TotpDialogProps = {
 };
 
 export function TotpDialog({ open }: TotpDialogProps) {
+  const { t } = useTranslation();
   const loading = useAuthStore((state) => state.loading);
   const error = useAuthStore((state) => state.error);
   const clearError = useAuthStore((state) => state.clearError);
@@ -51,8 +53,8 @@ export function TotpDialog({ open }: TotpDialogProps) {
         onInteractOutside={(event) => event.preventDefault()}
       >
         <DialogHeader>
-          <DialogTitle>Two-factor verification</DialogTitle>
-          <DialogDescription>Enter the 6-digit code from your authenticator app.</DialogDescription>
+          <DialogTitle>{t("auth.totp.title")}</DialogTitle>
+          <DialogDescription>{t("auth.totp.description")}</DialogDescription>
         </DialogHeader>
 
         <Form {...form}>
@@ -62,7 +64,7 @@ export function TotpDialog({ open }: TotpDialogProps) {
               name="code"
               render={({ field }) => (
                 <FormItem className="flex flex-col items-center gap-2">
-                  <FormLabel className="sr-only">TOTP code</FormLabel>
+                  <FormLabel className="sr-only">{t("auth.totp.codeLabel")}</FormLabel>
                   <FormControl>
                     <InputOTP
                       maxLength={6}
@@ -93,7 +95,7 @@ export function TotpDialog({ open }: TotpDialogProps) {
 
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? <Spinner size="sm" className="mr-2" /> : null}
-              Verify
+              {t("auth.totp.submit")}
             </Button>
           </form>
         </Form>

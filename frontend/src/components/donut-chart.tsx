@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Cell, Pie, PieChart, Sector, type PieSectorShapeProps } from "@/components/lazy-recharts";
 
 import { buildDonutPalette } from "@/utils/colors";
@@ -108,6 +109,7 @@ function formatUsedPercent(percent: number): string {
 }
 
 export function DonutChart({ items, total, centerValue, title, subtitle, safeLine, centerLayout = "remaining" }: DonutChartProps) {
+  const { t } = useTranslation();
   const isDark = useThemeStore((s) => s.theme === "dark");
   const blurred = usePrivacyStore((s) => s.blurred);
   const reducedMotion = useReducedMotion();
@@ -171,13 +173,13 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
   };
 
   return (
-    <div className="rounded-xl border bg-card p-5">
+    <div className="min-w-0 rounded-xl border bg-card p-5">
       <div className="mb-5">
         <h3 className="text-sm font-semibold">{title}</h3>
         {subtitle ? <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p> : null}
       </div>
 
-      <div className="flex items-center gap-6">
+      <div className="flex min-w-0 items-center gap-6">
         <div className="flex shrink-0 flex-col items-center gap-2">
           <div className="relative h-[152px] w-[152px] overflow-visible">
             <PieChart width={CHART_SIZE} height={CHART_SIZE} margin={{ top: CHART_MARGIN, right: CHART_MARGIN, bottom: CHART_MARGIN, left: CHART_MARGIN }}>
@@ -226,7 +228,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
              <div>
                {centerLayout === "credits" ? (
                  <>
-                   <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Credits</p>
+                   <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{t("components.donut.credits")}</p>
                    <p
                      className="text-sm font-semibold tabular-nums leading-tight"
                      data-testid="donut-center-remaining"
@@ -243,7 +245,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
                  </>
                ) : (
                  <>
-                   <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Remaining</p>
+                   <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{t("components.donut.remaining")}</p>
                    <p className="text-base font-semibold tabular-nums">{formatCompactNumber(displayTotal)}</p>
                  </>
                )}
@@ -251,12 +253,15 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
           </div>
           </div>
           <p className="text-[11px] tabular-nums text-muted-foreground" data-testid="donut-caption">
-            Total {formatCompactNumber(safeCapacity)} · {formatUsedPercent(usedPercent)} used
+            {t("components.donut.caption", {
+              total: formatCompactNumber(safeCapacity),
+              used: formatUsedPercent(usedPercent),
+            })}
           </p>
         </div>
 
         <div
-          className="flex-1 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="min-w-0 flex-1 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           data-testid="donut-legend-list"
           style={{ maxHeight: `calc(${LEGEND_VISIBLE_COUNT} * ${LEGEND_ROW_HEIGHT_REM}rem + ${(LEGEND_VISIBLE_COUNT - 1) * LEGEND_ROW_GAP_REM}rem)` }}
         >
@@ -318,7 +323,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
                 className="h-2.5 w-2.5 shrink-0 rounded-full"
                 style={{ backgroundColor: consumedColor }}
               />
-              <span className="truncate font-medium">Used</span>
+              <span className="truncate font-medium">{t("components.donut.used")}</span>
             </div>
             <span className="tabular-nums text-muted-foreground" data-testid="donut-used-value">
               {formatCompactNumber(consumed)}

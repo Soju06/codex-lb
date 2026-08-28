@@ -142,5 +142,14 @@ class CompactResponsePayload(BaseModel):
         return _normalize_model_value(ResponseUsage, value)
 
 
+def normalize_compaction_item_id(item_id: object) -> str | None:
+    """Return a valid compaction ID without changing opaque upstream identity."""
+    if not isinstance(item_id, str):
+        return None
+    if item_id.startswith("cmp_"):
+        return item_id
+    return None
+
+
 OpenAIResponseResult: TypeAlias = OpenAIResponsePayload | OpenAIErrorEnvelope
 CompactResponseResult: TypeAlias = CompactResponsePayload | OpenAIErrorEnvelope

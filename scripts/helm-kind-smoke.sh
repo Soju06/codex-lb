@@ -28,6 +28,42 @@ wait_for_release() {
   helm test "${release}" --namespace "${namespace}" --kube-context "${KUBE_CONTEXT}" --timeout "${HELM_TEST_TIMEOUT}"
 }
 
+assert_bridge_ring() {
+  local release="$1"
+  local namespace="$2"
+  local expected_replicas="$3"
+  local workload="${release}-workload"
+
+  log_step "asserting ${expected_replicas} Ready pods for ${workload}"
+  local ordinal
+  for ((ordinal = 0; ordinal < expected_replicas; ordinal++)); do
+    kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" wait \
+      --for=condition=Ready "pod/${workload}-${ordinal}" --timeout=300s
+  done
+
+  log_step "asserting bridge ring size ${expected_replicas} via /health/ready on ${workload}-0"
+  local probe_output
+  probe_output=$(kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" exec -i "${workload}-0" -c codex-lb -- \
+    python - "${expected_replicas}" <<'PY'
+import json
+import sys
+import urllib.request
+
+expected = int(sys.argv[1])
+payload = json.loads(urllib.request.urlopen("http://127.0.0.1:2455/health/ready", timeout=10).read())
+ring = payload.get("bridge_ring") or {}
+assert ring.get("ring_size") == expected, f"bridge ring size {ring.get('ring_size')} != {expected}: {ring}"
+assert ring.get("is_member") is True, f"probed pod is not an active ring member: {ring}"
+print(f"bridge ring ok: {ring}")
+PY
+)
+  if [[ "${probe_output}" != "bridge ring ok:"* ]]; then
+    echo "[helm-kind-smoke] bridge ring probe emitted no confirmation (stdin not forwarded to python?): '${probe_output}'" >&2
+    return 1
+  fi
+  log_step "${probe_output}"
+}
+
 dump_namespace_debug() {
   local namespace="$1"
   echo "[helm-kind-smoke] dumping namespace state for ${namespace}" >&2
@@ -131,10 +167,11 @@ PY
     --set test.image.tag="${IMAGE_TAG}" \
     --set test.image.pullPolicy=IfNotPresent \
     --set auth.existingSecret="${app_secret}" \
-    --set replicaCount=1 \
+    --set replicaCount=2 \
     --wait \
     --timeout 10m
 
+  assert_bridge_ring "${release}" "${namespace}" 2
   wait_for_release "${release}" "${namespace}"
   trap - ERR
 }

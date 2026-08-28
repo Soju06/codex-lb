@@ -1,0 +1,5 @@
+- [x] Track and clean up unsent HTTP bridge admission waiters.
+- [x] Defer reader retirement and pruning while a waiter owns the handoff.
+- [x] Reconnect the retained session before sending an admitted waiter.
+- [x] Add regression coverage for the upstream-close/admission race.
+- [x] Run focused tests, lint, and OpenSpec validation.

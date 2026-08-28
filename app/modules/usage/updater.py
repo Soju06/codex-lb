@@ -5,31 +5,43 @@ import contextlib
 import logging
 import math
 import time
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Hashable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping, Protocol, cast
+from typing import Final, Mapping, Protocol, cast
 
 from app.core import usage as usage_core
 from app.core.auth.refresh import RefreshError
 from app.core.balancer import (
     PERMANENT_FAILURE_CODES,
     QUOTA_EXCEEDED_COOLDOWN_SECONDS,
+    RATE_LIMITED_MIN_COOLDOWN_SECONDS,
     account_status_for_permanent_failure,
+    plausible_rate_limit_reset_at,
 )
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
-from app.core.plan_types import coerce_account_plan_type
+from app.core.plan_types import ACCOUNT_PLAN_TYPES, coerce_account_plan_type, normalize_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.usage.models import AdditionalRateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
+from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
+from app.modules.accounts.background_repository import BackgroundAccountsRepository
+from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
-from app.modules.usage.repository import AdditionalUsageRepository
+from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
+from app.modules.usage.plan_downgrade_observations import (
+    InMemoryPlanDowngradeObservationStore,
+    PlanDowngradeObservationStorePort,
+    credential_fingerprint,
+    get_plan_downgrade_observation_store,
+)
+from app.modules.usage.repository import AdditionalUsageRepository, UsageWindowWrite
 
 logger = logging.getLogger(__name__)
 
@@ -42,20 +54,13 @@ class UsageRepositoryPort(Protocol):
         window: str | None = None,
     ) -> UsageHistory | None: ...
 
-    async def add_entry(
+    async def add_account_snapshot(
         self,
         account_id: str,
-        used_percent: float,
-        input_tokens: int | None = None,
-        output_tokens: int | None = None,
+        windows: Collection[UsageWindowWrite],
+        *,
         recorded_at: datetime | None = None,
-        window: str | None = None,
-        reset_at: int | None = None,
-        window_minutes: int | None = None,
-        credits_has: bool | None = None,
-        credits_unlimited: bool | None = None,
-        credits_balance: float | None = None,
-    ) -> UsageHistory | None: ...
+    ) -> list[UsageHistory]: ...
 
 
 class AdditionalUsageRepositoryPort(Protocol):
@@ -122,6 +127,7 @@ class AccountsRepositoryWithStatusComparePort(AccountsRepositoryPort, Protocol):
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool: ...
 
 
@@ -146,15 +152,31 @@ class _MergedAdditionalWindow:
 _last_successful_refresh: dict[str, datetime] = {}
 _usage_refresh_auth_cooldowns: dict[str, float] = {}
 
+# Fallback for consecutive workspace-less "free" observations (issue #1456) used
+# only when persistence is explicitly disabled -- the DB-less unit-test harness.
+# The process default is the database-backed
+# :class:`PlanDowngradeObservationStore`, so the observation sequence stays
+# coherent across replicas sharing one database; this fallback preserves
+# single-process behavior instead of dropping the guard when no database is
+# available.
+_FALLBACK_PLAN_DOWNGRADE_OBSERVATIONS = InMemoryPlanDowngradeObservationStore()
+
+# Number of consecutive agreeing observations required before a workspace-less
+# paid -> free downgrade is persisted. Deliberately a constant rather than a
+# CODEX_LB_* setting: two observations is the minimum that distinguishes a real
+# expiry from a single degraded response, and operators gain nothing from tuning
+# it (PRINCIPLES.md P2, settings-surface ratchet in issue #1340).
+_FREE_PLAN_DOWNGRADE_CONFIRMATIONS: Final[int] = 2
+
 
 class _UsageRefreshSingleflight:
     def __init__(self) -> None:
-        self._inflight: dict[str, asyncio.Task[AccountRefreshResult]] = {}
+        self._inflight: dict[Hashable, asyncio.Task[AccountRefreshResult]] = {}
         self._lock = asyncio.Lock()
 
     async def run(
         self,
-        account_id: str,
+        account_id: Hashable,
         factory: Callable[[], Awaitable[AccountRefreshResult]],
         *,
         join_existing: bool = True,
@@ -176,14 +198,14 @@ class _UsageRefreshSingleflight:
             if wait_for_existing is None:
                 break
             try:
-                await asyncio.shield(wait_for_existing)
+                await wait_on_shared_future(wait_for_existing)
             except asyncio.CancelledError:
                 current_task = asyncio.current_task()
                 if current_task is not None and current_task.cancelling():
                     raise
             except Exception:
                 pass
-        return await asyncio.shield(task)
+        return await wait_on_shared_future(task)
 
     async def _run_factory(
         self,
@@ -193,7 +215,7 @@ class _UsageRefreshSingleflight:
 
     def _clear_if_current(
         self,
-        key: str,
+        key: Hashable,
         task: asyncio.Task[AccountRefreshResult],
     ) -> None:
         current = self._inflight.get(key)
@@ -222,29 +244,54 @@ class _UsageRefreshSingleflight:
 _USAGE_REFRESH_SINGLEFLIGHT = _UsageRefreshSingleflight()
 
 
+def _usage_refresh_singleflight_key(
+    account_id: str,
+    *,
+    own_singleflight_session: bool = False,
+) -> str | tuple[str, str]:
+    return ("owned-session", account_id) if own_singleflight_session else account_id
+
+
 class UsageUpdater:
     def __init__(
         self,
         usage_repo: UsageRepositoryPort,
         accounts_repo: AccountsRepositoryPort | None = None,
         additional_usage_repo: AdditionalUsageRepositoryPort | AdditionalUsageRepository | None = None,
+        *,
+        auth_manager: AuthManager | None = None,
     ) -> None:
         self._usage_repo = usage_repo
         self._accounts_repo = accounts_repo
         self._additional_usage_repo = additional_usage_repo
-        self._accounts_repo = accounts_repo
         self._encryptor = TokenEncryptor()
-        self._auth_manager = AuthManager(accounts_repo) if accounts_repo else None
+        self._auth_manager = (
+            auth_manager if auth_manager is not None else AuthManager(accounts_repo) if accounts_repo else None
+        )
 
     async def refresh_accounts(
         self,
         accounts: list[Account],
         latest_usage: Mapping[str, UsageHistory],
+        *,
+        own_singleflight_sessions: bool = False,
+        join_existing: bool | None = None,
     ) -> bool:
-        """Refresh usage for all accounts. Returns True if usage rows were written."""
+        """Refresh usage for all accounts. Returns True if usage rows were written.
+
+        ``own_singleflight_sessions`` makes each detached singleflight refresh
+        acquire and release its own DB session instead of using this updater's
+        caller-bound repositories. ``join_existing`` controls whether a caller
+        joins an in-flight refresh for the same key (deduplication) or waits
+        and forces a fresh one; it defaults to the historical coupling
+        ``not own_singleflight_sessions`` so existing callers keep their
+        semantics.
+        """
         settings = get_settings()
         if not settings.usage_refresh_enabled:
             return False
+        if join_existing is None:
+            join_existing = not own_singleflight_sessions
 
         refreshed = False
         now = utcnow()
@@ -257,7 +304,12 @@ class UsageUpdater:
                 continue
             latest = await self._freshness_usage_entry(account, latest_usage.get(account.id))
             bypass_freshness = _quota_recovery_should_bypass_freshness(account, latest=latest)
-            if not bypass_freshness and _latest_usage_is_fresh(latest, now=now, interval_seconds=interval):
+            if not bypass_freshness and await self._usage_is_fresh_with_siblings(
+                account,
+                latest,
+                now=now,
+                interval_seconds=interval,
+            ):
                 continue
             # Additional-only accounts have no main UsageHistory entry.
             # Check DB-backed freshness (works across workers/restarts)
@@ -285,15 +337,33 @@ class UsageUpdater:
             # within the request-scoped session to avoid PK collisions and
             # flush-time warnings (SAWarning: Session.add during flush).
             try:
+                if own_singleflight_sessions:
+
+                    async def refresh_factory(account_id: str = account.id) -> AccountRefreshResult:
+                        return await self._refresh_account_if_stale_with_owned_session(
+                            account_id,
+                            interval_seconds=interval,
+                        )
+
+                else:
+
+                    async def refresh_factory(account: Account = account) -> AccountRefreshResult:
+                        return await self._refresh_account_if_stale(
+                            account,
+                            usage_account_id=account.chatgpt_account_id,
+                            interval_seconds=interval,
+                        )
+
                 result = await _USAGE_REFRESH_SINGLEFLIGHT.run(
-                    account.id,
-                    lambda account=account: self._refresh_account_if_stale(
-                        account,
-                        usage_account_id=account.chatgpt_account_id,
-                        interval_seconds=interval,
+                    _usage_refresh_singleflight_key(
+                        account.id,
+                        own_singleflight_session=own_singleflight_sessions,
                     ),
+                    refresh_factory,
+                    join_existing=join_existing,
                 )
-                await self._sync_account_from_repo(account)
+                if join_existing:
+                    await self._sync_account_from_repo(account)
                 refreshed = refreshed or result.usage_written
                 # Only cache when the upstream fetch actually succeeded.
                 # Transient errors (401 retry failure, 5xx, etc.) must not
@@ -313,19 +383,41 @@ class UsageUpdater:
                 continue
         return refreshed
 
-    async def force_refresh(self, account: Account) -> bool:
+    async def force_refresh(
+        self,
+        account: Account,
+        *,
+        ignore_refresh_disabled: bool = False,
+        access_token_override: str | None = None,
+    ) -> bool:
         """Refresh one account regardless of cached/fresh usage rows."""
+        result = await self.force_refresh_result(
+            account,
+            ignore_refresh_disabled=ignore_refresh_disabled,
+            access_token_override=access_token_override,
+        )
+        return result.usage_written
+
+    async def force_refresh_result(
+        self,
+        account: Account,
+        *,
+        ignore_refresh_disabled: bool = False,
+        access_token_override: str | None = None,
+    ) -> AccountRefreshResult:
+        """Refresh one account and expose whether the upstream fetch completed."""
         settings = get_settings()
-        if not settings.usage_refresh_enabled:
-            return False
+        if not settings.usage_refresh_enabled and not ignore_refresh_disabled:
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
         if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
-            return False
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
         try:
             result = await _USAGE_REFRESH_SINGLEFLIGHT.run(
                 account.id,
                 lambda: self._refresh_account(
                     account,
                     usage_account_id=account.chatgpt_account_id,
+                    access_token_override=access_token_override,
                 ),
                 join_existing=False,
             )
@@ -333,7 +425,7 @@ class UsageUpdater:
             if result.fetch_succeeded:
                 _last_successful_refresh[account.id] = utcnow()
                 _clear_usage_refresh_auth_cooldown(account.id)
-            return result.usage_written
+            return result
         except Exception as exc:
             logger.warning(
                 "Forced usage refresh failed account_id=%s request_id=%s error=%s",
@@ -342,7 +434,7 @@ class UsageUpdater:
                 exc,
                 exc_info=True,
             )
-            return False
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
     async def _refresh_account_if_stale(
         self,
@@ -353,16 +445,34 @@ class UsageUpdater:
     ) -> AccountRefreshResult:
         primary_latest = await self._usage_repo.latest_entry_for_account(account.id, window="primary")
         latest = await self._freshness_usage_entry(account, primary_latest)
-        if not _quota_recovery_should_bypass_freshness(account, latest=latest) and _latest_usage_is_fresh(
-            latest,
-            now=utcnow(),
-            interval_seconds=interval_seconds,
-        ):
-            return AccountRefreshResult(usage_written=False)
+        if not _quota_recovery_should_bypass_freshness(account, latest=latest):
+            if await self._usage_is_fresh_with_siblings(
+                account,
+                latest,
+                now=utcnow(),
+                interval_seconds=interval_seconds,
+            ):
+                return AccountRefreshResult(usage_written=False)
         return await self._refresh_account(
             account,
             usage_account_id=usage_account_id,
         )
+
+    async def _additional_usage_is_stale(self, account_id: str, *, now: datetime, interval_seconds: int) -> bool:
+        # The upstream fetch is the only path that syncs additional
+        # (per-model) rate limits; live main-window rows must not keep an
+        # account "fresh" while its additional rows age past the interval,
+        # or gated-model routing starves on additional_quota_data_unavailable.
+        if self._additional_usage_repo is None:
+            return False
+        latest_at = await self._additional_usage_repo.latest_recorded_at_for_account(account_id)
+        if latest_at is None:
+            # No additional rows ever fetched: live rows alone must not
+            # suppress the fetch, or a first gated-model use would never be
+            # discovered. Non-gated accounts simply keep the pre-live poll
+            # cadence.
+            return True
+        return (now - latest_at).total_seconds() >= interval_seconds
 
     async def _freshness_usage_entry(self, account: Account, latest: UsageHistory | None) -> UsageHistory | None:
         if latest is not None:
@@ -371,13 +481,83 @@ class UsageUpdater:
             return None
         return await self._usage_repo.latest_entry_for_account(account.id, window="monthly")
 
+    async def _usage_is_fresh_with_siblings(
+        self,
+        account: Account,
+        latest: UsageHistory | None,
+        *,
+        now: datetime,
+        interval_seconds: int,
+    ) -> bool:
+        if _latest_usage_is_fresh(latest, now=now, interval_seconds=interval_seconds):
+            return not await self._additional_usage_is_stale(account.id, now=now, interval_seconds=interval_seconds)
+        # A stale (or elapsed-reset) newest row of one window must not
+        # permanently defeat freshness once upstream stops reporting that
+        # window: a strictly newer sibling-window row proves a later fetch
+        # happened without rewriting the stale window, so the newest row's
+        # own freshness governs the account instead. When no primary-slot
+        # row exists at all (upstream omitted the short window from the
+        # first fetch), any sibling row is that proof.
+        newest = latest
+        for window in _MAIN_USAGE_WINDOWS:
+            if latest is not None and window == latest.window:
+                continue
+            if window == "monthly" and usage_core.capacity_for_plan(account.plan_type, "monthly") is None:
+                # A lingering monthly row from a former plan (e.g. after a
+                # free-to-paid upgrade) is not applicable usage and must not
+                # suppress refreshes.
+                continue
+            sibling = await self._usage_repo.latest_entry_for_account(account.id, window=window)
+            if sibling is not None and (newest is None or sibling.recorded_at > newest.recorded_at):
+                newest = sibling
+        if newest is None or newest is latest:
+            return False
+        if (
+            latest is not None
+            and (newest.recorded_at - latest.recorded_at).total_seconds() <= usage_core.SIBLING_FETCH_MARGIN_SECONDS
+        ):
+            return False
+        if not _latest_usage_is_fresh(newest, now=now, interval_seconds=interval_seconds):
+            return False
+        return not await self._additional_usage_is_stale(account.id, now=now, interval_seconds=interval_seconds)
+
+    async def _refresh_account_if_stale_with_owned_session(
+        self,
+        account_id: str,
+        *,
+        interval_seconds: int,
+    ) -> AccountRefreshResult:
+        @contextlib.asynccontextmanager
+        async def refresh_repo_factory():
+            yield BackgroundAccountsRepository()
+
+        accounts_repo = BackgroundAccountsRepository()
+        usage_repo = BackgroundUsageRepository()
+        additional_usage_repo = BackgroundAdditionalUsageRepository()
+        account = await accounts_repo.get_by_id(account_id)
+        if account is None:
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+        return await UsageUpdater(
+            usage_repo,
+            accounts_repo,
+            additional_usage_repo,
+            auth_manager=AuthManager(accounts_repo, refresh_repo_factory=refresh_repo_factory),
+        )._refresh_account_if_stale(
+            account,
+            usage_account_id=account.chatgpt_account_id,
+            interval_seconds=interval_seconds,
+        )
+
     async def _refresh_account(
         self,
         account: Account,
         *,
         usage_account_id: str | None,
+        access_token_override: str | None = None,
     ) -> AccountRefreshResult:
-        access_token = self._encryptor.decrypt(account.access_token_encrypted)
+        access_token = access_token_override or self._encryptor.decrypt(account.access_token_encrypted)
         payload: UsagePayload | None = None
         try:
             route = await _resolve_upstream_route_for_account(account, operation="usage_refresh")
@@ -398,6 +578,9 @@ class UsageUpdater:
         except UsageFetchError as exc:
             if _should_deactivate_for_usage_error(exc):
                 await self._deactivate_for_client_error(account, exc)
+                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+            if access_token_override is not None:
+                _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             if exc.status_code != 401 or not self._auth_manager:
                 _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
@@ -434,7 +617,7 @@ class UsageUpdater:
         if payload is None:
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
-        if _payload_mismatches_account_slot(account, payload):
+        if await _payload_mismatches_account_slot(account, payload):
             logger.warning(
                 "Usage refresh payload identity mismatch; skipping account mutation "
                 "account_id=%s stored_workspace_id=%s payload_workspace_id=%s stored_plan_type=%s "
@@ -531,49 +714,49 @@ class UsageUpdater:
             additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
             return AccountRefreshResult(usage_written=additional_synced)
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
-        usage_written = False
+        snapshot_windows: list[UsageWindowWrite] = []
 
         if primary and primary.used_percent is not None:
-            entry = await self._usage_repo.add_entry(
-                account_id=account.id,
-                used_percent=float(primary.used_percent),
-                input_tokens=None,
-                output_tokens=None,
-                window="primary",
-                reset_at=_reset_at(primary.reset_at, primary.reset_after_seconds, now_epoch),
-                window_minutes=_window_minutes(primary.limit_window_seconds),
-                credits_has=credits_has,
-                credits_unlimited=credits_unlimited,
-                credits_balance=credits_balance,
+            snapshot_windows.append(
+                UsageWindowWrite(
+                    window="primary",
+                    used_percent=float(primary.used_percent),
+                    reset_at=_reset_at(primary.reset_at, primary.reset_after_seconds, now_epoch),
+                    window_minutes=_window_minutes(primary.limit_window_seconds),
+                    credits_has=credits_has,
+                    credits_unlimited=credits_unlimited,
+                    credits_balance=credits_balance,
+                )
             )
-            usage_written = usage_written or _usage_entry_written(entry)
 
         if secondary and secondary.used_percent is not None:
-            entry = await self._usage_repo.add_entry(
-                account_id=account.id,
-                used_percent=float(secondary.used_percent),
-                input_tokens=None,
-                output_tokens=None,
-                window="secondary",
-                reset_at=_reset_at(secondary.reset_at, secondary.reset_after_seconds, now_epoch),
-                window_minutes=_window_minutes(secondary.limit_window_seconds),
+            snapshot_windows.append(
+                UsageWindowWrite(
+                    window="secondary",
+                    used_percent=float(secondary.used_percent),
+                    reset_at=_reset_at(secondary.reset_at, secondary.reset_after_seconds, now_epoch),
+                    window_minutes=_window_minutes(secondary.limit_window_seconds),
+                )
             )
-            usage_written = usage_written or _usage_entry_written(entry)
 
         if monthly and monthly.used_percent is not None:
-            entry = await self._usage_repo.add_entry(
-                account_id=account.id,
-                used_percent=float(monthly.used_percent),
-                input_tokens=None,
-                output_tokens=None,
-                window="monthly",
-                reset_at=_reset_at(monthly.reset_at, monthly.reset_after_seconds, now_epoch),
-                window_minutes=_window_minutes(monthly.limit_window_seconds),
-                credits_has=credits_has,
-                credits_unlimited=credits_unlimited,
-                credits_balance=credits_balance,
+            snapshot_windows.append(
+                UsageWindowWrite(
+                    window="monthly",
+                    used_percent=float(monthly.used_percent),
+                    reset_at=_reset_at(monthly.reset_at, monthly.reset_after_seconds, now_epoch),
+                    window_minutes=_window_minutes(monthly.limit_window_seconds),
+                    credits_has=credits_has,
+                    credits_unlimited=credits_unlimited,
+                    credits_balance=credits_balance,
+                )
             )
-            usage_written = usage_written or _usage_entry_written(entry)
+
+        entries = await self._usage_repo.add_account_snapshot(
+            account.id,
+            snapshot_windows,
+        )
+        usage_written = any(_usage_entry_written(entry) for entry in entries)
         await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
         return AccountRefreshResult(usage_written=usage_written)
 
@@ -598,6 +781,8 @@ class UsageUpdater:
         await self._auth_manager._repo.update_status(account.id, status, reason)
         account.status = status
         account.deactivation_reason = reason
+        mark_account_routing_unavailable(account.id)
+        get_account_selection_cache().invalidate()
 
     async def _sync_identity_metadata(self, account: Account, payload: UsagePayload) -> bool:
         next_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
@@ -635,12 +820,13 @@ class UsageUpdater:
         if not self._auth_manager:
             return True
 
-        await self._auth_manager._repo.update_tokens(
+        # Identity/plan/workspace sync only. This runs against a stale in-memory
+        # ``account`` snapshot taken well before the write, so it MUST route
+        # through the metadata-only writer, which structurally cannot touch
+        # token ciphertext. Persisting token material from this snapshot would
+        # clobber a peer replica's concurrent refresh-token rotation.
+        await self._auth_manager._repo.update_account_metadata(
             account.id,
-            access_token_encrypted=account.access_token_encrypted,
-            refresh_token_encrypted=account.refresh_token_encrypted,
-            id_token_encrypted=account.id_token_encrypted,
-            last_refresh=account.last_refresh,
             plan_type=account.plan_type,
             email=account.email,
             chatgpt_account_id=account.chatgpt_account_id,
@@ -661,6 +847,23 @@ class UsageUpdater:
         if not self._auth_manager:
             return
         if account.status == AccountStatus.RATE_LIMITED:
+            if account.blocked_at is not None:
+                # An account marked RATE_LIMITED by an actual 429 always
+                # carries a blocked_at marker. Honor the persisted cooldown
+                # deadline (Retry-After hint, upstream reset metadata, or the
+                # backoff floor) so the periodic usage refresh cannot flip the
+                # account back to ACTIVE — erasing reset_at that peer replicas
+                # rely on — while the upstream cooldown is still running.
+                # Fresh usage showing quota is not evidence the 429 window
+                # ended: throttles are not always quota-based. Rows without
+                # blocked_at are stale window-derived markings and keep the
+                # fresh-usage recovery below.
+                now = time.time()
+                cooldown_deadline = plausible_rate_limit_reset_at(account.reset_at, now=now) or (
+                    float(account.blocked_at) + RATE_LIMITED_MIN_COOLDOWN_SECONDS
+                )
+                if now < cooldown_deadline:
+                    return
             long_window = monthly or secondary
             if primary is None and monthly is None:
                 return
@@ -717,7 +920,9 @@ class UsageUpdater:
     async def _sync_account_from_repo(self, account: Account) -> None:
         if not self._accounts_repo:
             return
-        stored = await self._accounts_repo.get_by_id(account.id)
+        # Joined owned-session refreshes run in a different session.  A plain
+        # get_by_id() can return the caller session's stale identity-map row.
+        stored = await self._accounts_repo.get_by_id_fresh(account.id)
         if stored is None:
             return
         account.chatgpt_account_id = stored.chatgpt_account_id
@@ -736,6 +941,16 @@ class UsageUpdater:
         account.blocked_at = stored.blocked_at
 
 
+def build_background_usage_updater() -> UsageUpdater:
+    accounts_repo = BackgroundAccountsRepository()
+    return UsageUpdater(
+        BackgroundUsageRepository(),
+        accounts_repo=accounts_repo,
+        additional_usage_repo=BackgroundAdditionalUsageRepository(),
+        auth_manager=AuthManager(accounts_repo),
+    )
+
+
 def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, float | None]:
     credits = payload.credits
     if credits is None:
@@ -746,16 +961,137 @@ def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, 
     return credits_has, credits_unlimited, _parse_credits_balance(balance_value)
 
 
-def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) -> bool:
+async def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) -> bool:
     payload_workspace_id = _clean_optional(payload.workspace_id)
     if account.workspace_id and payload_workspace_id and account.workspace_id != payload_workspace_id:
+        # The payload reports a different workspace slot than the one this
+        # account is bound to; refuse to write another workspace's usage/plan.
+        # This guard is unconditional: repetition never makes a conflicting
+        # workspace identity trustworthy.
         return True
-    if not payload_workspace_id:
+    if not payload_workspace_id and payload.plan_type:
         payload_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
+        normalized_payload_plan_type = normalize_account_plan_type(payload.plan_type)
         stored_plan_type = coerce_account_plan_type(account.plan_type, "free")
-        if payload.plan_type and stored_plan_type not in {"unknown", ""} and payload_plan_type != stored_plan_type:
+        recognized_paid_plans = ACCOUNT_PLAN_TYPES - {"free"}
+        # A transition from free into a recognized paid plan (e.g. Free -> Plus)
+        # or between paid plans (e.g. Plus -> Pro) is a legitimate plan change,
+        # not an identity mismatch: the usage payload carries no independent
+        # account identifier and is fetched per-account token, so plan_type alone
+        # cannot establish identity. A workspace-less payload that instead
+        # introduces "free" or an unrecognized plan stays untrusted -- the
+        # signature of a degraded or wrong-identity usage response that must not
+        # silently rewrite the stored plan.
+        if payload_plan_type != stored_plan_type and not (
+            stored_plan_type == "unknown"
+            and normalized_payload_plan_type in recognized_paid_plans
+            or (
+                not account.workspace_id
+                and stored_plan_type in ACCOUNT_PLAN_TYPES
+                and payload_plan_type in recognized_paid_plans
+            )
+        ):
+            # A subscription that expires reports "free" every cycle from that
+            # account's own token, so an agreeing repeat observation is no
+            # longer the single-sample degraded signature above. Persist the
+            # downgrade only once it has been confirmed (issue #1456).
+            if await _free_plan_downgrade_is_confirmed(
+                account,
+                stored_plan_type=stored_plan_type,
+                normalized_payload_plan_type=normalized_payload_plan_type,
+            ):
+                return False
             return True
+        if normalize_account_plan_type(payload.plan_type) in (ACCOUNT_PLAN_TYPES - {"free"}):
+            # The account reports a recognized paid plan, which is positive
+            # evidence that it is still paid, so any pending downgrade evidence
+            # is discarded. An unrecognized value is absence of evidence and
+            # deliberately does not reach here.
+            await _clear_workspace_less_free_plan_observations(account.id)
     return False
+
+
+async def _free_plan_downgrade_is_confirmed(
+    account: Account,
+    *,
+    stored_plan_type: str,
+    normalized_payload_plan_type: str | None,
+) -> bool:
+    """Record a workspace-less paid -> free observation and report confirmation.
+
+    Only a recognized ``free`` payload against a recognized paid stored plan on a
+    workspace-less account is confirmable. Unrecognized plan values never
+    accumulate, so a degraded response reporting garbage can never downgrade an
+    account no matter how often it repeats.
+    """
+    if normalized_payload_plan_type != "free":
+        return False
+    if stored_plan_type not in (ACCOUNT_PLAN_TYPES - {"free"}):
+        return False
+    if account.workspace_id:
+        # The account is bound to a workspace, so a payload that omits
+        # ``workspace_id`` cannot establish that it describes this slot. A
+        # workspace-bound seat (Team/Business/Enterprise) must not be demoted to
+        # free on the strength of a payload that never names its workspace,
+        # however many times it repeats.
+        return False
+    fingerprint = credential_fingerprint(account)
+    store = _plan_downgrade_observation_store()
+    # One atomic step records the observation and returns the resulting count.
+    # The fingerprint digests the account's stable seat identity, not token
+    # material, so routine token rotation between two observations does not
+    # restart the sequence and a real expiry still converges (#1456). Credential
+    # replacement (re-import or in-place reauthentication) resets pending
+    # evidence at the replacement site itself -- the accounts repository
+    # discards it in the same transaction that applies the fresh material --
+    # while the fingerprint comparison here restarts the count for any
+    # remaining path that rebinds the row's seat identity. Doing this as a read
+    # followed by a write would leave an await between the two halves, letting
+    # concurrent refreshes for one account lose an increment.
+    observations = await store.observe(
+        account.id,
+        credential_fingerprint=fingerprint,
+        observed_plan_type="free",
+    )
+    if observations < _FREE_PLAN_DOWNGRADE_CONFIRMATIONS:
+        logger.info(
+            "Usage refresh observed a workspace-less downgrade to free; awaiting confirmation "
+            "account_id=%s stored_plan_type=%s observations=%s required=%s request_id=%s",
+            account.id,
+            stored_plan_type,
+            observations,
+            _FREE_PLAN_DOWNGRADE_CONFIRMATIONS,
+            get_request_id(),
+        )
+        return False
+    await store.clear(account.id)
+    logger.info(
+        "Usage refresh confirmed a workspace-less downgrade to free; persisting plan change "
+        "account_id=%s stored_plan_type=%s observations=%s request_id=%s",
+        account.id,
+        stored_plan_type,
+        observations,
+        get_request_id(),
+    )
+    return True
+
+
+def _plan_downgrade_observation_store() -> PlanDowngradeObservationStorePort:
+    """Resolve the shared store, falling back to process-local state.
+
+    The database-backed store is the process default so the observation sequence
+    is coherent across replicas. When persistence is explicitly disabled (the
+    DB-less unit-test harness), the fallback preserves the previous
+    single-process behavior rather than losing the guard entirely.
+    """
+    store = get_plan_downgrade_observation_store()
+    if store is not None:
+        return store
+    return _FALLBACK_PLAN_DOWNGRADE_OBSERVATIONS
+
+
+async def _clear_workspace_less_free_plan_observations(account_id: str) -> None:
+    await _plan_downgrade_observation_store().clear(account_id)
 
 
 def _clean_optional(value: str | None) -> str | None:
@@ -947,6 +1283,9 @@ def _latest_usage_is_fresh(
     return True
 
 
+_MAIN_USAGE_WINDOWS = ("primary", "secondary", "monthly")
+
+
 def _quota_recovery_should_bypass_freshness(account: Account, *, latest: UsageHistory | None) -> bool:
     if _account_needs_post_reset_refresh(account, latest=latest):
         return True
@@ -1073,4 +1412,5 @@ def _prune_usage_refresh_auth_cooldowns() -> None:
 def _clear_usage_refresh_state() -> None:
     _usage_refresh_auth_cooldowns.clear()
     _last_successful_refresh.clear()
+    _FALLBACK_PLAN_DOWNGRADE_OBSERVATIONS.clear_all()
     _USAGE_REFRESH_SINGLEFLIGHT.clear()

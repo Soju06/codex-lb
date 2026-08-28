@@ -5,7 +5,9 @@ import json
 from typing import cast
 
 import pytest
+from fastapi.responses import JSONResponse
 
+import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.openai.requests import ResponsesRequest
 
@@ -244,6 +246,93 @@ async def test_v1_responses_preserves_prompt_cache_controls(async_client, monkey
     assert resp.status_code == 200
     assert seen["payload"]["prompt_cache_key"] == "thread_123"
     assert "prompt_cache_retention" not in seen["payload"]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_downgrades_explicit_prompt_cache_for_subscription(async_client, monkeypatch):
+    await _import_account(async_client, "acc_prompt_cache_explicit", "prompt-cache-explicit@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload.to_payload()
+        yield _completed_event("resp_prompt_cache_explicit")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.6-sol",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "stable prefix",
+                        "prompt_cache_breakpoint": {"mode": "explicit"},
+                    },
+                    {"type": "input_text", "text": "changing suffix"},
+                ],
+            }
+        ],
+        "prompt_cache_key": "explicit-thread",
+        "prompt_cache_options": {"mode": "explicit"},
+    }
+    resp = await async_client.post("/v1/responses", json=payload)
+
+    assert resp.status_code == 200
+    assert resp.headers["x-codex-lb-prompt-cache-mode"] == "subscription-implicit"
+    forwarded = seen["payload"]
+    assert forwarded["prompt_cache_key"] == "explicit-thread"
+    assert "prompt_cache_options" not in forwarded
+    assert "prompt_cache_breakpoint" not in forwarded["input"][0]["content"][0]
+    assert forwarded["input"][0]["content"][0]["text"] == "stable prefix"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_preserves_explicit_prompt_cache_for_model_source(async_client, monkeypatch):
+    await _import_account(async_client, "acc_prompt_cache_source", "prompt-cache-source@example.com")
+
+    seen = {}
+    source = object()
+
+    async def fake_select(model, api_key, *, raw_model=None, require_streaming=False):
+        return source, model
+
+    async def fake_source_response(
+        request, payload, *, source, api_key, rate_limit_headers, pre_normalization_effort=None
+    ):
+        seen["payload"] = payload.model_dump_for_forwarding()
+        return JSONResponse({"id": "resp_prompt_cache_source", "status": "completed", "output": []})
+
+    monkeypatch.setattr(proxy_api_module, "_select_responses_model_source", fake_select)
+    monkeypatch.setattr(proxy_api_module, "_source_responses_response", fake_source_response)
+
+    payload = {
+        "model": "gpt-5.6-sol",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "stable prefix",
+                        "prompt_cache_breakpoint": {"mode": "explicit"},
+                    }
+                ],
+            }
+        ],
+        "prompt_cache_key": "source-thread",
+        "prompt_cache_options": {"mode": "explicit"},
+    }
+    resp = await async_client.post("/v1/responses", json=payload)
+
+    assert resp.status_code == 200
+    assert "x-codex-lb-prompt-cache-mode" not in resp.headers
+    forwarded = seen["payload"]
+    assert forwarded["prompt_cache_options"] == {"mode": "explicit"}
+    assert forwarded["input"][0]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
+    assert forwarded["prompt_cache_key"] == "source-thread"
 
 
 @pytest.mark.asyncio

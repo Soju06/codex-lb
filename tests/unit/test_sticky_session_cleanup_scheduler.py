@@ -1,18 +1,32 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 import app.modules.sticky_sessions.cleanup_scheduler as cleanup_scheduler
+from app.core.config.settings import Settings
+from app.core.utils.time import utcnow
+from app.db.models import DashboardSettings
 
 pytestmark = pytest.mark.unit
 
 
+class _FakeLeader:
+    """Leader stub that always runs the guarded body, bypassing the DB lease."""
+
+    async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+        return await fn()
+
+
 def test_build_sticky_session_cleanup_scheduler_respects_enabled_setting(monkeypatch) -> None:
-    settings = SimpleNamespace(sticky_session_cleanup_interval_seconds=42, sticky_session_cleanup_enabled=False)
+    settings = SimpleNamespace(sticky_session_cleanup_enabled=False)
     monkeypatch.setattr(cleanup_scheduler, "get_settings", lambda: settings)
+    monkeypatch.setattr(cleanup_scheduler, "_CLEANUP_INTERVAL_SECONDS", 42)
 
     scheduler = cleanup_scheduler.build_sticky_session_cleanup_scheduler()
 
@@ -23,17 +37,37 @@ def test_build_sticky_session_cleanup_scheduler_respects_enabled_setting(monkeyp
 @pytest.mark.asyncio
 async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     """_cleanup_once should purge prompt-cache entries by affinity TTL.
-    Durable kinds (STICKY_THREAD, CODEX_SESSION) must NOT be purged."""
-    dashboard_settings = SimpleNamespace(openai_cache_affinity_max_age_seconds=600)
+    STICKY_THREAD is never purged here. CODEX_SESSION is only ever purged
+    via the separate, account-status-gated purge_stale_hard_codex_session_mappings
+    call (see test_sticky_repository.py), never by this TTL-based path."""
+    dashboard_settings = SimpleNamespace(
+        openai_cache_affinity_max_age_seconds=600,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=600,
+    )
 
     settings_repo = AsyncMock()
     settings_repo.get_or_create = AsyncMock(return_value=dashboard_settings)
+    monkeypatch.setattr(
+        cleanup_scheduler,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_idle_ttl_seconds=120.0,
+            http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
+            http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
+        ),
+    )
 
     sticky_repo = AsyncMock()
+    sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=5)
     sticky_repo.purge_before = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=2)
+    bridge_repo.purge_abandoned_before = AsyncMock(return_value=1)
+    bridge_repo.purge_retry_circuits_before = AsyncMock(return_value=3)
+    bridge_repo.purge_operation_spool = AsyncMock(return_value=0)
+    ring_service = AsyncMock()
+    ring_service.purge_stale_before = AsyncMock(return_value=0)
 
     class FakeSession:
         async def __aenter__(self):
@@ -52,6 +86,8 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
         patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
         patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
         patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+        patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
+        patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
         patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
     ):
         await scheduler._cleanup_once()
@@ -59,19 +95,45 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     sticky_repo.purge_prompt_cache_before.assert_called_once()
     sticky_repo.purge_before.assert_not_called()
     bridge_repo.purge_closed_before.assert_called_once()
+    bridge_repo.purge_abandoned_before.assert_called_once()
+    bridge_repo.purge_retry_circuits_before.assert_called_once()
+    bridge_repo.purge_operation_spool.assert_called_once()
+    ring_service.purge_stale_before.assert_called_once()
+    sticky_repo.purge_stale_hard_codex_session_mappings.assert_called_once()
+    passed_cutoff = sticky_repo.purge_stale_hard_codex_session_mappings.call_args.args[0]
+    expected_cutoff = utcnow() - timedelta(seconds=cleanup_scheduler._STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS)
+    assert abs((passed_cutoff - expected_cutoff).total_seconds()) < 5
 
 
 @pytest.mark.asyncio
 async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypatch) -> None:
-    dashboard_settings = SimpleNamespace(openai_cache_affinity_max_age_seconds=600)
+    dashboard_settings = SimpleNamespace(
+        openai_cache_affinity_max_age_seconds=600,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=600,
+    )
 
     settings_repo = AsyncMock()
     settings_repo.get_or_create = AsyncMock(return_value=dashboard_settings)
+    monkeypatch.setattr(
+        cleanup_scheduler,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_idle_ttl_seconds=120.0,
+            http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
+            http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
+        ),
+    )
 
     sticky_repo = AsyncMock()
+    sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=0)
+    bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
+    bridge_repo.purge_retry_circuits_before = AsyncMock(return_value=0)
+    bridge_repo.purge_operation_spool = AsyncMock(return_value=0)
+    ring_service = AsyncMock()
+    ring_service.purge_stale_before = AsyncMock(return_value=0)
 
     class FakeSession:
         async def __aenter__(self):
@@ -90,6 +152,8 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
         patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
         patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
         patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+        patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
+        patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
         patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", False),
         patch.object(
             cleanup_scheduler,
@@ -101,19 +165,40 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
 
     sticky_repo.purge_prompt_cache_before.assert_called_once()
     bridge_repo.purge_closed_before.assert_not_called()
+    bridge_repo.purge_abandoned_before.assert_not_called()
+    bridge_repo.purge_retry_circuits_before.assert_not_called()
+    ring_service.purge_stale_before.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_reset(monkeypatch) -> None:
-    dashboard_settings = SimpleNamespace(openai_cache_affinity_max_age_seconds=600)
+    dashboard_settings = SimpleNamespace(
+        openai_cache_affinity_max_age_seconds=600,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=600,
+    )
 
     settings_repo = AsyncMock()
     settings_repo.get_or_create = AsyncMock(return_value=dashboard_settings)
+    monkeypatch.setattr(
+        cleanup_scheduler,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_idle_ttl_seconds=120.0,
+            http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
+            http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
+        ),
+    )
 
     sticky_repo = AsyncMock()
+    sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=1)
+    bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
+    bridge_repo.purge_retry_circuits_before = AsyncMock(return_value=0)
+    bridge_repo.purge_operation_spool = AsyncMock(return_value=0)
+    ring_service = AsyncMock()
+    ring_service.purge_stale_before = AsyncMock(return_value=2)
 
     class FakeSession:
         async def __aenter__(self):
@@ -132,6 +217,8 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
         patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
         patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
         patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+        patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
+        patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
         patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", False),
         patch.object(cleanup_scheduler, "missing_durable_bridge_tables", AsyncMock(return_value=())),
     ):
@@ -139,3 +226,134 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
 
     sticky_repo.purge_prompt_cache_before.assert_called_once()
     bridge_repo.purge_closed_before.assert_called_once()
+    bridge_repo.purge_abandoned_before.assert_called_once()
+    bridge_repo.purge_retry_circuits_before.assert_called_once()
+    bridge_repo.purge_operation_spool.assert_called_once()
+    ring_service.purge_stale_before.assert_called_once()
+
+
+def test_abandoned_bridge_retention_covers_prompt_cache_reuse_window() -> None:
+    """Abandoned-row retention must be at least the longest bridge reuse TTL."""
+    dashboard_settings = SimpleNamespace(
+        openai_cache_affinity_max_age_seconds=1800,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+    )
+    app_settings = SimpleNamespace(
+        http_responses_session_bridge_idle_ttl_seconds=120.0,
+        http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
+    )
+
+    retention = cleanup_scheduler._abandoned_bridge_retention_seconds(
+        cast(DashboardSettings, dashboard_settings),
+        cast(Settings, app_settings),
+    )
+
+    assert retention == 3600.0
+
+    app_settings.http_responses_session_bridge_codex_idle_ttl_seconds = 7200.0
+    retention = cleanup_scheduler._abandoned_bridge_retention_seconds(
+        cast(DashboardSettings, dashboard_settings),
+        cast(Settings, app_settings),
+    )
+    assert retention == 7200.0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_once_gates_abandoned_purge_on_prompt_cache_reuse_ttl(monkeypatch) -> None:
+    """An in-reuse-window prompt-cache session must not have its ACTIVE durable
+    row purged: the abandoned cutoff must honor the prompt-cache idle TTL even
+    when the affinity max age is shorter."""
+    dashboard_settings = SimpleNamespace(
+        openai_cache_affinity_max_age_seconds=1800,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+    )
+
+    settings_repo = AsyncMock()
+    settings_repo.get_or_create = AsyncMock(return_value=dashboard_settings)
+    monkeypatch.setattr(
+        cleanup_scheduler,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_idle_ttl_seconds=120.0,
+            http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
+            http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
+        ),
+    )
+
+    sticky_repo = AsyncMock()
+    sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
+    sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    bridge_repo = AsyncMock()
+    bridge_repo.purge_closed_before = AsyncMock(return_value=0)
+    bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
+    bridge_repo.purge_retry_circuits_before = AsyncMock(return_value=0)
+    bridge_repo.purge_operation_spool = AsyncMock(return_value=0)
+    ring_service = AsyncMock()
+    ring_service.purge_stale_before = AsyncMock(return_value=0)
+
+    class FakeSession:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            pass
+
+    scheduler = cleanup_scheduler.StickySessionCleanupScheduler(
+        interval_seconds=60,
+        enabled=True,
+    )
+
+    with (
+        patch.object(cleanup_scheduler, "get_background_session", FakeSession),
+        patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
+        patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
+        patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+        patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
+        patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
+        patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
+    ):
+        await scheduler._cleanup_once()
+
+    closed_cutoff = bridge_repo.purge_closed_before.call_args.args[0]
+    abandoned_cutoff = bridge_repo.purge_abandoned_before.call_args.args[0]
+    # Closed rows use the 1800s affinity cutoff; abandoned ACTIVE/DRAINING rows
+    # must be retained for the full 3600s prompt-cache reuse window.
+    gap_seconds = (closed_cutoff - abandoned_cutoff).total_seconds()
+    assert abs(gap_seconds - 1800.0) < 5.0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_once_retains_operation_purge_when_sticky_cleanup_disabled(monkeypatch) -> None:
+    settings_repo = AsyncMock()
+    sticky_repo = AsyncMock()
+    bridge_repo = AsyncMock()
+    bridge_repo.purge_operation_spool = AsyncMock(return_value=0)
+
+    class FakeSession:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(
+        cleanup_scheduler,
+        "get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_operation_spool_retention_seconds=604800.0),
+    )
+    scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=False)
+
+    with (
+        patch.object(cleanup_scheduler, "get_background_session", FakeSession),
+        patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
+        patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
+        patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+        patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
+        patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
+    ):
+        await scheduler._cleanup_once()
+
+    settings_repo.get_or_create.assert_not_awaited()
+    sticky_repo.purge_prompt_cache_before.assert_not_awaited()
+    bridge_repo.purge_closed_before.assert_not_awaited()
+    bridge_repo.purge_operation_spool.assert_awaited_once()

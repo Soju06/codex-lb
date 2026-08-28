@@ -1,0 +1,10 @@
+# Tasks: replica-aware-model-registry
+
+- [x] 1. Create OpenSpec change artifacts (proposal, design, tasks, context, model-catalog-compat deltas); `openspec validate replica-aware-model-registry`
+- [x] 2. Add `ModelRegistrySnapshotRecord` to `app/db/models.py` and Alembic revision `20260712_070000_add_model_registry_snapshot` on head `20260711_030000_add_limit_warmup_idle_threshold`; upgrade + downgrade; extend `tests/integration/test_migrations.py`
+- [x] 3. Implement `app/core/openai/model_registry_store.py`: field-complete JSON codec (UpstreamModel/ReasoningLevel/ModelRegistrySnapshot/metadata models, cleared marker), `SCHEMA_VERSION`, sha256 `content_hash` of canonical JSON, `persist_registry_snapshot()` (pg/sqlite upsert + unchanged-hash touch), `reconcile_model_registry_from_store()` with header probe and staleness cap; codec unit tests with field-complete equality
+- [x] 4. Add `ModelRegistry.export_state()` / `import_state()` under the existing anyio lock plus applied-content-hash tracking; unit tests incl. `needs_refresh()` correctness after import
+- [x] 5. Wire `ModelRefreshScheduler`: leader persists + bumps `NAMESPACE_MODEL_REGISTRY` after successful `update()` and after `clear()` (payload write + bump skipped when content hash unchanged); non-leader `_refresh_once` reconciles from the store instead of returning early (no upstream fetch)
+- [x] 6. Add `NAMESPACE_MODEL_REGISTRY` to `app/core/cache/invalidation.py`; register poller callback and lifespan startup load in `app/main.py` (gated on `model_registry_enabled`); add settings field `model_registry_snapshot_max_age_seconds` (default 86400, gt=0)
+- [x] 7. Integration tests `tests/integration/test_model_registry_replication.py`: two-instance-over-one-DB — bus-propagated refresh visible on `/v1/models`, follower suppression + plan gating, clear propagation, lost-bump tick backstop with zero upstream fetches, startup load, stale-cap ignore, schema-version skew ignore, leader `_refresh_once` write-then-bump
+- [x] 8. Run targeted pytest + ruff check/format; verify single Alembic head on this branch

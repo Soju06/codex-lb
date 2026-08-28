@@ -1,0 +1,4 @@
+- [x] Refresh the account in `POST /v1/reset-credit` before decrypting and forwarding the bearer token to upstream reset-credit consume.
+- [x] Add regression coverage proving the self-service reset-credit path consumes with the refreshed token material.
+- [x] Translate self-service reset-credit refresh failures into a client-actionable conflict response before upstream consume.
+- [x] Validate OpenSpec after updating the delta spec.

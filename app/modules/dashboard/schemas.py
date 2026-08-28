@@ -27,9 +27,12 @@ class DashboardUsageCost(DashboardModel):
 class DashboardUsageMetrics(DashboardModel):
     requests: int | None = None
     tokens: int | None = None
+    conversations: int = 0
+    conversation_requests: int = 0
     cached_input_tokens: int | None = Field(default=None, alias="cachedInputTokens")
     error_rate: float | None = Field(default=None, alias="errorRate")
     error_count: int | None = Field(default=None, alias="errorCount")
+    cancelled_count: int | None = Field(default=None, alias="cancelledCount")
     top_error: str | None = None
 
 
@@ -78,6 +81,9 @@ class WeeklyCreditPaceResponse(DashboardModel):
     scheduled_used_percent: float
     delta_percent: float
     schedule_gap_credits: float
+    smoothed_delta_percent: float
+    smoothed_schedule_gap_credits: float
+    pace_gap_smoothing_minutes: int
     # Legacy frontend field name kept as an alias-compatible value for one release.
     over_plan_credits: float
     projected_shortfall_credits: float

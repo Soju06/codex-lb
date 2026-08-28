@@ -2,21 +2,33 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
 from websockets.asyncio.server import serve as websocket_serve
 from websockets.datastructures import Headers
-from websockets.exceptions import InvalidHandshake, InvalidProxy, InvalidStatus
+from websockets.exceptions import ConnectionClosedError, InvalidHandshake, InvalidProxy, InvalidStatus
+from websockets.frames import Close
 from websockets.http11 import Response
 
 import app.core.clients.proxy_websocket as proxy_websocket_module
 from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
-from app.core.clients.proxy import ProxyResponseError
-from app.core.clients.proxy_websocket import connect_responses_websocket
+from app.core.clients.proxy import ProxyResponseError, is_confirmed_pre_dispatch_transport_error
+from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+    CodexUpstreamWebSocket,
+    RealtimeWebSocketProtocol,
+    UpstreamWebSocketTransportError,
+    WebsocketsUpstreamWebSocket,
+    connect_live_websocket,
+    connect_responses_websocket,
+)
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
+from tests.unit._proxy_test_helpers import runtime_basic_auth_url
 
 
 def _proxy_error_code(exc: ProxyResponseError) -> str | None:
@@ -41,9 +53,12 @@ class _UnexpectedHttpClient:
 
 
 class _FakeConnection:
-    def __init__(self) -> None:
+    connection_lost_waiter: asyncio.Future[object]
+
+    def __init__(self, *, subprotocol: str | None = None) -> None:
         self.sent: list[str | bytes] = []
         self.closed = False
+        self.subprotocol = subprotocol
 
     async def send(self, data: str | bytes) -> None:
         self.sent.append(data)
@@ -53,6 +68,18 @@ class _FakeConnection:
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_websockets_response_websocket_consumes_connection_lost_waiter_error():
+    connection = _FakeConnection()
+    connection.connection_lost_waiter = asyncio.get_running_loop().create_future()
+
+    WebsocketsUpstreamWebSocket(cast(Any, connection))
+    connection.connection_lost_waiter.set_exception(RuntimeError("keepalive ping timeout"))
+    await asyncio.sleep(0)
+
+    assert connection.connection_lost_waiter.exception() is not None
 
 
 async def _local_proxy_tunnel_handler(
@@ -105,8 +132,9 @@ async def _local_proxy_tunnel_handler(
 
 
 class _FakeCodexWebSocket:
-    def __init__(self) -> None:
+    def __init__(self, *, protocol: str | None = None) -> None:
         self.closed = False
+        self.protocol = protocol
         self.response = SimpleNamespace(headers={"x-codex-turn-state": "turn-routed"})
 
     async def send_str(self, data: str) -> None:
@@ -121,12 +149,16 @@ class _FakeCodexWebSocket:
     async def receive(self) -> object:
         return b'{"type":"response.completed"}'
 
-    async def close(self) -> None:
+    def exception(self) -> BaseException | None:
+        return None
+
+    async def close(self, *, code: int = 1000, message: bytes = b"") -> None:
+        del code, message
         self.closed = True
 
 
 class _FakeCodexErrorWebSocket(_FakeCodexWebSocket):
-    def __init__(self, error: BaseException) -> None:
+    def __init__(self, error: BaseException | None) -> None:
         super().__init__()
         self.error = error
 
@@ -181,6 +213,161 @@ class _FailingCodexClient:
 
 
 @pytest.mark.asyncio
+async def test_live_direct_adapter_preserves_abnormal_close_code_and_reason() -> None:
+    class Connection:
+        async def recv(self):
+            raise ConnectionClosedError(Close(1011, "server restart"), None)
+
+    websocket = WebsocketsUpstreamWebSocket(
+        cast(Any, Connection()),
+        uses_proxy=False,
+        preserve_close_semantics=True,
+    )
+
+    message = await websocket.receive()
+
+    assert message.kind == "close"
+    assert message.close_code == 1011
+    assert message.close_reason == "server restart"
+    assert message.error is None
+
+
+@pytest.mark.asyncio
+async def test_direct_adapter_classifies_keepalive_timeout() -> None:
+    class Connection:
+        async def recv(self):
+            raise ConnectionClosedError(None, Close(1011, "keepalive ping timeout"))
+
+    websocket = WebsocketsUpstreamWebSocket(cast(Any, Connection()))
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+
+
+@pytest.mark.asyncio
+async def test_direct_adapter_classifies_keepalive_timeout_after_close_ack() -> None:
+    class Connection:
+        async def recv(self):
+            raise ConnectionClosedError(
+                Close(1000, "acknowledged"),
+                Close(1011, "keepalive ping timeout"),
+                False,
+            )
+
+    websocket = WebsocketsUpstreamWebSocket(cast(Any, Connection()))
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+
+
+@pytest.mark.asyncio
+async def test_direct_adapter_does_not_trust_peer_keepalive_timeout_marker() -> None:
+    class Connection:
+        async def recv(self):
+            raise ConnectionClosedError(
+                Close(1011, "keepalive ping timeout"),
+                Close(1011, "keepalive ping timeout"),
+                True,
+            )
+
+    websocket = WebsocketsUpstreamWebSocket(cast(Any, Connection()))
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_routed_adapter_classifies_heartbeat_timeout() -> None:
+    websocket = CodexUpstreamWebSocket(
+        _FakeCodexErrorWebSocket(aiohttp.ServerTimeoutError("No PONG received after 60.0 seconds"))
+    )
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+
+
+@pytest.mark.asyncio
+async def test_routed_adapter_classifies_heartbeat_timeout_stored_between_receive_calls() -> None:
+    heartbeat_timeout = aiohttp.ServerTimeoutError("No PONG received after 60.0 seconds")
+
+    class ClosedWebSocket(_FakeCodexWebSocket):
+        async def receive(self) -> aiohttp.WSMessage:
+            return aiohttp.WSMessage(aiohttp.WSMsgType.CLOSED, None, None)
+
+        def exception(self) -> BaseException | None:
+            return heartbeat_timeout
+
+    websocket = CodexUpstreamWebSocket(ClosedWebSocket())
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    ["request", b"request"],
+    ids=["text", "bytes"],
+)
+async def test_routed_adapter_send_preserves_stored_heartbeat_timeout(
+    payload: str | bytes,
+) -> None:
+    heartbeat_timeout = aiohttp.ServerTimeoutError("No PONG received after 60.0 seconds")
+
+    class ClosedWebSocket(_FakeCodexWebSocket):
+        async def send_str(self, data: str) -> None:
+            del data
+            raise RuntimeError("Cannot write to closing transport")
+
+        async def send_bytes(self, data: bytes) -> None:
+            del data
+            raise RuntimeError("Cannot write to closing transport")
+
+        def exception(self) -> BaseException | None:
+            return heartbeat_timeout
+
+    websocket = CodexUpstreamWebSocket(ClosedWebSocket())
+
+    with pytest.raises(UpstreamWebSocketTransportError) as exc_info:
+        if isinstance(payload, str):
+            await websocket.send_text(payload)
+        else:
+            await websocket.send_bytes(payload)
+
+    assert exc_info.value.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+
+
+@pytest.mark.asyncio
+async def test_codex_responses_websocket_closes_owned_client_when_context_exit_fails():
+    class _FailingContext:
+        async def __aexit__(self, *_args: object) -> None:
+            raise RuntimeError("websocket context exit failed")
+
+    codex_client = _FailingCodexClient()
+    websocket = CodexUpstreamWebSocket(
+        _FakeCodexWebSocket(),
+        context=_FailingContext(),
+        codex_client=cast(Any, codex_client),
+        owns_codex_client=True,
+    )
+
+    with pytest.raises(RuntimeError, match="websocket context exit failed"):
+        await websocket.close()
+
+    assert codex_client.closed is True
+
+
+@pytest.mark.asyncio
 async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch):
     fake_connection = _FakeConnection()
     seen: dict[str, object] = {}
@@ -198,6 +385,7 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
         ),
@@ -226,8 +414,10 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
     assert kwargs["proxy"] is None
     assert kwargs["open_timeout"] == 7.0
     assert "ping_interval" not in kwargs
-    assert kwargs["ping_timeout"] is None
+    assert kwargs["ping_timeout"] == 120.0
     assert kwargs["max_size"] == 4321
+    assert kwargs["compression"] is None
+    assert "subprotocols" not in kwargs
     additional_headers = cast(dict[str, str], kwargs["additional_headers"])
     assert additional_headers["Authorization"] == "Bearer access-token"
     assert additional_headers["chatgpt-account-id"] == "account-123"
@@ -236,6 +426,52 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
     assert "Cookie" not in additional_headers
     assert "User-Agent" not in additional_headers
     assert "Origin" not in additional_headers
+
+
+@pytest.mark.asyncio
+async def test_direct_websocket_network_send_and_receive_are_typed_and_rotate_without_reconnect(monkeypatch):
+    class _NetworkFailureConnection(_FakeConnection):
+        async def send(self, data: str | bytes) -> None:
+            del data
+            raise OSError(errno.ENETUNREACH, "Network is unreachable")
+
+        async def recv(self) -> str:
+            raise OSError(errno.ENETUNREACH, "Network is unreachable")
+
+    connection = _NetworkFailureConnection()
+    websocket_connect = AsyncMock(return_value=connection)
+    rotate = AsyncMock(return_value="rotated")
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", websocket_connect)
+    monkeypatch.setattr(proxy_websocket_module, "rotate_shared_http_transport", rotate)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    websocket = await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        "account-123",
+        allow_direct_egress=True,
+    )
+
+    with pytest.raises(UpstreamWebSocketTransportError) as exc_info:
+        await websocket.send_text('{"type":"response.create"}')
+    message = await websocket.receive()
+
+    assert exc_info.value.error_code == "proxy_network_unavailable"
+    assert message.kind == "error"
+    assert message.error_code == "proxy_network_unavailable"
+    websocket_connect.assert_awaited_once()
+    assert rotate.await_count == 2
+    assert all(call.kwargs["transport"] == "websocket" for call in rotate.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -252,6 +488,7 @@ async def test_connect_responses_websocket_routed_codex_call_preserves_size_limi
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
         ),
@@ -276,8 +513,268 @@ async def test_connect_responses_websocket_routed_codex_call_preserves_size_limi
     assert call["route"] is route
     assert call["timeout"] == 7.0
     assert call["max_msg_size"] == 4321
+    assert call["heartbeat"] == 120.0
     assert "max_size" not in call
+    assert "protocols" not in call
     assert websocket.response_header("x-codex-turn-state") == "turn-routed"
+
+
+@pytest.mark.asyncio
+async def test_connect_live_websocket_routed_call_disables_denial_replay_and_enables_heartbeat(monkeypatch):
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    codex_client = _FakeCodexClient(_FakeCodexWebSocket(protocol="live.v1"))
+    offered_subprotocols = ("live.v0", "live.v1")
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    websocket = await connect_live_websocket(
+        "rtc_live",
+        {"Sec-WebSocket-Protocol": "raw-header-must-not-be-forwarded"},
+        "access-token",
+        "account-123",
+        protocol=RealtimeWebSocketProtocol.LIVE_V3,
+        route=route,
+        codex_client=cast(Any, codex_client),
+        subprotocols=offered_subprotocols,
+    )
+    await websocket.close()
+
+    call = codex_client.calls[0]
+    assert call["retry_handshake_status"] is False
+    assert call["retry_network_errors"] is False
+    assert call["heartbeat"] == 120.0
+    assert call["max_msg_size"] == 4321
+    assert call["protocols"] is offered_subprotocols
+    headers = cast(dict[str, str], call["headers"])
+    assert not any(key.lower() == "sec-websocket-protocol" for key in headers)
+    assert websocket.response_header("sec-websocket-protocol") == "live.v1"
+
+
+def test_routed_live_websocket_exposes_unoffered_raw_subprotocol_for_rejection() -> None:
+    websocket = CodexUpstreamWebSocket(
+        _FakeCodexWebSocket(protocol=None),
+        response_headers={
+            "Sec-WebSocket-Protocol": "live.private",
+        },
+    )
+
+    assert websocket.response_header("sec-websocket-protocol") == "live.private"
+
+
+@pytest.mark.asyncio
+async def test_connect_live_websocket_closes_owned_client_when_handshake_is_cancelled(monkeypatch):
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+
+    class HangingCodexClient:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.close_calls = 0
+
+        async def open_ws_with_route_metadata(self, *_args, **_kwargs):
+            self.started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    codex_client = HangingCodexClient()
+    monkeypatch.setattr(proxy_websocket_module, "create_codex_session", lambda: object())
+    monkeypatch.setattr(proxy_websocket_module, "CodexClient", lambda _session: codex_client)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    task = asyncio.create_task(
+        connect_live_websocket(
+            "rtc_live",
+            {},
+            "access-token",
+            "account-123",
+            protocol=RealtimeWebSocketProtocol.LIVE_V3,
+            route=route,
+        )
+    )
+    await asyncio.wait_for(codex_client.started.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert codex_client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_connect_live_websocket_preserves_handshake_status_without_endpoint_disclosure(monkeypatch):
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_secret", "http", "proxy.test", 8080),
+    )
+
+    class DeniedCodexClient:
+        async def open_ws_with_route_metadata(self, *_args, **_kwargs):
+            raise CodexTransportError(
+                "sensitive denial via endpoint ep_secret",
+                status_code=403,
+                error_code="upstream_websocket_handshake_failed",
+            )
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_live_websocket(
+            "rtc_live",
+            {},
+            "access-token",
+            "account-123",
+            protocol=RealtimeWebSocketProtocol.LIVE_V3,
+            route=route,
+            codex_client=cast(Any, DeniedCodexClient()),
+        )
+
+    assert exc_info.value.status_code == 403
+    assert _proxy_error_code(exc_info.value) == "upstream_websocket_handshake_failed"
+    assert "ep_secret" not in (_proxy_error_message(exc_info.value) or "")
+    assert "sensitive" not in (_proxy_error_message(exc_info.value) or "")
+
+
+@pytest.mark.asyncio
+async def test_connect_live_websocket_direct_invalid_status_is_credential_safe(monkeypatch):
+    denial = Response(
+        403,
+        "malicious denial reason with account-secret",
+        Headers(
+            {
+                "Content-Type": "application/json",
+                "X-Private-Credential": "private-header-secret",
+            }
+        ),
+        body=(b'{"error":{"code":"malicious_error","message":"malicious denial body with bearer-secret"}}'),
+    )
+
+    async def fake_websocket_connect(url: str, **kwargs):
+        del url, kwargs
+        raise InvalidStatus(denial)
+
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_live_websocket(
+            "rtc_live",
+            {},
+            "access-token",
+            "account-123",
+            protocol=RealtimeWebSocketProtocol.LIVE_V3,
+            allow_direct_egress=True,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert _proxy_error_code(exc_info.value) == "upstream_websocket_handshake_failed"
+    assert _proxy_error_type(exc_info.value) == "server_error"
+    message = _proxy_error_message(exc_info.value)
+    assert message == "Upstream websocket handshake failed with HTTP 403"
+    assert message is not None
+    for secret in (
+        "account-secret",
+        "private-header-secret",
+        "bearer-secret",
+        "malicious_error",
+    ):
+        assert secret not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected_message"),
+    [
+        (InvalidHandshake("private-handshake-secret"), "Invalid upstream websocket handshake"),
+        (OSError("private-network-secret"), "Upstream websocket connection failed"),
+    ],
+    ids=["invalid-handshake", "os-error"],
+)
+async def test_connect_live_websocket_redacts_generic_direct_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    expected_message: str,
+) -> None:
+    async def fake_websocket_connect(url: str, **kwargs):
+        del url, kwargs
+        raise failure
+
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_live_websocket(
+            "rtc_live",
+            {},
+            "access-token",
+            "account-123",
+            protocol=RealtimeWebSocketProtocol.LIVE_V3,
+            allow_direct_egress=True,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert _proxy_error_message(exc_info.value) == expected_message
+    assert "private" not in expected_message
 
 
 @pytest.mark.asyncio
@@ -293,6 +790,7 @@ async def test_connect_responses_websocket_routed_transport_error_maps_proxy_err
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
         ),
@@ -310,6 +808,107 @@ async def test_connect_responses_websocket_routed_transport_error_maps_proxy_err
     assert exc_info.value.status_code == 502
     assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
     assert "ep_1" in (_proxy_error_message(exc_info.value) or "")
+    # An ambiguous routed transport failure must not authorize replay.
+    assert exc_info.value.retryable_same_contract is False
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_routed_pre_dispatch_failure_carries_provenance(monkeypatch):
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+        ),
+    )
+
+    class _PreDispatchFailingCodexClient(_FailingCodexClient):
+        async def open_ws_with_route_metadata(
+            self,
+            url: str,
+            *,
+            route: ResolvedUpstreamRoute,
+            **kwargs: object,
+        ) -> CodexWebSocketResult:
+            del url, route, kwargs
+            raise CodexTransportError(
+                "Codex upstream websocket failed via proxy endpoint ep_1: ClientProxyConnectionError",
+                failure_phase="connect",
+                retryable_same_contract=True,
+            )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_responses_websocket(
+            {"openai-beta": "responses_websockets=2026-02-06"},
+            "access-token",
+            "account-123",
+            route=route,
+            codex_client=cast(Any, _PreDispatchFailingCodexClient()),
+        )
+
+    assert exc_info.value.status_code == 502
+    assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
+    assert exc_info.value.retryable_same_contract is True
+    assert exc_info.value.failure_phase == "connect"
+    assert exc_info.value.failure_detail == "proxy_connect_pre_dispatch"
+    assert is_confirmed_pre_dispatch_transport_error(exc_info.value) is True
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_routed_tls_verification_failure_is_not_replayable(monkeypatch):
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+        ),
+    )
+
+    class _TLSFailingCodexClient(_FailingCodexClient):
+        async def open_ws_with_route_metadata(
+            self,
+            url: str,
+            *,
+            route: ResolvedUpstreamRoute,
+            **kwargs: object,
+        ) -> CodexWebSocketResult:
+            del url, route, kwargs
+            raise CodexTransportError(
+                "Codex upstream websocket failed via proxy endpoint ep_1: ClientConnectorCertificateError",
+                failure_phase="connect",
+                retryable_same_contract=True,
+                is_tls_verification_failure=True,
+            )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_responses_websocket(
+            {"openai-beta": "responses_websockets=2026-02-06"},
+            "access-token",
+            "account-123",
+            route=route,
+            codex_client=cast(Any, _TLSFailingCodexClient()),
+        )
+
+    assert exc_info.value.retryable_same_contract is False
+    assert is_confirmed_pre_dispatch_transport_error(exc_info.value) is False
 
 
 @pytest.mark.asyncio
@@ -330,6 +929,7 @@ async def test_connect_responses_websocket_appends_required_beta_header(monkeypa
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
         ),
@@ -345,6 +945,70 @@ async def test_connect_responses_websocket_appends_required_beta_header(monkeypa
     kwargs = cast(dict[str, object], seen["kwargs"])
     additional_headers = cast(dict[str, str], kwargs["additional_headers"])
     assert additional_headers["OpenAI-Beta"] == "assistants=v2, responses_websockets=2026-02-06"
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_drops_http_responses_beta_and_encoding_header(monkeypatch):
+    fake_connection = _FakeConnection()
+    seen: dict[str, object] = {}
+
+    async def fake_websocket_connect(url: str, **kwargs):
+        seen["url"] = url
+        seen["kwargs"] = kwargs
+        return fake_connection
+
+    monkeypatch.setattr(proxy_websocket_module, "get_http_client", lambda: _UnexpectedHttpClient(), raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    await connect_responses_websocket(
+        {
+            "Connection": "keep-alive, X-Handshake-Debug",
+            "Keep-Alive": "timeout=5",
+            "Proxy-Authorization": "Basic secret",
+            "Proxy-Connection": "keep-alive",
+            "TE": "trailers",
+            "Trailer": "X-Trailer",
+            "Transfer-Encoding": "chunked",
+            "Upgrade": "websocket",
+            "X-Handshake-Debug": "1",
+            "accept-encoding": "gzip, deflate, br, zstd",
+            "OpenAI-Beta": "responses=experimental, assistants=v2",
+            "session_id": "session-1",
+        },
+        "access-token",
+        None,
+        allow_direct_egress=True,
+    )
+
+    kwargs = cast(dict[str, object], seen["kwargs"])
+    additional_headers = cast(dict[str, str], kwargs["additional_headers"])
+    lowered_headers = {key.lower(): value for key, value in additional_headers.items()}
+    for header_name in (
+        "accept-encoding",
+        "connection",
+        "keep-alive",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "x-handshake-debug",
+    ):
+        assert header_name not in lowered_headers
+    assert additional_headers["OpenAI-Beta"] == "assistants=v2, responses_websockets=2026-02-06"
+    assert additional_headers["session_id"] == "session-1"
 
 
 @pytest.mark.asyncio
@@ -367,6 +1031,7 @@ async def test_connect_responses_websocket_maps_invalid_status(monkeypatch):
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
         ),
@@ -403,6 +1068,7 @@ async def test_connect_responses_websocket_can_opt_in_to_env_proxy(monkeypatch):
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -441,6 +1107,7 @@ async def test_connect_responses_websocket_disables_proxy_when_env_proxy_is_unse
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -478,7 +1145,9 @@ async def test_connect_responses_websocket_sanitizes_ws_error_payload(monkeypatc
         endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
     )
     codex_client = _FakeCodexClient(
-        _FakeCodexErrorWebSocket(OSError("proxy http://user:pass@proxy.local:8080 websocket failed"))
+        _FakeCodexErrorWebSocket(
+            OSError("proxy " + runtime_basic_auth_url("user", "pass", "proxy.local:8080") + " websocket failed")
+        )
     )
     monkeypatch.setattr(
         proxy_websocket_module,
@@ -486,6 +1155,7 @@ async def test_connect_responses_websocket_sanitizes_ws_error_payload(monkeypatc
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -507,6 +1177,20 @@ async def test_connect_responses_websocket_sanitizes_ws_error_payload(monkeypatc
     assert "user:pass" not in message.error
     assert "proxy.local:8080" not in message.error
     assert message.error == "Codex upstream websocket receive failed via proxy endpoint ep_1: OSError"
+    assert message.error_code is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_exception", [False, True], ids=["without-exception", "with-exception"])
+async def test_routed_websocket_error_message_defers_ordinary_code_to_relay(with_exception: bool):
+    websocket = CodexUpstreamWebSocket(
+        _FakeCodexErrorWebSocket(ConnectionResetError("upstream reset") if with_exception else None)
+    )
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.error_code is None
 
 
 @pytest.mark.asyncio
@@ -527,6 +1211,7 @@ async def test_connect_responses_websocket_uses_all_proxy_fallback(monkeypatch):
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -569,6 +1254,7 @@ async def test_connect_responses_websocket_uses_socks_proxy_before_all_proxy(mon
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -613,6 +1299,7 @@ async def test_connect_responses_websocket_uses_socks_proxy_before_https_proxy(m
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -657,6 +1344,7 @@ async def test_connect_responses_websocket_normalizes_http_socks_env_proxy(monke
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -699,6 +1387,7 @@ async def test_connect_responses_websocket_uses_settings_proxy_env(monkeypatch):
         lambda: _Settings(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -742,6 +1431,7 @@ async def test_connect_responses_websocket_respects_settings_no_proxy(monkeypatc
         lambda: _Settings(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -778,6 +1468,7 @@ async def test_connect_responses_websocket_uses_https_proxy_fallback_for_ws(monk
         lambda: SimpleNamespace(
             upstream_base_url="http://chatgpt.local/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -836,6 +1527,7 @@ async def test_connect_responses_websocket_traverses_http_proxy_smoke(monkeypatc
                 lambda: SimpleNamespace(
                     upstream_base_url=f"http://127.0.0.1:{upstream_port}/backend-api",
                     upstream_connect_timeout_seconds=7.0,
+                    proxy_downstream_websocket_idle_timeout_seconds=120.0,
                     max_sse_event_bytes=4321,
                     upstream_websocket_trust_env=True,
                 ),
@@ -874,6 +1566,7 @@ async def test_connect_responses_websocket_ignores_cgi_http_proxy(monkeypatch):
         lambda: SimpleNamespace(
             upstream_base_url="http://chatgpt.local/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -921,6 +1614,7 @@ async def test_connect_responses_websocket_maps_generic_invalid_handshake(monkey
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -941,9 +1635,11 @@ async def test_connect_responses_websocket_maps_generic_invalid_handshake(monkey
 
 @pytest.mark.asyncio
 async def test_connect_responses_websocket_maps_invalid_proxy(monkeypatch):
+    invalid_proxy = InvalidProxy("http://proxy.invalid", "unsupported proxy scheme")
+
     async def fake_websocket_connect(url: str, **kwargs):
         del url, kwargs
-        raise InvalidProxy("http://proxy.invalid", "unsupported proxy scheme")
+        raise invalid_proxy
 
     monkeypatch.setattr(proxy_websocket_module, "get_http_client", lambda: _UnexpectedHttpClient(), raising=False)
     monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
@@ -953,6 +1649,7 @@ async def test_connect_responses_websocket_maps_invalid_proxy(monkeypatch):
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -968,3 +1665,293 @@ async def test_connect_responses_websocket_maps_invalid_proxy(monkeypatch):
 
     assert exc_info.value.status_code == 502
     assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
+
+    assert _proxy_error_message(exc_info.value) == str(invalid_proxy)
+
+
+@pytest.mark.asyncio
+async def test_connect_live_websocket_redacts_invalid_proxy_credentials(monkeypatch):
+    async def fake_websocket_connect(url: str, **kwargs):
+        del url, kwargs
+        raise InvalidProxy(
+            runtime_basic_auth_url("proxy-user", "proxy-secret", "proxy.invalid"),
+            "unsupported proxy scheme",
+        )
+
+    monkeypatch.setattr(proxy_websocket_module, "get_http_client", lambda: _UnexpectedHttpClient(), raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=True,
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_live_websocket(
+            "rtc_live",
+            {},
+            "access-token",
+            "account-123",
+            protocol=RealtimeWebSocketProtocol.LIVE_V3,
+            allow_direct_egress=True,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
+    message = _proxy_error_message(exc_info.value)
+    assert message == "Invalid upstream websocket proxy configuration"
+    assert "proxy-user" not in message
+    assert "proxy-secret" not in message
+
+
+def test_responses_websocket_builder_normalizes_non_native_sdk_fingerprint():
+    # Regression for the Codex P2 finding: the client-facing /v1/responses
+    # websocket egress builder must normalize a non-native SDK fingerprint, not
+    # just the internal auto-transport builder, or a direct websocket SDK caller
+    # bypasses the priority-downgrade mitigation.
+    from unittest.mock import patch
+
+    from app.core.clients import proxy as proxy_module
+    from app.core.clients.proxy_websocket import _build_upstream_websocket_headers
+
+    inbound = {
+        "User-Agent": "OpenAI/Python 2.24.0",
+        "x-openai-client-version": "2.24.0",
+        "x-stainless-os": "MacOS",
+        "originator": "sdk",
+        "Version": "9.9.9",
+        "openai-beta": "responses_websockets=2026-02-06",
+    }
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
+
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
+    lowered = {key.lower() for key in headers}
+    assert "x-openai-client-version" not in lowered
+    assert not any(key.lower().startswith("x-stainless-") for key in headers)
+    assert headers["originator"] == "codex_cli_rs"
+    assert headers["version"] == "0.142.0"
+    assert "Version" not in headers
+    assert headers["ChatGPT-Account-Id"] == "acct-1"
+    assert "chatgpt-account-id" not in headers
+    # The responses websocket beta header is still appended.
+    assert "responses_websockets=2026-02-06" in headers["openai-beta"]
+
+
+def test_responses_websocket_builder_strips_internal_responses_lite_header():
+    from app.core.clients.proxy_websocket import _build_upstream_websocket_headers
+
+    inbound = {
+        "User-Agent": "codex_cli_rs/0.142.0 (Mac OS 27.0.0; arm64) iTerm.app/3.6.10",
+        "X-OpenAI-Internal-Codex-Responses-Lite": "1",
+        "openai-beta": "responses_websockets=2026-02-06",
+    }
+    headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
+    lowered = {key.lower() for key in headers}
+
+    assert "x-openai-internal-codex-responses-lite" not in lowered
+    assert "responses_websockets=2026-02-06" in headers["openai-beta"]
+
+
+def test_responses_websocket_builder_leaves_native_codex_unchanged():
+    from app.core.clients.proxy_websocket import _build_upstream_websocket_headers
+
+    native_ua = "codex_cli_rs/0.142.0 (Mac OS 27.0.0; arm64) iTerm.app/3.6.10"
+    inbound = {"User-Agent": native_ua, "openai-beta": "responses_websockets=2026-02-06"}
+    headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
+
+    assert headers["User-Agent"] == native_ua
+    assert headers["chatgpt-account-id"] == "acct-1"
+    assert "ChatGPT-Account-Id" not in headers
+
+
+@pytest.fixture
+def live_websocket_connect(monkeypatch):
+    connector = AsyncMock(return_value=_FakeConnection())
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", connector)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+    return connector
+
+
+@pytest.mark.asyncio
+async def test_live_connector_uses_frameless_url(live_websocket_connect) -> None:
+    live_websocket_connect.return_value = _FakeConnection(subprotocol="live.v1")
+    offered_subprotocols = ("live.v0", "live.v1")
+    websocket = await proxy_websocket_module.connect_live_websocket(
+        "rtc_example",
+        {
+            "OpenAI-Alpha": "quicksilver=v2",
+            "Sec-WebSocket-Protocol": "raw-header-must-not-be-forwarded",
+        },
+        "access-token",
+        "account-a",
+        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+        query_params=[("intent", "quicksilver"), ("architecture", "avas")],
+        subprotocols=offered_subprotocols,
+        allow_direct_egress=True,
+    )
+    await websocket.close()
+
+    assert (
+        live_websocket_connect.await_args.args[0]
+        == "wss://api.openai.com/v1/live/rtc_example?intent=quicksilver&architecture=avas"
+    )
+    assert live_websocket_connect.await_args.kwargs["subprotocols"] is offered_subprotocols
+    additional_headers = live_websocket_connect.await_args.kwargs["additional_headers"]
+    assert not any(key.lower() == "sec-websocket-protocol" for key in additional_headers)
+    assert websocket.response_header("sec-websocket-protocol") == "live.v1"
+
+
+@pytest.mark.asyncio
+async def test_live_connector_uses_legacy_realtime_url_with_one_ordered_call_id(
+    live_websocket_connect,
+) -> None:
+    websocket = await proxy_websocket_module.connect_live_websocket(
+        "rtc_example",
+        {},
+        "access-token",
+        "account-a",
+        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.REALTIME_V1_V2,
+        query_params=[("intent", "quicksilver"), ("architecture", "avas")],
+        base_url="https://api.openai.com/v1?configured=one",
+        allow_direct_egress=True,
+    )
+    await websocket.close()
+
+    assert (
+        live_websocket_connect.await_args.args[0]
+        == "wss://api.openai.com/v1/realtime?configured=one&intent=quicksilver&architecture=avas&call_id=rtc_example"
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_connector_rejects_duplicate_legacy_call_id(live_websocket_connect) -> None:
+    with pytest.raises(ValueError, match="must not include call_id"):
+        await proxy_websocket_module.connect_live_websocket(
+            "rtc_example",
+            {},
+            "access-token",
+            "account-a",
+            protocol=proxy_websocket_module.RealtimeWebSocketProtocol.REALTIME_V1_V2,
+            query_params=[("call_id", "rtc_duplicate"), ("intent", "quicksilver")],
+            allow_direct_egress=True,
+        )
+
+    live_websocket_connect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_live_v3_connector_rejects_query_call_id_before_connect(live_websocket_connect) -> None:
+    with pytest.raises(ValueError, match="must not include call_id"):
+        await proxy_websocket_module.connect_live_websocket(
+            "rtc_a",
+            {},
+            "access-token",
+            "account-a",
+            protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+            query_params=[("intent", "quicksilver"), ("call_id", "rtc_b")],
+            allow_direct_egress=True,
+        )
+
+    live_websocket_connect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_live_connector_replaces_identity_and_preserves_frameless_metadata(
+    live_websocket_connect,
+) -> None:
+    websocket = await proxy_websocket_module.connect_live_websocket(
+        "rtc_example",
+        {
+            "Authorization": "Bearer codex-lb-key",
+            "ChatGPT-Account-ID": "wrong-account",
+            "User-Agent": "frameless-desktop/1.0",
+            "OpenAI-Alpha": "quicksilver=v2",
+            "OpenAI-Beta": "realtime=v1, responses=experimental, responses_websockets=2026-07-01",
+            "x-oai-attestation": "attestation",
+            "x-session-id": "session-a",
+            "session-id": "session-b",
+            "thread-id": "thread-a",
+            "originator": "frameless_desktop",
+            "X-OpenAI-Fedramp": "true",
+            "x-openai-internal-codex-residency": "us",
+            "Sec-WebSocket-Key": "must-not-forward",
+        },
+        "account-token",
+        "account-a",
+        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+        allow_direct_egress=True,
+    )
+    await websocket.close()
+    first_call = live_websocket_connect.await_args_list[0]
+    lowered = {key.lower(): value for key, value in first_call.kwargs["additional_headers"].items()}
+
+    assert lowered["authorization"] == "Bearer account-token"
+    assert lowered["chatgpt-account-id"] == "account-a"
+    assert lowered["openai-alpha"] == "quicksilver=v2"
+    assert lowered["x-oai-attestation"] == "attestation"
+    assert lowered["x-session-id"] == "session-a"
+    assert lowered["session-id"] == "session-b"
+    assert lowered["thread-id"] == "thread-a"
+    assert lowered["originator"] == "frameless_desktop"
+    assert lowered["x-openai-fedramp"] == "true"
+    assert lowered["x-openai-internal-codex-residency"] == "us"
+    assert lowered["openai-beta"] == "realtime=v1"
+    assert "sec-websocket-key" not in lowered
+    assert "codex-lb-key" not in str(first_call)
+    assert first_call.kwargs["user_agent_header"] == "frameless-desktop/1.0"
+
+    responses_only_websocket = await proxy_websocket_module.connect_live_websocket(
+        "rtc_example",
+        {"OpenAI-Beta": "responses=experimental, responses_websockets=2026-07-01"},
+        "account-token",
+        "account-a",
+        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+        allow_direct_egress=True,
+    )
+    await responses_only_websocket.close()
+    responses_only_headers = live_websocket_connect.await_args_list[1].kwargs["additional_headers"]
+    assert "openai-beta" not in {key.lower() for key in responses_only_headers}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "supplied_alpha",
+    ["quicksilver=v1", None, "quicksilver=v2"],
+    ids=["v1", "v2", "v3"],
+)
+async def test_live_connector_preserves_version_specific_alpha_without_synthesis(
+    live_websocket_connect,
+    supplied_alpha: str | None,
+) -> None:
+    inbound = {"OpenAI-Alpha": supplied_alpha} if supplied_alpha is not None else {}
+
+    websocket = await proxy_websocket_module.connect_live_websocket(
+        "rtc_example",
+        inbound,
+        "account-token",
+        "account-a",
+        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+        allow_direct_egress=True,
+    )
+    await websocket.close()
+    headers = live_websocket_connect.await_args.kwargs["additional_headers"]
+    lowered = {key.lower(): value for key, value in headers.items()}
+
+    assert lowered.get("openai-alpha") == supplied_alpha
+    assert "openai-beta" not in lowered
+    assert "sec-websocket-protocol" not in lowered

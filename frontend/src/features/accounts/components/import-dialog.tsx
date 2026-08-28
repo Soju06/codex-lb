@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -28,6 +29,7 @@ export function ImportDialog({
   onOpenChange,
   onImport,
 }: ImportDialogProps) {
+  const { t } = useTranslation();
   const [file, setFile] = useState<File | null>(null);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -44,13 +46,13 @@ export function ImportDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Import auth.json</DialogTitle>
-          <DialogDescription>Upload an exported account auth.json file.</DialogDescription>
+          <DialogTitle>{t("accounts.importDialog.title")}</DialogTitle>
+          <DialogDescription>{t("accounts.importDialog.description")}</DialogDescription>
         </DialogHeader>
 
         <form className="space-y-4" onSubmit={handleSubmit}>
           <div className="space-y-2">
-            <Label htmlFor="auth-json-file">File</Label>
+            <Label htmlFor="auth-json-file">{t("accounts.importDialog.fileLabel")}</Label>
             <Input
               id="auth-json-file"
               type="file"
@@ -67,7 +69,7 @@ export function ImportDialog({
 
           <DialogFooter>
             <Button type="submit" disabled={busy || !file}>
-              Import
+              {t("common.actions.import")}
             </Button>
           </DialogFooter>
         </form>

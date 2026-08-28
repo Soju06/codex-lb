@@ -1,17 +1,24 @@
 from __future__ import annotations
 
-from datetime import timedelta
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import timedelta, timezone
 
 import pytest
 
+from app.core.clients.rate_limit_reset_credits import RateLimitResetCreditsSnapshot, ResetCreditItem
+from app.core.clients.usage import ConsumeRateLimitResetCreditResponse
 from app.core.crypto import TokenEncryptor
 from app.core.usage.models import UsagePayload
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKeyLimit, LimitType, LimitWindow, UsageHistory
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
+from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -23,12 +30,16 @@ def _make_account(
     *,
     chatgpt_account_id: str | None = None,
     plan_type: str = "plus",
+    workspace_id: str | None = None,
+    workspace_label: str | None = None,
 ) -> Account:
     encryptor = TokenEncryptor()
     return Account(
         id=account_id,
         chatgpt_account_id=chatgpt_account_id,
         email=email,
+        workspace_id=workspace_id,
+        workspace_label=workspace_label,
         plan_type=plan_type,
         access_token_encrypted=encryptor.encrypt("access"),
         refresh_token_encrypted=encryptor.encrypt("refresh"),
@@ -36,6 +47,19 @@ def _make_account(
         last_refresh=utcnow(),
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
+    )
+
+
+def _reset_credit_snapshot(credit_id: str) -> RateLimitResetCreditsSnapshot:
+    credit = ResetCreditItem(
+        id=credit_id,
+        status="available",
+        expires_at=utcnow() + timedelta(days=7),
+    )
+    return RateLimitResetCreditsSnapshot(
+        available_count=1,
+        nearest_expires_at=credit.expires_at,
+        credits=[credit],
     )
 
 
@@ -64,6 +88,9 @@ def stub_codex_usage_caller_validation(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_codex_usage_aggregates_windows(async_client, db_setup):
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    primary_reset = now_epoch + 300
+    secondary_reset = now_epoch + 5 * 24 * 3600
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         usage_repo = UsageRepository(session)
@@ -75,7 +102,7 @@ async def test_codex_usage_aggregates_windows(async_client, db_setup):
             "acc_a",
             10.0,
             window="primary",
-            reset_at=0,
+            reset_at=primary_reset,
             window_minutes=300,
             credits_has=True,
             credits_unlimited=False,
@@ -85,7 +112,7 @@ async def test_codex_usage_aggregates_windows(async_client, db_setup):
             "acc_b",
             30.0,
             window="primary",
-            reset_at=0,
+            reset_at=primary_reset,
             window_minutes=300,
             credits_has=False,
             credits_unlimited=False,
@@ -95,14 +122,14 @@ async def test_codex_usage_aggregates_windows(async_client, db_setup):
             "acc_a",
             40.0,
             window="secondary",
-            reset_at=0,
+            reset_at=secondary_reset,
             window_minutes=10080,
         )
         await usage_repo.add_entry(
             "acc_b",
             60.0,
             window="secondary",
-            reset_at=0,
+            reset_at=secondary_reset,
             window_minutes=10080,
         )
 
@@ -124,14 +151,14 @@ async def test_codex_usage_aggregates_windows(async_client, db_setup):
     primary = rate_limit["primary_window"]
     assert primary["used_percent"] == 20
     assert primary["limit_window_seconds"] == 18000
-    assert primary["reset_after_seconds"] == 0
-    assert primary["reset_at"] == 0
+    assert 0 < primary["reset_after_seconds"] <= 300
+    assert primary["reset_at"] == primary_reset
 
     secondary = rate_limit["secondary_window"]
     assert secondary["used_percent"] == 50
     assert secondary["limit_window_seconds"] == 604800
-    assert secondary["reset_after_seconds"] == 0
-    assert secondary["reset_at"] == 0
+    assert 0 < secondary["reset_after_seconds"] <= 5 * 24 * 3600
+    assert secondary["reset_at"] == secondary_reset
 
     credits = payload["credits"]
     assert credits["has_credits"] is True
@@ -149,11 +176,12 @@ async def test_codex_usage_uses_monthly_only_rows_for_credits(async_client, db_s
             _make_account("acc_monthly", "monthly@example.com", chatgpt_account_id="workspace_acc_monthly")
         )
 
+        monthly_reset = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 30 * 24 * 3600
         await usage_repo.add_entry(
             "acc_monthly",
             42.0,
             window="monthly",
-            reset_at=1735862400,
+            reset_at=monthly_reset,
             window_minutes=43200,
             credits_has=True,
             credits_unlimited=False,
@@ -173,7 +201,7 @@ async def test_codex_usage_uses_monthly_only_rows_for_credits(async_client, db_s
     monthly = payload["rate_limit"]["monthly_window"]
     assert monthly["used_percent"] == 42
     assert monthly["limit_window_seconds"] == 2592000
-    assert monthly["reset_at"] == 1735862400
+    assert monthly["reset_at"] == monthly_reset
     assert payload["credits"] == {
         "has_credits": True,
         "unlimited": False,
@@ -206,25 +234,26 @@ async def test_codex_usage_monthly_free_exhaustion_does_not_block_paid_capacity(
             )
         )
 
+        now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
         await usage_repo.add_entry(
             "acc_free_monthly_full",
             100.0,
             window="monthly",
-            reset_at=1735862400,
+            reset_at=now_epoch + 30 * 24 * 3600,
             window_minutes=43200,
         )
         await usage_repo.add_entry(
             "acc_paid_available",
             10.0,
             window="primary",
-            reset_at=1735689600,
+            reset_at=now_epoch + 300,
             window_minutes=300,
         )
         await usage_repo.add_entry(
             "acc_paid_available",
             20.0,
             window="secondary",
-            reset_at=1735862400,
+            reset_at=now_epoch + 5 * 24 * 3600,
             window_minutes=10080,
         )
 
@@ -253,18 +282,19 @@ async def test_codex_usage_header_ignored(async_client, db_setup):
         await accounts_repo.upsert(_make_account("acc_a", "a@example.com", chatgpt_account_id="workspace_acc_a"))
         await accounts_repo.upsert(_make_account("acc_b", "b@example.com", chatgpt_account_id="workspace_acc_b"))
 
+        primary_reset = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 300
         await usage_repo.add_entry(
             "acc_a",
             10.0,
             window="primary",
-            reset_at=0,
+            reset_at=primary_reset,
             window_minutes=300,
         )
         await usage_repo.add_entry(
             "acc_b",
             90.0,
             window="primary",
-            reset_at=0,
+            reset_at=primary_reset,
             window_minutes=300,
         )
 
@@ -292,11 +322,13 @@ async def test_codex_usage_prefers_newer_weekly_primary_over_stale_secondary(asy
             _make_account("acc_weekly", "weekly@example.com", chatgpt_account_id="workspace_weekly")
         )
 
+        now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+        weekly_reset = now_epoch + 6 * 24 * 3600
         await usage_repo.add_entry(
             "acc_weekly",
             15.0,
             window="secondary",
-            reset_at=1735689600,
+            reset_at=now_epoch + 5 * 24 * 3600,
             window_minutes=10080,
             recorded_at=now - timedelta(days=2),
         )
@@ -304,7 +336,7 @@ async def test_codex_usage_prefers_newer_weekly_primary_over_stale_secondary(asy
             "acc_weekly",
             80.0,
             window="primary",
-            reset_at=1735862400,
+            reset_at=weekly_reset,
             window_minutes=10080,
             recorded_at=now,
         )
@@ -321,7 +353,55 @@ async def test_codex_usage_prefers_newer_weekly_primary_over_stale_secondary(asy
     rate_limit = payload["rate_limit"]
     assert rate_limit["primary_window"] is None
     assert rate_limit["secondary_window"]["used_percent"] == 80
-    assert rate_limit["secondary_window"]["reset_at"] == 1735862400
+    assert rate_limit["secondary_window"]["reset_at"] == weekly_reset
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_expires_elapsed_primary_rows(async_client, db_setup):
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(
+            _make_account("acc_expired", "expired@example.com", chatgpt_account_id="workspace_expired")
+        )
+
+        # Upstream stopped reporting the primary window: the last primary row
+        # keeps a fully-used sample with an elapsed reset while the weekly
+        # window stays fresh.
+        await usage_repo.add_entry(
+            "acc_expired",
+            100.0,
+            window="primary",
+            reset_at=now_epoch - 7200,
+            window_minutes=300,
+            recorded_at=now - timedelta(hours=3),
+        )
+        await usage_repo.add_entry(
+            "acc_expired",
+            40.0,
+            window="secondary",
+            reset_at=now_epoch + 5 * 24 * 3600,
+            window_minutes=10080,
+            recorded_at=now,
+        )
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": "workspace_expired",
+        },
+    )
+    assert response.status_code == 200
+    rate_limit = response.json()["rate_limit"]
+    assert rate_limit["limit_reached"] is False
+    # The expired primary window is omitted instead of advertising a frozen
+    # 100% sample with a reset time in the past.
+    assert rate_limit["primary_window"] is None
+    assert rate_limit["secondary_window"]["used_percent"] == 40
 
 
 @pytest.mark.asyncio
@@ -620,3 +700,299 @@ async def test_codex_usage_api_key_ignores_aggregate_workspace_limits(async_clie
     assert payload["rate_limit"]["primary_window"]["used_percent"] == 5
     assert payload["rate_limit"]["secondary_window"]["used_percent"] == 10
     assert payload["credits"]["balance"] == "450"
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_exposes_reset_credit_availability(async_client, db_setup, monkeypatch):
+    raw_chatgpt_account_id = "workspace_reset_available"
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(
+            _make_account(
+                "acc_reset_available",
+                "reset-available@example.com",
+                chatgpt_account_id=raw_chatgpt_account_id,
+            )
+        )
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: object) -> UsagePayload:
+        assert access_token == "chatgpt-token"
+        assert account_id == raw_chatgpt_account_id
+        return UsagePayload.model_validate(
+            {
+                "plan_type": "plus",
+                "rate_limit_reset_credits": {"available_count": 3},
+            }
+        )
+
+    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": raw_chatgpt_account_id,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["rate_limit_reset_credits"] == {"available_count": 3}
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_reset_consume_forwards_and_refreshes(async_client, db_setup, monkeypatch):
+    raw_chatgpt_account_id = "workspace_reset_consume"
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(
+            _make_account("acc_reset_consume", "reset-consume@example.com", chatgpt_account_id=raw_chatgpt_account_id)
+        )
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: object) -> UsagePayload:
+        assert access_token == "chatgpt-token"
+        assert account_id == raw_chatgpt_account_id
+        return UsagePayload.model_validate({"plan_type": "plus"})
+
+    consume_calls: list[dict[str, object]] = []
+
+    async def stub_consume_rate_limit_reset_credit(**kwargs: object) -> ConsumeRateLimitResetCreditResponse:
+        consume_calls.append(kwargs)
+        return ConsumeRateLimitResetCreditResponse.model_validate({"code": "reset", "windows_reset": 2})
+
+    refreshed_account_ids: list[str] = []
+
+    class StubUsageUpdater:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def force_refresh(
+            self,
+            account: Account,
+            *,
+            ignore_refresh_disabled: bool = False,
+            access_token_override: str | None = None,
+        ) -> bool:
+            refreshed_account_ids.append(f"{account.id}:{ignore_refresh_disabled}:{access_token_override}")
+            return True
+
+    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.modules.proxy.api.consume_rate_limit_reset_credit", stub_consume_rate_limit_reset_credit)
+    monkeypatch.setattr("app.modules.proxy.api.UsageUpdater", StubUsageUpdater)
+    cache_generation = get_account_selection_cache().generation
+    await get_rate_limit_reset_credits_store().set("acc_reset_consume", _reset_credit_snapshot("credit-codex"))
+
+    response = await async_client.post(
+        "/api/codex/rate-limit-reset-credits/consume",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": raw_chatgpt_account_id,
+        },
+        json={"redeem_request_id": "redeem-123"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"code": "reset", "windows_reset": 2}
+    assert consume_calls == [
+        {
+            "access_token": "chatgpt-token",
+            "account_id": raw_chatgpt_account_id,
+            "redeem_request_id": "redeem-123",
+            "route": None,
+            "allow_direct_egress": True,
+        }
+    ]
+    assert refreshed_account_ids == ["acc_reset_consume:True:chatgpt-token"]
+    assert get_account_selection_cache().generation > cache_generation
+    assert get_rate_limit_reset_credits_store().get("acc_reset_consume") is None
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_reset_consume_refreshes_matched_workspace_account(async_client, db_setup, monkeypatch):
+    raw_chatgpt_account_id = "workspace_reset_multi"
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(
+            _make_account(
+                "workspace_reset_multi_default",
+                "reset-multi@example.com",
+                chatgpt_account_id=raw_chatgpt_account_id,
+            )
+        )
+        await accounts_repo.upsert(
+            _make_account(
+                "workspace_reset_multi_29c4834a",
+                "reset-multi@example.com",
+                chatgpt_account_id=raw_chatgpt_account_id,
+                workspace_id="team-alpha",
+                workspace_label="Team Alpha",
+            )
+        )
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: object) -> UsagePayload:
+        assert access_token == "chatgpt-token"
+        assert account_id == raw_chatgpt_account_id
+        return UsagePayload.model_validate({"plan_type": "plus", "workspace_id": "team-alpha"})
+
+    async def stub_consume_rate_limit_reset_credit(**_: object) -> ConsumeRateLimitResetCreditResponse:
+        return ConsumeRateLimitResetCreditResponse.model_validate({"code": "reset", "windows_reset": 1})
+
+    refreshed_account_ids: list[str] = []
+
+    class StubUsageUpdater:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def force_refresh(
+            self,
+            account: Account,
+            *,
+            ignore_refresh_disabled: bool = False,
+            access_token_override: str | None = None,
+        ) -> bool:
+            del ignore_refresh_disabled
+            assert access_token_override == "chatgpt-token"
+            refreshed_account_ids.append(account.id)
+            return True
+
+    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.modules.proxy.api.consume_rate_limit_reset_credit", stub_consume_rate_limit_reset_credit)
+    monkeypatch.setattr("app.modules.proxy.api.UsageUpdater", StubUsageUpdater)
+
+    response = await async_client.post(
+        "/api/codex/rate-limit-reset-credits/consume",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": raw_chatgpt_account_id,
+        },
+        json={"redeem_request_id": "redeem-workspace"},
+    )
+
+    assert response.status_code == 200
+    assert refreshed_account_ids == ["workspace_reset_multi_29c4834a"]
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_reset_consume_rejects_api_key_callers(async_client, db_setup):
+    _, plain_key = await _create_api_key(name="reset-api-key")
+
+    response = await async_client.post(
+        "/api/codex/rate-limit-reset-credits/consume",
+        headers={"Authorization": f"Bearer {plain_key}"},
+        json={"redeem_request_id": "redeem-123"},
+    )
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_reset_consume_rejects_empty_redeem_request_id(async_client, db_setup, monkeypatch):
+    raw_chatgpt_account_id = "workspace_reset_empty"
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(
+            _make_account("acc_reset_empty", "reset-empty@example.com", chatgpt_account_id=raw_chatgpt_account_id)
+        )
+
+    async def stub_fetch_usage(**_: object) -> UsagePayload:
+        return UsagePayload.model_validate({"plan_type": "plus"})
+
+    async def should_not_consume(**_: object) -> ConsumeRateLimitResetCreditResponse:
+        raise AssertionError("empty redeem_request_id should not be forwarded upstream")
+
+    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.modules.proxy.api.consume_rate_limit_reset_credit", should_not_consume)
+
+    response = await async_client.post(
+        "/api/codex/rate-limit-reset-credits/consume",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": raw_chatgpt_account_id,
+        },
+        json={"redeem_request_id": "  "},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_cancellation_closes_initial_scope_without_reopening(
+    async_client,
+    app_instance,
+    monkeypatch: pytest.MonkeyPatch,
+    db_setup,
+):
+    del db_setup
+    account_id = "acc_usage_cancel"
+    chatgpt_account_id = "workspace_usage_cancel"
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(
+            _make_account(
+                account_id,
+                "usage-cancel@example.com",
+                chatgpt_account_id=chatgpt_account_id,
+            )
+        )
+        await usage_repo.add_entry(
+            account_id,
+            10.0,
+            window="primary",
+            reset_at=int(utcnow().timestamp()) + 300,
+            window_minutes=300,
+        )
+
+    service = get_proxy_service_for_app(app_instance)
+    original_factory = service._repo_factory
+    scope_depth = 0
+    scope_depths_during_refresh: list[int] = []
+    refresh_started = asyncio.Event()
+    release_owned_refresh = asyncio.Event()
+    owned_tasks: list[asyncio.Task[None]] = []
+
+    @asynccontextmanager
+    async def tracking_factory():
+        nonlocal scope_depth
+        scope_depth += 1
+        try:
+            async with original_factory() as repos:
+                yield repos
+        finally:
+            scope_depth -= 1
+
+    async def fake_refresh_usage(accounts, latest_usage) -> None:
+        del accounts, latest_usage
+        scope_depths_during_refresh.append(scope_depth)
+        refresh_started.set()
+
+        async def owned_refresh() -> None:
+            await release_owned_refresh.wait()
+
+        owned_task = asyncio.create_task(owned_refresh())
+        owned_tasks.append(owned_task)
+        await asyncio.shield(owned_task)
+
+    monkeypatch.setattr(service, "_repo_factory", tracking_factory)
+    monkeypatch.setattr(service, "_refresh_usage", fake_refresh_usage)
+
+    request_task = asyncio.create_task(
+        async_client.get(
+            "/api/codex/usage",
+            headers={
+                "Authorization": "Bearer chatgpt-token",
+                "chatgpt-account-id": chatgpt_account_id,
+            },
+        )
+    )
+    await asyncio.wait_for(refresh_started.wait(), timeout=1)
+    request_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    try:
+        assert scope_depths_during_refresh == [0]
+        assert scope_depth == 0
+        assert len(owned_tasks) == 1
+        assert not owned_tasks[0].done()
+    finally:
+        release_owned_refresh.set()
+        for owned_task in owned_tasks:
+            await asyncio.wait_for(owned_task, timeout=1)

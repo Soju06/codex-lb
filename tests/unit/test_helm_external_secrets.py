@@ -47,6 +47,21 @@ def _helm_template(*args: str) -> str:
     return completed.stdout
 
 
+def _helm_template_failure(*args: str) -> subprocess.CalledProcessError:
+    if shutil.which("helm") is None:
+        pytest.skip("helm is required for chart rendering tests")
+    _ensure_chart_dependencies()
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        subprocess.run(
+            ["helm", "template", "codex-lb", str(_CHART_DIR), *args],
+            cwd=_REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    return exc_info.value
+
+
 def _helm_documents(rendered: str) -> list[dict]:
     return [document for document in yaml.safe_load_all(rendered) if document]
 
@@ -104,6 +119,86 @@ def test_external_secrets_upgrade_keeps_startup_migration_disabled_and_runs_hook
 
     assert 'CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "false"' in rendered
     assert '"helm.sh/hook": "post-install,pre-upgrade"' in rendered
+
+
+def test_external_secret_uses_v1_api_and_default_json_properties() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/externalsecret.yaml",
+        "--set",
+        "externalSecrets.enabled=true",
+        "--set",
+        "externalSecrets.secretStoreRef.name=test-store",
+    )
+
+    (external_secret,) = _helm_documents(rendered)
+    assert external_secret["apiVersion"] == "external-secrets.io/v1"
+    assert external_secret["spec"]["data"] == [
+        {
+            "secretKey": "database-url",
+            "remoteRef": {"key": "codex-lb", "property": "database-url"},
+        },
+        {
+            "secretKey": "encryption-key",
+            "remoteRef": {"key": "codex-lb", "property": "encryption-key"},
+        },
+    ]
+
+
+def test_external_secret_supports_individual_remote_secret_keys() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/externalsecret.yaml",
+        "--set",
+        "externalSecrets.enabled=true",
+        "--set",
+        "externalSecrets.secretStoreRef.name=infisical",
+        "--set-string",
+        "externalSecrets.remoteRefs.databaseUrl.key=/apps/codex-lb/DATABASE_URL",
+        "--set",
+        "externalSecrets.remoteRefs.databaseUrl.property=",
+        "--set-string",
+        "externalSecrets.remoteRefs.encryptionKey.key=/apps/codex-lb/ENCRYPTION_KEY",
+        "--set",
+        "externalSecrets.remoteRefs.encryptionKey.property=",
+    )
+
+    (external_secret,) = _helm_documents(rendered)
+    assert external_secret["spec"]["data"] == [
+        {
+            "secretKey": "database-url",
+            "remoteRef": {"key": "/apps/codex-lb/DATABASE_URL"},
+        },
+        {
+            "secretKey": "encryption-key",
+            "remoteRef": {"key": "/apps/codex-lb/ENCRYPTION_KEY"},
+        },
+    ]
+
+
+def test_external_secret_nulled_remote_refs_render_default_layout() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/externalsecret.yaml",
+        "--set",
+        "externalSecrets.enabled=true",
+        "--set",
+        "externalSecrets.secretStoreRef.name=test-store",
+        "--set",
+        "externalSecrets.remoteRefs=null",
+    )
+
+    (external_secret,) = _helm_documents(rendered)
+    assert external_secret["spec"]["data"] == [
+        {
+            "secretKey": "database-url",
+            "remoteRef": {"key": "codex-lb", "property": "database-url"},
+        },
+        {
+            "secretKey": "encryption-key",
+            "remoteRef": {"key": "codex-lb", "property": "encryption-key"},
+        },
+    ]
 
 
 def test_upgrade_renders_legacy_deployment_cleanup_hook_for_statefulset_migration() -> None:
@@ -310,10 +405,43 @@ def test_deployment_prestop_starts_and_polls_local_drain() -> None:
     )
 
     assert "http://127.0.0.1:3456" in rendered
-    assert "/internal/drain/start" in rendered
-    assert "/internal/drain/status" in rendered
-    assert "deadline = time.monotonic() + 15" in rendered
-    assert "break" not in rendered
+    assert "-m" in rendered
+    assert "app.core.prestop" in rendered
+    assert "--routing-dwell-seconds" in rendered
+    assert '"15"' in rendered
+    assert "--drain-timeout-seconds" in rendered
+    assert '"30"' in rendered
+
+
+def test_deployment_rejects_routing_dwell_larger_than_drain_timeout() -> None:
+    failure = _helm_template_failure(
+        "--show-only",
+        "templates/deployment.yaml",
+        "--set",
+        "preStopSleepSeconds=31",
+        "--set",
+        "config.shutdownDrainTimeoutSeconds=30",
+        "--set",
+        "terminationGracePeriodSeconds=61",
+    )
+
+    assert "shutdownDrainTimeoutSeconds must be greater than or equal to preStopSleepSeconds" in failure.stderr
+
+
+def test_deployment_rejects_missing_post_drain_cleanup_buffer() -> None:
+    failure = _helm_template_failure(
+        "--show-only",
+        "templates/deployment.yaml",
+        "--set",
+        "preStopSleepSeconds=15",
+        "--set",
+        "config.shutdownDrainTimeoutSeconds=30",
+        "--set",
+        "terminationGracePeriodSeconds=44",
+    )
+
+    assert "terminationGracePeriodSeconds must cover preStop start fallback" in failure.stderr
+    assert "config.shutdownDrainTimeoutSeconds + 32" in failure.stderr
 
 
 def test_deployment_uses_service_port_for_container_and_probes() -> None:
@@ -366,16 +494,194 @@ def test_ingress_renders_dedicated_responses_ingress_with_session_hash() -> None
 
     assert rendered.count("kind: Ingress") == 2
     assert "name: codex-lb-responses" in rendered
-    assert "nginx.ingress.kubernetes.io/upstream-hash-by: $codex_responses_hash_key" in rendered
-    assert "nginx.ingress.kubernetes.io/configuration-snippet:" in rendered
-    assert 'set $codex_responses_hash_key "$http_authorization:$request_id";' in rendered
-    assert "set $codex_responses_hash_key $http_x_codex_session_id;" in rendered
+    assert "nginx.ingress.kubernetes.io/upstream-hash-by: $http_x_codex_session_id$http_authorization" in rendered
+    assert "nginx.ingress.kubernetes.io/configuration-snippet:" not in rendered
     assert "nginx.ingress.kubernetes.io/upstream-hash-by: $http_authorization" in rendered
     assert "nginx.ingress.kubernetes.io/proxy-next-upstream: error timeout http_502 http_503 http_504" in rendered
     assert "invalid_header" in rendered
     assert 'nginx.ingress.kubernetes.io/proxy-next-upstream-tries: "2"' in rendered
     assert "path: /v1/responses" in rendered
     assert "path: /backend-api/codex/responses" in rendered
+
+
+def test_gateway_api_defaults_to_catch_all_backend_rule() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/httproute.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+    )
+
+    (route,) = _helm_documents(rendered)
+    assert route["spec"]["rules"] == [{"backendRefs": [{"name": "codex-lb", "port": 2455}]}]
+
+
+def test_gateway_api_renders_ordered_path_matches_and_filters() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/httproute.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+        "--set-string",
+        "gatewayApi.rules[0].matches[0].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[0].matches[0].path.value=/v1",
+        "--set-string",
+        "gatewayApi.rules[0].matches[1].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[0].matches[1].path.value=/backend-api/codex",
+        "--set-string",
+        "gatewayApi.rules[0].matches[2].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[0].matches[2].path.value=/backend-api/wham",
+        "--set-string",
+        "gatewayApi.rules[0].matches[3].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[0].matches[3].path.value=/backend-api/transcribe",
+        "--set-string",
+        "gatewayApi.rules[0].matches[4].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[0].matches[4].path.value=/backend-api/files",
+        "--set-string",
+        "gatewayApi.rules[0].matches[5].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[0].matches[5].path.value=/api/codex",
+        "--set-string",
+        "gatewayApi.rules[1].matches[0].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[1].matches[0].path.value=/",
+        "--set-string",
+        "gatewayApi.rules[1].filters[0].type=ExtensionRef",
+        "--set-string",
+        "gatewayApi.rules[1].filters[0].extensionRef.group=traefik.io",
+        "--set-string",
+        "gatewayApi.rules[1].filters[0].extensionRef.kind=Middleware",
+        "--set-string",
+        "gatewayApi.rules[1].filters[0].extensionRef.name=oauth-forward-auth",
+    )
+
+    (route,) = _helm_documents(rendered)
+    rules = route["spec"]["rules"]
+    assert rules[0] == {
+        "matches": [
+            {"path": {"type": "PathPrefix", "value": "/v1"}},
+            {"path": {"type": "PathPrefix", "value": "/backend-api/codex"}},
+            {"path": {"type": "PathPrefix", "value": "/backend-api/wham"}},
+            {"path": {"type": "PathPrefix", "value": "/backend-api/transcribe"}},
+            {"path": {"type": "PathPrefix", "value": "/backend-api/files"}},
+            {"path": {"type": "PathPrefix", "value": "/api/codex"}},
+        ],
+        "backendRefs": [{"name": "codex-lb", "port": 2455}],
+    }
+    assert rules[1]["matches"] == [{"path": {"type": "PathPrefix", "value": "/"}}]
+    assert rules[1]["filters"] == [
+        {
+            "type": "ExtensionRef",
+            "extensionRef": {
+                "group": "traefik.io",
+                "kind": "Middleware",
+                "name": "oauth-forward-auth",
+            },
+        }
+    ]
+    assert rules[1]["backendRefs"] == [{"name": "codex-lb", "port": 2455}]
+
+
+def test_gateway_api_can_create_application_specific_gateway() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/gateway.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+        "--set",
+        "gatewayApi.gateway.create=true",
+        "--set",
+        "gatewayApi.gateway.gatewayClassName=envoy",
+    )
+
+    (gateway,) = _helm_documents(rendered)
+    assert gateway["apiVersion"] == "gateway.networking.k8s.io/v1"
+    assert gateway["kind"] == "Gateway"
+    assert gateway["metadata"]["name"] == "codex-lb"
+    assert gateway["spec"]["gatewayClassName"] == "envoy"
+    assert gateway["spec"]["listeners"] == [{"name": "http", "port": 80, "protocol": "HTTP"}]
+
+
+def test_gateway_api_httproute_attaches_to_chart_managed_gateway() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/httproute.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+        "--set",
+        "gatewayApi.gateway.create=true",
+        "--set",
+        "gatewayApi.gateway.gatewayClassName=envoy",
+        "--set-string",
+        "gatewayApi.parentRefs[0].name=shared-gateway",
+        "--set-string",
+        "gatewayApi.parentRefs[0].namespace=gateway-system",
+    )
+
+    (route,) = _helm_documents(rendered)
+    assert route["spec"]["parentRefs"] == [{"name": "codex-lb"}]
+
+
+def test_gateway_api_gateway_supports_custom_listeners() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/gateway.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+        "--set",
+        "gatewayApi.gateway.create=true",
+        "--set",
+        "gatewayApi.gateway.gatewayClassName=envoy",
+        "--set-string",
+        "gatewayApi.gateway.listeners[0].name=https",
+        "--set",
+        "gatewayApi.gateway.listeners[0].port=443",
+        "--set-string",
+        "gatewayApi.gateway.listeners[0].protocol=HTTPS",
+        "--set-string",
+        "gatewayApi.gateway.listeners[0].tls.mode=Terminate",
+        "--set-string",
+        "gatewayApi.gateway.listeners[0].tls.certificateRefs[0].name=codex-lb-tls",
+    )
+
+    (gateway,) = _helm_documents(rendered)
+    assert gateway["spec"]["listeners"] == [
+        {
+            "name": "https",
+            "port": 443,
+            "protocol": "HTTPS",
+            "tls": {"mode": "Terminate", "certificateRefs": [{"name": "codex-lb-tls"}]},
+        }
+    ]
+
+
+def test_gateway_api_gateway_requires_gateway_class_name() -> None:
+    with pytest.raises(subprocess.CalledProcessError) as excinfo:
+        _helm_template(
+            "--set",
+            "gatewayApi.enabled=true",
+            "--set",
+            "gatewayApi.gateway.create=true",
+        )
+
+    assert "gatewayApi.gateway.gatewayClassName" in excinfo.value.stderr
+
+
+def test_gateway_api_does_not_render_gateway_by_default() -> None:
+    rendered = _helm_template(
+        "--set",
+        "gatewayApi.enabled=true",
+    )
+
+    documents = _helm_documents(rendered)
+    assert all(document.get("kind") != "Gateway" for document in documents)
+    (route,) = [document for document in documents if document.get("kind") == "HTTPRoute"]
+    assert route["spec"]["parentRefs"] == [{"name": "gateway", "namespace": "gateway-system"}]
 
 
 def test_bundled_kind_smoke_preserves_primary_ingress_paths() -> None:
@@ -439,8 +745,8 @@ def test_kind_smoke_overrides_helm_test_image_and_external_db_replicas() -> None
     assert '--set test.image.repository="${IMAGE_REPOSITORY}"' in script
     assert '--set test.image.tag="${IMAGE_TAG}"' in script
     assert "--set test.image.pullPolicy=IfNotPresent" in script
-    assert _command_sets_value(external_db_install, "replicaCount=1")
-    assert not _command_sets_value(bundled_install, "replicaCount=1")
+    assert _command_sets_value(external_db_install, "replicaCount=2")
+    assert not _command_sets_value(bundled_install, "replicaCount=2")
 
 
 def test_kind_smoke_logs_timestamped_major_steps() -> None:
@@ -619,6 +925,274 @@ def test_external_database_url_is_rendered_into_chart_managed_secret_when_postgr
     )
 
     assert 'database-url: "postgresql+asyncpg://user:pass@db.example.com:5432/codexlb"' in rendered
+
+
+def test_network_policy_uses_external_database_port() -> None:
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set",
+        "externalDatabase.host=db.example.test",
+        "--set",
+        "externalDatabase.user=codexlb",
+        "--set",
+        "externalDatabase.database=codexlb",
+        "--set",
+        "externalDatabase.port=6432",
+    )
+
+    documents = _helm_documents(rendered)
+    (secret,) = [document for document in documents if document.get("kind") == "Secret"]
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert secret["stringData"]["database-url"] == "postgresql+asyncpg://codexlb@db.example.test:6432/codexlb"
+    assert network_policy["spec"]["egress"][1] == {"ports": [{"port": 6432, "protocol": "TCP"}]}
+
+
+def test_network_policy_uses_port_from_external_database_url() -> None:
+    database_url = "postgresql+asyncpg://codexlb@db.example.test:6432/codexlb"
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set-string",
+        f"externalDatabase.url={database_url}",
+    )
+
+    documents = _helm_documents(rendered)
+    (secret,) = [document for document in documents if document.get("kind") == "Secret"]
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert secret["stringData"]["database-url"] == database_url
+    assert network_policy["spec"]["egress"][1] == {"ports": [{"port": 6432, "protocol": "TCP"}]}
+
+
+def test_network_policy_uses_default_port_for_external_database_url_without_port() -> None:
+    database_url = "postgresql+asyncpg://codexlb@db.example.test/codexlb"
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set-string",
+        f"externalDatabase.url={database_url}",
+        "--set",
+        "externalDatabase.port=6432",
+    )
+
+    documents = _helm_documents(rendered)
+    (secret,) = [document for document in documents if document.get("kind") == "Secret"]
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert secret["stringData"]["database-url"] == database_url
+    assert network_policy["spec"]["egress"][1] == {"ports": [{"port": 5432, "protocol": "TCP"}]}
+
+
+@pytest.mark.parametrize(
+    ("database_url", "expected_ports"),
+    [
+        ("postgresql+asyncpg://codexlb@db.example.test:5432/codexlb?port=6432", (6432,)),
+        ("postgresql+asyncpg://codexlb@/codexlb?host=db.example.test:6432", (6432,)),
+        ("postgresql+asyncpg://codexlb@/codexlb?host=db.example.test%3A6432", (6432,)),
+        ("postgresql+asyncpg://codexlb@db.example.test:06432/codexlb", (6432,)),
+        ("postgresql+asyncpg://codexlb@db.example.test/codexlb?port=%36%34%33%32", (6432,)),
+        ("postgresql+asyncpg://codexlb@/codexlb?host=2001:db8::1", (5432,)),
+        (
+            "postgresql+asyncpg://codexlb@/codexlb?host=db1.example.test:6432&host=db2.example.test:7432",
+            (6432, 7432),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?host=failover.example.test",
+            (6432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?host=2001:db8::a",
+            (6432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?port=7432&port=",
+            (7432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?host=failover.example.test:7432&host=",
+            (7432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:5432/codexlb?port=%096432%09",
+            (6432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:5432/codexlb?port=6_432",
+            (6432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?host=failover.example.test:%2D1",
+            (6432,),
+        ),
+    ],
+    ids=[
+        "query-port-override",
+        "query-host-port",
+        "encoded-query-host-port",
+        "leading-zero-port",
+        "encoded-query-port",
+        "portless-ipv6-query-host",
+        "multihost-query-ports",
+        "query-host-inherits-authority-port",
+        "portless-ipv6-query-host-inherits-authority-port",
+        "blank-query-port-is-ignored",
+        "blank-query-host-is-ignored",
+        "encoded-query-port-whitespace",
+        "underscored-query-port",
+        "signed-query-host-suffix-is-not-a-port",
+    ],
+)
+def test_network_policy_uses_effective_port_from_external_database_url(
+    database_url: str,
+    expected_ports: tuple[int, ...],
+) -> None:
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set-string",
+        f"externalDatabase.url={database_url}",
+    )
+
+    documents = _helm_documents(rendered)
+    (secret,) = [document for document in documents if document.get("kind") == "Secret"]
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert secret["stringData"]["database-url"] == database_url
+    assert network_policy["spec"]["egress"][1] == {
+        "ports": [{"port": port, "protocol": "TCP"} for port in expected_ports]
+    }
+
+
+@pytest.mark.parametrize(
+    "source_args",
+    [
+        ("--set", "externalDatabase.existingSecret=external-db-secret"),
+        ("--set", "auth.existingSecret=app-secret"),
+        (
+            "--set",
+            "externalSecrets.enabled=true",
+            "--set",
+            "externalSecrets.secretStoreRef.name=test-store",
+        ),
+    ],
+    ids=["external-database-secret", "auth-secret", "external-secrets"],
+)
+def test_network_policy_ignores_inactive_external_database_url(source_args: tuple[str, ...]) -> None:
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set-string",
+        "externalDatabase.url=postgresql+asyncpg://codexlb@stale.example.test:5432/codexlb",
+        "--set",
+        "externalDatabase.port=6432",
+        *source_args,
+    )
+
+    documents = _helm_documents(rendered)
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert network_policy["spec"]["egress"][1] == {"ports": [{"port": 6432, "protocol": "TCP"}]}
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql+asyncpg://codexlb@db.example.test:0/codexlb",
+        "postgresql+asyncpg://codexlb@db.example.test:65536/codexlb",
+        "postgresql+asyncpg://codexlb@db.example.test/codexlb?port=-1",
+    ],
+    ids=["zero", "above-maximum", "negative-query-port"],
+)
+def test_network_policy_rejects_invalid_external_database_url_port(database_url: str) -> None:
+    failure = _helm_template_failure(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set-string",
+        f"externalDatabase.url={database_url}",
+    )
+
+    assert "externalDatabase.url port must be between 1 and 65535" in failure.stderr
+
+
+def test_network_policy_uses_default_external_database_port() -> None:
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set",
+        "externalDatabase.host=db.example.test",
+        "--set",
+        "externalDatabase.user=codexlb",
+        "--set",
+        "externalDatabase.database=codexlb",
+    )
+
+    documents = _helm_documents(rendered)
+    (secret,) = [document for document in documents if document.get("kind") == "Secret"]
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert secret["stringData"]["database-url"] == "postgresql+asyncpg://codexlb@db.example.test:5432/codexlb"
+    assert network_policy["spec"]["egress"][1] == {"ports": [{"port": 5432, "protocol": "TCP"}]}
+
+
+def test_network_policy_keeps_bundled_postgresql_egress() -> None:
+    rendered = _helm_template(
+        "--set",
+        "networkPolicy.enabled=true",
+    )
+
+    documents = _helm_documents(rendered)
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert network_policy["spec"]["egress"][1] == {
+        "to": [
+            {
+                "podSelector": {
+                    "matchLabels": {
+                        "app.kubernetes.io/name": "postgresql",
+                        "app.kubernetes.io/instance": "codex-lb",
+                    }
+                }
+            }
+        ],
+        "ports": [{"port": 5432, "protocol": "TCP"}],
+    }
 
 
 def test_network_policy_does_not_allow_http_ingress_from_all_namespaces_by_default() -> None:

@@ -43,12 +43,21 @@ class ResponseFailedEvent(TypedDict):
 
 
 PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE = "Upstream websocket closed before response.completed"
-PREVIOUS_RESPONSE_STALE_CODE = "codex_previous_response_stale"
-PREVIOUS_RESPONSE_STALE_MESSAGE = "Upstream previous response anchor expired; retry without previous_response_id."
+PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found"
+PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE = "Previous response was not found; retry without previous_response_id."
 
 
-def openai_error(code: str, message: str, error_type: str = "server_error") -> OpenAIErrorEnvelope:
-    return {"error": {"message": message, "type": error_type, "code": code}}
+def openai_error(
+    code: str,
+    message: str,
+    error_type: str = "server_error",
+    *,
+    resets_at: int | float | None = None,
+) -> OpenAIErrorEnvelope:
+    detail: OpenAIErrorDetail = {"message": message, "type": error_type, "code": code}
+    if resets_at is not None:
+        detail["resets_at"] = int(resets_at)
+    return {"error": detail}
 
 
 def dashboard_error(code: str, message: str) -> DashboardErrorEnvelope:
@@ -70,6 +79,13 @@ def is_previous_response_not_found_message(message: str | None) -> bool:
     return "previous response" in normalized and "not found" in normalized
 
 
+def _is_invalid_previous_response_id_message(message: str | None) -> bool:
+    if message is None:
+        return False
+    normalized = " ".join(message.casefold().replace("`", "").split()).removesuffix(".").rstrip()
+    return normalized == "invalid previous_response_id"
+
+
 def previous_response_id_from_not_found_message(message: str | None) -> str | None:
     if message is None:
         return None
@@ -88,14 +104,20 @@ def previous_response_id_from_not_found_message(message: str | None) -> str | No
 def is_previous_response_not_found_error(
     *,
     code: str | None,
-    param: str | None,
+    param: object,
     message: str | None,
 ) -> bool:
-    if code == "previous_response_not_found":
+    if code == PREVIOUS_RESPONSE_NOT_FOUND_CODE:
         return True
-    if code != "invalid_request_error" or param != "previous_response_id":
+    if param is not None and not isinstance(param, str):
         return False
-    return is_previous_response_not_found_message(message)
+    if code != "invalid_request_error":
+        return False
+    if param is None:
+        return _is_invalid_previous_response_id_message(message)
+    if param != "previous_response_id":
+        return False
+    return is_previous_response_not_found_message(message) or _is_invalid_previous_response_id_message(message)
 
 
 def response_failed_event(
@@ -105,10 +127,11 @@ def response_failed_event(
     response_id: str | None = None,
     created_at: int | None = None,
     error_param: str | None = None,
+    resets_at: int | float | None = None,
     incomplete_details: dict[str, str] | None = None,
 ) -> ResponseFailedEvent:
-    error = openai_error(code, message, error_type)["error"]
-    if error_param:
+    error = openai_error(code, message, error_type, resets_at=resets_at)["error"]
+    if error_param is not None:
         error["param"] = error_param
     if created_at is None:
         created_at = int(time.time())

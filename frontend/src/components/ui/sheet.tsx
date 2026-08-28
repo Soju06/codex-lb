@@ -1,8 +1,10 @@
 import * as React from "react"
 import { XIcon } from "lucide-react"
 import { Dialog as SheetPrimitive } from "radix-ui"
+import { useTranslation } from "react-i18next"
 
 import { cn } from "@/lib/utils"
+import { useFloatingLayerDismissGuard } from "@/components/ui/use-floating-layer-dismiss-guard"
 
 function Sheet({ ...props }: React.ComponentProps<typeof SheetPrimitive.Root>) {
   return <SheetPrimitive.Root data-slot="sheet" {...props} />
@@ -47,16 +49,36 @@ function SheetContent({
   children,
   side = "right",
   showCloseButton = true,
+  onFocusOutside,
+  onInteractOutside,
+  onPointerDownOutside,
   ...props
 }: React.ComponentProps<typeof SheetPrimitive.Content> & {
   side?: "top" | "right" | "bottom" | "left"
   showCloseButton?: boolean
 }) {
+  // Keep the sheet open when an outside interaction is really the user
+  // dismissing a nested floating layer (Select / DropdownMenu / Popover).
+  const guardDismiss = useFloatingLayerDismissGuard()
+  const { t } = useTranslation()
+
   return (
     <SheetPortal>
       <SheetOverlay />
       <SheetPrimitive.Content
         data-slot="sheet-content"
+        onFocusOutside={(event) => {
+          onFocusOutside?.(event)
+          guardDismiss(event)
+        }}
+        onInteractOutside={(event) => {
+          onInteractOutside?.(event)
+          guardDismiss(event)
+        }}
+        onPointerDownOutside={(event) => {
+          onPointerDownOutside?.(event)
+          guardDismiss(event)
+        }}
         className={cn(
           "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out fixed z-50 flex flex-col gap-4 shadow-lg transition ease-in-out overscroll-contain data-[state=closed]:duration-300 data-[state=open]:duration-500",
           side === "right" &&
@@ -75,7 +97,7 @@ function SheetContent({
         {showCloseButton && (
           <SheetPrimitive.Close className="ring-offset-background focus:ring-ring data-[state=open]:bg-secondary absolute top-4 right-4 rounded-xs opacity-70 transition-opacity hover:opacity-100 focus:ring-2 focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none">
             <XIcon className="size-4" />
-            <span className="sr-only">Close</span>
+            <span className="sr-only">{t("common.actions.close")}</span>
           </SheetPrimitive.Close>
         )}
       </SheetPrimitive.Content>

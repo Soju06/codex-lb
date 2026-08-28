@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from typing import cast
 
 import pytest
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi import FastAPI, Response
 from httpx import ASGITransport, AsyncClient
-from starlette.types import Message
 
 import app.main as main
 from app import __version__
@@ -17,98 +13,43 @@ from app.core.middleware.app_version import add_app_version_middleware
 
 pytestmark = pytest.mark.unit
 
-_Dispatch = Callable[[Request, Callable[[Request], Awaitable[Response]]], Awaitable[Response]]
+
+def _build_app(status_code: int, *, headers: dict[str, str] | None = None) -> FastAPI:
+    app = FastAPI()
+    add_app_version_middleware(app)
+
+    @app.get("/probe")
+    async def probe() -> Response:
+        return Response(status_code=status_code, headers=headers)
+
+    return app
 
 
 @pytest.mark.asyncio
 async def test_app_version_middleware_adds_header_to_2xx_response():
-    app = FastAPI()
-    add_app_version_middleware(app)
-    dispatch = cast(_Dispatch, app.user_middleware[0].kwargs["dispatch"])
+    transport = ASGITransport(app=_build_app(204))
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/probe")
 
-    request = Request(
-        {
-            "type": "http",
-            "http_version": "1.1",
-            "method": "GET",
-            "scheme": "http",
-            "path": "/health",
-            "raw_path": b"/health",
-            "query_string": b"",
-            "root_path": "",
-            "headers": [],
-            "client": ("testclient", 50000),
-            "server": ("testserver", 80),
-        },
-        receive=_empty_receive,
-    )
-
-    async def call_next(_: Request) -> JSONResponse:
-        return JSONResponse({"ok": True}, status_code=204)
-
-    response = await dispatch(request, call_next)
-
+    assert response.status_code == 204
     assert response.headers["X-App-Version"] == __version__
 
 
 @pytest.mark.asyncio
 async def test_app_version_middleware_skips_header_on_5xx_response():
-    app = FastAPI()
-    add_app_version_middleware(app)
-    dispatch = cast(_Dispatch, app.user_middleware[0].kwargs["dispatch"])
+    transport = ASGITransport(app=_build_app(503))
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/probe")
 
-    request = Request(
-        {
-            "type": "http",
-            "http_version": "1.1",
-            "method": "GET",
-            "scheme": "http",
-            "path": "/health",
-            "raw_path": b"/health",
-            "query_string": b"",
-            "root_path": "",
-            "headers": [],
-            "client": ("testclient", 50000),
-            "server": ("testserver", 80),
-        },
-        receive=_empty_receive,
-    )
-
-    async def call_next(_: Request) -> JSONResponse:
-        return JSONResponse({"error": "boom"}, status_code=503)
-
-    response = await dispatch(request, call_next)
-
+    assert response.status_code == 503
     assert "X-App-Version" not in response.headers
 
 
 @pytest.mark.asyncio
 async def test_app_version_middleware_preserves_existing_header_value():
-    app = FastAPI()
-    add_app_version_middleware(app)
-    dispatch = cast(_Dispatch, app.user_middleware[0].kwargs["dispatch"])
-
-    request = Request(
-        {
-            "type": "http",
-            "http_version": "1.1",
-            "method": "GET",
-            "scheme": "http",
-            "path": "/health",
-            "raw_path": b"/health",
-            "query_string": b"",
-            "root_path": "",
-            "headers": [],
-            "client": ("testclient", 50000),
-            "server": ("testserver", 80),
-        },
-        receive=_empty_receive,
-    )
-
-    async def call_next(_: Request) -> Response:
-        return Response(status_code=200, headers={"X-App-Version": "route-owned-version"})
-
-    response = await dispatch(request, call_next)
+    transport = ASGITransport(app=_build_app(200, headers={"X-App-Version": "route-owned-version"}))
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/probe")
 
     assert response.headers["X-App-Version"] == "route-owned-version"
 
@@ -145,7 +86,3 @@ async def test_app_version_middleware_adds_header_to_short_circuited_4xx_respons
 
     assert overloaded.status_code == 429
     assert overloaded.headers["X-App-Version"] == __version__
-
-
-async def _empty_receive() -> Message:
-    return {"type": "http.request", "body": b"", "more_body": False}

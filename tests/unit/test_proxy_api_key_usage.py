@@ -3,8 +3,47 @@ from __future__ import annotations
 import pytest
 
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
-from app.modules.api_keys.service import API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET
+from app.modules.api_keys.service import (
+    API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
+    API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
+    API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET,
+    ApiKeyRequestUsageBudget,
+)
+from app.modules.proxy import service as proxy_service
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
+
+
+@pytest.mark.parametrize(
+    ("budget", "expected"),
+    [
+        pytest.param(None, 0.0, id="no-budget"),
+        pytest.param(
+            ApiKeyRequestUsageBudget(input_tokens=None, output_tokens=None),
+            float(API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS + API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS),
+            id="defaults",
+        ),
+        pytest.param(
+            ApiKeyRequestUsageBudget(input_tokens=-1, output_tokens=API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET + 1),
+            float(API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET),
+            id="bounded",
+        ),
+    ],
+)
+def test_estimated_lease_tokens_preserves_service_facade_contract(
+    budget: ApiKeyRequestUsageBudget | None,
+    expected: float,
+) -> None:
+    assert proxy_service._estimated_lease_tokens_from_request_usage_budget(budget) == expected
+
+
+def test_bounded_lease_token_estimate_remains_available_from_service_facade() -> None:
+    assert (
+        proxy_service._bounded_lease_token_estimate(
+            API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET + 1,
+            default=0,
+        )
+        == API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET
+    )
 
 
 def test_estimate_api_key_request_usage_does_not_trust_unsupported_output_caps() -> None:
@@ -93,3 +132,30 @@ def test_estimate_api_key_request_usage_uses_conservative_input_for_file_referen
     budget = estimate_api_key_request_usage(payload)
 
     assert budget.input_tokens is None
+
+
+def test_estimate_api_key_request_usage_allows_structured_content_type_values() -> None:
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "continue",
+            "input": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": {
+                                "namespace": "multi_agent_v1",
+                                "name": "tool_search_output",
+                            },
+                            "text": "deferred tool metadata",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    budget = estimate_api_key_request_usage(payload)
+
+    assert budget.input_tokens is not None

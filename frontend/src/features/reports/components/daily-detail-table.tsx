@@ -1,7 +1,13 @@
-import { Download } from "lucide-react";
+import { useState } from "react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Download } from "lucide-react";
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
+import { buildContinuousDailyRows } from "../daily-series";
 import type { DailyReportRow } from "../schemas";
 import { formatReportBucketDate } from "../date";
+import { formatCurrency } from "@/utils/formatters";
 
 export type DailyDetailTableProps = {
   startDate: string;
@@ -11,6 +17,9 @@ export type DailyDetailTableProps = {
 
 const DAILY_BREAKDOWN_SCROLL_HEIGHT_CLASS = "max-h-[17.5rem]";
 
+type SortKey = "date" | "requests" | "conversations" | "inputTokens" | "outputTokens" | "reasoningTokens" | "costUsd" | "activeAccounts" | "cancelledCount" | "errorCount";
+type SortDirection = "asc" | "desc";
+
 function formatTokens(v: number): string {
   if (v >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(1)}B`;
   if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
@@ -19,145 +28,257 @@ function formatTokens(v: number): string {
 }
 
 export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableProps) {
-  const rows = buildContinuousRows(startDate, endDate, data);
+  const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
+  const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({
+    key: "date",
+    direction: "desc",
+  });
+  const rows = sortRows(buildContinuousDailyRows(startDate, endDate, data), sort);
+  const csvRows = sortRows(rows, { key: "date", direction: "asc" });
+
+  const toggleSort = (key: SortKey) => {
+    setSort((current) =>
+      current.key === key
+        ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
+        : { key, direction: "asc" },
+    );
+  };
 
   return (
     <div className="rounded-xl border bg-card p-5">
       <div className="mb-3 flex items-center justify-between">
-        <div className="text-sm font-semibold text-foreground">Daily Breakdown</div>
+        <div className="text-sm font-semibold text-foreground">{t("reports.dailyBreakdown.title")}</div>
         <Button
           variant="outline"
           size="sm"
           className="h-7 gap-1 text-xs"
-          onClick={() => exportCSV(rows)}
+          onClick={() => exportCSV(csvRows, t)}
         >
           <Download className="h-3 w-3" />
-          CSV
+          {t("reports.dailyBreakdown.csv")}
         </Button>
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full table-fixed text-xs">
+      <div
+        data-testid="daily-breakdown-scroll-body"
+        className={`${DAILY_BREAKDOWN_SCROLL_HEIGHT_CLASS} overflow-x-auto overflow-y-auto`}
+      >
+        <table className="w-full table-fixed text-xs min-w-[1000px]">
           <ColumnGroup />
-          <thead>
+          <thead className="sticky top-0 z-10 bg-card">
             <tr className="border-b text-left text-muted-foreground">
-              <th className="pb-2 pr-4 font-medium">Day</th>
-              <th className="pb-2 pr-4 text-right font-medium">Reqs</th>
-              <th className="pb-2 pr-4 text-right font-medium">Input Tokens</th>
-              <th className="pb-2 pr-4 text-right font-medium">Output Tokens</th>
-              <th className="pb-2 pr-4 text-right font-medium">Cost</th>
-              <th className="pb-2 text-right font-medium">Accounts</th>
+              <SortableHeader
+                align="left"
+                label={t("reports.dailyBreakdown.columns.day")}
+                isActive={sort.key === "date"}
+                direction={sort.direction}
+                onClick={() => toggleSort("date")}
+              />
+              <SortableHeader
+                label={t("reports.dailyBreakdown.columns.reqs")}
+                isActive={sort.key === "requests"}
+                direction={sort.direction}
+                onClick={() => toggleSort("requests")}
+              />
+              <SortableHeader
+                label={t("reports.dailyBreakdown.columns.conversations")}
+                isActive={sort.key === "conversations"}
+                direction={sort.direction}
+                onClick={() => toggleSort("conversations")}
+              />
+              <SortableHeader
+                label={t("reports.dailyBreakdown.columns.inputTokens")}
+                isActive={sort.key === "inputTokens"}
+                direction={sort.direction}
+                onClick={() => toggleSort("inputTokens")}
+              />
+              <SortableHeader
+                label={t("reports.dailyBreakdown.columns.outputTokens")}
+                isActive={sort.key === "outputTokens"}
+                direction={sort.direction}
+                onClick={() => toggleSort("outputTokens")}
+              />
+              <SortableHeader
+                label={t("reports.dailyBreakdown.columns.reasoningTokens")}
+                isActive={sort.key === "reasoningTokens"}
+                direction={sort.direction}
+                onClick={() => toggleSort("reasoningTokens")}
+              />
+              <SortableHeader
+                label={t("reports.dailyBreakdown.columns.cost")}
+                isActive={sort.key === "costUsd"}
+                direction={sort.direction}
+                onClick={() => toggleSort("costUsd")}
+              />
+              <SortableHeader
+                label={t("reports.dailyBreakdown.columns.accounts")}
+                isActive={sort.key === "activeAccounts"}
+                direction={sort.direction}
+                onClick={() => toggleSort("activeAccounts")}
+              />
+              <SortableHeader
+                label={t("reports.dailyBreakdown.columns.cancelled")}
+                isActive={sort.key === "cancelledCount"}
+                direction={sort.direction}
+                onClick={() => toggleSort("cancelledCount")}
+              />
+              <SortableHeader
+                label={t("reports.dailyBreakdown.columns.errors")}
+                isActive={sort.key === "errorCount"}
+                direction={sort.direction}
+                onClick={() => toggleSort("errorCount")}
+              />
             </tr>
           </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr
+                key={row.date}
+                data-testid={`daily-breakdown-row-${row.date}`}
+                className="border-b border-border/50 last:border-0"
+              >
+                <td className="py-2.5 pr-4 font-medium text-foreground">
+                  {formatReportBucketDate(row.date, dateDisplayFormat)}
+                </td>
+                <td className="py-2.5 pr-4 text-right text-foreground">{row.requests}</td>
+                <td className="py-2.5 pr-4 text-right text-foreground">
+                  {row.conversations}
+                </td>
+                <td className="py-2.5 pr-4 text-right text-foreground">
+                  <span>{formatTokens(row.inputTokens)}</span>{" "}
+                  <span className="text-[11px] text-muted-foreground">
+                    ({formatTokens(row.cachedInputTokens)})
+                  </span>
+                </td>
+                <td className="py-2.5 pr-4 text-right text-foreground">
+                  {formatTokens(row.outputTokens)}
+                </td>
+                <td className="py-2.5 pr-4 text-right text-foreground">
+                  {row.reasoningTokens == null ? "—" : formatTokens(row.reasoningTokens)}
+                </td>
+                <td className="py-2.5 pr-4 text-right font-medium text-emerald-600 dark:text-emerald-400">
+                  {formatCurrency(row.costUsd)}
+                </td>
+                <td className="py-2.5 pr-4 text-right text-muted-foreground">
+                  {row.activeAccounts}
+                </td>
+                <td className="py-2.5 pr-4 text-right text-foreground">
+                  {row.cancelledCount}
+                </td>
+                <td className="py-2.5 text-right text-foreground">{row.errorCount}</td>
+              </tr>
+            ))}
+          </tbody>
         </table>
-        <div
-          data-testid="daily-breakdown-scroll-body"
-          className={`${DAILY_BREAKDOWN_SCROLL_HEIGHT_CLASS} overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden`}
-        >
-          <table className="w-full table-fixed text-xs">
-            <ColumnGroup />
-            <tbody>
-              {rows.map((row) => (
-                <tr
-                  key={row.date}
-                  data-testid={`daily-breakdown-row-${row.date}`}
-                  className="border-b border-border/50 last:border-0"
-                >
-                  <td className="py-2.5 pr-4 font-medium text-foreground">
-                    {formatDate(row.date)}
-                  </td>
-                  <td className="py-2.5 pr-4 text-right text-foreground">
-                    {row.requests}
-                  </td>
-                  <td className="py-2.5 pr-4 text-right text-foreground">
-                    {formatTokens(row.inputTokens)}
-                  </td>
-                  <td className="py-2.5 pr-4 text-right text-foreground">
-                    {formatTokens(row.outputTokens)}
-                  </td>
-                  <td className="py-2.5 pr-4 text-right font-medium text-emerald-600 dark:text-emerald-400">
-                    ${row.costUsd.toFixed(2)}
-                  </td>
-                  <td className="py-2.5 text-right text-muted-foreground">
-                    {row.activeAccounts}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
       </div>
     </div>
+  );
+}
+
+type SortableHeaderProps = {
+  align?: "left" | "right";
+  label: string;
+  isActive: boolean;
+  direction: SortDirection;
+  onClick: () => void;
+};
+
+function SortableHeader({
+  align = "right",
+  label,
+  isActive,
+  direction,
+  onClick,
+}: SortableHeaderProps) {
+  const Icon = isActive ? (direction === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
+  const iconTestId = isActive ? (direction === "asc" ? "sort-icon-asc" : "sort-icon-desc") : "sort-icon-none";
+  const iconVariant = isActive ? (direction === "asc" ? "up" : "down") : "up-down";
+  const ariaSort = isActive ? (direction === "asc" ? "ascending" : "descending") : "none";
+
+  return (
+    <th
+      className={`pb-2 ${align === "left" ? "pr-4" : align === "right" ? "pr-4 text-right" : ""} font-medium`}
+      aria-sort={ariaSort}
+    >
+      <button
+        type="button"
+        className={`flex w-full items-center gap-1 ${align === "left" ? "justify-start text-left" : "justify-end text-right"} font-medium text-inherit`}
+        onClick={onClick}
+      >
+        <span>{label}</span>
+        <Icon
+          aria-hidden="true"
+          data-testid={iconTestId}
+          data-sort-icon={iconVariant}
+          className={`h-3 w-3 shrink-0 ${isActive ? "text-foreground" : "text-muted-foreground/60"}`}
+        />
+      </button>
+    </th>
   );
 }
 
 function ColumnGroup() {
   return (
     <colgroup>
-      <col style={{ width: "18%" }} />
       <col style={{ width: "14%" }} />
-      <col style={{ width: "20%" }} />
-      <col style={{ width: "20%" }} />
-      <col style={{ width: "14%" }} />
-      <col style={{ width: "14%" }} />
+      <col style={{ width: "8%" }} />
+      <col style={{ width: "10%" }} />
+      <col style={{ width: "12%" }} />
+      <col style={{ width: "12%" }} />
+      <col style={{ width: "13%" }} />
+      <col style={{ width: "9%" }} />
+      <col style={{ width: "8%" }} />
+      <col style={{ width: "7%" }} />
+      <col style={{ width: "7%" }} />
     </colgroup>
   );
 }
 
-function formatDate(iso: string): string {
-  return formatReportBucketDate(iso);
-}
-
-function buildContinuousRows(
-  startDate: string,
-  endDate: string,
+function sortRows(
   rows: DailyReportRow[],
+  sort: { key: SortKey; direction: SortDirection },
 ): DailyReportRow[] {
-  if (!isISODate(startDate) || !isISODate(endDate) || startDate > endDate) {
-    return rows;
-  }
+  const sorted = [...rows].sort((left, right) => {
+    const leftValue = left[sort.key];
+    const rightValue = right[sort.key];
 
-  const rowsByDate = new Map(rows.map((row) => [row.date, row]));
-  const continuousRows: DailyReportRow[] = [];
+    if (leftValue == null && rightValue == null) {
+      return 0;
+    }
+    if (leftValue == null) {
+      return 1;
+    }
+    if (rightValue == null) {
+      return -1;
+    }
+    if (leftValue < rightValue) {
+      return sort.direction === "asc" ? -1 : 1;
+    }
+    if (leftValue > rightValue) {
+      return sort.direction === "asc" ? 1 : -1;
+    }
+    return 0;
+  });
 
-  for (let current = startDate; current <= endDate; current = nextISODate(current)) {
-    continuousRows.push(rowsByDate.get(current) ?? createZeroRow(current));
-  }
-
-  return continuousRows;
+  return sorted;
 }
 
-function nextISODate(date: string): string {
-  const nextDate = new Date(`${date}T00:00:00Z`);
-  nextDate.setUTCDate(nextDate.getUTCDate() + 1);
-  return nextDate.toISOString().slice(0, 10);
-}
-
-function isISODate(value: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return false;
-  }
-
-  const parsed = new Date(`${value}T00:00:00Z`);
-  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
-}
-
-function createZeroRow(date: string): DailyReportRow {
-  return {
-    date,
-    requests: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    cachedInputTokens: 0,
-    costUsd: 0,
-    activeAccounts: 0,
-    errorCount: 0,
-  };
-}
-
-function exportCSV(rows: DailyReportRow[]) {
-  const headers = ["Date", "Requests", "Input Tokens", "Output Tokens", "Cached Tokens", "Cost USD", "Active Accounts", "Errors"];
+function exportCSV(rows: DailyReportRow[], t: TFunction) {
+  const headers = [
+    t("reports.dailyBreakdown.csvColumns.date"),
+    t("reports.dailyBreakdown.csvColumns.requests"),
+    t("reports.dailyBreakdown.csvColumns.conversations"),
+    t("reports.dailyBreakdown.csvColumns.inputTokens"),
+    t("reports.dailyBreakdown.csvColumns.outputTokens"),
+    t("reports.dailyBreakdown.csvColumns.reasoningTokens"),
+    t("reports.dailyBreakdown.csvColumns.cachedTokens"),
+    t("reports.dailyBreakdown.csvColumns.costUsd"),
+    t("reports.dailyBreakdown.csvColumns.activeAccounts"),
+    t("reports.dailyBreakdown.csvColumns.cancelled"),
+    t("reports.dailyBreakdown.csvColumns.errors"),
+  ];
   const lines = rows.map((r) =>
-    [r.date, r.requests, r.inputTokens, r.outputTokens, r.cachedInputTokens, r.costUsd.toFixed(4), r.activeAccounts, r.errorCount].join(","),
+    [r.date, r.requests, r.conversations, r.inputTokens, r.outputTokens, r.reasoningTokens ?? "", r.cachedInputTokens, r.costUsd.toFixed(4), r.activeAccounts, r.cancelledCount, r.errorCount].join(","),
   );
   const csv = [headers.join(","), ...lines].join("\n");
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });

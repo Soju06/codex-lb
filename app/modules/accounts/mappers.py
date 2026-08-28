@@ -22,9 +22,17 @@ from app.modules.accounts.schemas import (
     AccountUsageTrend,
     UsageTrendPoint,
 )
+from app.modules.rate_limit_reset_credits.store import (
+    RateLimitResetCreditsSnapshot,
+    RateLimitResetCreditsStore,
+    get_rate_limit_reset_credits_store,
+)
 from app.modules.usage.mappers import usage_history_to_window_row
 
 _ACCOUNT_ROUTING_POLICIES = frozenset({"burn_first", "normal", "preserve"})
+_RESET_CREDITS_INELIGIBLE_STATUSES = frozenset(
+    {AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED}
+)
 _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS = 60
 
 
@@ -39,7 +47,9 @@ def build_account_summaries(
     limit_warmups_by_account: dict[str, AccountLimitWarmup] | None = None,
     encryptor: TokenEncryptor,
     include_auth: bool = True,
+    reset_credits_store: RateLimitResetCreditsStore | None = None,
 ) -> list[AccountSummary]:
+    store = reset_credits_store or get_rate_limit_reset_credits_store()
     duplicate_keys = _duplicate_detection_keys_appearing_more_than_once(accounts)
     return [
         _account_to_summary(
@@ -53,6 +63,7 @@ def build_account_summaries(
             encryptor,
             include_auth=include_auth,
             is_email_duplicate=_duplicate_detection_key(account) in duplicate_keys,
+            reset_credits_snapshot=_reset_credits_snapshot_for_account(account, store),
         )
         for account in accounts
     ]
@@ -99,6 +110,7 @@ def _account_to_summary(
     encryptor: TokenEncryptor,
     include_auth: bool = True,
     is_email_duplicate: bool = False,
+    reset_credits_snapshot: RateLimitResetCreditsSnapshot | None = None,
 ) -> AccountSummary:
     plan_type = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
     auth_status = _build_auth_status(account, encryptor) if include_auth else None
@@ -109,6 +121,7 @@ def _account_to_summary(
 
     if monthly_usage is not None and usage_core.capacity_for_plan(plan_type, "monthly") is None:
         monthly_usage = None
+    usage_refreshed_at = _latest_usage_recorded_at(primary_usage, secondary_usage, monthly_usage)
     monthly_used_percent = _normalize_used_percent(monthly_usage)
     monthly_remaining_percent = usage_core.remaining_percent_from_used(monthly_used_percent)
     if monthly_usage is not None:
@@ -127,11 +140,17 @@ def _account_to_summary(
     primary_remaining_percent = usage_core.remaining_percent_from_used(primary_used_percent)
     secondary_remaining_percent = usage_core.remaining_percent_from_used(secondary_used_percent)
 
-    if primary_remaining_percent is None and not weekly_only_usage:
-        primary_remaining_percent = 100.0
-
     status_primary_usage = effective_primary_usage
     status_primary_used_percent = primary_used_percent
+    now_epoch = int(datetime.now(timezone.utc).timestamp())
+    if _display_window_expired(status_primary_usage, now_epoch):
+        # Mirror routing (`_state_from_account`): an elapsed primary sample
+        # describes a reset window, not exhaustion evidence. Zero the used
+        # percentage (not None, so usage-derived recovery still evaluates)
+        # and drop the stale reset so a frozen >=100% sample cannot infer a
+        # rate-limited badge the selector would never apply.
+        status_primary_usage = None
+        status_primary_used_percent = 0.0
     status_runtime_reset = float(account.reset_at) if account.reset_at else None
     status_seed = account.status
     allow_missing_runtime_reset_recovery = False
@@ -220,6 +239,20 @@ def _account_to_summary(
         credits_balance=credits_balance,
         allow_missing_runtime_reset_recovery=allow_missing_runtime_reset_recovery,
     )
+    # Display-only expiry for the SHORT window: a primary sample whose reset
+    # elapsed is not an active window — show it as absent instead of
+    # freezing the stale sample (upstream may have stopped reporting the
+    # window entirely). Long windows stay raw: weekly/monthly consumers
+    # (e.g. the weekly credit pace) advance elapsed resets by design, and
+    # upstream still reports them so staleness is transient. Status
+    # derivation above expired the sample the same way routing does, so the
+    # badge stays aligned with the selector.
+    if _display_window_expired(effective_primary_usage, now_epoch):
+        primary_remaining_percent = None
+        remaining_credits_primary = None
+        reset_at_primary = None
+        window_minutes_primary = None
+
     return AccountSummary(
         account_id=account.id,
         chatgpt_account_id=account.chatgpt_account_id,
@@ -245,6 +278,7 @@ def _account_to_summary(
         window_minutes_secondary=window_minutes_secondary,
         window_minutes_monthly=window_minutes_monthly,
         last_refresh_at=account.last_refresh,
+        usage_refreshed_at=usage_refreshed_at,
         capacity_credits_primary=capacity_primary,
         remaining_credits_primary=remaining_credits_primary,
         capacity_credits_secondary=capacity_secondary,
@@ -261,6 +295,8 @@ def _account_to_summary(
         limit_warmup_enabled=bool(account.limit_warmup_enabled),
         limit_warmup=_limit_warmup_to_status(limit_warmup),
         is_email_duplicate=is_email_duplicate,
+        available_reset_credits=reset_credits_snapshot.available_count if reset_credits_snapshot else 0,
+        reset_credit_nearest_expires_at=(reset_credits_snapshot.nearest_expires_at if reset_credits_snapshot else None),
     )
 
 
@@ -268,6 +304,22 @@ def _normalize_account_routing_policy(value: str | None) -> str:
     if value in _ACCOUNT_ROUTING_POLICIES:
         return value
     return "normal"
+
+
+def _latest_usage_recorded_at(*entries: UsageHistory | None) -> datetime | None:
+    recorded_at = [entry.recorded_at for entry in entries if entry is not None and entry.recorded_at is not None]
+    if not recorded_at:
+        return None
+    return max(recorded_at, key=lambda value: value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value)
+
+
+def _reset_credits_snapshot_for_account(
+    account: Account,
+    store: RateLimitResetCreditsStore,
+) -> RateLimitResetCreditsSnapshot | None:
+    if account.status in _RESET_CREDITS_INELIGIBLE_STATUSES or not account.chatgpt_account_id:
+        return None
+    return store.get(account.id)
 
 
 def _limit_warmup_to_status(entry: AccountLimitWarmup | None) -> AccountLimitWarmupStatus | None:
@@ -370,6 +422,10 @@ def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:
 def _usage_refresh_interval_seconds() -> int:
     settings = config_settings.get_settings()
     return int(getattr(settings, "usage_refresh_interval_seconds", _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS))
+
+
+def _display_window_expired(entry: UsageHistory | None, now_epoch: int) -> bool:
+    return entry is not None and entry.reset_at is not None and entry.reset_at <= now_epoch
 
 
 def _effective_usage_windows(

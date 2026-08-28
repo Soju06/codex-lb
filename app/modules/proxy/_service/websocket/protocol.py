@@ -4,12 +4,16 @@ from typing import Any, Protocol
 
 
 class _WebSocketServiceProtocol(Protocol):
+    _capability_router: Any
+    _background_cleanup_tasks: Any
     _acquire_account_response_create_lease_or_overload: Any
     _acquire_request_state_response_create_admission: Any
     _cancel_request_state_api_key_reservation_heartbeat: Any
     _connect_proxy_websocket: Any
     _decide_websocket_failover_action: Any
     _downstream_websocket_is_idle: Any
+    _drain_deferred_account_error_backoffs: Any
+    _drain_deferred_keyed_stream_health: Any
     _emit_pending_websocket_keepalive: Any
     _emit_websocket_connect_failure: Any
     _emit_websocket_connect_timeout: Any
@@ -35,14 +39,17 @@ class _WebSocketServiceProtocol(Protocol):
     _process_upstream_websocket_text: Any
     _raise_for_unsupported_input_image_references: Any
     _refresh_websocket_api_key_policy: Any
+    _revalidate_open_websocket_account: Any
     _relay_upstream_websocket_messages: Any
     _release_websocket_request_state_reservation: Any
     _release_websocket_reservation: Any
+    _release_request_state_account_response_create_lease: Any
     _remember_websocket_previous_response_owner: Any
     _remember_websocket_previous_response_owner_miss: Any
     _repo_factory: Any
     _reserve_websocket_api_key_usage: Any
     _resolve_file_account_for_responses: Any
+    _resolve_compact_turn_state_owner: Any
     _resolve_upstream_route_for_account: Any
     _resolve_websocket_previous_response_owner: Any
     _retry_websocket_connect_after_401: Any
@@ -53,6 +60,7 @@ class _WebSocketServiceProtocol(Protocol):
     _settle_stream_api_key_usage: Any
     _start_request_state_api_key_reservation_heartbeat: Any
     _try_open_websocket_connect_attempt: Any
+    _touch_active_websocket_thread_affinity: Any
     _websocket_continuity_index: Any
     _websocket_continuity_state_for_request: Any
     _websocket_previous_response_account_index: Any

@@ -10,37 +10,27 @@ import re
 import subprocess
 import sys
 import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import cast
+
+try:
+    from github_api import GitHubApiError, next_link, request_json
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from github_api import GitHubApiError, next_link, request_json
 
 NOREPLY_RE = re.compile(r"^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$")
 
 
 def _request_json(url: str, token: str | None) -> tuple[list[dict[str, object]], str | None]:
-    request = urllib.request.Request(url)
-    request.add_header("Accept", "application/vnd.github+json")
-    request.add_header("X-GitHub-Api-Version", "2022-11-28")
-    if token:
-        request.add_header("Authorization", f"Bearer {token}")
-
-    with urllib.request.urlopen(request, timeout=30) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-        link = response.headers.get("Link")
+    payload, link = request_json(url, token=token)
+    if not isinstance(payload, list):
+        raise GitHubApiError(f"expected list payload, got {type(payload).__name__}")
     return payload, link
 
 
 def _next_link(link_header: str | None) -> str | None:
-    if not link_header:
-        return None
-    for part in link_header.split(","):
-        bits = part.strip().split(";")
-        if len(bits) != 2:
-            continue
-        url_part, rel_part = bits
-        if rel_part.strip() == 'rel="next"':
-            return url_part.strip()[1:-1]
-    return None
+    return next_link(link_header)
 
 
 def fetch_contributor_logins(repository: str, token: str | None) -> set[str]:
@@ -52,6 +42,11 @@ def fetch_contributor_logins(repository: str, token: str | None) -> set[str]:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise SystemExit(f"GitHub contributors request failed: HTTP {exc.code}: {detail}") from exc
+        except GitHubApiError as exc:
+            raise SystemExit(
+                "GitHub contributors request failed after retries; "
+                f"cannot validate all-contributors coverage from partial evidence: {exc}"
+            ) from exc
         for contributor in page:
             login = contributor.get("login")
             contributor_type = contributor.get("type")
@@ -134,6 +129,11 @@ def pull_request_commit_author_logins(event_path: str | None, token: str | None)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise SystemExit(f"GitHub PR commits request failed: HTTP {exc.code}: {detail}") from exc
+        except GitHubApiError as exc:
+            raise SystemExit(
+                "GitHub PR commits request failed after retries; "
+                f"cannot validate all-contributors coverage from partial evidence: {exc}"
+            ) from exc
         for commit in page:
             author = commit.get("author")
             if not isinstance(author, dict):

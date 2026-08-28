@@ -1,0 +1,3 @@
+- [x] 1. Detect output-only WebSocket tool deltas as unsafe for fresh retry.
+- [x] 2. Keep full resend stale-anchor recovery retry-safe.
+- [x] 3. Update OpenSpec and focused regression coverage.

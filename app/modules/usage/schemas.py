@@ -26,6 +26,7 @@ class UsageMetrics(DashboardModel):
     cached_tokens_secondary_window: int | None = None
     error_rate_7d: float | None = Field(default=None, alias="errorRate7d")
     top_error: str | None = None
+    cancelled_7d: int | None = Field(default=None, alias="cancelled7d")
 
 
 class UsageSummaryResponse(DashboardModel):
@@ -64,3 +65,4 @@ class MetricsTrends(DashboardModel):
     tokens: list[TrendPoint] = Field(default_factory=list)
     cost: list[TrendPoint] = Field(default_factory=list)
     error_rate: list[TrendPoint] = Field(default_factory=list)
+    conversations: list[TrendPoint] = Field(default_factory=list)

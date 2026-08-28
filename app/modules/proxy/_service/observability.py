@@ -12,9 +12,11 @@ from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
+    upstream_transport_decisions_total,
 )
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, canonicalized_tools
 from app.core.types import JsonValue
+from app.core.utils.json_guards import is_json_list
 from app.core.utils.request_id import get_request_id
 from app.modules.proxy.affinity import (
     _extract_model_class,
@@ -36,6 +38,25 @@ def _service_get_settings() -> Any:
     return cast(Callable[[], Any], _service_global("get_settings", get_settings))()
 
 
+def _record_upstream_transport_decision(
+    *,
+    downstream_transport: str,
+    upstream_transport: str | None,
+    policy: str,
+    sticky: bool,
+    status: str,
+) -> None:
+    if upstream_transport_decisions_total is None:
+        return
+    upstream_transport_decisions_total.labels(
+        downstream_transport=downstream_transport,
+        upstream_transport=upstream_transport or "unknown",
+        policy=policy,
+        sticky="true" if sticky else "false",
+        status="success" if status == "success" else "error",
+    ).inc()
+
+
 def _maybe_log_proxy_request_shape(
     kind: str,
     payload: ResponsesRequest | ResponsesCompactRequest,
@@ -45,8 +66,8 @@ def _maybe_log_proxy_request_shape(
     sticky_key_source: str | None = None,
     prompt_cache_key_set: bool | None = None,
 ) -> None:
-    settings = _service_get_settings()
-    if not settings.log_proxy_request_shape:
+    trace_channels = _service_get_settings().trace_channels
+    if "shape" not in trace_channels:
         return
 
     request_id = get_request_id()
@@ -54,7 +75,7 @@ def _maybe_log_proxy_request_shape(
     prompt_cache_key_hash = _hash_identifier(prompt_cache_key) if isinstance(prompt_cache_key, str) else None
     prompt_cache_key_raw = (
         _truncate_identifier(prompt_cache_key)
-        if settings.log_proxy_request_shape_raw_cache_key and isinstance(prompt_cache_key, str)
+        if "shape_raw_cache_key" in trace_channels and isinstance(prompt_cache_key, str)
         else None
     )
 
@@ -95,8 +116,7 @@ def _maybe_log_proxy_request_payload(
     payload: ResponsesRequest | ResponsesCompactRequest,
     headers: Mapping[str, str],
 ) -> None:
-    settings = _service_get_settings()
-    if not settings.log_proxy_request_payload:
+    if "payload" not in _service_get_settings().trace_channels:
         return
 
     request_id = get_request_id()
@@ -122,8 +142,7 @@ def _maybe_log_proxy_service_tier_trace(
     requested_service_tier: str | None,
     actual_service_tier: str | None,
 ) -> None:
-    settings = _service_get_settings()
-    if not settings.log_proxy_service_tier_trace:
+    if "service_tier" not in _service_get_settings().trace_channels:
         return
 
     logger.warning(
@@ -173,6 +192,41 @@ def _record_continuity_owner_resolution(
     )
 
 
+def _format_continuity_fail_closed_diagnostics(
+    *,
+    previous_response_source: str | None,
+    fresh_replay_available: bool | None,
+    owner_lookup_source: str | None,
+    owner_lookup_outcome: str | None,
+    previous_response_age_seconds: int | None,
+    same_session: bool | None,
+) -> str | None:
+    if all(
+        value is None
+        for value in (
+            previous_response_source,
+            fresh_replay_available,
+            owner_lookup_source,
+            owner_lookup_outcome,
+            previous_response_age_seconds,
+            same_session,
+        )
+    ):
+        return None
+    return " ".join(
+        (
+            f"previous_response_source={previous_response_source or 'unknown'}",
+            "fresh_replay_available="
+            f"{str(fresh_replay_available).lower() if fresh_replay_available is not None else 'unknown'}",
+            f"owner_lookup_source={owner_lookup_source or 'unknown'}",
+            f"owner_lookup_outcome={owner_lookup_outcome or 'unknown'}",
+            "previous_response_age_seconds="
+            f"{previous_response_age_seconds if previous_response_age_seconds is not None else 'unknown'}",
+            f"same_session={str(same_session).lower() if same_session is not None else 'unknown'}",
+        )
+    )
+
+
 def _record_continuity_fail_closed(
     *,
     surface: str,
@@ -180,6 +234,12 @@ def _record_continuity_fail_closed(
     previous_response_id: str | None,
     session_id: str | None = None,
     upstream_error_code: str | None = None,
+    previous_response_source: str | None = None,
+    fresh_replay_available: bool | None = None,
+    owner_lookup_source: str | None = None,
+    owner_lookup_outcome: str | None = None,
+    previous_response_age_seconds: int | None = None,
+    same_session: bool | None = None,
 ) -> None:
     prometheus_available = bool(_service_global("PROMETHEUS_AVAILABLE", PROMETHEUS_AVAILABLE))
     counter = _service_global("continuity_fail_closed_total", continuity_fail_closed_total)
@@ -188,13 +248,23 @@ def _record_continuity_fail_closed(
             surface=surface,
             reason=reason,
         ).inc()
+    diagnostics = _format_continuity_fail_closed_diagnostics(
+        previous_response_source=previous_response_source,
+        fresh_replay_available=fresh_replay_available,
+        owner_lookup_source=owner_lookup_source,
+        owner_lookup_outcome=owner_lookup_outcome,
+        previous_response_age_seconds=previous_response_age_seconds,
+        same_session=same_session,
+    )
     logger.warning(
-        "continuity_fail_closed surface=%s reason=%s previous_response_id=%s session_id=%s upstream_error_code=%s",
+        "continuity_fail_closed surface=%s reason=%s previous_response_id=%s session_id=%s "
+        "upstream_error_code=%s diagnostics=%s",
         surface,
         reason,
         _hash_identifier_or_none(previous_response_id),
         _hash_identifier_or_none(session_id),
         upstream_error_code,
+        diagnostics,
     )
 
 
@@ -228,9 +298,17 @@ def _truncate_identifier(value: str, *, max_length: int = 96) -> str:
 
 def _tools_hash(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
     payload_tools = payload.to_payload().get("tools")
-    if not isinstance(payload_tools, list) or not payload_tools:
+    if not is_json_list(payload_tools) or not payload_tools:
         return None
-    serialized = json.dumps(payload_tools, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    # The wire payload keeps client tool entries byte-preserved (issue #1184),
+    # so the affinity/observability hash canonicalizes locally to stay
+    # insensitive to tool array order and object key order (change #228).
+    serialized = json.dumps(
+        canonicalized_tools(payload_tools),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return _hash_identifier(serialized)
 
 
@@ -239,7 +317,9 @@ def _interesting_header_keys(headers: Mapping[str, str]) -> list[str]:
         "user-agent",
         "x-request-id",
         "request-id",
+        "session-id",
         "session_id",
+        "thread-id",
         "x-openai-client-id",
         "x-openai-client-version",
         "x-openai-client-arch",

@@ -7,7 +7,7 @@ import sqlite3
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.codex_sessions_retag import RetagResult, default_codex_home, retag_codex_sessions
 
@@ -80,6 +80,17 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "client writing to a stale socket before the request reaches the app."
         ),
     )
+    parser.add_argument(
+        "--ws-max-size",
+        default=os.getenv("UVICORN_WS_MAX_SIZE", str(128 * 1024 * 1024)),
+        help=(
+            "Maximum decompressed size in bytes of a single incoming websocket message. "
+            "Codex clients resend the full conversation history (inline screenshots "
+            "included) as one response.create message after a reconnect; messages above "
+            "this budget are closed at the protocol layer with 1009 before the "
+            "application-level slimming guard can run."
+        ),
+    )
 
     return parser.parse_args(argv)
 
@@ -122,15 +133,18 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     port = _parse_server_port(args.port)
     timeout_keep_alive = _parse_server_timeout_keep_alive(args.timeout_keep_alive)
+    ws_max_size = _parse_server_ws_max_size(args.ws_max_size)
     os.environ["PORT"] = str(port)
 
-    _load_uvicorn().run(
+    _run_server(
         "app.main:app",
         host=args.host,
         port=port,
         ssl_certfile=args.ssl_certfile,
         ssl_keyfile=args.ssl_keyfile,
         timeout_keep_alive=timeout_keep_alive,
+        ws_max_size=ws_max_size,
+        proxy_headers=False,
         log_config=_build_log_config(),
     )
 
@@ -141,6 +155,56 @@ def _load_uvicorn():
     return uvicorn
 
 
+def _load_graceful_drain_server():
+    from app.core.server import GracefulDrainServer
+
+    return GracefulDrainServer
+
+
+def _load_http_protocol_class() -> Any:
+    from app.core.http_protocol import load_http_protocol_class
+
+    return load_http_protocol_class()
+
+
+def _load_shutdown_drain_timeout_seconds() -> int:
+    from app.core.config.settings import get_settings
+
+    return get_settings().shutdown_drain_timeout_seconds
+
+
+def _run_server(app: str, **kwargs: Any) -> None:
+    uvicorn = _load_uvicorn()
+    drain_timeout_seconds = _load_shutdown_drain_timeout_seconds()
+    config = uvicorn.Config(
+        app,
+        # One process per instance is the binding topology contract. Passing
+        # this explicitly prevents Uvicorn from treating ambient
+        # WEB_CONCURRENCY as an unsupported multiprocess launch.
+        workers=1,
+        # Serve valid HTTP/1.1 requests that opportunistically offer an h2c
+        # upgrade (JetBrains/Ktor clients) instead of rejecting them; the
+        # stock httptools protocol drops the body or answers 400. See
+        # app/core/http_protocol.py and issue #1757.
+        http=_load_http_protocol_class(),
+        timeout_graceful_shutdown=drain_timeout_seconds,
+        **kwargs,
+    )
+    try:
+        config.load_app()
+        server = _load_graceful_drain_server()(
+            config,
+            drain_timeout_seconds=drain_timeout_seconds,
+        )
+        server.run()
+    except KeyboardInterrupt:
+        return
+    if not server.started:
+        from uvicorn.main import STARTUP_FAILURE
+
+        raise SystemExit(STARTUP_FAILURE)
+
+
 def _build_log_config() -> "LogConfig":
     from app.core.runtime_logging import build_log_config
 
@@ -149,9 +213,12 @@ def _build_log_config() -> "LogConfig":
 
 def _parse_server_port(raw_port: str) -> int:
     try:
-        return int(raw_port)
+        port = int(raw_port)
     except ValueError as exc:
-        raise SystemExit(f"--port/PORT must be an integer, got {raw_port!r}.") from exc
+        raise SystemExit(f"--port/PORT must be an integer between 0 and 65535 inclusive, got {raw_port!r}.") from exc
+    if not 0 <= port <= 65535:
+        raise SystemExit(f"--port/PORT must be between 0 and 65535 inclusive, got {raw_port!r}.")
+    return port
 
 
 def _parse_server_timeout_keep_alive(raw_timeout: str) -> int:
@@ -160,6 +227,17 @@ def _parse_server_timeout_keep_alive(raw_timeout: str) -> int:
     except ValueError as exc:
         message = f"--timeout-keep-alive/UVICORN_TIMEOUT_KEEP_ALIVE must be an integer, got {raw_timeout!r}."
         raise SystemExit(message) from exc
+
+
+def _parse_server_ws_max_size(raw_ws_max_size: str) -> int:
+    try:
+        ws_max_size = int(raw_ws_max_size)
+    except ValueError as exc:
+        message = f"--ws-max-size/UVICORN_WS_MAX_SIZE must be an integer, got {raw_ws_max_size!r}."
+        raise SystemExit(message) from exc
+    if ws_max_size <= 0:
+        raise SystemExit(f"--ws-max-size/UVICORN_WS_MAX_SIZE must be positive, got {raw_ws_max_size!r}.")
+    return ws_max_size
 
 
 def _run_codex_sessions_retag(args: argparse.Namespace) -> None:

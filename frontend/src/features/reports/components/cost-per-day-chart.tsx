@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import {
   AreaChart,
   Area,
@@ -8,22 +10,26 @@ import {
   ResponsiveContainer,
 } from "@/components/lazy-recharts";
 import type { DailyReportRow } from "../schemas";
+import { buildContinuousDailyRows } from "../daily-series";
+import { formatCurrency } from "@/utils/formatters";
 import { ChartTooltip } from "./chart-tooltip";
+import { ReportChartCard } from "./report-chart-card";
 
 export type CostPerDayChartProps = {
+  startDate: string;
+  endDate: string;
   data: DailyReportRow[];
 };
 
-export function CostPerDayChart({ data }: CostPerDayChartProps) {
-  const chartData = data.map((d) => ({
+export function CostPerDayChart({ startDate, endDate, data }: CostPerDayChartProps) {
+  const { t } = useTranslation();
+  const chartData = buildContinuousDailyRows(startDate, endDate, data).map((d) => ({
     date: d.date.slice(5),
     cost: d.costUsd,
   }));
 
   return (
-    <div className="rounded-xl border bg-card p-5">
-      <div className="text-sm font-semibold text-foreground">Cost by Day</div>
-      <div className="mt-4 h-[200px]">
+    <ReportChartCard title={t("reports.charts.costByDay")} empty={data.length === 0}>
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 0 }}>
             <defs>
@@ -43,10 +49,10 @@ export function CostPerDayChart({ data }: CostPerDayChartProps) {
               tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
               axisLine={false}
               tickLine={false}
-              tickFormatter={(v: number) => `$${v}`}
+              tickFormatter={formatCurrency}
             />
             <Tooltip
-              content={<ChartTooltip names={{ cost: "Cost" }} formatValue={(v) => `$${v.toFixed(2)}`} />}
+              content={<ChartTooltip names={{ cost: t("reports.dailyBreakdown.columns.cost") }} formatValue={formatCurrency} />}
             />
             <Area
               type="monotone"
@@ -59,7 +65,6 @@ export function CostPerDayChart({ data }: CostPerDayChartProps) {
             />
           </AreaChart>
         </ResponsiveContainer>
-      </div>
-    </div>
+    </ReportChartCard>
   );
 }

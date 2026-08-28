@@ -53,6 +53,59 @@ describe("CopyButton", () => {
     expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
   });
 
+  it("clears the feedback timer when unmounted", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    const { unmount } = render(<CopyButton value="secret-value" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+      await Promise.resolve();
+    });
+
+    expect(vi.getTimerCount()).toBe(1);
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("ignores clipboard completion after unmount", async () => {
+    let resolveWrite!: () => void;
+    const writeText = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveWrite = resolve;
+        }),
+    );
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    const { unmount } = render(<CopyButton value="secret-value" />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    expect(writeText).toHaveBeenCalledWith("secret-value");
+
+    unmount();
+    await act(async () => {
+      resolveWrite();
+      await Promise.resolve();
+    });
+
+    expect(toastSuccess).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("shows error toast when clipboard write fails", async () => {
     const writeText = vi.fn().mockRejectedValue(new Error("clipboard blocked"));
     Object.defineProperty(window, "isSecureContext", {

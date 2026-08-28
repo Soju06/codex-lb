@@ -8,7 +8,7 @@ import pytest
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import naive_utc_to_epoch, utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import AccountSummary
@@ -108,6 +108,7 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
             latency_ms=50,
             status="success",
             error_code=None,
+            conversation_id="conv-dash",
             requested_at=now - timedelta(minutes=1),
         )
 
@@ -143,10 +144,199 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
     assert len(trends["tokens"]) == 28
     assert len(trends["cost"]) == 28
     assert len(trends["errorRate"]) == 28
+    assert len(trends["conversations"]) == 28
 
     # At least one trend point should have non-zero request count
     request_values = [p["v"] for p in trends["requests"]]
     assert any(v > 0 for v in request_values)
+    conversation_values = [p["v"] for p in trends["conversations"]]
+    assert any(v > 0 for v in conversation_values)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_counts_distinct_nonblank_conversations_in_timeframe(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    now = datetime(2026, 4, 3, 10, 37, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: now)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_dash_conversations", "dash-conversations@example.com"))
+        session.add_all(
+            [
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-1",
+                    requested_at=now - timedelta(minutes=5),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-a",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-2",
+                    requested_at=now - timedelta(minutes=4),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-a",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-3",
+                    requested_at=now - timedelta(minutes=3),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-b",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-repeat-other-bucket",
+                    requested_at=now - timedelta(hours=1, minutes=5),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-a",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-null",
+                    requested_at=now - timedelta(minutes=2),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id=None,
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-empty",
+                    requested_at=now - timedelta(minutes=1),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-whitespace",
+                    requested_at=now,
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="   ",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-tab",
+                    requested_at=now,
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="\t",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-newline",
+                    requested_at=now,
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="\n",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-warmup",
+                    requested_at=now - timedelta(minutes=1),
+                    model="gpt-5.1",
+                    status="success",
+                    request_kind="warmup",
+                    conversation_id="conv-warmup",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-old",
+                    requested_at=now - timedelta(days=2),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-old",
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get("/api/dashboard/overview?timeframe=1d")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["metrics"]["conversations"] == 2
+    assert payload["summary"]["metrics"]["conversationRequests"] == 4
+
+    populated_conversation_values = [point["v"] for point in payload["trends"]["conversations"] if point["v"] > 0]
+    assert populated_conversation_values == [1.0, 2.0]
+    assert max(populated_conversation_values) == 2.0
+    assert sum(point["v"] for point in payload["trends"]["conversations"]) == 3.0
+
+
+@pytest.mark.asyncio
+async def test_conversation_list_agrees_with_dashboard_activity_window(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    now = utcnow().replace(microsecond=0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: now)
+    since = now - timedelta(days=1)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_conversation_window", "conversation-window@example.com"))
+        session.add_all(
+            [
+                RequestLog(
+                    account_id="acc_conversation_window",
+                    request_id="conversation-window-old",
+                    requested_at=now - timedelta(days=2),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-a",
+                ),
+                RequestLog(
+                    account_id="acc_conversation_window",
+                    request_id="conversation-window-active",
+                    requested_at=now - timedelta(hours=1),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-a",
+                ),
+                RequestLog(
+                    account_id="acc_conversation_window",
+                    request_id="conversation-window-outside",
+                    requested_at=now - timedelta(days=2),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-b",
+                ),
+                RequestLog(
+                    account_id="acc_conversation_window",
+                    request_id="conversation-window-deleted",
+                    requested_at=now - timedelta(hours=2),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-deleted",
+                    deleted_at=now - timedelta(hours=1),
+                ),
+            ]
+        )
+        await session.commit()
+
+    conversations_response = await async_client.get("/api/conversations", params={"since": since.isoformat()})
+    dashboard_response = await async_client.get("/api/dashboard/overview?timeframe=1d")
+
+    assert conversations_response.status_code == 200
+    assert dashboard_response.status_code == 200
+    conversations = conversations_response.json()
+    dashboard = dashboard_response.json()
+    assert [row["conversationId"] for row in conversations["conversations"]] == ["conv-a"]
+    assert conversations["total"] == 1
+    assert dashboard["summary"]["metrics"]["conversations"] == 1
+    assert dashboard["summary"]["metrics"]["conversationRequests"] == 1
+    assert sum(point["v"] for point in dashboard["trends"]["conversations"]) == 1.0
 
 
 @pytest.mark.asyncio
@@ -228,6 +418,55 @@ async def test_dashboard_overview_maps_weekly_only_primary_to_secondary(async_cl
     assert accounts["acc_free"]["windowMinutesPrimary"] is None
     assert accounts["acc_free"]["windowMinutesSecondary"] == 10080
     assert accounts["acc_free"]["usage"]["secondaryRemainingPercent"] == pytest.approx(80.0)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_weekly_primary_beats_no_data_secondary_placeholder(async_client, db_setup):
+    # Regression: upstream reports the weekly window in the primary slot and an
+    # empty no-data secondary placeholder (used_percent=0, no window duration, no
+    # reset). Both rows are written milliseconds apart in the same fetch. Before
+    # the data-aware tiebreak, the sub-second younger placeholder won and the
+    # dashboard weekly remaining jumped to 100%. The real weekly used_percent
+    # must drive the secondary remaining percent instead.
+    now = utcnow().replace(microsecond=0)
+    reset_at = int(naive_utc_to_epoch(now + timedelta(days=2)))
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_weekly_placeholder", "weekly-placeholder@example.com"))
+
+        # Real weekly window reported in the primary slot.
+        await usage_repo.add_entry(
+            "acc_weekly_placeholder",
+            74.0,
+            window="primary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=now - timedelta(milliseconds=13),
+        )
+        # Empty secondary placeholder written ~13ms later in the same fetch.
+        await usage_repo.add_entry(
+            "acc_weekly_placeholder",
+            0.0,
+            window="secondary",
+            window_minutes=0,
+            reset_at=None,
+            recorded_at=now,
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+    payload = response.json()
+
+    account = payload["accounts"][0]
+    # The weekly primary row (74% used) must be remapped onto the secondary
+    # slot, not the no-data placeholder (0% used -> 100% remaining).
+    assert account["windowMinutesPrimary"] is None
+    assert account["windowMinutesSecondary"] == 10080
+    assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(26.0)
+    assert account["remainingCreditsSecondary"] == pytest.approx(7560.0 * 0.26)
 
 
 @pytest.mark.asyncio
@@ -351,6 +590,14 @@ async def test_dashboard_projections_weekly_credit_pace_excludes_inactive_and_st
         usage_repo = UsageRepository(session)
 
         await accounts_repo.upsert(_make_account("acc_active_fresh", "fresh@example.com", plan_type="pro"))
+        await accounts_repo.upsert(
+            _make_account(
+                "acc_quota_exceeded_fresh",
+                "quota@example.com",
+                plan_type="pro",
+                status=AccountStatus.QUOTA_EXCEEDED,
+            )
+        )
         await accounts_repo.upsert(_make_account("acc_active_stale", "stale@example.com", plan_type="pro"))
         await accounts_repo.upsert(
             _make_account(
@@ -360,10 +607,26 @@ async def test_dashboard_projections_weekly_credit_pace_excludes_inactive_and_st
                 status=AccountStatus.DEACTIVATED,
             )
         )
+        await accounts_repo.upsert(
+            _make_account(
+                "acc_reauth_fresh",
+                "reauth@example.com",
+                plan_type="pro",
+                status=AccountStatus.REAUTH_REQUIRED,
+            )
+        )
 
         await usage_repo.add_entry(
             "acc_active_fresh",
             20.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=fixed_now - timedelta(minutes=1),
+        )
+        await usage_repo.add_entry(
+            "acc_quota_exceeded_fresh",
+            100.0,
             window="secondary",
             window_minutes=10080,
             reset_at=reset_at,
@@ -385,20 +648,28 @@ async def test_dashboard_projections_weekly_credit_pace_excludes_inactive_and_st
             reset_at=reset_at,
             recorded_at=fixed_now - timedelta(minutes=1),
         )
+        await usage_repo.add_entry(
+            "acc_reauth_fresh",
+            100.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=fixed_now - timedelta(minutes=1),
+        )
 
     response = await async_client.get("/api/dashboard/projections")
     assert response.status_code == 200
     payload = response.json()
 
     pace = payload["weeklyCreditPace"]
-    assert pace["accountCount"] == 1
+    assert pace["accountCount"] == 2
     assert pace["staleAccountCount"] == 1
-    assert pace["inactiveAccountCount"] == 1
-    assert pace["totalFullCredits"] == pytest.approx(50_400.0)
-    assert pace["actualUsedPercent"] == pytest.approx(20.0)
+    assert pace["inactiveAccountCount"] == 2
+    assert pace["totalFullCredits"] == pytest.approx(100_800.0)
+    assert pace["actualUsedPercent"] == pytest.approx(60.0)
     assert pace["scheduledUsedPercent"] == pytest.approx(42.857, abs=0.01)
-    assert pace["scheduleGapCredits"] == 0
-    assert pace["status"] == "behind"
+    assert pace["scheduleGapCredits"] == pytest.approx(17_280.0, abs=1.0)
+    assert pace["status"] == "ahead"
 
 
 @pytest.mark.asyncio
@@ -455,6 +726,101 @@ async def test_dashboard_projections_weekly_credit_pace_forecast_uses_recent_slo
     assert pace["paceMultiplier"] == pytest.approx(0.0)
     assert pace["pauseForBreakEvenHours"] is None
     assert pace["status"] == "ahead"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_projections_weekly_credit_pace_smooths_displayed_gap(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixed_now = datetime(2026, 5, 18, 12, 0, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: fixed_now)
+    reset_at = int(naive_utc_to_epoch(fixed_now + timedelta(days=5, hours=18)))
+
+    settings_response = await async_client.put("/api/settings", json={"weeklyPaceSmoothingMinutes": 240})
+    assert settings_response.status_code == 200
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_smoothed", "smoothed@example.com", plan_type="pro"))
+        await usage_repo.add_entry(
+            "acc_smoothed",
+            0.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=fixed_now - timedelta(hours=3),
+        )
+        await usage_repo.add_entry(
+            "acc_smoothed",
+            24.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=fixed_now - timedelta(minutes=1),
+        )
+
+    response = await async_client.get("/api/dashboard/projections")
+    assert response.status_code == 200
+    payload = response.json()
+
+    pace = payload["weeklyCreditPace"]
+    assert pace["paceGapSmoothingMinutes"] == 240
+    assert pace["actualUsedPercent"] == pytest.approx(24.0)
+    assert pace["deltaPercent"] == pytest.approx(6.142, abs=0.01)
+    assert pace["scheduleGapCredits"] == pytest.approx(3_096.0, abs=1.0)
+    assert pace["smoothedDeltaPercent"] == pytest.approx(-5.857, abs=0.01)
+    assert pace["smoothedScheduleGapCredits"] == 0
+
+
+@pytest.mark.asyncio
+async def test_dashboard_projections_weekly_credit_pace_smoothing_resets_with_quota_window(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixed_now = datetime(2026, 5, 18, 12, 0, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: fixed_now)
+    previous_reset_at = int(naive_utc_to_epoch(fixed_now - timedelta(minutes=5)))
+    current_reset_at = int(naive_utc_to_epoch(fixed_now + timedelta(days=7)))
+
+    settings_response = await async_client.put("/api/settings", json={"weeklyPaceSmoothingMinutes": 15})
+    assert settings_response.status_code == 200
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_reset_smooth", "reset-smooth@example.com", plan_type="pro"))
+        await usage_repo.add_entry(
+            "acc_reset_smooth",
+            99.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=previous_reset_at,
+            recorded_at=fixed_now - timedelta(minutes=10),
+        )
+        await usage_repo.add_entry(
+            "acc_reset_smooth",
+            0.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=current_reset_at,
+            recorded_at=fixed_now - timedelta(minutes=1),
+        )
+
+    response = await async_client.get("/api/dashboard/projections")
+    assert response.status_code == 200
+    payload = response.json()
+
+    pace = payload["weeklyCreditPace"]
+    assert pace["actualUsedPercent"] == pytest.approx(0.0)
+    assert pace["smoothedDeltaPercent"] == pytest.approx(pace["deltaPercent"])
+    assert pace["smoothedScheduleGapCredits"] == 0
+    assert pace["status"] == "on_track"
 
 
 @pytest.mark.asyncio
@@ -627,6 +993,7 @@ async def test_dashboard_overview_respects_selected_timeframe(
             latency_ms=50,
             status="success",
             error_code=None,
+            conversation_id="conv-timeframe-recent",
             requested_at=now - timedelta(hours=3),
         )
         await logs_repo.add_log(
@@ -638,6 +1005,7 @@ async def test_dashboard_overview_respects_selected_timeframe(
             latency_ms=50,
             status="error",
             error_code="rate_limit_exceeded",
+            conversation_id="conv-timeframe-old",
             requested_at=now - timedelta(days=2),
         )
 
@@ -647,14 +1015,88 @@ async def test_dashboard_overview_respects_selected_timeframe(
 
     assert payload["timeframe"]["key"] == timeframe
     assert payload["timeframe"]["bucketCount"] == expected_bucket_count
-    assert len(payload["trends"]["requests"]) == expected_bucket_count
+    assert all(len(series) == expected_bucket_count for series in payload["trends"].values())
+    assert any(point["v"] > 0 for point in payload["trends"]["conversations"])
     assert payload["summary"]["metrics"]["requests"] == expected_requests
+    assert payload["summary"]["metrics"]["conversations"] == expected_requests
     if timeframe == "1d":
         assert payload["summary"]["metrics"]["errorCount"] == 0
         assert payload["summary"]["metrics"]["topError"] is None
     else:
         assert payload["summary"]["metrics"]["errorCount"] == 1
         assert payload["summary"]["metrics"]["topError"] == "rate_limit_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_error_rate_excludes_cancelled_requests(async_client, db_setup):
+    """Regression for #1552: cancelled/client_disconnected terminals are
+    normal agent lifecycle — they must not inflate the overview error rate
+    or top error, and they surface as a distinct cancelled count."""
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        logs_repo = RequestLogsRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_cancelled", "cancelled@example.com"))
+        await usage_repo.add_entry(
+            "acc_cancelled",
+            20.0,
+            window="primary",
+            recorded_at=now - timedelta(minutes=5),
+        )
+        await usage_repo.add_entry(
+            "acc_cancelled",
+            40.0,
+            window="secondary",
+            recorded_at=now - timedelta(minutes=2),
+        )
+        await logs_repo.add_log(
+            account_id="acc_cancelled",
+            request_id="req_cx_success",
+            model="gpt-5.1",
+            input_tokens=100,
+            output_tokens=50,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            requested_at=now - timedelta(minutes=10),
+        )
+        # Cancelled rows dominate the window (multi-agent disconnect churn).
+        for index in range(2):
+            await logs_repo.add_log(
+                account_id="acc_cancelled",
+                request_id=f"req_cx_cancelled_{index}",
+                model="gpt-5.1",
+                input_tokens=10,
+                output_tokens=0,
+                latency_ms=20,
+                status="cancelled",
+                error_code="client_disconnected",
+                requested_at=now - timedelta(minutes=20 + index),
+            )
+        await logs_repo.add_log(
+            account_id="acc_cancelled",
+            request_id="req_cx_error",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=0,
+            latency_ms=20,
+            status="error",
+            error_code="upstream_500",
+            requested_at=now - timedelta(minutes=30),
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+    metrics = response.json()["summary"]["metrics"]
+
+    assert metrics["requests"] == 4
+    assert metrics["errorCount"] == 1
+    assert metrics["errorRate"] == pytest.approx(0.25)
+    assert metrics["cancelledCount"] == 2
+    assert metrics["topError"] == "upstream_500"
 
 
 @pytest.mark.asyncio

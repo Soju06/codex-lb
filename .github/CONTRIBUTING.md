@@ -193,7 +193,7 @@ PR titles must follow the same format — that's the title release-please reads.
 2. Make atomic commits with Conventional Commit titles.
 3. Run the lint/test gate locally (see above).
 4. Open a PR using the template. Link the relevant issue.
-5. Codex Review (and a human maintainer) will review. Address feedback by
+5. CodeRabbit (and a human maintainer) will review. Address feedback by
    pushing follow-up commits — no force-pushing during active review.
 6. Once approved and CI is green, a maintainer squash-merges with a clean
    Conventional Commits title.
@@ -215,16 +215,11 @@ Before a PR is squash-merged into `main`:
    `CI Required` check is the branch-protection check to require: it
    depends on every CI job and also runs for merge queue synthetic merge
    groups, so a stale PR head cannot bypass a broken merge result.
-2. **`@codex review` must be clean — or its findings addressed — on the
-   merge-target head.** Every PR triggers `@codex review` at least once
-   against the head that's about to be merged. Local `codex review
-   --base origin/main` runs are encouraged but don't substitute for the
-   cloud review (the cloud `@codex review` reliably catches things the
-   local run misses).
-   The `🤖 codex: ok` label is maintained by the trusted
-   `Codex review labels` workflow from current-head CI and current-head
-   Codex review evidence. Treat the label as an audit aid, not as a
-   substitute for branch protection or merge queue checks.
+2. **Actionable CodeRabbit findings must be fixed or explicitly addressed
+   or dismissed in-thread on the merge-target head.** Review the current-head
+   CodeRabbit findings before merging; no finding may be silently skipped.
+   Local `codex review --base origin/main` runs remain an encouraged extra
+   tool, but they are not a merge gate and do not substitute for CodeRabbit.
    - **P1 findings**: fix in the PR, or justify in-thread with a short
      write-up of why the finding doesn't apply. No silent skipping.
    - **P2 findings**: fix in the PR, or open a follow-up issue and link
@@ -240,6 +235,37 @@ Before a PR is squash-merged into `main`:
 5. **`Fixes #N` / `Closes #N` in the PR body** for anything that
    resolves an issue, so the issue close stays automatic and the merge
    stays traceable. Use `Refs #N` / `Related to #N` for partial cover.
+6. **Simplicity gates must pass** (see
+   [Simplicity gates](#simplicity-gates)): the five simplicity rules
+   (PRINCIPLES.md P1-P5). Budget exceptions need the
+   maintainer-applied `simplicity-budget-approved` label.
+
+### Simplicity gates
+
+These implement [PRINCIPLES.md](../PRINCIPLES.md); the normative spec is
+`openspec/specs/contribution-simplicity/spec.md` (created when the
+codify-simplicity-principles change is archived). Reviewers apply them to
+every PR (budget checks are enforced by CI as of the
+`ci-simplicity-budgets` change; reviewer-enforced before that):
+
+1. **New features default to off or zero-config.** No new required
+   setup step (env var, migration action, external account, manual
+   file edit) on the base install path without maintainer approval via
+   the `simplicity-budget-approved` label.
+2. **Every new `CODEX_LB_*` setting justifies not being a default.**
+   The PR body answers "why can't this be a hardcoded default?" for
+   each new setting; internals-only knobs stay out of `.env.example`.
+3. **README, `.env.example`, and dashboard nav are budgeted.** The
+   caps live in `.github/simplicity-budgets.toml` (introduced by the
+   `ci-simplicity-budgets` change; until that manifest exists on
+   `main`, reviewers judge growth of these surfaces directionally
+   rather than against numeric caps). Exceeding a cap requires the
+   maintainer-applied `simplicity-budget-approved` label before merge.
+4. **Feature docs go to `docs/` + OpenSpec, never new README
+   sections.** Each spec-governed docs page links back to its
+   `openspec/specs/<capability>/` entry.
+5. **Dashboard-visible PRs include before/after screenshots** (or a
+   short recording) in the PR body.
 
 ### Collaborator rules
 
@@ -266,7 +292,7 @@ self-merge escape hatch applies:
 
 - If a collaborator's PR has been waiting on a maintainer merge for
   **more than 14 days** with **all merge gates met** (CI green,
-  `@codex review` clean or findings addressed, `mergeable=CLEAN`, no
+  CodeRabbit findings addressed, `mergeable=CLEAN`, no
   outstanding requested-changes review, no objection from any other
   active collaborator in the thread), the PR author may self-merge.
 - Self-merge under this clause **must** include a comment on the PR
@@ -280,8 +306,8 @@ self-merge escape hatch applies:
 
 These rules are intentionally lightweight. They don't require:
 
-- A second human reviewer in addition to `@codex review` for every PR.
-  Codex review + the PR author + a maintainer merge is the baseline.
+- A second human reviewer in addition to CodeRabbit for every PR.
+  CodeRabbit review + the PR author + a maintainer merge is the baseline.
 - Squash-merge commit message rewriting beyond the Conventional Commits
   title. The PR description ends up in the body; that's enough.
 - A formal escalation process for disagreements. If a P1 finding is
@@ -313,6 +339,40 @@ Releases are automated via [release-please](https://github.com/googleapis/releas
 
 Contributors **never** need to edit `CHANGELOG.md`, version strings, or tag
 manually.
+
+### Release channels: beta first
+
+Stable releases are promoted from the beta channel, not cut directly:
+
+1. A `vX.Y.Z-beta.N` release ships first (the beta release PR).
+2. The beta soaks on at least one production-scale deployment for **at least
+   48 hours** with no new regressions attributable to the release.
+3. Only then is the stable `vX.Y.Z` release PR merged.
+
+Rationale: migrations and proxy-path changes routinely behave differently at
+production data volumes than in CI. The beta soak is where migration duration,
+memory pressure, and upstream-protocol regressions surface without burning a
+stable version number.
+
+Exceptions — a maintainer may promote directly to stable, noting the reason in
+the release PR, when the **entire** unsoaked delta consists of (any
+combination of):
+
+- documentation, CI, or release-tooling changes, or
+- a security or outage hotfix where waiting out the soak is the greater risk.
+
+A train that also carries unrelated unsoaked changes must either soak as a
+beta or ship the hotfix separately.
+
+Before merging a release PR whose train includes migrations, inspect the
+Alembic revisions directly (`git diff vPREV..HEAD -- app/db/alembic/versions`)
+for data backfills and estimate their duration against a production-sized
+dataset — they run at startup and block serving until they finish. Changelog
+titles do not reveal backfills.
+
+The normative requirements live in
+[`openspec/specs/release-management/`](../openspec/specs/release-management/)
+(delta: `openspec/changes/require-beta-soak-before-stable/`).
 
 ## Security issues
 

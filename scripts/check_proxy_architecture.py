@@ -10,20 +10,32 @@ from __future__ import annotations
 
 import ast
 import sys
+import tomllib
+from collections.abc import Callable
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROXY_DIR = ROOT / "app" / "modules" / "proxy"
 SERVICE_PATH = PROXY_DIR / "service.py"
+LOAD_BALANCER_PATH = PROXY_DIR / "load_balancer.py"
 _SERVICE_DIR = PROXY_DIR / "_service"
 SERVICE_PACKAGE_DIR = PROXY_DIR / "_service"
 HTTP_BRIDGE_MIXIN_PATH = PROXY_DIR / "_service" / "http_bridge" / "mixin.py"
 STREAMING_MIXIN_PATH = PROXY_DIR / "_service" / "streaming" / "mixin.py"
+PROXY_ARCHITECTURE_SPEC_PATH = ROOT / "openspec" / "specs" / "proxy-architecture" / "spec.md"
 
-MAX_SERVICE_LINES = 2_600
-MAX_HTTP_BRIDGE_MIXIN_LINES = 2_400
-MAX_STREAMING_MIXIN_LINES = 1_100
-MAX_PROXY_SERVICE_METHOD_LINES = 1_200
+_THRESHOLD_BLOCK_START = "<!-- proxy-architecture-thresholds:start -->"
+_THRESHOLD_BLOCK_END = "<!-- proxy-architecture-thresholds:end -->"
+_THRESHOLD_KEYS = (
+    "service_lines",
+    "load_balancer_lines",
+    "http_bridge_mixin_lines",
+    "streaming_mixin_lines",
+    "proxy_service_method_lines",
+    "load_balancer_select_account_lines",
+)
 
 REQUIRED_SERVICE_PACKAGES = {
     "http_bridge",
@@ -39,6 +51,7 @@ REQUIRED_SERVICE_MODULES = {
     "file_ops.py",
     "observability.py",
     "rate_limit.py",
+    "refresh.py",
     "request_log.py",
     "response_create.py",
     "support.py",
@@ -63,6 +76,10 @@ REQUIRED_SERVICE_FACADE_NAMES = {
     "_REQUEST_TRANSPORT_WEBSOCKET",
     "_WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS",
     "_WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS",
+    "_http_error_status_from_payload",
+    "_is_account_neutral_error_code",
+    "_is_local_account_cap_code",
+    "_openai_error_envelope_from_response_failed_payload",
 }
 
 ALLOWED_SERVICE_INTERNAL_IMPORTS = {
@@ -96,12 +113,81 @@ ALLOWED_SERVICE_IMPORT_DOMAINS_BY_DOMAIN = {
 }
 
 
+ArchitectureCheck = Callable[[], None]
+
+
+@dataclass(frozen=True, slots=True)
+class ArchitectureThresholds:
+    service_lines: int
+    load_balancer_lines: int
+    http_bridge_mixin_lines: int
+    streaming_mixin_lines: int
+    proxy_service_method_lines: int
+    load_balancer_select_account_lines: int
+
+
+def _relative_path(path: Path) -> Path:
+    try:
+        return path.relative_to(ROOT)
+    except ValueError:
+        return path
+
+
 def _parse(path: Path) -> ast.Module:
-    return ast.parse(path.read_text(), filename=str(path))
+    try:
+        return ast.parse(path.read_text(), filename=str(path))
+    except SyntaxError as exc:
+        location = f" at line {exc.lineno}" if exc.lineno is not None else ""
+        raise AssertionError(f"{_relative_path(path)} could not be parsed: {exc.msg}{location}") from None
 
 
 def _line_count(path: Path) -> int:
     return len(path.read_text().splitlines())
+
+
+def _load_architecture_thresholds(path: Path = PROXY_ARCHITECTURE_SPEC_PATH) -> ArchitectureThresholds:
+    relative_path = _relative_path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeError:
+        raise AssertionError(f"{relative_path} threshold definition is not valid UTF-8") from None
+    except OSError as exc:
+        detail = exc.strerror or type(exc).__name__
+        raise AssertionError(f"{relative_path} threshold definition could not be read: {detail}") from None
+
+    if text.count(_THRESHOLD_BLOCK_START) != 1 or text.count(_THRESHOLD_BLOCK_END) != 1:
+        raise AssertionError(f"{relative_path} must contain exactly one marked architecture threshold block")
+    _prefix, _start, remainder = text.partition(_THRESHOLD_BLOCK_START)
+    block, end, _suffix = remainder.partition(_THRESHOLD_BLOCK_END)
+    if not end:
+        raise AssertionError(f"{relative_path} must contain exactly one marked architecture threshold block")
+
+    lines = block.strip().splitlines()
+    if len(lines) < 3 or lines[0].strip() != "```toml" or lines[-1].strip() != "```":
+        raise AssertionError(f"{relative_path} architecture threshold block must contain one TOML fence")
+    try:
+        values = tomllib.loads("\n".join(lines[1:-1]))
+    except tomllib.TOMLDecodeError:
+        raise AssertionError(f"{relative_path} architecture threshold block contains invalid TOML") from None
+
+    expected_keys = set(_THRESHOLD_KEYS)
+    actual_keys = set(values)
+    missing_keys = sorted(expected_keys - actual_keys)
+    unknown_keys = sorted(actual_keys - expected_keys)
+    if missing_keys or unknown_keys:
+        details: list[str] = []
+        if missing_keys:
+            details.append("missing " + ", ".join(missing_keys))
+        if unknown_keys:
+            details.append("unknown " + ", ".join(unknown_keys))
+        raise AssertionError(f"{relative_path} architecture threshold keys are invalid: {'; '.join(details)}")
+
+    for key in _THRESHOLD_KEYS:
+        value = values[key]
+        if type(value) is not int or value <= 0:
+            raise AssertionError(f"{relative_path} architecture threshold {key} must be a positive integer")
+
+    return ArchitectureThresholds(**{key: values[key] for key in _THRESHOLD_KEYS})
 
 
 def _defined_or_imported_names(module: ast.Module) -> set[str]:
@@ -133,6 +219,17 @@ def _proxy_service_methods(module: ast.Module) -> list[ast.FunctionDef | ast.Asy
     raise AssertionError("ProxyService class not found in service.py")
 
 
+def _load_balancer_select_account(module: ast.Module) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    for node in module.body:
+        if not isinstance(node, ast.ClassDef) or node.name != "LoadBalancer":
+            continue
+        for child in node.body:
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef) and child.name == "select_account":
+                return child
+        raise AssertionError("LoadBalancer.select_account method not found in load_balancer.py")
+    raise AssertionError("LoadBalancer class not found in load_balancer.py")
+
+
 def _assert_shim_only(path: Path) -> None:
     module = _parse(path)
     allowed = (ast.Expr, ast.ImportFrom)
@@ -149,31 +246,42 @@ def _assert_shim_only(path: Path) -> None:
             )
 
 
-def _check_service_line_count() -> None:
+def _check_service_line_count(limit: int) -> None:
     count = _line_count(SERVICE_PATH)
-    if count > MAX_SERVICE_LINES:
-        raise AssertionError(f"service.py has {count} lines; limit is {MAX_SERVICE_LINES}")
+    if count > limit:
+        raise AssertionError(f"service.py has {count} lines; limit is {limit}")
 
 
-def _check_http_bridge_mixin_line_count() -> None:
+def _check_load_balancer_line_count(limit: int) -> None:
+    count = _line_count(LOAD_BALANCER_PATH)
+    if count > limit:
+        raise AssertionError(f"load_balancer.py has {count} lines; limit is {limit}")
+
+
+def _check_http_bridge_mixin_line_count(limit: int) -> None:
     count = _line_count(HTTP_BRIDGE_MIXIN_PATH)
-    if count > MAX_HTTP_BRIDGE_MIXIN_LINES:
-        raise AssertionError(f"http_bridge/mixin.py has {count} lines; limit is {MAX_HTTP_BRIDGE_MIXIN_LINES}")
+    if count > limit:
+        raise AssertionError(f"http_bridge/mixin.py has {count} lines; limit is {limit}")
 
 
-def _check_streaming_mixin_line_count() -> None:
+def _check_streaming_mixin_line_count(limit: int) -> None:
     count = _line_count(STREAMING_MIXIN_PATH)
-    if count > MAX_STREAMING_MIXIN_LINES:
-        raise AssertionError(f"streaming/mixin.py has {count} lines; limit is {MAX_STREAMING_MIXIN_LINES}")
+    if count > limit:
+        raise AssertionError(f"streaming/mixin.py has {count} lines; limit is {limit}")
 
 
-def _check_proxy_service_method_size(module: ast.Module) -> None:
+def _check_proxy_service_method_size(module: ast.Module, limit: int) -> None:
     methods = _proxy_service_methods(module)
     largest = max((method.end_lineno or method.lineno) - method.lineno + 1 for method in methods)
-    if largest > MAX_PROXY_SERVICE_METHOD_LINES:
-        raise AssertionError(
-            f"largest ProxyService method spans {largest} lines; limit is {MAX_PROXY_SERVICE_METHOD_LINES}"
-        )
+    if largest > limit:
+        raise AssertionError(f"largest ProxyService method spans {largest} lines; limit is {limit}")
+
+
+def _check_load_balancer_select_account_size(module: ast.Module, limit: int) -> None:
+    method = _load_balancer_select_account(module)
+    span = (method.end_lineno or method.lineno) - method.lineno + 1
+    if span > limit:
+        raise AssertionError(f"LoadBalancer.select_account spans {span} lines; limit is {limit}")
 
 
 def _check_service_facade_surface(module: ast.Module) -> None:
@@ -219,7 +327,7 @@ def _imported_service_domain(imported_module: str) -> str | None:
 
 
 def _check_no_cross_domain_service_imports() -> None:
-    for path in SERVICE_PACKAGE_DIR.rglob("*.py"):
+    for path in sorted(SERVICE_PACKAGE_DIR.rglob("*.py")):
         if path.name == "__init__.py" or path == SERVICE_PACKAGE_DIR / "support.py":
             continue
         current_domain = _service_domain(path)
@@ -240,22 +348,92 @@ def _check_no_cross_domain_service_imports() -> None:
             )
 
 
-def main() -> int:
+def _parse_for_checks(path: Path) -> tuple[ast.Module | None, str | None]:
     try:
-        service_module = _parse(SERVICE_PATH)
-        _check_service_line_count()
-        _check_http_bridge_mixin_line_count()
-        _check_streaming_mixin_line_count()
-        _check_proxy_service_method_size(service_module)
-        _check_service_facade_surface(service_module)
-        _check_service_does_not_import_shims(service_module)
-        _check_required_service_packages()
-        _check_required_service_modules()
-        _assert_shim_only(PROXY_DIR / "_support.py")
-        _assert_shim_only(PROXY_DIR / "_warmup.py")
-        _check_no_cross_domain_service_imports()
+        return _parse(path), None
     except AssertionError as exc:
-        print(f"proxy architecture check failed: {exc}", file=sys.stderr)
+        return None, str(exc)
+
+
+def _load_thresholds_for_checks() -> tuple[ArchitectureThresholds | None, str | None]:
+    try:
+        return _load_architecture_thresholds(PROXY_ARCHITECTURE_SPEC_PATH), None
+    except AssertionError as exc:
+        return None, str(exc)
+
+
+def _raise_assertion(message: str) -> None:
+    raise AssertionError(message)
+
+
+def _architecture_checks() -> list[ArchitectureCheck]:
+    thresholds, threshold_failure = _load_thresholds_for_checks()
+    service_module, service_parse_failure = _parse_for_checks(SERVICE_PATH)
+    load_balancer_module, load_balancer_parse_failure = _parse_for_checks(LOAD_BALANCER_PATH)
+
+    checks: list[ArchitectureCheck] = []
+    if thresholds is None:
+        assert threshold_failure is not None
+        checks.append(partial(_raise_assertion, threshold_failure))
+    else:
+        checks.extend(
+            (
+                partial(_check_service_line_count, thresholds.service_lines),
+                partial(_check_load_balancer_line_count, thresholds.load_balancer_lines),
+                partial(_check_http_bridge_mixin_line_count, thresholds.http_bridge_mixin_lines),
+                partial(_check_streaming_mixin_line_count, thresholds.streaming_mixin_lines),
+            )
+        )
+    if service_module is None:
+        assert service_parse_failure is not None
+        checks.append(partial(_raise_assertion, service_parse_failure))
+    elif thresholds is not None:
+        checks.append(partial(_check_proxy_service_method_size, service_module, thresholds.proxy_service_method_lines))
+    if load_balancer_module is None:
+        assert load_balancer_parse_failure is not None
+        checks.append(partial(_raise_assertion, load_balancer_parse_failure))
+    elif thresholds is not None:
+        checks.append(
+            partial(
+                _check_load_balancer_select_account_size,
+                load_balancer_module,
+                thresholds.load_balancer_select_account_lines,
+            )
+        )
+    if service_module is not None:
+        checks.extend(
+            (
+                partial(_check_service_facade_surface, service_module),
+                partial(_check_service_does_not_import_shims, service_module),
+            )
+        )
+    checks.extend(
+        (
+            _check_required_service_packages,
+            _check_required_service_modules,
+            partial(_assert_shim_only, PROXY_DIR / "_support.py"),
+            partial(_assert_shim_only, PROXY_DIR / "_warmup.py"),
+            _check_no_cross_domain_service_imports,
+        )
+    )
+    return checks
+
+
+def _collect_failures(checks: list[ArchitectureCheck]) -> list[str]:
+    failures: list[str] = []
+    for check in checks:
+        try:
+            check()
+        except AssertionError as exc:
+            failures.append(str(exc))
+    return failures
+
+
+def main() -> int:
+    failures = _collect_failures(_architecture_checks())
+    if failures:
+        for failure in failures:
+            print(f"proxy architecture check failed: {failure}", file=sys.stderr)
         return 1
 
     print("proxy architecture checks passed")

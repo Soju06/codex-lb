@@ -1,5 +1,6 @@
 import { Check, CircleAlert, Copy, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { useCallback, useState, type MouseEvent } from "react";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -27,6 +28,7 @@ function getStage(state: OAuthState): Stage {
 }
 
 function CopyButton({ text }: { text: string }) {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(async (event: MouseEvent<HTMLButtonElement>) => {
@@ -39,20 +41,20 @@ function CopyButton({ text }: { text: string }) {
         container: dialogContainer instanceof HTMLElement ? dialogContainer : undefined,
       });
       if (!copiedToClipboard) {
-        toast.error("Failed to copy");
+        toast.error(t("components.copyButton.toasts.failed"));
         return;
       }
 
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error("Failed to copy");
+      toast.error(t("components.copyButton.toasts.failed"));
     } finally {
       if (blurAfterCopy) {
         trigger.blur();
       }
     }
-  }, [text]);
+  }, [text, t]);
 
   return (
     <Button
@@ -66,12 +68,12 @@ function CopyButton({ text }: { text: string }) {
       {copied ? (
         <>
           <Check className="h-3 w-3" />
-          Copied!
+          {t("components.copyButton.copiedBang")}
         </>
       ) : (
         <>
           <Copy className="h-3 w-3" />
-          Copy
+          {t("components.copyButton.copy")}
         </>
       )}
     </Button>
@@ -91,6 +93,7 @@ function ManualCallbackInputBody({
   onSubmit,
   disabled = false,
 }: ManualCallbackInputProps) {
+  const { t } = useTranslation();
   const [callbackUrl, setCallbackUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -110,12 +113,12 @@ function ManualCallbackInputBody({
   return (
     <div className="space-y-1.5">
       <p className="text-xs font-medium text-muted-foreground">
-        Paste callback URL (for remote server)
+        {t("accounts.oauth.manualCallback.title")}
       </p>
       <div className="flex items-center gap-2">
         <input
           type="text"
-          aria-label="OAuth callback URL"
+          aria-label={t("accounts.oauth.manualCallback.aria")}
           value={callbackUrl}
           onChange={(e) => setCallbackUrl(e.target.value)}
           disabled={disabled}
@@ -129,7 +132,7 @@ function ManualCallbackInputBody({
           disabled={disabled || !callbackUrl.trim() || submitting}
           onClick={() => void handleSubmit()}
         >
-          {submitting ? "Submitting..." : "Submit"}
+          {submitting ? t("common.states.submitting") : t("common.actions.submit")}
         </Button>
       </div>
     </div>
@@ -154,6 +157,7 @@ export function OauthDialog({
   onManualCallback,
   onReset,
 }: OauthDialogProps) {
+  const { t } = useTranslation();
   const [selectedMethod, setSelectedMethod] = useState<"browser" | "device">("browser");
   const stage = getStage(state);
   const browserRefreshInProgress = stage === "browser" && state.status === "starting";
@@ -183,10 +187,14 @@ export function OauthDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {stage === "success" ? "Account added" : stage === "error" ? "Authorization failed" : "Add account with OAuth"}
+            {stage === "success"
+              ? t("accounts.oauth.titles.success")
+              : stage === "error"
+                ? t("accounts.oauth.titles.error")
+                : t("accounts.oauth.titles.intro")}
           </DialogTitle>
           {stage === "intro" ? (
-            <DialogDescription>Choose a sign-in method and complete authorization.</DialogDescription>
+            <DialogDescription>{t("accounts.oauth.introDescription")}</DialogDescription>
           ) : null}
         </DialogHeader>
 
@@ -203,9 +211,9 @@ export function OauthDialog({
                   : "hover:bg-muted/50",
               )}
             >
-              <p className="text-sm font-medium">Browser (PKCE)</p>
+              <p className="text-sm font-medium">{t("accounts.oauth.methods.browser.title")}</p>
               <p className="mt-0.5 text-xs text-muted-foreground">
-                Opens a browser window for sign-in. Recommended for most users.
+                {t("accounts.oauth.methods.browser.description")}
               </p>
             </button>
             <button
@@ -218,9 +226,9 @@ export function OauthDialog({
                   : "hover:bg-muted/50",
               )}
             >
-              <p className="text-sm font-medium">Device code</p>
+              <p className="text-sm font-medium">{t("accounts.oauth.methods.device.title")}</p>
               <p className="mt-0.5 text-xs text-muted-foreground">
-                Use a code on another device. Useful for headless environments.
+                {t("accounts.oauth.methods.device.description")}
               </p>
             </button>
           </div>
@@ -231,7 +239,7 @@ export function OauthDialog({
           <div className="min-w-0 space-y-3 text-sm">
             <div className="space-y-1.5">
               <div className="flex items-center justify-between gap-2">
-                <p className="text-xs font-medium text-muted-foreground">Authorization URL</p>
+                <p className="text-xs font-medium text-muted-foreground">{t("accounts.oauth.authorizationUrl")}</p>
                 <Button
                   type="button"
                   size="sm"
@@ -243,12 +251,12 @@ export function OauthDialog({
                   {browserRefreshInProgress ? (
                     <>
                       <Loader2 className="h-3 w-3 animate-spin" />
-                      Refreshing...
+                      {t("common.states.refreshing")}
                     </>
                   ) : (
                     <>
                       <RefreshCw className="h-3 w-3" />
-                      Refresh link
+                      {t("accounts.oauth.refreshLink")}
                     </>
                   )}
                 </Button>
@@ -256,7 +264,7 @@ export function OauthDialog({
               {browserRefreshInProgress ? (
                 <div className="flex items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  <span>Generating a fresh sign-in link...</span>
+                  <span>{t("accounts.oauth.generatingLink")}</span>
                 </div>
               ) : state.authorizationUrl ? (
                 <div className="flex min-w-0 items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2">
@@ -265,13 +273,13 @@ export function OauthDialog({
                 </div>
               ) : null}
               <p className="text-xs text-muted-foreground">
-                Refresh the link if the current sign-in page has already been used.
+                {t("accounts.oauth.refreshHint")}
               </p>
             </div>
             <ManualCallbackInput onSubmit={onManualCallback} disabled={browserRefreshInProgress} />
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              <span>Waiting for authorization to complete...</span>
+              <span>{t("accounts.oauth.waitingComplete")}</span>
             </div>
           </div>
         ) : null}
@@ -280,14 +288,14 @@ export function OauthDialog({
         {stage === "device" ? (
           <div className="space-y-3 text-sm">
             <ol className="list-inside list-decimal space-y-1 text-xs text-muted-foreground">
-              <li>Open the verification link below</li>
-              <li>Enter the user code when prompted</li>
-              <li>Complete sign-in on that page</li>
+              <li>{t("accounts.oauth.deviceSteps.open")}</li>
+              <li>{t("accounts.oauth.deviceSteps.code")}</li>
+              <li>{t("accounts.oauth.deviceSteps.complete")}</li>
             </ol>
 
             {state.userCode ? (
               <div className="space-y-1.5">
-                <p className="text-xs font-medium text-muted-foreground">User code</p>
+                <p className="text-xs font-medium text-muted-foreground">{t("accounts.oauth.userCode")}</p>
                 <div className="flex items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2">
                   <p className="min-w-0 flex-1 font-mono text-lg font-bold tracking-widest">{state.userCode}</p>
                   <CopyButton text={state.userCode} />
@@ -297,7 +305,7 @@ export function OauthDialog({
 
             {state.verificationUrl ? (
               <div className="space-y-1.5">
-                <p className="text-xs font-medium text-muted-foreground">Verification URL</p>
+                <p className="text-xs font-medium text-muted-foreground">{t("accounts.oauth.verificationUrl")}</p>
                 <div className="flex min-w-0 items-center gap-2 overflow-hidden rounded-lg border bg-muted/20 px-3 py-2">
                   <p className="min-w-0 flex-1 truncate break-all font-mono text-xs">{state.verificationUrl}</p>
                   <CopyButton text={state.verificationUrl} />
@@ -308,9 +316,9 @@ export function OauthDialog({
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               <span>
-                Waiting for authorization
+                {t("accounts.oauth.waiting")}
                 {state.expiresInSeconds != null && state.expiresInSeconds > 0
-                  ? ` · expires in ${formatCountdown(state.expiresInSeconds)}`
+                  ? ` · ${t("accounts.oauth.expiresIn", { time: formatCountdown(state.expiresInSeconds) })}`
                   : "..."}
               </span>
             </div>
@@ -321,7 +329,7 @@ export function OauthDialog({
         {stage === "success" ? (
           <div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-3 text-sm text-emerald-700 dark:text-emerald-400">
             <Check className="h-4 w-4 shrink-0" />
-            <p>Account has been added successfully.</p>
+            <p>{t("accounts.oauth.successMessage")}</p>
           </div>
         ) : null}
 
@@ -329,7 +337,7 @@ export function OauthDialog({
         {stage === "error" ? (
           <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive">
             <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-            <p>{state.errorMessage || "An unknown error occurred."}</p>
+            <p>{state.errorMessage || t("common.errors.unknown")}</p>
           </div>
         ) : null}
 
@@ -342,14 +350,14 @@ export function OauthDialog({
                 className="cursor-pointer disabled:cursor-not-allowed"
                 onClick={() => close(false)}
               >
-                Cancel
+                {t("common.cancel")}
               </Button>
               <Button
                 type="button"
                 className="cursor-pointer disabled:cursor-not-allowed"
                 onClick={handleStart}
               >
-                Start sign-in
+                {t("accounts.oauth.startSignIn")}
               </Button>
             </>
           ) : null}
@@ -363,7 +371,7 @@ export function OauthDialog({
                 disabled={browserRefreshInProgress}
                 onClick={handleChangeMethod}
               >
-                Change method
+                {t("accounts.oauth.changeMethod")}
               </Button>
               {state.authorizationUrl && !browserRefreshInProgress ? (
                 <Button
@@ -373,7 +381,7 @@ export function OauthDialog({
                 >
                   <a href={state.authorizationUrl} target="_blank" rel="noreferrer">
                     <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
-                    Open sign-in page
+                    {t("accounts.oauth.openSignInPage")}
                   </a>
                 </Button>
               ) : null}
@@ -388,7 +396,7 @@ export function OauthDialog({
                 className="cursor-pointer disabled:cursor-not-allowed"
                 onClick={handleChangeMethod}
               >
-                Change method
+                {t("accounts.oauth.changeMethod")}
               </Button>
               {state.verificationUrl ? (
                 <Button
@@ -398,7 +406,7 @@ export function OauthDialog({
                 >
                   <a href={state.verificationUrl} target="_blank" rel="noreferrer">
                     <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
-                    Open link
+                    {t("accounts.oauth.openLink")}
                   </a>
                 </Button>
               ) : null}
@@ -411,7 +419,7 @@ export function OauthDialog({
               className="cursor-pointer disabled:cursor-not-allowed"
               onClick={() => close(false)}
             >
-              Done
+              {t("common.actions.done")}
             </Button>
           ) : null}
 
@@ -423,14 +431,14 @@ export function OauthDialog({
                 className="cursor-pointer disabled:cursor-not-allowed"
                 onClick={handleChangeMethod}
               >
-                Try again
+                {t("common.actions.tryAgain")}
               </Button>
               <Button
                 type="button"
                 className="cursor-pointer disabled:cursor-not-allowed"
                 onClick={() => close(false)}
               >
-                Close
+                {t("common.actions.close")}
               </Button>
             </>
           ) : null}

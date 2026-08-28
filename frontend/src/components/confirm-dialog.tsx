@@ -8,12 +8,15 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import i18n from "@/i18n";
 
 export type ConfirmDialogProps = {
   open: boolean;
   title: string;
   description?: string;
   confirmLabel?: string;
+  confirmDisabled?: boolean;
+  keepOpenOnConfirm?: boolean;
   cancelLabel?: string;
   onConfirm: () => void;
   onOpenChange: (open: boolean) => void;
@@ -24,8 +27,10 @@ export function ConfirmDialog({
   open,
   title,
   description,
-  confirmLabel = "Confirm",
-  cancelLabel = "Cancel",
+  confirmLabel = i18n.t("common.confirm"),
+  confirmDisabled = false,
+  keepOpenOnConfirm = false,
+  cancelLabel = i18n.t("common.cancel"),
   onConfirm,
   onOpenChange,
   children,
@@ -40,7 +45,17 @@ export function ConfirmDialog({
         {children}
         <AlertDialogFooter>
           <AlertDialogCancel>{cancelLabel}</AlertDialogCancel>
-          <AlertDialogAction onClick={onConfirm}>{confirmLabel}</AlertDialogAction>
+          <AlertDialogAction
+            disabled={confirmDisabled}
+            onClick={(event) => {
+              if (keepOpenOnConfirm) {
+                event.preventDefault();
+              }
+              onConfirm();
+            }}
+          >
+            {confirmLabel}
+          </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

@@ -21,6 +21,43 @@ def test_settings_rejects_invalid_firewall_trusted_proxy_cidr(monkeypatch):
         Settings()
 
 
+@pytest.mark.parametrize("cidrs", ["", " ", ",", " , "])
+def test_settings_rejects_proxy_header_trust_without_trusted_cidrs(monkeypatch, cidrs):
+    monkeypatch.setenv("CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS", "true")
+    monkeypatch.setenv("CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS", cidrs)
+
+    with pytest.raises(
+        ValidationError,
+        match="firewall_trust_proxy_headers=true requires at least one entry in firewall_trusted_proxy_cidrs",
+    ):
+        Settings()
+
+
+@pytest.mark.parametrize("dashboard_auth_mode", list(DashboardAuthMode))
+def test_settings_rejects_empty_trusted_proxy_cidr_list_in_every_dashboard_mode(
+    dashboard_auth_mode: DashboardAuthMode,
+):
+    with pytest.raises(
+        ValidationError,
+        match="firewall_trust_proxy_headers=true requires at least one entry in firewall_trusted_proxy_cidrs",
+    ):
+        Settings(
+            dashboard_auth_mode=dashboard_auth_mode,
+            firewall_trust_proxy_headers=True,
+            firewall_trusted_proxy_cidrs=[],
+        )
+
+
+def test_settings_allows_empty_trusted_proxy_cidrs_when_header_trust_is_disabled(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS", "false")
+    monkeypatch.setenv("CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS", " , ")
+
+    settings = Settings()
+
+    assert settings.firewall_trust_proxy_headers is False
+    assert settings.firewall_trusted_proxy_cidrs == []
+
+
 def test_settings_parses_proxy_unauthenticated_client_cidrs_from_csv(monkeypatch):
     monkeypatch.setenv("CODEX_LB_PROXY_UNAUTHENTICATED_CLIENT_CIDRS", "192.168.65.1/32, 172.17.0.0/16")
 

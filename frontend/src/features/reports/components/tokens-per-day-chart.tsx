@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import {
   AreaChart,
   Area,
@@ -8,9 +10,13 @@ import {
   ResponsiveContainer,
 } from "@/components/lazy-recharts";
 import type { DailyReportRow } from "../schemas";
+import { buildContinuousDailyRows } from "../daily-series";
 import { ChartTooltip } from "./chart-tooltip";
+import { ReportChartCard } from "./report-chart-card";
 
 export type TokensPerDayChartProps = {
+  startDate: string;
+  endDate: string;
   data: DailyReportRow[];
 };
 
@@ -21,17 +27,16 @@ function formatTokens(v: number): string {
   return String(v);
 }
 
-export function TokensPerDayChart({ data }: TokensPerDayChartProps) {
-  const chartData = data.map((d) => ({
+export function TokensPerDayChart({ startDate, endDate, data }: TokensPerDayChartProps) {
+  const { t } = useTranslation();
+  const chartData = buildContinuousDailyRows(startDate, endDate, data).map((d) => ({
     date: d.date.slice(5),
     input: d.inputTokens,
     output: d.outputTokens,
   }));
 
   return (
-    <div className="rounded-xl border bg-card p-5">
-      <div className="text-sm font-semibold text-foreground">Tokens by Day</div>
-      <div className="mt-4 h-[200px]">
+    <ReportChartCard title={t("reports.charts.tokensByDay")} empty={data.length === 0}>
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 0 }}>
             <defs>
@@ -58,7 +63,7 @@ export function TokensPerDayChart({ data }: TokensPerDayChartProps) {
               tickFormatter={formatTokens}
             />
             <Tooltip
-              content={<ChartTooltip names={{ input: "Input", output: "Output" }} formatValue={(v) => formatTokens(v)} />}
+              content={<ChartTooltip names={{ input: t("reports.charts.input"), output: t("reports.charts.output") }} formatValue={(v) => formatTokens(v)} />}
             />
             <Area
               type="monotone"
@@ -80,7 +85,6 @@ export function TokensPerDayChart({ data }: TokensPerDayChartProps) {
             />
           </AreaChart>
         </ResponsiveContainer>
-      </div>
-    </div>
+    </ReportChartCard>
   );
 }

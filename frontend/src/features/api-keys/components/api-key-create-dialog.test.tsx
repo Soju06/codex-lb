@@ -11,6 +11,14 @@ import { renderWithProviders } from "@/test/utils";
 import { ApiKeyCreateDialog } from "./api-key-create-dialog";
 
 describe("ApiKeyCreateDialog", () => {
+  it("labels the reasoning effort trigger with its field and state", () => {
+    renderWithProviders(
+      <ApiKeyCreateDialog open busy={false} onOpenChange={vi.fn()} onSubmit={vi.fn()} />,
+    );
+
+    expect(screen.getByRole("button", { name: "Allowed efforts: All efforts" })).toBeInTheDocument();
+  });
+
   it("shows the codex /model checkbox unchecked by default", () => {
     renderWithProviders(
       <ApiKeyCreateDialog
@@ -71,6 +79,58 @@ describe("ApiKeyCreateDialog", () => {
     });
 
     expect(onSubmit.mock.calls[0][0].trafficClass).toBe("opportunistic");
+  });
+
+  it("submits Ultrafast service tier", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "Ultrafast key");
+    await user.click(screen.getByRole("combobox", { name: /enforced service tier/i }));
+    await user.click(await screen.findByRole("option", { name: "Ultrafast" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][0].enforcedServiceTier).toBe("ultrafast");
+  });
+
+  it("renders and submits a transport policy override", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(screen.getByRole("combobox", { name: "HTTP client routing" })).toHaveTextContent("Follow global default");
+
+    await user.type(screen.getByLabelText("Name"), "Persistent sessions key");
+    await user.click(screen.getByRole("combobox", { name: "HTTP client routing" }));
+    await user.click(await screen.findByRole("option", { name: "Prefer persistent sessions" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][0].transportPolicyOverride).toBe("always_websocket");
   });
 
   it("resets the codex /model checkbox when the dialog is dismissed", async () => {

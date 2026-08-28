@@ -74,6 +74,47 @@ def test_error_event_emits_done_chunk():
     assert chunks[-1].strip() == "data: [DONE]"
 
 
+@pytest.mark.parametrize(
+    "event_line",
+    [
+        'data: {"type":"response.failed","response":{"id":"r1","status":"failed"}}\n\n',
+        'data: {"type":"response.failed","response":{"error":{}}}\n\n',
+        'data: {"type":"error"}\n\n',
+        'data: {"type":"error","error":{}}\n\n',
+    ],
+)
+@pytest.mark.asyncio
+async def test_stream_chat_chunks_preserves_terminal_error_without_payload(event_line: str):
+    async def _stream():
+        yield event_line
+
+    chunks = [chunk async for chunk in stream_chat_chunks(_stream(), model="gpt-5.2")]
+
+    error_payload = json.loads(chunks[-2][5:].strip())
+    assert error_payload["error"] == {
+        "message": "Upstream error",
+        "type": "server_error",
+        "code": "upstream_error",
+    }
+    assert chunks[-1].strip() == "data: [DONE]"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_chunks_emits_error_and_done_when_upstream_ends_without_terminal_event():
+    # #given
+    async def _stream():
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+
+    # #when
+    chunks = [chunk async for chunk in stream_chat_chunks(_stream(), model="gpt-5.2")]
+
+    # #then
+    assert chunks[-1].strip() == "data: [DONE]"
+    error_chunk = json.loads(chunks[-2][5:].strip())
+    assert error_chunk["error"]["code"] == "upstream_stream_truncated"
+    assert error_chunk["error"]["type"] == "server_error"
+
+
 @pytest.mark.asyncio
 async def test_collect_completion_parses_event_prefixed_sse_block():
     lines = [
@@ -92,6 +133,22 @@ async def test_collect_completion_parses_event_prefixed_sse_block():
     assert isinstance(result, OpenAIErrorEnvelope)
     assert result.error is not None
     assert result.error.code == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_collect_chat_completion_returns_error_when_upstream_ends_without_terminal_event():
+    # #given
+    async def _stream():
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+
+    # #when
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+
+    # #then
+    assert isinstance(result, OpenAIErrorEnvelope)
+    assert result.error is not None
+    assert result.error.code == "upstream_stream_truncated"
+    assert result.error.type == "server_error"
 
 
 def test_tool_call_delta_is_emitted():
@@ -426,6 +483,61 @@ async def test_collect_completion_returns_error_event():
     assert isinstance(result, OpenAIErrorEnvelope)
     assert result.error is not None
     assert result.error.code == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_drains_after_first_failed_event():
+    # #given
+    closed = {"value": False}
+
+    async def _stream():
+        try:
+            yield (
+                'data: {"type":"response.failed","response":{"error":'
+                '{"message":"limit","type":"rate_limit_error","code":"rate_limit_exceeded"}}}\n\n'
+            )
+            yield 'data: {"type":"response.completed","response":{"id":"should-not-win"}}\n\n'
+        finally:
+            closed["value"] = True
+
+    # #when
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+
+    # #then
+    assert isinstance(result, OpenAIErrorEnvelope)
+    assert result.error is not None
+    assert result.error.code == "rate_limit_exceeded"
+    assert closed["value"] is True
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_drains_original_after_anext_split():
+    # #given
+    from app.modules.proxy.api import _prepend_first
+
+    closed = {"value": False}
+
+    async def _stream():
+        try:
+            yield (
+                'data: {"type":"response.failed","response":{"error":'
+                '{"message":"limit","type":"rate_limit_error","code":"rate_limit_exceeded"}}}\n\n'
+            )
+            yield 'data: {"type":"response.completed","response":{"id":"tail"}}\n\n'
+        finally:
+            closed["value"] = True
+
+    stream = _stream()
+    first = await stream.__anext__()
+
+    # #when
+    result = await collect_chat_completion(_prepend_first(first, stream), model="gpt-5.2")
+
+    # #then
+    assert isinstance(result, OpenAIErrorEnvelope)
+    assert result.error is not None
+    assert result.error.code == "rate_limit_exceeded"
+    assert closed["value"] is True
 
 
 @pytest.mark.asyncio

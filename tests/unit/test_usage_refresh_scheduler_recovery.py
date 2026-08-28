@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable, Collection
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -62,6 +65,111 @@ def _epoch_to_naive_utc(epoch: float) -> datetime:
     return datetime.fromtimestamp(epoch, timezone.utc).replace(tzinfo=None)
 
 
+def _reset_evidence(
+    before: UsageHistory,
+    after: UsageHistory,
+    *,
+    baseline: UsageHistory | None = None,
+):
+    return refresh_scheduler_module._MonthlyResetEvidence(
+        baseline=baseline or before,
+        before=before,
+        after=after,
+    )
+
+
+def test_historical_reset_recovery_scans_adjacent_sliding_samples() -> None:
+    now = 1_700_000_000
+    legacy_reset_at = now + 7 * 24 * 60 * 60
+    transition_recorded_at = now - 120
+    history = [
+        _make_usage(
+            "acc_free_history",
+            window="monthly",
+            used_percent=used_percent,
+            reset_at=reset_at,
+            recorded_at=_epoch_to_naive_utc(recorded_at),
+            window_minutes=43_200,
+        )
+        for used_percent, reset_at, recorded_at in (
+            (100.0, legacy_reset_at, now - 300),
+            (100.0, legacy_reset_at + 60, now - 240),
+            (100.0, legacy_reset_at + 120, now - 180),
+            (0.0, transition_recorded_at + 43_200 * 60, transition_recorded_at),
+            (0.0, now - 60 + 43_200 * 60, now - 60),
+        )
+    ]
+
+    evidence = refresh_scheduler_module._latest_confirmed_reset_transition_after_baseline(
+        history,
+        expected_reset_at=legacy_reset_at,
+        reset_at_tolerance_seconds=5,
+    )
+
+    assert evidence is not None
+    assert evidence.baseline is history[0]
+    assert (evidence.before, evidence.after) == (history[2], history[3])
+
+
+def test_historical_reset_recovery_fails_closed_without_matching_baseline() -> None:
+    now = 1_700_000_000
+    history = [
+        _make_usage(
+            "acc_free_no_baseline",
+            window="monthly",
+            used_percent=100.0,
+            reset_at=now + 60,
+            recorded_at=_epoch_to_naive_utc(now - 60),
+            window_minutes=43_200,
+        ),
+        _make_usage(
+            "acc_free_no_baseline",
+            window="monthly",
+            used_percent=0.0,
+            reset_at=now + 43_200 * 60,
+            recorded_at=_epoch_to_naive_utc(now),
+            window_minutes=43_200,
+        ),
+    ]
+
+    evidence = refresh_scheduler_module._latest_confirmed_reset_transition_after_baseline(
+        history,
+        expected_reset_at=now + 7 * 24 * 60 * 60,
+        reset_at_tolerance_seconds=5,
+    )
+
+    assert evidence is None
+
+
+def test_historical_reset_recovery_never_skips_an_exhausted_successor() -> None:
+    now = 1_700_000_000
+    legacy_reset_at = now + 7 * 24 * 60 * 60
+    next_reset_at = now + 30 * 24 * 60 * 60
+    history = [
+        _make_usage(
+            "acc_free_exhausted_successor",
+            window="monthly",
+            used_percent=used_percent,
+            reset_at=reset_at,
+            recorded_at=_epoch_to_naive_utc(now + offset),
+            window_minutes=43_200,
+        )
+        for offset, used_percent, reset_at in (
+            (0, 100.0, legacy_reset_at),
+            (60, 100.0, next_reset_at),
+            (120, 0.0, next_reset_at),
+        )
+    ]
+
+    evidence = refresh_scheduler_module._latest_confirmed_reset_transition_after_baseline(
+        history,
+        expected_reset_at=legacy_reset_at,
+        reset_at_tolerance_seconds=5,
+    )
+
+    assert evidence is None
+
+
 class StubAccountsRepository:
     def __init__(self, accounts: list[Account]) -> None:
         self._accounts = {account.id: account for account in accounts}
@@ -117,13 +225,26 @@ class StubUsageRepository:
         self._primary = primary or {}
         self._secondary = secondary or {}
         self._monthly = monthly or {}
+        self.queries: list[tuple[str | None, tuple[str, ...] | None]] = []
 
-    async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
+    async def latest_by_account(
+        self,
+        window: str | None = None,
+        *,
+        account_ids: Collection[str] | None = None,
+    ) -> dict[str, UsageHistory]:
+        normalized_account_ids = tuple(account_ids) if account_ids is not None else None
+        self.queries.append((window, normalized_account_ids))
         if window == "secondary":
-            return self._secondary
-        if window == "monthly":
-            return self._monthly
-        return self._primary
+            rows = self._secondary
+        elif window == "monthly":
+            rows = self._monthly
+        else:
+            rows = self._primary
+        if normalized_account_ids is None:
+            return rows
+        allowed = set(normalized_account_ids)
+        return {account_id: entry for account_id, entry in rows.items() if account_id in allowed}
 
 
 class MutatingAccountsRepository(StubAccountsRepository):
@@ -131,6 +252,51 @@ class MutatingAccountsRepository(StubAccountsRepository):
         account = next(iter(self._accounts.values()))
         account.reset_at = 42
         return await super().update_status_if_current(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recoverable_account_statuses_scopes_latest_usage_to_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    future_reset = int(now + 3600)
+    selected = _make_account(
+        "acc_selected",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=future_reset,
+        blocked_at=int(now - 30),
+    )
+    unrelated = _make_account("acc_unrelated", status=AccountStatus.ACTIVE)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: _make_usage(
+                account.id,
+                window="primary",
+                used_percent=10.0,
+                reset_at=future_reset,
+                recorded_at=_epoch_to_naive_utc(now - 10),
+                window_minutes=300,
+            )
+            for account in (selected, unrelated)
+        }
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([selected, unrelated]),
+        usage_repo=usage_repo,
+        accounts=[selected, unrelated],
+    )
+
+    assert recovered == 0
+    assert usage_repo.queries == [
+        ("primary", (selected.id,)),
+        ("secondary", (selected.id,)),
+        ("monthly", (selected.id,)),
+    ]
 
 
 @pytest.mark.asyncio
@@ -188,6 +354,386 @@ async def test_reconcile_recoverable_account_statuses_keeps_rate_limited_until_r
 
 
 @pytest.mark.asyncio
+async def test_reconcile_recovers_free_after_confirmed_monthly_reset_before_legacy_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 3600)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    previous_monthly_reset = legacy_reset_at
+    next_monthly_reset = int(now - 60 + 30 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_free_confirmed_reset",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=previous_monthly_reset,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=43200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=next_monthly_reset,
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43200,
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([account]),
+        usage_repo=StubUsageRepository(
+            primary={
+                account.id: _make_usage(
+                    account.id,
+                    window="primary",
+                    used_percent=100.0,
+                    reset_at=legacy_reset_at,
+                    recorded_at=_epoch_to_naive_utc(now - 1),
+                    window_minutes=300,
+                )
+            },
+            monthly={account.id: after},
+        ),
+        accounts=[account],
+        monthly_reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 1
+    assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_monthly_reset_recovery_loses_cas_to_newer_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 3600)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_free_confirmed_reset_cas",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=legacy_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=43200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=int(now - 60 + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43200,
+    )
+    repo = MutatingAccountsRepository([account])
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=repo,
+        usage_repo=StubUsageRepository(monthly={account.id: after}),
+        accounts=[account],
+        monthly_reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 0
+    assert repo.status_updates == []
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == 42
+
+
+@pytest.mark.asyncio
+async def test_confirmed_monthly_reset_recovery_honors_post_429_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 10)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_free_confirmed_reset_floor",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=legacy_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 9),
+        window_minutes=43200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=int(now - 1 + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 1),
+        window_minutes=43200,
+    )
+    repo = StubAccountsRepository([account])
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=repo,
+        usage_repo=StubUsageRepository(monthly={account.id: after}),
+        accounts=[account],
+        monthly_reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 0
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_free_blocked_without_confirmed_monthly_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 3600)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    monthly_reset_at = legacy_reset_at
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_free_no_reset",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=monthly_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=43200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=monthly_reset_at + 60,
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43200,
+    )
+    repo = StubAccountsRepository([account])
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=repo,
+        usage_repo=StubUsageRepository(monthly={account.id: after}),
+        accounts=[account],
+        monthly_reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 0
+    assert (account.status, account.reset_at, account.blocked_at) == (
+        AccountStatus.RATE_LIMITED,
+        legacy_reset_at,
+        blocked_at,
+    )
+    assert repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_free_blocked_when_current_monthly_quota_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 3600)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_free_current_exhausted",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=legacy_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=43200,
+    )
+    reset_sample = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=int(now - 60 + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43200,
+    )
+    current = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=reset_sample.reset_at or 0,
+        recorded_at=_epoch_to_naive_utc(now - 1),
+        window_minutes=43200,
+    )
+    repo = StubAccountsRepository([account])
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=repo,
+        usage_repo=StubUsageRepository(monthly={account.id: current}),
+        accounts=[account],
+        monthly_reset_evidence={account.id: _reset_evidence(before, reset_sample)},
+    )
+
+    assert recovered == 0
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_free_blocked_when_matching_baseline_predates_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 90)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_free_pre_block_baseline",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    baseline = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=legacy_reset_at,
+        recorded_at=_epoch_to_naive_utc(blocked_at - 1),
+        window_minutes=43_200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=int(now - 60 + 43_200 * 60),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43_200,
+    )
+    repo = StubAccountsRepository([account])
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=repo,
+        usage_repo=StubUsageRepository(monthly={account.id: after}),
+        accounts=[account],
+        monthly_reset_evidence={account.id: _reset_evidence(baseline, after)},
+    )
+
+    assert recovered == 0
+    assert (account.status, account.reset_at, account.blocked_at) == (
+        AccountStatus.RATE_LIMITED,
+        legacy_reset_at,
+        blocked_at,
+    )
+    assert repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_does_not_apply_monthly_reset_override_to_plus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 3600)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_plus_monthly_reset",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="plus",
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=legacy_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=43200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=int(now - 60 + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43200,
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([account]),
+        usage_repo=StubUsageRepository(
+            primary={
+                account.id: _make_usage(
+                    account.id,
+                    window="primary",
+                    used_percent=100.0,
+                    reset_at=legacy_reset_at,
+                    recorded_at=_epoch_to_naive_utc(now - 1),
+                    window_minutes=300,
+                )
+            },
+            monthly={account.id: after},
+        ),
+        accounts=[account],
+        monthly_reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 0
+    assert (account.status, account.reset_at, account.blocked_at) == (
+        AccountStatus.RATE_LIMITED,
+        legacy_reset_at,
+        blocked_at,
+    )
+
+
+@pytest.mark.asyncio
 async def test_reconcile_recoverable_account_statuses_restores_rate_limited_after_reset_elapses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -237,6 +783,50 @@ async def test_reconcile_recoverable_account_statuses_restores_rate_limited_afte
             "blocked_at": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recoverable_account_statuses_keeps_elapsed_reset_until_block_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    past_reset = int(now - 1)
+    blocked_at = int(now - 10)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_account(
+        "acc_rate_limited_floor",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=blocked_at,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: _make_usage(
+                account.id,
+                window="primary",
+                used_percent=10.0,
+                reset_at=past_reset,
+                recorded_at=_epoch_to_naive_utc(now - 5),
+                window_minutes=300,
+            )
+        }
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=accounts_repo,
+        usage_repo=usage_repo,
+        accounts=[account],
+    )
+
+    assert recovered == 0
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == past_reset
+    assert account.blocked_at == blocked_at
+    assert accounts_repo.status_updates == []
 
 
 @pytest.mark.asyncio
@@ -718,3 +1308,277 @@ async def test_reconcile_recoverable_account_statuses_keeps_rate_limited_when_re
     assert account.status == AccountStatus.RATE_LIMITED
     assert account.reset_at == past_reset
     assert account.blocked_at == blocked_at
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_closes_read_session_before_usage_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    account = _make_account("acc_scheduler", status=AccountStatus.ACTIVE)
+    session_closed = False
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    class _Leader:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
+
+    class _UsageRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def latest_by_account(
+            self,
+            window: str | None = None,
+            *,
+            account_ids: Collection[str] | None = None,
+        ) -> dict[str, UsageHistory]:
+            assert account_ids == [account.id]
+            return {}
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+            return [account]
+
+    class _Updater:
+        async def refresh_accounts(
+            self,
+            accounts: list[Account],
+            latest_usage: dict[str, UsageHistory],
+        ) -> bool:
+            assert accounts == [account]
+            assert latest_usage == {}
+            assert session_closed is True
+            fetch_started.set()
+            await release_fetch.wait()
+            return False
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _background_session():
+        nonlocal session_closed
+        session_closed = False
+        try:
+            yield _Session()
+        finally:
+            session_closed = True
+
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(refresh_scheduler_module, "UsageRepository", _UsageRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "AccountsRepository", _AccountsRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+    refresh_task = asyncio.create_task(scheduler._refresh_once())
+    await fetch_started.wait()
+
+    assert session_closed is True
+    release_fetch.set()
+    assert await refresh_task == 60.0
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_cancellation_closes_read_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    session_closed = asyncio.Event()
+    listed_accounts = asyncio.Event()
+    release_list_accounts = asyncio.Event()
+
+    class _Leader:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
+
+    class _UsageRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def latest_by_account(
+            self,
+            window: str | None = None,
+            *,
+            account_ids: Collection[str] | None = None,
+        ) -> dict[str, UsageHistory]:
+            return {}
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+            listed_accounts.set()
+            await release_list_accounts.wait()
+            return []
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _background_session():
+        try:
+            yield _Session()
+        finally:
+            session_closed.set()
+
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(refresh_scheduler_module, "UsageRepository", _UsageRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "AccountsRepository", _AccountsRepo)
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+    task = asyncio.create_task(scheduler._refresh_once())
+    await listed_accounts.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.wait_for(session_closed.wait(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = [
+        _make_account("acc_a", status=AccountStatus.ACTIVE),
+        _make_account("acc_b", status=AccountStatus.ACTIVE),
+    ]
+    usage = {
+        (account.id, window): _make_usage(
+            account.id,
+            window=window,
+            used_percent=10.0,
+            reset_at=1_800_000_000,
+            recorded_at=datetime(2026, 1, 1),
+            window_minutes=300 if window == "primary" else 10_080,
+        )
+        for account in accounts
+        for window in ("primary", "secondary")
+    }
+    open_sessions = 0
+    query_scopes: list[tuple[str | None, tuple[str, ...]]] = []
+    updater_calls: list[str] = []
+    warmup_calls: list[dict[str, object]] = []
+    invalidations = 0
+
+    class _Leader:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
+
+    class _UsageRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def latest_by_account(
+            self,
+            window: str | None = None,
+            *,
+            account_ids: Collection[str] | None = None,
+        ) -> dict[str, UsageHistory]:
+            assert account_ids is not None
+            normalized_ids = tuple(account_ids)
+            query_scopes.append((window, normalized_ids))
+            return {
+                account_id: usage[(account_id, window or "primary")]
+                for account_id in normalized_ids
+                if (account_id, window or "primary") in usage
+            }
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+            return accounts
+
+    class _SettingsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get_or_create(self) -> object:
+            return object()
+
+    class _Updater:
+        async def refresh_accounts(
+            self,
+            selected_accounts: list[Account],
+            latest_usage: dict[str, UsageHistory],
+        ) -> bool:
+            assert open_sessions == 0
+            assert len(selected_accounts) == 1
+            selected = selected_accounts[0]
+            assert set(latest_usage) == {selected.id}
+            updater_calls.append(selected.id)
+            return len(updater_calls) == 2
+
+    class _WarmupService:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def run_after_usage_refresh(self, **kwargs: object) -> None:
+            assert open_sessions == 0
+            warmup_calls.append(kwargs)
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _background_session():
+        nonlocal open_sessions
+        open_sessions += 1
+        try:
+            yield _Session()
+        finally:
+            open_sessions -= 1
+
+    async def _invalidate() -> None:
+        nonlocal invalidations
+        invalidations += 1
+
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(refresh_scheduler_module, "UsageRepository", _UsageRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "AccountsRepository", _AccountsRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "SettingsRepository", _SettingsRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
+    monkeypatch.setattr(refresh_scheduler_module, "LimitWarmupService", _WarmupService)
+    monkeypatch.setattr(refresh_scheduler_module, "_invalidate_usage_refresh_caches", _invalidate)
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+
+    assert await scheduler._refresh_once() == 30.0
+    assert updater_calls == ["acc_a"]
+    assert query_scopes == [
+        ("primary", ("acc_a",)),
+        ("secondary", ("acc_a",)),
+        ("monthly", ("acc_a",)),
+    ]
+    assert warmup_calls == []
+    assert invalidations == 0
+
+    assert await scheduler._refresh_once() == 30.0
+    assert updater_calls == ["acc_a", "acc_b"]
+    assert query_scopes[-6:] == [
+        ("primary", ("acc_b",)),
+        ("secondary", ("acc_b",)),
+        ("monthly", ("acc_b",)),
+        ("primary", ("acc_b",)),
+        ("secondary", ("acc_b",)),
+        ("monthly", ("acc_b",)),
+    ]
+    assert len(warmup_calls) == 1
+    assert [account.id for account in cast("list[Account]", warmup_calls[0]["accounts"])] == ["acc_b"]
+    assert [account.id for account in cast("list[Account]", warmup_calls[0]["stagger_accounts"])] == [
+        "acc_a",
+        "acc_b",
+    ]
+    assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["before_primary"])) == {"acc_b"}
+    assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["after_primary"])) == {"acc_b"}
+    assert invalidations == 1
+    assert open_sessions == 0

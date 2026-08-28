@@ -1,8 +1,12 @@
 import { render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 import { AuthGate } from "@/features/auth/components/auth-gate";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+
+vi.mock("@/features/auth/components/totp-dialog", () => ({
+  TotpDialog: () => <div>Two-factor verification</div>,
+}));
 
 function setAuthState(
   patch: Partial<ReturnType<typeof useAuthStore.getState>>,
@@ -24,9 +28,14 @@ function setAuthState(
 
 describe("AuthGate", () => {
   beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     setAuthState({
       refreshSession: vi.fn().mockResolvedValue(undefined),
     });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("shows login form when unauthenticated", async () => {
@@ -49,6 +58,27 @@ describe("AuthGate", () => {
     await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
   });
 
+  it("shows guest login prompt when guest access requires a password", async () => {
+    const refreshSession = vi.fn().mockResolvedValue(undefined);
+    setAuthState({
+      refreshSession,
+      passwordRequired: false,
+      authenticated: false,
+      guestAccessEnabled: true,
+      guestPasswordRequired: true,
+    });
+
+    render(
+      <AuthGate>
+        <div>Protected content</div>
+      </AuthGate>,
+    );
+
+    expect(screen.getByText("Guest access")).toBeInTheDocument();
+    expect(screen.queryByText("Protected content")).not.toBeInTheDocument();
+    await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
+  });
+
   it("shows children when authenticated", async () => {
     const refreshSession = vi.fn().mockResolvedValue(undefined);
     setAuthState({
@@ -65,6 +95,27 @@ describe("AuthGate", () => {
     );
 
     expect(screen.getByText("Protected content")).toBeInTheDocument();
+    await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
+  });
+
+  it("shows admin login form when a guest requests admin sign in", async () => {
+    const refreshSession = vi.fn().mockResolvedValue(undefined);
+    setAuthState({
+      refreshSession,
+      passwordRequired: true,
+      authenticated: true,
+      role: "guest",
+      adminLoginRequested: true,
+    });
+
+    render(
+      <AuthGate>
+        <div>Protected content</div>
+      </AuthGate>,
+    );
+
+    expect(screen.getByText("Sign in")).toBeInTheDocument();
+    expect(screen.queryByText("Protected content")).not.toBeInTheDocument();
     await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
   });
 

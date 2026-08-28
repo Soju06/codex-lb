@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List
 
-from pydantic import Field
+from pydantic import Field, PrivateAttr, field_validator
 
 from app.modules.shared.schemas import DashboardModel
 
@@ -30,6 +30,15 @@ class AccountRequestUsage(DashboardModel):
     total_tokens: int = 0
     cached_input_tokens: int = 0
     total_cost_usd: float = 0.0
+
+
+class AccountUsageResetCredits(DashboardModel):
+    available_count: int = Field(ge=0)
+
+
+class AccountUsageResetCreditsResponse(DashboardModel):
+    account_id: str
+    rate_limit_reset_credits: AccountUsageResetCredits
 
 
 class AccountTokenStatus(DashboardModel):
@@ -91,6 +100,7 @@ class AccountSummary(DashboardModel):
     window_minutes_secondary: int | None = None
     window_minutes_monthly: int | None = None
     last_refresh_at: datetime | None = None
+    usage_refreshed_at: datetime | None = Field(default=None, exclude=True)
     capacity_credits_primary: float | None = None
     remaining_credits_primary: float | None = None
     capacity_credits_secondary: float | None = None
@@ -115,6 +125,10 @@ class AccountSummary(DashboardModel):
     # surface a "delete older" action without requiring the operator to
     # group rows by email themselves. See codex-lb #787 (B).
     is_email_duplicate: bool = False
+    # Banked rate-limit reset credits from the in-memory snapshot when cached,
+    # otherwise the latest persisted primary usage_history count from /wham/usage.
+    available_reset_credits: int = 0
+    reset_credit_nearest_expires_at: datetime | None = None
 
 
 class AccountsResponse(DashboardModel):
@@ -214,9 +228,42 @@ class AccountProbeRequest(DashboardModel):
 
 
 class AccountProbeResponse(DashboardModel):
+    _usage_refresh_fetch_succeeded: bool | None = PrivateAttr(default=None)
+
     status: str
     account_id: str
     probe_status_code: int
+    primary_used_percent_before: float | None = None
+    primary_used_percent_after: float | None = None
+    secondary_used_percent_before: float | None = None
+    secondary_used_percent_after: float | None = None
+    account_status_before: str
+    account_status_after: str
+
+    def usage_refresh_ready_for_probe_settlement(self) -> bool:
+        return self._usage_refresh_fetch_succeeded is True
+
+
+class AccountUsageResetConsumeRequest(DashboardModel):
+    redeem_request_id: str | None = None
+
+    @field_validator("redeem_request_id")
+    @classmethod
+    def normalize_redeem_request_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("redeem_request_id must not be empty")
+        return normalized
+
+
+class AccountUsageResetConsumeResponse(DashboardModel):
+    status: str
+    account_id: str
+    code: str
+    windows_reset: int = 0
+    usage_written: bool
     primary_used_percent_before: float | None = None
     primary_used_percent_after: float | None = None
     secondary_used_percent_before: float | None = None

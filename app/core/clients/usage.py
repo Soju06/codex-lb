@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Literal
 
 import aiohttp
 from aiohttp_retry import ExponentialRetry, RetryClient
@@ -13,6 +14,7 @@ from app.core.clients.codex import (
     create_codex_session,
     require_route_or_direct_egress_opt_in,
 )
+from app.core.clients.headers import build_chatgpt_auth_headers
 from app.core.clients.http import lease_retry_client
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
@@ -49,6 +51,13 @@ class UsageFetchError(Exception):
         self.status_code = status_code
         self.message = message
         self.code = code
+
+
+class ConsumeRateLimitResetCreditResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    code: Literal["reset", "nothing_to_reset", "no_credit", "already_redeemed"]
+    windows_reset: int = 0
 
 
 async def fetch_usage(
@@ -123,6 +132,64 @@ async def fetch_usage(
         raise UsageFetchError(0, f"Usage fetch failed: {exc}") from exc
 
 
+async def consume_rate_limit_reset_credit(
+    *,
+    access_token: str,
+    account_id: str,
+    redeem_request_id: str,
+    base_url: str | None = None,
+    timeout_seconds: float | None = None,
+    max_retries: int | None = None,
+    client: RetryClient | None = None,
+    route: ResolvedUpstreamRoute | None = None,
+    codex_client: CodexClient | None = None,
+    allow_direct_egress: bool = False,
+) -> ConsumeRateLimitResetCreditResponse:
+    settings = get_settings()
+    usage_base = base_url or settings.upstream_base_url
+    url = _rate_limit_reset_url(usage_base)
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.usage_fetch_timeout_seconds)
+    retries = max_retries if max_retries is not None else settings.usage_fetch_max_retries
+    headers = _usage_headers(access_token, account_id)
+    payload = {"redeem_request_id": redeem_request_id}
+    retry_options = _retry_options(retries + 1)
+    require_route_or_direct_egress_opt_in(
+        route=route,
+        allow_direct_egress=allow_direct_egress,
+        operation="usage limit reset consume",
+    )
+
+    try:
+        if route is not None:
+            return await _consume_rate_limit_reset_via_codex(
+                url=url,
+                route=route,
+                headers=headers,
+                payload=payload,
+                timeout_seconds=timeout_seconds or settings.usage_fetch_timeout_seconds,
+                retries=retries,
+                codex_client=codex_client,
+            )
+        async with lease_retry_client(client) as retry_client:
+            async with retry_client.request(
+                "POST",
+                url,
+                headers=headers,
+                json=payload,
+                timeout=timeout,
+                retry_options=retry_options,
+            ) as resp:
+                data = await _safe_json(resp)
+                return _consume_rate_limit_reset_response_or_raise(data, resp.status)
+    except (aiohttp.ClientError, asyncio.TimeoutError, CodexTransportError) as exc:
+        logger.warning(
+            "Usage limit reset consume error request_id=%s error=%s",
+            get_request_id(),
+            exc,
+        )
+        raise UsageFetchError(0, f"Usage limit reset consume failed: {exc}") from exc
+
+
 async def _fetch_usage_via_codex(
     *,
     url: str,
@@ -165,6 +232,50 @@ async def _fetch_usage_via_codex(
     raise RuntimeError("unreachable usage retry state")
 
 
+async def _consume_rate_limit_reset_via_codex(
+    *,
+    url: str,
+    route: ResolvedUpstreamRoute,
+    headers: dict[str, str],
+    payload: dict[str, str],
+    timeout_seconds: float,
+    retries: int,
+    codex_client: CodexClient | None,
+) -> ConsumeRateLimitResetCreditResponse:
+    attempts = max(1, retries + 1)
+    owns_codex_client = codex_client is None
+    active_codex_client = codex_client or CodexClient(create_codex_session())
+    try:
+        for attempt in range(attempts):
+            try:
+                resp = await active_codex_client.request(
+                    "POST",
+                    url,
+                    route=route,
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout_seconds,
+                )
+            except CodexTransportError:
+                if attempt < attempts - 1:
+                    await asyncio.sleep(_retry_delay_seconds(attempt))
+                    continue
+                raise
+
+            data = await _safe_codex_json(resp)
+            status = _codex_response_status(resp)
+            if status in RETRYABLE_STATUS and attempt < attempts - 1:
+                await asyncio.sleep(_retry_delay_seconds(attempt))
+                continue
+            return _consume_rate_limit_reset_response_or_raise(data, status)
+    finally:
+        if owns_codex_client:
+            close = getattr(active_codex_client, "close", None)
+            if callable(close):
+                await close()
+    raise RuntimeError("unreachable usage limit reset retry state")
+
+
 def _usage_payload_or_raise(data: JsonObject, status: int) -> UsagePayload:
     if status >= 400:
         code = _extract_error_code(data)
@@ -185,6 +296,31 @@ def _usage_payload_or_raise(data: JsonObject, status: int) -> UsagePayload:
             get_request_id(),
         )
         raise UsageFetchError(502, "Invalid usage payload") from exc
+
+
+def _consume_rate_limit_reset_response_or_raise(
+    data: JsonObject,
+    status: int,
+) -> ConsumeRateLimitResetCreditResponse:
+    if status >= 400:
+        code = _extract_error_code(data)
+        message = _extract_error_message(data) or f"Usage limit reset consume failed ({status})"
+        logger.warning(
+            "Usage limit reset consume failed request_id=%s status=%s code=%s message=%s",
+            get_request_id(),
+            status,
+            code,
+            message,
+        )
+        raise UsageFetchError(status, message, code=code)
+    try:
+        return ConsumeRateLimitResetCreditResponse.model_validate(data)
+    except ValidationError as exc:
+        logger.warning(
+            "Usage limit reset consume invalid payload request_id=%s",
+            get_request_id(),
+        )
+        raise UsageFetchError(502, "Invalid usage limit reset payload") from exc
 
 
 def _codex_response_status(response: object) -> int:
@@ -219,14 +355,15 @@ def _usage_url(base_url: str) -> str:
     return f"{normalized}/wham/usage"
 
 
+def _rate_limit_reset_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if "/backend-api" not in normalized:
+        normalized = f"{normalized}/backend-api"
+    return f"{normalized}/wham/rate-limit-reset-credits/consume"
+
+
 def _usage_headers(access_token: str, account_id: str | None) -> dict[str, str]:
-    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
-    request_id = get_request_id()
-    if request_id:
-        headers["x-request-id"] = request_id
-    if account_id and not account_id.startswith(("email_", "local_")):
-        headers["chatgpt-account-id"] = account_id
-    return headers
+    return build_chatgpt_auth_headers(access_token, account_id)
 
 
 async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:

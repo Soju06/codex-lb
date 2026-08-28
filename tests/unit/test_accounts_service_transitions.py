@@ -26,6 +26,7 @@ def _account(
         deactivation_reason=deactivation_reason,
         reset_at=reset_at,
         blocked_at=blocked_at,
+        delete_requested_at=None,
     )
 
 

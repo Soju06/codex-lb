@@ -3,6 +3,14 @@ name: CI
 on:
   push:
     branches: ["main"]
+  # `edited` must stay: release-guard evidence (validation checklist + exact
+  # head SHA) is added by editing the release PR body, and CI Required only
+  # reruns for that PR via an `edited` event (scripts/guard_beta_release.py).
+  # Known cost: a body edit right after a push starts a duplicate run for the
+  # same head SHA and concurrency cancels the older one. Do NOT "fix" this by
+  # skipping edited runs for non-release PRs: skipped or all-skipped
+  # "CI Required" check runs still satisfy branch protection, so a body-only
+  # edit could mint a passing check for a red or untested head.
   pull_request:
     types: [opened, reopened, synchronize, edited, ready_for_review]
   merge_group:
@@ -32,7 +40,7 @@ jobs:
       migrations: ${{ steps.force.outputs.full_suite || steps.filter.outputs.migrations }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
@@ -48,44 +56,9 @@ jobs:
       - name: Detect file changes
         id: filter
         if: steps.force.outputs.full_suite != 'true'
-        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d
-        with:
-          filters: |
-            frontend:
-              - 'frontend/**'
-              - 'Makefile'
-              - '.github/workflows/ci.yml'
-            backend:
-              - '.github/scripts/**'
-              - 'app/**'
-              - 'tests/**'
-              - 'config/**'
-              - 'scripts/**'
-              - 'pyproject.toml'
-              - 'uv.lock'
-              - 'Makefile'
-              - '.github/workflows/ci.yml'
-            helm:
-              - 'deploy/helm/**'
-              - 'Makefile'
-              - '.github/workflows/ci.yml'
-            docker:
-              - 'Dockerfile'
-              - 'Dockerfile.*'
-              - '.dockerignore'
-              - 'docker-compose*.yml'
-              - 'app/**'
-              - 'config/**'
-              - 'frontend/**'
-              - 'scripts/**'
-              - 'pyproject.toml'
-              - 'uv.lock'
-              - '.github/workflows/ci.yml'
-            migrations:
-              - 'app/db/alembic/**'
-              - 'pyproject.toml'
-              - 'uv.lock'
-              - '.github/workflows/ci.yml'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/detect_changed_areas.py
 
   contributors:
     name: Contributors attribution
@@ -93,7 +66,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -109,7 +82,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -136,7 +109,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -164,7 +137,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
@@ -174,7 +147,7 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.bun/install/cache
@@ -194,7 +167,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
@@ -204,7 +177,7 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.bun/install/cache
@@ -217,6 +190,9 @@ jobs:
         run: make frontend-typecheck
 
   frontend-test:
+    # Keep this exact job name: the repository ruleset requires "Frontend
+    # tests (vitest + coverage)" as a check context. PR runs skip the coverage
+    # instrumentation below, but the check name must not change.
     name: Frontend tests (vitest + coverage)
     runs-on: ubuntu-24.04
     needs: changes
@@ -224,7 +200,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
@@ -234,7 +210,7 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.bun/install/cache
@@ -243,7 +219,14 @@ jobs:
           restore-keys: |
             bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
 
+      # PRs run vitest without coverage instrumentation for a faster signal;
+      # main pushes and the merge queue keep the full coverage run.
+      - name: Run frontend tests
+        if: github.event_name == 'pull_request'
+        run: make frontend-test-fast
+
       - name: Run frontend tests with coverage
+        if: github.event_name != 'pull_request'
         run: make frontend-test
 
   frontend-build:
@@ -254,7 +237,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
@@ -264,7 +247,7 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.bun/install/cache
@@ -276,6 +259,55 @@ jobs:
       - name: Build frontend
         run: make frontend-build
 
+  dashboard-browser-smoke:
+    name: Dashboard browser smoke (Playwright)
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.3.14"
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.bun/install/cache
+            frontend/node_modules
+          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          restore-keys: |
+            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          prune-cache: true
+
+      - name: Install frontend dependencies
+        run: make frontend-install
+
+      - name: Install Playwright Chromium
+        run: cd frontend && bun run playwright install --with-deps chromium
+
+      - name: Run dashboard browser smoke test
+        run: make test-dashboard-browser-smoke
+
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-24.04
@@ -284,15 +316,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Ruff check
         run: make lint
@@ -305,15 +338,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Ty check
         run: make typecheck
@@ -328,7 +362,6 @@ jobs:
       matrix:
         slice:
           - name: unit
-          - name: integration-core
           - name: integration-bridge
           - name: e2e
     env:
@@ -341,7 +374,7 @@ jobs:
 
       - name: Checkout repository
         if: needs.changes.outputs.backend == 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
@@ -353,7 +386,7 @@ jobs:
 
       - name: Cache Bun dependencies
         if: needs.changes.outputs.backend == 'true'
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.bun/install/cache
@@ -364,14 +397,105 @@ jobs:
 
       - name: Set up uv
         if: needs.changes.outputs.backend == 'true'
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Run tests
         if: needs.changes.outputs.backend == 'true'
         run: make test-${{ matrix.slice.name }}
+
+  # integration-core is split into deterministic shards to shorten the CI
+  # critical path; each shard's make target verifies the shards partition the
+  # full selection before running pytest (see .github/scripts/pytest_shards.py).
+  test-integration-core:
+    name: Tests (pytest, integration-core-${{ matrix.shard }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: changes
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      PYTHONFAULTHANDLER: "1"
+
+    steps:
+      - name: Skip backend tests for unrelated changes
+        if: needs.changes.outputs.backend != 'true'
+        run: echo "Backend files unchanged; required pytest context satisfied."
+
+      - name: Checkout repository
+        if: needs.changes.outputs.backend == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        if: needs.changes.outputs.backend == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.3.14"
+
+      - name: Cache Bun dependencies
+        if: needs.changes.outputs.backend == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.bun/install/cache
+            frontend/node_modules
+          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          restore-keys: |
+            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Set up uv
+        if: needs.changes.outputs.backend == 'true'
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          prune-cache: true
+
+      - name: Run tests
+        if: needs.changes.outputs.backend == 'true'
+        run: make test-integration-core-${{ matrix.shard }}
+
+  # Aggregate for the shards above. Keep this exact job name: the repository
+  # ruleset requires "Tests (pytest, integration-core)" as a check context.
+  # The shard jobs never skip at job level (they use the placeholder-step
+  # pattern), so anything other than an all-success matrix result must fail
+  # here — skipped or cancelled shards are not laundered into a passing check.
+  test-integration-core-required:
+    name: Tests (pytest, integration-core)
+    runs-on: ubuntu-24.04
+    if: always()
+    needs:
+      - test-integration-core
+
+    steps:
+      - name: Require every integration-core shard to pass
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = {
+              name: details["result"]
+              for name, details in sorted(needs.items())
+              if details.get("result") != "success"
+          }
+          if failed:
+              for name, result in failed.items():
+                  print(f"{name}: {result}")
+              sys.exit(1)
+          print("all integration-core shards passed")
+          PY
 
   test-postgres:
     name: Tests (pytest, PostgreSQL)
@@ -403,7 +527,7 @@ jobs:
 
       - name: Checkout repository
         if: needs.changes.outputs.backend == 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
@@ -415,7 +539,7 @@ jobs:
 
       - name: Cache Bun dependencies
         if: needs.changes.outputs.backend == 'true'
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.bun/install/cache
@@ -426,10 +550,11 @@ jobs:
 
       - name: Set up uv
         if: needs.changes.outputs.backend == 'true'
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Run tests
         if: needs.changes.outputs.backend == 'true'
@@ -443,15 +568,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Validate migration policy and drift
         run: make migration-check
@@ -478,15 +604,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Validate migration policy and drift on PostgreSQL
         run: make migration-check-postgres
@@ -499,7 +626,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
@@ -509,7 +636,7 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.bun/install/cache
@@ -519,10 +646,11 @@ jobs:
             bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Build and verify package
         run: make package
@@ -541,15 +669,15 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
 
       - name: Build Docker image
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
         with:
           context: .
           file: Dockerfile
@@ -569,7 +697,7 @@ jobs:
           ignore-unfixed: true
 
       - name: Upload Trivy scan results to GitHub Security
-        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         with:
           sarif_file: trivy-results.sarif
@@ -594,16 +722,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
       - name: Set up Helm
-        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
 
       - name: Cache kubeconform
         id: cache-kubeconform
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: .cache/ci-tools/kubeconform
           key: kubeconform-0.7.0-${{ runner.os }}-${{ runner.arch }}
@@ -642,16 +770,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
       - name: Set up Helm
-        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
 
       - name: Cache kind
         id: cache-kind
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: .cache/ci-tools/kind
           key: kind-0.30.0-${{ runner.os }}-${{ runner.arch }}
@@ -695,9 +823,12 @@ jobs:
       - frontend-typecheck
       - frontend-test
       - frontend-build
+      - dashboard-browser-smoke
       - lint
       - typecheck
       - test
+      - test-integration-core
+      - test-integration-core-required
       - test-postgres
       - migration-check
       - migration-check-postgres

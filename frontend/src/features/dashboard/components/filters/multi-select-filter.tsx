@@ -1,5 +1,6 @@
 import { ChevronDown, X } from "lucide-react";
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import {
@@ -32,6 +33,7 @@ export type MultiSelectFilterProps = {
 };
 
 export function MultiSelectFilter({ label, values, options, onChange }: MultiSelectFilterProps) {
+  const { t } = useTranslation();
   const blurred = usePrivacyStore((s) => s.blurred);
   const renderedOptions = useMemo<RenderedOption[]>(() => {
     const byValue = new Map<string, RenderedOption>();
@@ -86,7 +88,7 @@ export function MultiSelectFilter({ label, values, options, onChange }: MultiSel
         <DropdownMenuLabel>{label}</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {renderedOptions.length === 0 ? (
-          <p className="px-2 py-1 text-xs text-muted-foreground">No options</p>
+          <p className="px-2 py-1 text-xs text-muted-foreground">{t("dashboard.filters.noOptions")}</p>
         ) : (
           renderedOptions.map((option) => (
             <DropdownMenuCheckboxItem
@@ -99,7 +101,7 @@ export function MultiSelectFilter({ label, values, options, onChange }: MultiSel
                 <span className={blurred && option.isEmail ? "truncate privacy-blur" : "truncate"}>{option.label}</span>
                 {option.isStale ? (
                   <Badge variant="secondary" className="text-[10px]">
-                    Stale
+                    {t("dashboard.filters.stale")}
                   </Badge>
                 ) : null}
               </span>
@@ -112,7 +114,7 @@ export function MultiSelectFilter({ label, values, options, onChange }: MultiSel
                     event.stopPropagation();
                     removeValue(option.value);
                   }}
-                  aria-label={`Remove stale ${option.label}`}
+                  aria-label={t("dashboard.filters.removeStale", { label: option.label })}
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>

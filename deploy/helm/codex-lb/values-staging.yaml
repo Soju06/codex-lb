@@ -16,6 +16,9 @@ metrics:
 
 ingress:
   enabled: true
+  # Render the full nginx annotation set (streaming safety + sticky hashing).
+  nginx:
+    enabled: true
   hosts:
     - host: codex-lb.staging.example.com
       paths:

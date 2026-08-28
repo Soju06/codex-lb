@@ -4,9 +4,12 @@ import {
   AccountProxyBindingSchema,
   DashboardSettingsSchema,
   SettingsUpdateRequestSchema,
+  TelemetryConsentSchema,
+  TelemetryConsentUpdateRequestSchema,
   UpstreamProxyAdminSchema,
   UpstreamProxyEndpointCreateRequestSchema,
   UpstreamProxyEndpointSchema,
+  UpstreamProxyEndpointTestResponseSchema,
   UpstreamProxyPoolCreateRequestSchema,
   UpstreamProxyPoolMemberRequestSchema,
   UpstreamProxyPoolSchema,
@@ -14,6 +17,7 @@ import {
 
 const SETTINGS_PATH = "/api/settings";
 const UPSTREAM_PROXY_PATH = `${SETTINGS_PATH}/upstream-proxy`;
+const TELEMETRY_PATH = `${SETTINGS_PATH}/telemetry`;
 
 export function getSettings() {
   return get(SETTINGS_PATH, DashboardSettingsSchema);
@@ -22,6 +26,18 @@ export function getSettings() {
 export function updateSettings(payload: unknown) {
   const validated = SettingsUpdateRequestSchema.parse(payload);
   return put(SETTINGS_PATH, DashboardSettingsSchema, {
+    body: validated,
+  });
+}
+
+export function getTelemetryConsent(options: { includePreview?: boolean } = {}) {
+  const path = options.includePreview ? `${TELEMETRY_PATH}?include_preview=true` : TELEMETRY_PATH;
+  return get(path, TelemetryConsentSchema);
+}
+
+export function updateTelemetryConsent(payload: unknown) {
+  const validated = TelemetryConsentUpdateRequestSchema.parse(payload);
+  return put(TELEMETRY_PATH, TelemetryConsentSchema, {
     body: validated,
   });
 }
@@ -35,6 +51,13 @@ export function createUpstreamProxyEndpoint(payload: unknown) {
   return post(`${UPSTREAM_PROXY_PATH}/endpoints`, UpstreamProxyEndpointSchema, {
     body: validated,
   });
+}
+
+export function testUpstreamProxyEndpoint(endpointId: string) {
+  return post(
+    `${UPSTREAM_PROXY_PATH}/endpoints/${encodeURIComponent(endpointId)}/test`,
+    UpstreamProxyEndpointTestResponseSchema,
+  );
 }
 
 export function createUpstreamProxyPool(payload: unknown) {

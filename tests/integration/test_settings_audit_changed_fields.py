@@ -13,12 +13,13 @@ from app.db.session import SessionLocal
 pytestmark = pytest.mark.integration
 
 
-async def _wait_for_settings_changed_audit_log(*, attempts: int = 20) -> AuditLog:
+async def _wait_for_settings_changed_audit_log(*, after_id: int | None = None, attempts: int = 20) -> AuditLog:
     for _ in range(attempts):
         async with SessionLocal() as session:
-            result = await session.execute(
-                select(AuditLog).where(AuditLog.action == "settings_changed").order_by(AuditLog.id.desc())
-            )
+            filters = [AuditLog.action == "settings_changed"]
+            if after_id is not None:
+                filters.append(AuditLog.id > after_id)
+            result = await session.execute(select(AuditLog).where(*filters).order_by(AuditLog.id.desc()))
             row = result.scalars().first()
             if row is not None:
                 return row
@@ -39,14 +40,22 @@ def _default_put_body() -> dict[str, Any]:
     [
         ("stickyThreadsEnabled", False, "sticky_threads_enabled"),
         ("upstreamStreamTransport", "websocket", "upstream_stream_transport"),
+        ("prohibitFastMode", True, "prohibit_fast_mode"),
         ("preferEarlierResetAccounts", False, "prefer_earlier_reset_accounts"),
+        ("showResetCreditBadges", False, "show_reset_credit_badges"),
+        (
+            "autoRedeemResetCreditsBeforeExpiry",
+            True,
+            "auto_redeem_reset_credits_before_expiry",
+        ),
+        ("showResetCreditExpiryBadge", False, "show_reset_credit_expiry_badge"),
         ("routingStrategy", "round_robin", "routing_strategy"),
         (
             "openaiCacheAffinityMaxAgeSeconds",
             180,
             "openai_cache_affinity_max_age_seconds",
         ),
-        ("dashboardSessionTtlSeconds", 31536000, "dashboard_session_ttl_seconds"),
+        ("dashboardSessionTtlSeconds", 604800, "dashboard_session_ttl_seconds"),
         (
             "httpResponsesSessionBridgePromptCacheIdleTtlSeconds",
             1800,
@@ -64,7 +73,21 @@ def _default_put_body() -> dict[str, Any]:
         ),
         ("importWithoutOverwrite", False, "import_without_overwrite"),
         ("apiKeyAuthEnabled", True, "api_key_auth_enabled"),
+        (
+            "limitWarmupExhaustedThresholdPercent",
+            98.5,
+            "limit_warmup_exhausted_threshold_percent",
+        ),
+        (
+            "limitWarmupIdleThresholdPercent",
+            2.0,
+            "limit_warmup_idle_threshold_percent",
+        ),
         ("weeklyPaceWorkingDays", "0,1,2,3,4", "weekly_pace_working_days"),
+        ("limitWarmupStaggeredIdleEnabled", True, "limit_warmup_staggered_idle_enabled"),
+        ("hideUpstreamQuotaFromApiKeys", True, "hide_upstream_quota_from_api_keys"),
+        ("requestLogRetentionOverrideDays", 30, "request_log_retention_override_days"),
+        ("usageHistoryRetentionOverrideDays", 45, "usage_history_retention_override_days"),
     ],
 )
 @pytest.mark.asyncio
@@ -117,6 +140,21 @@ async def test_settings_audit_changed_fields_empty_on_noop_put(async_client) -> 
     assert audit_log.details is not None, "settings_changed audit row missing details payload"
     details = json.loads(audit_log.details)
     assert details["changed_fields"] == [], f"no-op PUT should produce an empty changed_fields list; got {details!r}"
+
+
+@pytest.mark.asyncio
+async def test_settings_audit_records_capacity_override_clear_when_effective_is_unchanged(async_client) -> None:
+    pinned = await async_client.put("/api/settings", json={"proxyAccountStreamLimit": 8})
+    assert pinned.status_code == 200
+    pinned_audit_log = await _wait_for_settings_changed_audit_log()
+
+    cleared = await async_client.put("/api/settings", json={"proxyAccountStreamLimit": None})
+    assert cleared.status_code == 200
+
+    audit_log = await _wait_for_settings_changed_audit_log(after_id=pinned_audit_log.id)
+    assert audit_log.details is not None, "settings_changed audit row missing details payload"
+    details = json.loads(audit_log.details)
+    assert "proxy_account_stream_limit" in details["changed_fields"]
 
 
 @pytest.mark.asyncio

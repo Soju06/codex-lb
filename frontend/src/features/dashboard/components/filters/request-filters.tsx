@@ -1,5 +1,7 @@
-import { RotateCcw, Search } from "lucide-react";
+import { RotateCcw, Search, X } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MultiSelectFilter, type MultiSelectOption } from "@/features/dashboard/components/filters/multi-select-filter";
@@ -18,6 +20,7 @@ export type RequestFiltersProps = {
   onApiKeyChange: (values: string[]) => void;
   onModelChange: (values: string[]) => void;
   onStatusChange: (values: string[]) => void;
+  onConversationDismiss: () => void;
   onReset: () => void;
 };
 
@@ -33,8 +36,11 @@ export function RequestFilters({
   onApiKeyChange,
   onModelChange,
   onStatusChange,
+  onConversationDismiss,
   onReset,
 }: RequestFiltersProps) {
+  const { t } = useTranslation();
+
   return (
     <div className="space-y-2 rounded-xl border bg-card p-4">
       <div className="flex items-center gap-2">
@@ -44,7 +50,7 @@ export function RequestFilters({
             value={filters.search}
             onChange={(event) => onSearchChange(event.target.value)}
             className="h-8 pl-9"
-            placeholder="Search request id, account, API key, model, error..."
+            placeholder={t("dashboard.filters.searchPlaceholder")}
           />
         </div>
 
@@ -53,33 +59,49 @@ export function RequestFilters({
 
       <div className="flex flex-wrap items-center gap-2">
         <MultiSelectFilter
-          label="Accounts"
+          label={t("dashboard.filters.accounts")}
           values={filters.accountIds}
           options={accountOptions}
           onChange={onAccountChange}
         />
         <MultiSelectFilter
-          label="API Keys"
+          label={t("dashboard.filters.apiKeys")}
           values={filters.apiKeyIds}
           options={apiKeyOptions}
           onChange={onApiKeyChange}
         />
         <MultiSelectFilter
-          label="Models"
+          label={t("dashboard.filters.models")}
           values={filters.modelOptions}
           options={modelOptions}
           onChange={onModelChange}
         />
         <MultiSelectFilter
-          label="Statuses"
+          label={t("dashboard.filters.statuses")}
           values={filters.statuses}
           options={statusOptions}
           onChange={onStatusChange}
         />
 
+        {filters.conversationId ? (
+          <Badge variant="outline" className="h-8 gap-1.5 px-3 text-xs font-normal">
+            <span className="max-w-[200px] truncate" title={filters.conversationId}>
+              {t("dashboard.filters.conversationBadge", { id: filters.conversationId })}
+            </span>
+            <button
+              type="button"
+              className="ml-0.5 rounded-full p-0.5 hover:bg-muted-foreground/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              onClick={onConversationDismiss}
+              aria-label={t("dashboard.filters.conversationDismiss")}
+            >
+              <X className="h-3 w-3" aria-hidden="true" />
+            </button>
+          </Badge>
+        ) : null}
+
         <Button type="button" variant="ghost" size="sm" onClick={onReset} className="h-8 gap-1.5 text-xs text-muted-foreground">
           <RotateCcw className="h-3 w-3" aria-hidden="true" />
-          Reset
+          {t("common.actions.reset")}
         </Button>
       </div>
     </div>

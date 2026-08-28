@@ -1,3 +1,7 @@
+# NOTE: This Compose file defines a SINGLE-REPLICA topology.
+# Do not use `docker compose up --scale server=N` — the SQLite default supports
+# only one writer and the published host ports collide. Multi-replica deployments
+# require the Helm chart with PostgreSQL and leader election (deploy/helm/codex-lb).
 services:
   server:
     build:
@@ -9,19 +13,22 @@ services:
       - "2455:2455"
       - "1455:1455"
     command:
-      - fastapi
-      - run
-      - app/main.py
+      # Keep development on the same pre-connection drain launcher as
+      # production. Compose watch restarts the service after source sync.
+      - python
+      - -m
+      - app.cli
       - --host
       - 0.0.0.0
       - --port
       - "2455"
-      - --reload
+      - --ws-max-size
+      - "134217728"
     volumes:
       - codex-lb-data:/var/lib/codex-lb
     develop:
       watch:
-        - action: sync
+        - action: sync+restart
           path: ./app
           target: /app/app
         - action: rebuild
@@ -36,7 +43,7 @@ services:
     build:
       context: ./frontend
       dockerfile_inline: |
-        FROM oven/bun:1.3.14-alpine
+        FROM oven/bun:1.4.0-alpine
         WORKDIR /app
         COPY package.json bun.lock ./
         RUN bun install --frozen-lockfile
@@ -85,6 +92,13 @@ services:
         fi
         exec docker-entrypoint.sh "$@"
       - codex-lb-postgres-entrypoint-guard
+    # Docker's default /dev/shm is 64MB. PostgreSQL parallel workers exchange
+    # tuples through dynamic shared memory under /dev/shm, so hash joins that
+    # spill past 64MB abort with "could not resize shared memory segment ...
+    # No space left on device". 1GB gives parallel query realistic headroom.
+    # (The Helm chart needs no equivalent: the bundled Bitnami PostgreSQL
+    # sub-chart mounts a memory-backed /dev/shm by default via shmVolume.)
+    shm_size: 1gb
     environment:
       POSTGRES_USER: codex_lb
       POSTGRES_PASSWORD: codex_lb
@@ -101,7 +115,7 @@ services:
     restart: unless-stopped
 
   postgres-upgrade:
-    image: pgautoupgrade/pgautoupgrade:18-alpine@sha256:f4e60dd718e185f4c55f1e948b68c45d68717dbbdebf3b398d4f13bec5385081
+    image: pgautoupgrade/pgautoupgrade:18-alpine@sha256:5d287ede0df43f7f448b7e56f8c4f6a79197318b15d90254a9d6a85eb7686fb0
     profiles: ["postgres-upgrade"]
     environment:
       POSTGRES_USER: codex_lb
@@ -111,6 +125,10 @@ services:
     volumes:
       - codex-lb-postgres-data:/var/lib/postgresql
     restart: "no"
+
+networks:
+  default:
+    driver: bridge
 
 volumes:
   codex-lb-data:

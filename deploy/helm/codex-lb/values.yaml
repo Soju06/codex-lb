@@ -63,9 +63,9 @@ updateStrategy:
   rollingUpdate:
     # @param updateStrategy.rollingUpdate.partition RollingUpdate partition for StatefulSet updates
     partition: 0
-# @param terminationGracePeriodSeconds Pod termination grace period seconds
-terminationGracePeriodSeconds: 60
-# @param preStopSleepSeconds Seconds to sleep in preStop lifecycle hook
+# @param terminationGracePeriodSeconds Pod termination grace; must cover app drain plus 32s start fallback and bounded cleanup
+terminationGracePeriodSeconds: 65
+# @param preStopSleepSeconds Minimum routing dwell from Python preStop helper start
 preStopSleepSeconds: 15
 resources:
   requests:
@@ -124,12 +124,13 @@ config:
   # @param config.databaseMigrateOnStartup Disable auto-migration (migration Job handles it)
   databaseMigrateOnStartup: false
   # @param config.databasePoolSize SQLAlchemy connection pool size
-  # Connection pool budget: (databasePoolSize + databaseMaxOverflow) × maxReplicas MUST be ≤ PostgreSQL max_connections (default 100)
-  # Default (5+5)×10=100 fits HPA maxReplicas=10 against PG default max_connections.
-  # Prod overlay uses (3+2)×20=100. Increase PG max_connections or deploy PgBouncer if more concurrency is needed.
-  databasePoolSize: 5
+  # Each supported replica has one worker with two pools (request + background).
+  # Reserve 20 of PostgreSQL's default 100 slots for PG internals, migrations, and operations.
+  # Default (3+1)×2×1×10=80. Prod uses (1+1)×2×1×20=80.
+  # Increase PG max_connections or deploy PgBouncer if more concurrency is needed.
+  databasePoolSize: 3
   # @param config.databaseMaxOverflow SQLAlchemy connection pool max overflow
-  databaseMaxOverflow: 5
+  databaseMaxOverflow: 1
   # @param config.upstreamBaseUrl Override OpenAI upstream base URL (empty = default)
   upstreamBaseUrl: ""
   # @param config.upstreamConnectTimeout Upstream connection timeout seconds
@@ -143,14 +144,11 @@ config:
   # @param config.leaderElectionTtlSeconds Leader election TTL in seconds
   leaderElectionTtlSeconds: 30
   # @param config.circuitBreakerEnabled Enable circuit breaker for upstream requests
+  # (failure threshold and recovery timeout are fixed application constants)
   circuitBreakerEnabled: true
-  # @param config.circuitBreakerFailureThreshold Number of failures before opening circuit
-  circuitBreakerFailureThreshold: 5
-  # @param config.circuitBreakerRecoveryTimeoutSeconds Seconds before half-open state
-  circuitBreakerRecoveryTimeoutSeconds: 60
   # @param config.backpressureMaxConcurrentRequests Max concurrent in-flight requests
   backpressureMaxConcurrentRequests: 200
-  # @param config.shutdownDrainTimeoutSeconds Graceful shutdown drain timeout
+  # @param config.shutdownDrainTimeoutSeconds Shared application drain timeout in seconds
   shutdownDrainTimeoutSeconds: 30
   # @param config.httpConnectorLimit Global HTTP connection pool limit
   httpConnectorLimit: 100
@@ -166,8 +164,8 @@ config:
   sessionBridgeIdleTtlSeconds: 120
   # @param config.sessionBridgeCodexIdleTtlSeconds Idle TTL for Codex session bridge sessions
   sessionBridgeCodexIdleTtlSeconds: 900
-  # @param config.sessionBridgeCodexPrewarmEnabled Proactively open upstream WebSocket for Codex sessions
-  sessionBridgeCodexPrewarmEnabled: true
+  # @param config.sessionBridgeCodexPrewarmEnabled Proactively open upstream WebSocket for Codex sessions (off by default; matches Settings / OpenSpec)
+  sessionBridgeCodexPrewarmEnabled: false
   # @param config.sessionBridgeMaxSessions Max in-memory bridge sessions per pod
   sessionBridgeMaxSessions: 256
   # @param config.sessionBridgeQueueLimit Max pending requests per bridge session
@@ -177,9 +175,8 @@ config:
   # @param config.sessionBridgeAdvertiseBaseUrl Optional explicit owner-handoff base URL. Empty = auto-advertise headless-service DNS for the current pod
   sessionBridgeAdvertiseBaseUrl: ""
   # @param config.stickySessionCleanupEnabled Enable periodic cleanup of stale sticky sessions
+  # (the cleanup interval is a fixed application constant)
   stickySessionCleanupEnabled: true
-  # @param config.stickySessionCleanupIntervalSeconds Interval between sticky session cleanup runs
-  stickySessionCleanupIntervalSeconds: 300
 
 # @section Authentication parameters
 auth:
@@ -201,6 +198,17 @@ externalSecrets:
     kind: SecretStore
   # @param externalSecrets.refreshInterval How often to refresh the secret
   refreshInterval: 1h
+  remoteRefs:
+    databaseUrl:
+      # @param externalSecrets.remoteRefs.databaseUrl.key Remote secret key for the database URL (empty defaults to the release fullname)
+      key: ""
+      # @param externalSecrets.remoteRefs.databaseUrl.property Optional JSON property containing the database URL
+      property: database-url
+    encryptionKey:
+      # @param externalSecrets.remoteRefs.encryptionKey.key Remote secret key for the encryption key (empty defaults to the release fullname)
+      key: ""
+      # @param externalSecrets.remoteRefs.encryptionKey.property Optional JSON property containing the encryption key
+      property: encryption-key
 rollout:
   reloader:
     # @param rollout.reloader.enabled Add Stakater Reloader annotations so pod restarts follow Secret/ConfigMap updates
@@ -321,14 +329,23 @@ ingress:
       - /v1/responses
       - /backend-api/codex/responses
     nginx:
-      # @param ingress.responses.nginx.upstreamHashBy Continuity-aware sticky key variable for responses traffic
-      upstreamHashBy: "$codex_responses_hash_key"
-      # @param ingress.responses.nginx.configurationSnippet NGINX snippet that uses x-codex-session-id when present and a per-request fallback otherwise
-      configurationSnippet: |
-        set $codex_responses_hash_key "$http_authorization:$request_id";
-        if ($http_x_codex_session_id != "") {
-          set $codex_responses_hash_key $http_x_codex_session_id;
-        }
+      # @param ingress.responses.nginx.upstreamHashBy Continuity-aware sticky key for responses traffic
+      #        Snippet-free default: undefined nginx $http_* variables render empty, so the composite
+      #        key hashes by x-codex-session-id (+Authorization) when the session header is present
+      #        and by the Authorization header alone otherwise. Admitted on stock ingress-nginx.
+      upstreamHashBy: "$http_x_codex_session_id$http_authorization"
+      # @param ingress.responses.nginx.configurationSnippet Optional NGINX snippet for advanced sticky keys. Empty = disabled.
+      #        Opt-in only: nginx.ingress.kubernetes.io/configuration-snippet is REJECTED at admission by
+      #        stock ingress-nginx >= 1.12 unless the controller runs with
+      #        --allow-snippet-annotations=true and annotations-risk-level=Critical.
+      #        When set, also point upstreamHashBy at the variable the snippet defines, e.g.:
+      #          upstreamHashBy: "$codex_responses_hash_key"
+      #          configurationSnippet: |
+      #            set $codex_responses_hash_key "$http_authorization:$request_id";
+      #            if ($http_x_codex_session_id != "") {
+      #              set $codex_responses_hash_key $http_x_codex_session_id;
+      #            }
+      configurationSnippet: ""
       # @param ingress.responses.nginx.upstreamHashBySubset Enable subset mode for responses ingress
       upstreamHashBySubset: false
       # @param ingress.responses.nginx.upstreamHashBySubsetSize Subset size for responses ingress
@@ -342,7 +359,16 @@ ingress:
 gatewayApi:
   # @param gatewayApi.enabled Enable Gateway API HTTPRoute
   enabled: false
-  # @param gatewayApi.parentRefs Gateway parent references
+  gateway:
+    # @param gatewayApi.gateway.create Create an application-specific Gateway for this release instead of attaching to an existing shared Gateway
+    create: false
+    # @param gatewayApi.gateway.gatewayClassName GatewayClass name for the chart-managed Gateway (required when create=true)
+    gatewayClassName: ""
+    # @param gatewayApi.gateway.annotations Annotations for the chart-managed Gateway
+    annotations: {}
+    # @param gatewayApi.gateway.listeners Listeners for the chart-managed Gateway (empty = one HTTP listener on port 80)
+    listeners: []
+  # @param gatewayApi.parentRefs Gateway parent references (ignored when gatewayApi.gateway.create=true)
   parentRefs:
     - name: gateway
       namespace: gateway-system
@@ -350,6 +376,8 @@ gatewayApi:
   hostnames: []
   # @param gatewayApi.annotations HTTPRoute annotations
   annotations: {}
+  # @param gatewayApi.rules Optional HTTPRoute rules with per-rule matches and filters; the chart adds the codex-lb backend to every rule
+  rules: []
 
 # @section Observability parameters
 metrics:
@@ -389,6 +417,8 @@ metrics:
     enabled: false
     # @param metrics.grafanaDashboard.folder Grafana dashboard folder label
     folder: codex-lb
+    # @param metrics.grafanaDashboard.titles Dashboard title overrides keyed by JSON filename
+    titles: {}
 
 # @section Tracing parameters
 tracing:

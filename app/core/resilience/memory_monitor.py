@@ -25,10 +25,16 @@ _memory_reject_threshold_bytes: int = 0
 _rss_provider_warning_logged = False
 
 
-def configure(warning_threshold_mb: int = 0, reject_threshold_mb: int = 0) -> None:
+# The warning level is derived, not configured: it exists only as an early
+# signal that the reject threshold is being approached, so it is fixed at 80%
+# of the reject threshold (issue #1340 / PRINCIPLES.md P2). 0 disables both.
+_WARNING_FRACTION = 0.8
+
+
+def configure(reject_threshold_mb: int = 0) -> None:
     global _memory_warning_threshold_bytes, _memory_reject_threshold_bytes
-    _memory_warning_threshold_bytes = warning_threshold_mb * 1024 * 1024
     _memory_reject_threshold_bytes = reject_threshold_mb * 1024 * 1024
+    _memory_warning_threshold_bytes = int(_memory_reject_threshold_bytes * _WARNING_FRACTION)
 
 
 def _get_windows_rss_bytes() -> int | None:

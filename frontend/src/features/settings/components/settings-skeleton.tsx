@@ -122,6 +122,30 @@ export function SettingsSkeleton() {
         </div>
       </div>
 
+      {/* Telemetry */}
+      <div className="rounded-xl border bg-card p-5">
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <Skeleton className="h-8 w-8 rounded-lg" />
+              <div className="space-y-1">
+                <Skeleton className="h-4 w-36" />
+                <Skeleton className="h-3 w-64" />
+              </div>
+            </div>
+            <Skeleton className="h-5 w-9 rounded-full" />
+          </div>
+          <Skeleton className="h-3 w-96 max-w-full" />
+          <div className="flex items-center justify-between rounded-lg border p-3">
+            <div className="space-y-1">
+              <Skeleton className="h-3.5 w-24" />
+              <Skeleton className="h-3 w-56" />
+            </div>
+            <Skeleton className="h-8 w-32 rounded-md" />
+          </div>
+        </div>
+      </div>
+
       {/* Firewall */}
       <div className="space-y-3 rounded-xl border bg-card p-5">
         <div className="flex items-center justify-between">

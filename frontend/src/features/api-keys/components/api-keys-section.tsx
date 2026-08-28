@@ -1,11 +1,13 @@
 import { KeySquare } from "lucide-react";
 import { lazy, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { ApiKeyAuthToggle } from "@/features/api-keys/components/api-key-auth-toggle";
+import { ApiKeyQuotaPrivacyToggle } from "@/features/api-keys/components/api-key-quota-privacy-toggle";
 import { ApiKeyCreatedDialog } from "@/features/api-keys/components/api-key-created-dialog";
 import { ApiKeyTable } from "@/features/api-keys/components/api-key-table";
 import { useApiKeys } from "@/features/api-keys/hooks/use-api-keys";
@@ -21,15 +23,20 @@ const ApiKeyEditDialog = lazy(() =>
 
 export type ApiKeysSectionProps = {
   apiKeyAuthEnabled: boolean;
+  hideUpstreamQuotaFromApiKeys: boolean;
   disabled?: boolean;
   onApiKeyAuthEnabledChange: (enabled: boolean) => void;
+  onHideUpstreamQuotaFromApiKeysChange: (enabled: boolean) => void;
 };
 
 export function ApiKeysSection({
   apiKeyAuthEnabled,
+  hideUpstreamQuotaFromApiKeys,
   disabled = false,
   onApiKeyAuthEnabledChange,
+  onHideUpstreamQuotaFromApiKeysChange,
 }: ApiKeysSectionProps) {
+  const { t } = useTranslation();
   const {
     apiKeysQuery,
     createMutation,
@@ -81,12 +88,12 @@ export function ApiKeysSection({
             <KeySquare className="h-4 w-4 text-primary" aria-hidden="true" />
           </div>
           <div>
-            <h3 className="text-sm font-semibold">API Keys</h3>
-            <p className="text-xs text-muted-foreground">Create and manage API keys for clients.</p>
+            <h3 className="text-sm font-semibold">{t("apiKeys.section.title")}</h3>
+            <p className="text-xs text-muted-foreground">{t("apiKeys.section.description")}</p>
           </div>
         </div>
         <Button type="button" size="sm" className="h-8 text-xs" onClick={() => createDialog.show()} disabled={busy}>
-          Create key
+          {t("apiKeys.section.createKey")}
         </Button>
       </div>
 
@@ -94,6 +101,12 @@ export function ApiKeysSection({
         enabled={apiKeyAuthEnabled}
         disabled={busy}
         onChange={onApiKeyAuthEnabledChange}
+      />
+
+      <ApiKeyQuotaPrivacyToggle
+        enabled={hideUpstreamQuotaFromApiKeys}
+        disabled={busy}
+        onChange={onHideUpstreamQuotaFromApiKeysChange}
       />
 
       {mutationError ? <AlertMessage variant="error">{mutationError}</AlertMessage> : null}
@@ -133,9 +146,9 @@ export function ApiKeysSection({
 
       <ConfirmDialog
         open={deleteDialog.open}
-        title="Delete API key"
-        description="This key will stop working immediately."
-        confirmLabel="Delete"
+        title={t("apiKeys.deleteDialog.title")}
+        description={t("apiKeys.deleteDialog.description")}
+        confirmLabel={t("common.actions.delete")}
         onOpenChange={deleteDialog.onOpenChange}
         onConfirm={() => {
           if (!deleteDialog.data) {

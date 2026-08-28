@@ -16,6 +16,8 @@ from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeysService
 from app.modules.audit.repository import AuditRepository
 from app.modules.audit.service import AuditLogsService
+from app.modules.automations.repository import AutomationsRepository
+from app.modules.automations.service import AutomationsService
 from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.service import DashboardService
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
@@ -27,7 +29,10 @@ from app.modules.dashboard_auth.service import (
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.limit_warmup.repository import LimitWarmupRepository
+from app.modules.model_sources.repository import ModelSourcesRepository
+from app.modules.model_sources.service import ModelSourcesService
 from app.modules.oauth.service import OauthService
+from app.modules.proxy.capability_lineage_repository import CapabilityLineageRepository
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
@@ -89,6 +94,13 @@ class ApiKeysContext:
 
 
 @dataclass(slots=True)
+class ModelSourcesContext:
+    session: AsyncSession
+    repository: ModelSourcesRepository
+    service: ModelSourcesService
+
+
+@dataclass(slots=True)
 class RequestLogsContext:
     session: AsyncSession
     repository: RequestLogsRepository
@@ -135,6 +147,14 @@ class ReportsContext:
     session: AsyncSession
     repository: ReportsRepository
     service: ReportsService
+
+
+@dataclass(slots=True)
+class AutomationsContext:
+    session: AsyncSession
+    repository: AutomationsRepository
+    accounts_repository: AccountsRepository
+    service: AutomationsService
 
 
 def get_accounts_context(
@@ -201,6 +221,8 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
             api_keys=ApiKeysRepository(session),
             additional_usage=AdditionalUsageRepository(session),
             quota_planner=QuotaPlannerRepository(session),
+            capability_lineage=CapabilityLineageRepository(session),
+            session=session,
         )
 
 
@@ -245,6 +267,14 @@ def get_api_keys_context(
     usage_repository = UsageRepository(session)
     service = ApiKeysService(repository, usage_repository=usage_repository)
     return ApiKeysContext(session=session, repository=repository, service=service)
+
+
+def get_model_sources_context(
+    session: AsyncSession = Depends(get_session),
+) -> ModelSourcesContext:
+    repository = ModelSourcesRepository(session)
+    service = ModelSourcesService(repository)
+    return ModelSourcesContext(session=session, repository=repository, service=service)
 
 
 def get_request_logs_context(
@@ -306,3 +336,18 @@ def get_reports_context(
     repository = ReportsRepository(session)
     service = ReportsService(repository)
     return ReportsContext(session=session, repository=repository, service=service)
+
+
+def get_automations_context(
+    session: AsyncSession = Depends(get_session),
+) -> AutomationsContext:
+    repository = AutomationsRepository(session)
+    accounts_repository = AccountsRepository(session)
+    request_logs_repository = RequestLogsRepository(session)
+    service = AutomationsService(repository, accounts_repository, request_logs_repository)
+    return AutomationsContext(
+        session=session,
+        repository=repository,
+        accounts_repository=accounts_repository,
+        service=service,
+    )

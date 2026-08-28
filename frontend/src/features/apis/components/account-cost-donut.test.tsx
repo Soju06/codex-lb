@@ -1,4 +1,5 @@
 import { act, fireEvent, screen } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { createApiKeyUsage7Day } from "@/test/mocks/factories";
@@ -6,6 +7,35 @@ import { renderWithProviders } from "@/test/utils";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 
 import { AccountCostDonut } from "./account-cost-donut";
+
+vi.mock("@/components/lazy-recharts", () => ({
+	Cell: () => null,
+	PieChart: ({ children }: { children: ReactNode }) => <svg>{children}</svg>,
+	Pie: ({
+		children,
+		data,
+		onMouseEnter,
+		onMouseLeave,
+	}: {
+		children: ReactNode;
+		data: Array<{ id: string }>;
+		onMouseEnter?: (entry: { payload: { id: string } }, index: number) => void;
+		onMouseLeave?: () => void;
+	}) => (
+		<>
+			{data.map((entry, index) => (
+				<g
+					key={entry.id}
+					className="recharts-pie-sector"
+					onMouseEnter={() => onMouseEnter?.({ payload: entry }, index)}
+					onMouseLeave={() => onMouseLeave?.()}
+				/>
+			))}
+			{children}
+		</>
+	),
+	Sector: () => <path />,
+}));
 
 describe("AccountCostDonut", () => {
 	it("highlights the matching legend row when a legend item is hovered", () => {
@@ -63,9 +93,8 @@ describe("AccountCostDonut", () => {
 			<AccountCostDonut accountCosts={usage.accountCosts} totalCostUsd={usage.totalCostUsd} />,
 		);
 
-		expect(screen.getByTestId("account-cost-legend-list")).toHaveStyle({
-			maxHeight: "calc(5 * 1.75rem + 4 * 0rem)",
-		});
+		// jsdom 30 simplifies calc() during serialization; authored: calc(5 * 1.75rem + 4 * 0rem)
+		expect(screen.getByTestId("account-cost-legend-list").style.maxHeight).toBe("calc(8.75rem)");
 		expect(screen.getByTestId("account-cost-legend-5")).toBeInTheDocument();
 	});
 

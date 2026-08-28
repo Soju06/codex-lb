@@ -124,14 +124,17 @@ class ChatCompletionsRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_tools(self) -> "ChatCompletionsRequest":
         responses_shaped_payload = not self.messages and self.input is not None
-        self.tools = validate_tool_types(
+        validated = validate_tool_types(
             self.tools,
             allow_builtin_tools=responses_shaped_payload,
         )
+        if validated != self.tools:
+            self.tools = validated
         return self
 
     def to_responses_request(self) -> ResponsesRequest:
         data = self.model_dump(mode="json", exclude_none=True)
+        tools_were_set = "tools" in self.model_fields_set
         messages = data.pop("messages", None)
         data.pop("store", None)
         data.pop("n", None)
@@ -141,10 +144,7 @@ class ChatCompletionsRequest(BaseModel):
         stream_options = data.pop("stream_options", None)
         raw_tools = data.pop("tools", [])
         raw_tool_choice = data.pop("tool_choice", None)
-        reasoning_effort = data.pop("reasoning_effort", None)
         preserve_instruction_roles = _is_json_object_response_format(response_format)
-        if reasoning_effort is not None and "reasoning" not in data:
-            data["reasoning"] = {"effort": reasoning_effort}
         normalize_reasoning_aliases(data)
         if response_format is not None:
             _apply_response_format(data, response_format)
@@ -160,7 +160,8 @@ class ChatCompletionsRequest(BaseModel):
             # a missing or explicitly empty `messages` field.
             if not isinstance(data.get("instructions"), str):
                 data["instructions"] = ""
-            data["tools"] = raw_tools
+            if tools_were_set:
+                data["tools"] = raw_tools
             if raw_tool_choice is not None:
                 data["tool_choice"] = raw_tool_choice
             return ResponsesRequest.model_validate(data)
@@ -177,7 +178,8 @@ class ChatCompletionsRequest(BaseModel):
         )
         data["instructions"] = instructions
         data["input"] = input_items
-        data["tools"] = tools
+        if tools_were_set:
+            data["tools"] = tools
         if tool_choice is not None:
             data["tool_choice"] = tool_choice
         return ResponsesRequest.model_validate(data)

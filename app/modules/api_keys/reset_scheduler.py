@@ -4,9 +4,10 @@ import asyncio
 import contextlib
 import importlib
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 
 from app.core.utils.time import utcnow
 from app.db.session import get_background_session
@@ -16,10 +17,19 @@ logger = logging.getLogger(__name__)
 
 _API_KEY_LIMIT_RESET_INTERVAL_SECONDS = 3600
 _STALE_USAGE_RESERVATION_AGE = timedelta(hours=6)
+# Hard ceiling on reservation lifetime regardless of heartbeat activity. This
+# is the backstop for orphaned reservation heartbeats (issue #1594): a leaked
+# heartbeat keeps refreshing ``updated_at`` forever, which would otherwise
+# exempt its reservation from the stale cutoff above. No legitimate request
+# holds a usage reservation anywhere near this long.
+_MAX_USAGE_RESERVATION_AGE = timedelta(hours=24)
+
+
+_T = TypeVar("_T")
 
 
 class _LeaderElectionLike(Protocol):
-    async def try_acquire(self) -> bool: ...
+    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 def _get_leader_election() -> _LeaderElectionLike:
@@ -61,8 +71,9 @@ class ApiKeyLimitResetScheduler:
                 continue
 
     async def _reset_once(self) -> None:
-        if not await _get_leader_election().try_acquire():
-            return
+        await _get_leader_election().run_if_leader(self._reset_as_leader)
+
+    async def _reset_as_leader(self) -> None:
         async with self._lock:
             try:
                 async with get_background_session() as session:
@@ -72,7 +83,8 @@ class ApiKeyLimitResetScheduler:
                     if reset_count > 0:
                         logger.info("Reset expired API key limits reset_count=%s", reset_count)
                     released_count = await repo.release_stale_usage_reservations(
-                        cutoff=now - _STALE_USAGE_RESERVATION_AGE
+                        cutoff=now - _STALE_USAGE_RESERVATION_AGE,
+                        max_age_cutoff=now - _MAX_USAGE_RESERVATION_AGE,
                     )
                     if released_count > 0:
                         logger.info("Released stale API key usage reservations released_count=%s", released_count)

@@ -1,21 +1,70 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import {
+  consumeRateLimitResetCredit,
+  consumeAccountUsageResetCredit,
   deleteAccount,
   exportAccountAuth,
   getAccountTrends,
+  getAccountUsageResetCredits,
+  getRateLimitResetCredits,
   importAccount,
   listAccounts,
   pauseAccount,
-  reactivateAccount,
   probeAccount,
+  reactivateAccount,
   setAccountAlias,
   updateAccount,
   updateAccountLimitWarmup,
   updateAccountRoutingPolicy,
 } from "@/features/accounts/api";
-import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
+import type {
+  AccountRoutingPolicy,
+  AccountUsageResetConsumeResponse,
+} from "@/features/accounts/schemas";
+
+async function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>, accountId?: string) {
+  const invalidations = [
+    queryClient.invalidateQueries({ queryKey: ["accounts", "list"] }),
+    queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] }),
+    queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] }),
+  ];
+  if (accountId) {
+    invalidations.push(queryClient.invalidateQueries({ queryKey: ["accounts", "trends", accountId] }));
+    invalidations.push(queryClient.invalidateQueries({ queryKey: ["accounts", "usage-reset-credits", accountId] }));
+  } else {
+    invalidations.push(queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] }));
+    invalidations.push(queryClient.invalidateQueries({ queryKey: ["accounts", "usage-reset-credits"] }));
+  }
+  await Promise.all(invalidations);
+}
+
+function usageResetToastMessage(data: AccountUsageResetConsumeResponse, t: ReturnType<typeof useTranslation>["t"]): string {
+  const changed =
+    data.primaryUsedPercentBefore !== data.primaryUsedPercentAfter ||
+    data.secondaryUsedPercentBefore !== data.secondaryUsedPercentAfter ||
+    data.accountStatusBefore !== data.accountStatusAfter;
+  if (data.code === "reset") {
+    return changed ? t("accounts.toasts.usageResetApplied") : t("accounts.toasts.usageResetAppliedUnchanged");
+  }
+  if (data.code === "already_redeemed") {
+    return t("accounts.toasts.usageResetAlreadyApplied");
+  }
+  if (data.code === "no_credit") {
+    return t("accounts.toasts.noUsageResetCredits");
+  }
+  if (data.code === "nothing_to_reset") {
+    return t("accounts.toasts.nothingToReset");
+  }
+  return t("accounts.toasts.usageResetCompleted");
+}
+
+function createRedeemRequestId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `dashboard-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 /**
  * Account mutation actions without the polling query.
@@ -23,47 +72,43 @@ import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
  * from another source (e.g. the dashboard overview query).
  */
 export function useAccountMutations() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const usageResetRedeemRequestRef = useRef<{
+    accountId: string;
+    redeemRequestId: string;
+  } | null>(null);
 
   const importMutation = useMutation({
     mutationFn: importAccount,
     onSuccess: () => {
-      toast.success("Account imported");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      toast.success(t("accounts.toasts.imported"));
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Import failed");
+      toast.error(error.message || t("accounts.toasts.importFailed"));
     },
   });
 
   const pauseMutation = useMutation({
     mutationFn: pauseAccount,
     onSuccess: () => {
-      toast.success("Account paused");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      toast.success(t("accounts.toasts.paused"));
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Pause failed");
+      toast.error(error.message || t("accounts.toasts.pauseFailed"));
     },
   });
 
   const resumeMutation = useMutation({
     mutationFn: reactivateAccount,
     onSuccess: () => {
-      toast.success("Account resumed");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      toast.success(t("accounts.toasts.resumed"));
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Resume failed");
+      toast.error(error.message || t("accounts.toasts.resumeFailed"));
     },
   });
 
@@ -71,14 +116,11 @@ export function useAccountMutations() {
     mutationFn: ({ accountId, alias }: { accountId: string; alias: string | null }) =>
       setAccountAlias(accountId, alias),
     onSuccess: () => {
-      toast.success("Account alias updated");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      toast.success(t("accounts.toasts.aliasUpdated"));
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Alias update failed");
+      toast.error(error.message || t("accounts.toasts.aliasUpdateFailed"));
     },
   });
 
@@ -86,14 +128,11 @@ export function useAccountMutations() {
     mutationFn: ({ accountId, deleteHistory }: { accountId: string; deleteHistory: boolean }) =>
       deleteAccount(accountId, deleteHistory),
     onSuccess: () => {
-      toast.success("Account deleted");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      toast.success(t("accounts.toasts.deleted"));
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Delete failed");
+      toast.error(error.message || t("accounts.toasts.deleteFailed"));
     },
   });
 
@@ -101,17 +140,33 @@ export function useAccountMutations() {
     mutationFn: ({ accountId, model }: { accountId: string; model?: string }) =>
       probeAccount(accountId, model ? { model } : undefined),
     onSuccess: (_data, variables) => {
-      toast.success("Account probed");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({
-        queryKey: ["accounts", "trends", variables.accountId],
-      });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      toast.success(t("accounts.toasts.probed"));
+      void invalidateAccountRelatedQueries(queryClient, variables.accountId);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Probe failed");
+      toast.error(error.message || t("accounts.toasts.probeFailed"));
+    },
+  });
+
+  const usageResetMutation = useMutation({
+    mutationFn: ({ accountId }: { accountId: string }) => {
+      if (usageResetRedeemRequestRef.current?.accountId !== accountId) {
+        usageResetRedeemRequestRef.current = {
+          accountId,
+          redeemRequestId: createRedeemRequestId(),
+        };
+      }
+      return consumeAccountUsageResetCredit(accountId, {
+        redeemRequestId: usageResetRedeemRequestRef.current.redeemRequestId,
+      });
+    },
+    onSuccess: async (data, variables) => {
+      usageResetRedeemRequestRef.current = null;
+      await invalidateAccountRelatedQueries(queryClient, variables.accountId);
+      toast.success(usageResetToastMessage(data, t));
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("accounts.toasts.usageResetFailed"));
     },
   });
 
@@ -119,14 +174,11 @@ export function useAccountMutations() {
     mutationFn: ({ accountId, enabled }: { accountId: string; enabled: boolean }) =>
       updateAccountLimitWarmup(accountId, enabled),
     onSuccess: (data) => {
-      toast.success(data.enabled ? "Limit warm-up enabled" : "Limit warm-up disabled");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      toast.success(data.enabled ? t("accounts.toasts.limitWarmupEnabled") : t("accounts.toasts.limitWarmupDisabled"));
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Limit warm-up update failed");
+      toast.error(error.message || t("accounts.toasts.limitWarmupUpdateFailed"));
     },
   });
 
@@ -141,24 +193,21 @@ export function useAccountMutations() {
     onSuccess: (data) => {
       const label =
         data.routingPolicy === "normal" ? "normal" : data.routingPolicy.replace("_", "-");
-      toast.success(`Account routing policy set to ${label}`);
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      toast.success(t("accounts.toasts.routingPolicySet", { label }));
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Routing policy update failed");
+      toast.error(error.message || t("accounts.toasts.routingPolicyUpdateFailed"));
     },
   });
 
   const exportAuthMutation = useMutation({
     mutationFn: exportAccountAuth,
     onSuccess: () => {
-      toast.success("Account exported");
+      toast.success(t("accounts.toasts.exported"));
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Export failed");
+      toast.error(error.message || t("accounts.toasts.exportFailed"));
     },
   });
 
@@ -166,14 +215,30 @@ export function useAccountMutations() {
     mutationFn: ({ accountId, securityWorkAuthorized }: { accountId: string; securityWorkAuthorized: boolean }) =>
       updateAccount(accountId, { securityWorkAuthorized }),
     onSuccess: () => {
-      toast.success("Account updated");
+      toast.success(t("accounts.toasts.updated"));
+      void invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("accounts.toasts.updateFailed"));
+    },
+  });
+
+  const resetCreditConsumeMutation = useMutation({
+    mutationFn: ({ accountId, redeemRequestId }: { accountId: string; redeemRequestId?: string }) =>
+      consumeRateLimitResetCredit(accountId, redeemRequestId ? { redeemRequestId } : undefined),
+    onSuccess: (data) => {
+      const resetCount = data.windowsReset ?? 0;
+      toast.success(
+        t("accounts.toasts.rateLimitWindowsReset", { count: resetCount }),
+      );
       void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "reset-credits"] });
       void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
       void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Update failed");
+      toast.error(error.message || t("accounts.toasts.resetCreditRedeemFailed"));
     },
   });
 
@@ -184,11 +249,25 @@ export function useAccountMutations() {
     setAliasMutation,
     deleteMutation,
     probeMutation,
+    usageResetMutation,
     exportAuthMutation,
     limitWarmupMutation,
     routingPolicyMutation,
     updateMutation,
+    resetCreditConsumeMutation,
   };
+}
+
+export function useRateLimitResetCredits(
+  accountId: string | null,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["accounts", "reset-credits", accountId],
+    queryFn: () => getRateLimitResetCredits(accountId as string),
+    enabled: enabled && !!accountId,
+    staleTime: 0,
+  });
 }
 
 export function useAccountTrends(accountId: string | null) {
@@ -199,6 +278,15 @@ export function useAccountTrends(accountId: string | null) {
     staleTime: 5 * 60_000,
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,
+  });
+}
+
+export function useAccountUsageResetCredits(accountId: string | null) {
+  return useQuery({
+    queryKey: ["accounts", "usage-reset-credits", accountId],
+    queryFn: () => getAccountUsageResetCredits(accountId!),
+    enabled: !!accountId,
+    staleTime: 60_000,
   });
 }
 

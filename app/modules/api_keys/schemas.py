@@ -29,12 +29,18 @@ class ApiKeyCreateRequest(DashboardModel):
     allowed_models: list[str] | None = None
     apply_to_codex_model: bool = False
     enforced_model: str | None = Field(default=None, min_length=1)
-    enforced_reasoning_effort: str | None = Field(default=None, pattern=r"(?i)^(none|minimal|low|medium|high|xhigh)$")
-    enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|fast)$")
+    enforced_reasoning_effort: str | None = Field(
+        default=None, pattern=r"(?i)^(none|minimal|low|medium|high|xhigh|max|ultra)$"
+    )
+    allowed_reasoning_efforts: list[str] | None = None
+    enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|(ultra)?fast)$")
     traffic_class: str | None = Field(default=None, pattern=r"(?i)^(foreground|opportunistic)$")
+    transport_policy_override: str | None = None
+    usage_sections: str | None = None
     weekly_token_limit: int | None = Field(default=None, ge=1)
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
+    assigned_source_ids: list[str] | None = None
     limits: list[LimitRuleCreate] | None = None
 
 
@@ -43,13 +49,19 @@ class ApiKeyUpdateRequest(DashboardModel):
     allowed_models: list[str] | None = None
     apply_to_codex_model: bool | None = None
     enforced_model: str | None = Field(default=None, min_length=1)
-    enforced_reasoning_effort: str | None = Field(default=None, pattern=r"(?i)^(none|minimal|low|medium|high|xhigh)$")
-    enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|fast)$")
+    enforced_reasoning_effort: str | None = Field(
+        default=None, pattern=r"(?i)^(none|minimal|low|medium|high|xhigh|max|ultra)$"
+    )
+    allowed_reasoning_efforts: list[str] | None = None
+    enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|(ultra)?fast)$")
     traffic_class: str | None = Field(default=None, pattern=r"(?i)^(foreground|opportunistic)$")
+    transport_policy_override: str | None = None
+    usage_sections: str | None = None
     weekly_token_limit: int | None = Field(default=None, ge=1)
     expires_at: datetime | None = None
     is_active: bool | None = None
     assigned_account_ids: list[str] | None = None
+    assigned_source_ids: list[str] | None = None
     limits: list[LimitRuleCreate] | None = None
     reset_usage: bool | None = None
 
@@ -69,12 +81,17 @@ class ApiKeyResponse(DashboardModel):
     apply_to_codex_model: bool = False
     enforced_model: str | None
     enforced_reasoning_effort: str | None
+    allowed_reasoning_efforts: list[str] | None
     enforced_service_tier: str | None
     traffic_class: str
+    transport_policy_override: str | None = None
+    usage_sections: str = "upstream_limits,account_pool_usage"
     expires_at: datetime | None
     is_active: bool
     account_assignment_scope_enabled: bool = False
+    source_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = Field(default_factory=list)
+    assigned_source_ids: list[str] = Field(default_factory=list)
     created_at: datetime
     last_used_at: datetime | None
     limits: list[LimitRuleResponse] = Field(default_factory=list)

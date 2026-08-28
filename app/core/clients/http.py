@@ -4,13 +4,16 @@ import asyncio
 import contextlib
 import logging
 import os
+import socket
 import ssl
+import time
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from types import TracebackType
 
 import aiohttp
 import certifi
+from aiohappyeyeballs.types import AddrInfoType
 from aiohttp_retry import RetryClient
 from aiohttp_socks import ProxyConnector
 
@@ -45,6 +48,18 @@ _http_client: _ManagedHttpClient | None = None
 _http_client_lock = asyncio.Lock()
 _retired_http_clients: list[_ManagedHttpClient] = []
 _closing_http_clients: list[_ManagedHttpClient] = []
+_last_generationless_network_rotation_at: float | None = None
+_GENERATIONLESS_NETWORK_ROTATION_COOLDOWN_SECONDS = 1.0
+
+# Pooled upstream connections outlive the request that opened them, so a socket
+# dropped by an intermediary (NAT rebind, tunnel reconnect, route change) is
+# otherwise only discovered when an application-level timeout fires. Probes turn
+# that silent black hole into a transport error the failover paths already
+# handle. Idle/interval/count are chosen to declare a dead peer in ~90s, which
+# matches the pooled keepalive window below.
+_TCP_KEEPALIVE_IDLE_SECONDS = 30
+_TCP_KEEPALIVE_INTERVAL_SECONDS = 10
+_TCP_KEEPALIVE_PROBE_COUNT = 6
 
 
 def _socks_proxy_config(environ: Mapping[str, str | None] = os.environ) -> _SocksProxyConfig | None:
@@ -92,6 +107,46 @@ def _build_ssl_context() -> ssl.SSLContext:
     return context
 
 
+def _apply_tcp_keepalive(sock: socket.socket) -> None:
+    """Enable OS keepalive probes on an upstream socket.
+
+    Probe tuning is best-effort by design: ``TCP_KEEPIDLE`` is Linux-only,
+    macOS spells the same knob ``TCP_KEEPALIVE``, and other platforms may
+    expose neither. Failing client construction over a missing socket option
+    would trade a rare hang for a certain outage, so unsupported knobs are
+    skipped and only the enable step is required.
+    """
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        logger.debug("Upstream socket rejected SO_KEEPALIVE", exc_info=True)
+        return
+    for option_name, option_value in (
+        ("TCP_KEEPIDLE", _TCP_KEEPALIVE_IDLE_SECONDS),
+        ("TCP_KEEPALIVE", _TCP_KEEPALIVE_IDLE_SECONDS),
+        ("TCP_KEEPINTVL", _TCP_KEEPALIVE_INTERVAL_SECONDS),
+        ("TCP_KEEPCNT", _TCP_KEEPALIVE_PROBE_COUNT),
+    ):
+        option = getattr(socket, option_name, None)
+        if option is None:
+            continue
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, option, option_value)
+        except OSError:
+            logger.debug("Upstream socket rejected %s", option_name, exc_info=True)
+
+
+def _keepalive_socket_factory(addr_info: AddrInfoType) -> socket.socket:
+    family, socket_type, proto = addr_info[0], addr_info[1], addr_info[2]
+    sock = socket.socket(family=family, type=socket_type, proto=proto)
+    try:
+        _apply_tcp_keepalive(sock)
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
 class HttpClientLease:
     def __init__(self, managed_client: _ManagedHttpClient) -> None:
         self.client = managed_client.client
@@ -130,12 +185,21 @@ async def _build_http_client() -> HttpClient:
             limit_per_host=settings.http_connector_limit_per_host,
             ssl=ssl_context,
             rdns=socks_config.rdns,
+            socket_factory=_keepalive_socket_factory,
         )
     else:
         connector = aiohttp.TCPConnector(
             limit=settings.http_connector_limit,
             limit_per_host=settings.http_connector_limit_per_host,
             ssl=ssl_context,
+            # aiohttp defaults (15s keepalive, 10s DNS TTL) are shorter than
+            # typical interactive Codex turn gaps, so nearly every turn paid a
+            # fresh DNS lookup + TCP/TLS handshake to the upstream host
+            # (~100-300ms of TTFT). Keep idle connections and resolved names
+            # around across turns instead.
+            keepalive_timeout=90,
+            ttl_dns_cache=300,
+            socket_factory=_keepalive_socket_factory,
         )
     session = aiohttp.ClientSession(
         connector=connector,
@@ -148,10 +212,16 @@ async def _build_http_client() -> HttpClient:
                 socks_config.connector_url,
                 ssl=ssl_context,
                 rdns=socks_config.rdns,
+                socket_factory=_keepalive_socket_factory,
             )
             ws_trust_env = False
         else:
-            ws_connector = aiohttp.TCPConnector(ssl=ssl_context)
+            ws_connector = aiohttp.TCPConnector(
+                ssl=ssl_context,
+                keepalive_timeout=90,
+                ttl_dns_cache=300,
+                socket_factory=_keepalive_socket_factory,
+            )
             ws_trust_env = settings.upstream_websocket_trust_env
         try:
             websocket_session = aiohttp.ClientSession(
@@ -159,11 +229,11 @@ async def _build_http_client() -> HttpClient:
                 timeout=aiohttp.ClientTimeout(total=None),
                 trust_env=ws_trust_env,
             )
-        except Exception:
-            await ws_connector.close()
+        except BaseException:
+            await asyncio.shield(ws_connector.close())
             raise
-    except Exception:
-        await session.close()
+    except BaseException:
+        await asyncio.shield(session.close())
         raise
     retry_client = RetryClient(client_session=session, raise_for_status=False)
     return HttpClient(
@@ -289,11 +359,44 @@ async def refresh_http_client() -> HttpClient:
     return replacement_client
 
 
+async def refresh_http_client_after_network_failure(
+    *,
+    failed_session: aiohttp.ClientSession | None = None,
+) -> str:
+    """Rotate stale shared transport state once for a failed client generation."""
+
+    global _http_client, _last_generationless_network_rotation_at
+    async with _http_client_lock:
+        current = _http_client
+        if current is None:
+            return "not_initialized"
+        if (
+            failed_session is not None
+            and failed_session is not current.client.session
+            and failed_session is not current.client.websocket_session
+        ):
+            return "already_rotated"
+        now = time.monotonic()
+        if (
+            failed_session is None
+            and _last_generationless_network_rotation_at is not None
+            and now - _last_generationless_network_rotation_at < _GENERATIONLESS_NETWORK_ROTATION_COOLDOWN_SECONDS
+        ):
+            return "coalesced"
+        replacement_client = await _build_http_client()
+        replacement = _ManagedHttpClient(client=replacement_client)
+        _http_client = replacement
+        _last_generationless_network_rotation_at = now
+        _request_client_close_locked(current)
+        return "rotated"
+
+
 async def close_http_client() -> None:
-    global _http_client
+    global _http_client, _last_generationless_network_rotation_at
     async with _http_client_lock:
         client = _http_client
         _http_client = None
+        _last_generationless_network_rotation_at = None
         clients = (
             *((client,) if client is not None else ()),
             *_retired_http_clients,

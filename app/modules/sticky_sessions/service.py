@@ -6,7 +6,11 @@ from datetime import datetime, timedelta
 
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import StickySessionKind
-from app.modules.proxy.sticky_repository import StickySessionListEntryRecord, StickySessionsRepository
+from app.modules.proxy.sticky_repository import (
+    StickySessionListEntryRecord,
+    StickySessionsRepository,
+    is_reserved_sticky_session_key,
+)
 from app.modules.settings.repository import SettingsRepository
 from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessionSortDir
 
@@ -107,6 +111,8 @@ class StickySessionsService:
         )
 
     async def delete_entry(self, key: str, *, kind: StickySessionKind) -> bool:
+        if is_reserved_sticky_session_key(key):
+            return False
         return await self._repository.delete(key, kind=kind)
 
     async def delete_entries(self, entries: Sequence[tuple[str, StickySessionKind]]) -> StickySessionsDeleteData:
@@ -121,6 +127,9 @@ class StickySessionsService:
             if target in seen:
                 continue
             seen.add(target)
+            if is_reserved_sticky_session_key(key):
+                failed.append(StickySessionDeleteFailureData(key=key, kind=kind, reason="not_found"))
+                continue
             targets.append(target)
 
         deleted = await self._repository.delete_entries(targets)

@@ -4,32 +4,58 @@ import asyncio
 import contextlib
 import importlib
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 
 from app.core.auth.refresh import RefreshError
+from app.core.cache.invalidation import NAMESPACE_MODEL_REGISTRY, get_cache_invalidation_poller
 from app.core.clients.http import refresh_http_client
 from app.core.clients.model_fetcher import ModelFetchError, fetch_models_for_plan
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
-from app.core.openai.model_registry import UpstreamModel, get_model_registry
+from app.core.openai.model_registry import (
+    UpstreamModel,
+    _merge_service_tier_metadata,
+    get_model_registry,
+)
+from app.core.openai.model_registry_store import (
+    encode_registry_export,
+    persist_registry_snapshot,
+    reconcile_model_registry_from_store,
+)
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.db.models import Account, AccountStatus
-from app.db.session import get_background_session
+from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
 
 logger = logging.getLogger(__name__)
 
+# Registry refresh cadence (fixed; issue #1340 / PRINCIPLES.md P2). The
+# scheduler keeps ``interval_seconds`` as a constructor field so tests can
+# exercise the loop with a short interval.
+_REFRESH_INTERVAL_SECONDS = 300
+
+
+_T = TypeVar("_T")
+
 
 class _LeaderElectionLike(Protocol):
-    async def try_acquire(self) -> bool: ...
+    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 @dataclass(slots=True)
 class _TransportRecoveryState:
     attempted: bool = False
+
+
+@dataclass(slots=True)
+class _FetchResult:
+    models: list[UpstreamModel]
+    account_models: dict[str, tuple[str, list[UpstreamModel]]]
 
 
 def _get_leader_election() -> _LeaderElectionLike:
@@ -70,45 +96,111 @@ class ModelRefreshScheduler:
                 continue
 
     async def _refresh_once(self) -> None:
-        is_leader = await _get_leader_election().try_acquire()
-        if not is_leader:
-            return
+        ran_as_leader = await _get_leader_election().run_if_leader(self._refresh_as_leader)
+        if not ran_as_leader:
+            # Never fetch upstream on a non-leader; reconcile from the persisted
+            # snapshot instead. This is the TTL backstop for a lost invalidation
+            # bump — the 0.5s cache-invalidation poller is the fast path. Also
+            # covers losing the lease mid-refresh, where run_if_leader returns
+            # None after cancelling the body.
+            await reconcile_model_registry_from_store()
+
+    async def _refresh_as_leader(self) -> bool:
         try:
             async with get_background_session() as session:
                 accounts_repo = AccountsRepository(session)
                 accounts = await accounts_repo.list_accounts()
-                grouped = _group_by_plan(accounts)
-                if not grouped:
-                    logger.debug("No active accounts for model registry refresh")
-                    return
+                detach_session_objects(session)
+            grouped = _group_by_plan(accounts)
+            if not grouped:
+                await get_model_registry().clear()
+                get_account_selection_cache().invalidate()
+                logger.info("Model registry cleared because no active accounts remain")
+                await _persist_registry_state_and_bump()
+                return True
 
-                encryptor = TokenEncryptor()
-                per_plan_results: dict[str, list[UpstreamModel]] = {}
+            encryptor = TokenEncryptor()
+            per_plan_results: dict[str, list[UpstreamModel]] = {}
+            per_account_results: dict[str, tuple[str, list[UpstreamModel]]] = {}
+            active_account_plans: dict[str, str] = {}
 
-                for plan_type, candidates in grouped.items():
-                    models = await _fetch_with_failover(
-                        candidates,
-                        encryptor,
-                        accounts_repo,
-                    )
-                    if models is not None:
-                        per_plan_results[plan_type] = models
+            for plan_type, candidates in grouped.items():
+                for account in candidates:
+                    active_account_plans[account.id] = plan_type
+                result = await _fetch_with_failover(
+                    candidates,
+                    encryptor,
+                )
+                if result is not None:
+                    per_plan_results[plan_type] = result.models
+                    per_account_results.update(result.account_models)
 
-                if per_plan_results:
-                    registry = get_model_registry()
-                    await registry.update(per_plan_results)
-                    snapshot = registry.get_snapshot()
-                    total_models = len(snapshot.models) if snapshot else 0
-                    logger.info(
-                        "Model registry refreshed plans=%d total_models=%d",
-                        len(per_plan_results),
-                        total_models,
-                    )
-                    get_account_selection_cache().invalidate()
-                else:
-                    logger.warning("Model registry refresh failed for all plans")
+            if per_plan_results:
+                registry = get_model_registry()
+                await registry.update(
+                    per_plan_results,
+                    per_account_results=per_account_results,
+                    active_account_plans=active_account_plans,
+                )
+                snapshot = registry.get_snapshot()
+                total_models = len(snapshot.models) if snapshot else 0
+                logger.info(
+                    "Model registry refreshed plans=%d total_models=%d",
+                    len(per_plan_results),
+                    total_models,
+                )
+                get_account_selection_cache().invalidate()
+                await _persist_registry_state_and_bump()
+            else:
+                logger.warning("Model registry refresh failed for all plans")
+                # Every upstream fetch failed, so the leader made no change and
+                # never advances the persisted ``refreshed_at``. Followers drop
+                # to the bootstrap floor once the store row ages past
+                # ``model_registry_snapshot_max_age_seconds``; reconcile here so
+                # the leader applies the same expiry instead of serving its now
+                # stale in-memory catalog indefinitely under a prolonged
+                # upstream outage. On a still-fresh row this is a no-op because
+                # the leader's applied content hash already matches the store.
+                await reconcile_model_registry_from_store()
         except Exception:
             logger.exception("Model registry refresh loop failed")
+        # Ran as leader (even on internal failure): signal completion so the
+        # caller does not additionally reconcile from the persisted snapshot.
+        return True
+
+
+async def _persist_registry_state_and_bump() -> None:
+    """Persist the leader's registry state, then bump the bus (write-then-bump).
+
+    A persist failure degrades to leader-local refresh behavior: the in-memory
+    registry already holds the refreshed catalog and persistence is retried on
+    the next cycle. The applied-hash marker is reset on failure because the
+    in-memory state now diverges from the persisted row; leaving the old hash
+    in place would make a later reconcile (e.g. after losing leadership) treat
+    the store's row as already applied and never converge back to it.
+    """
+    registry = get_model_registry()
+    try:
+        export = await registry.export_state()
+        encoded = encode_registry_export(export)
+        async with get_background_session() as session:
+            changed = await persist_registry_snapshot(
+                session,
+                encoded=encoded,
+                leader_id=get_settings().http_responses_session_bridge_instance_id,
+            )
+        registry.note_applied_content_hash(encoded.content_hash)
+    except Exception:
+        registry.note_applied_content_hash(None)
+        logger.warning(
+            "Model registry snapshot persist failed; serving leader-local refresh until next cycle",
+            exc_info=True,
+        )
+        return
+    if changed:
+        poller = get_cache_invalidation_poller()
+        if poller is not None:
+            await poller.bump(NAMESPACE_MODEL_REGISTRY)
 
 
 def _group_by_plan(accounts: list[Account]) -> dict[str, list[Account]]:
@@ -148,12 +240,15 @@ def _compact_error_message(message: str) -> str:
 async def _fetch_with_failover(
     candidates: list[Account],
     encryptor: TokenEncryptor,
-    accounts_repo: AccountsRepository,
-) -> list[UpstreamModel] | None:
+    accounts_repo: AccountsRepository | None = None,
+) -> _FetchResult | None:
     transport_recovery = _TransportRecoveryState()
+    successful_results: list[list[UpstreamModel]] = []
+    account_models: dict[str, tuple[str, list[UpstreamModel]]] = {}
+    auth_accounts_repo = accounts_repo or BackgroundAccountsRepository()
+    auth_manager = AuthManager(auth_accounts_repo)
 
     for account in candidates:
-        auth_manager = AuthManager(accounts_repo)
         try:
             account = await _ensure_fresh_with_transport_recovery(
                 auth_manager,
@@ -165,7 +260,8 @@ async def _fetch_with_failover(
                 encryptor,
                 transport_recovery=transport_recovery,
             )
-            return models
+            successful_results.append(models)
+            account_models[account.id] = (account.plan_type, models)
         except ModelFetchError as exc:
             if exc.status_code == 401:
                 try:
@@ -180,7 +276,9 @@ async def _fetch_with_failover(
                         encryptor,
                         transport_recovery=transport_recovery,
                     )
-                    return models
+                    successful_results.append(models)
+                    account_models[account.id] = (account.plan_type, models)
+                    continue
                 except (ModelFetchError, RefreshError) as retry_exc:
                     logger.warning(
                         "Model fetch auth retry failed account=%s plan=%s initial_error=%s retry_error=%s",
@@ -214,7 +312,22 @@ async def _fetch_with_failover(
                 exc_info=True,
             )
             continue
-    return None
+    merged_models = _merge_same_plan_model_results(successful_results)
+    if not successful_results:
+        return None
+    return _FetchResult(models=merged_models, account_models=account_models)
+
+
+def _merge_same_plan_model_results(successful_results: list[list[UpstreamModel]]) -> list[UpstreamModel]:
+    if not successful_results:
+        return []
+
+    merged_by_slug: dict[str, UpstreamModel] = {}
+    for models in successful_results:
+        for model in models:
+            existing = merged_by_slug.get(model.slug)
+            merged_by_slug[model.slug] = model if existing is None else _merge_service_tier_metadata(existing, model)
+    return list(merged_by_slug.values())
 
 
 async def _ensure_fresh_with_transport_recovery(
@@ -302,6 +415,6 @@ async def _refresh_http_client_after_transport_error(account: Account, transport
 def build_model_refresh_scheduler() -> ModelRefreshScheduler:
     settings = get_settings()
     return ModelRefreshScheduler(
-        interval_seconds=settings.model_registry_refresh_interval_seconds,
+        interval_seconds=_REFRESH_INTERVAL_SECONDS,
         enabled=settings.model_registry_enabled,
     )

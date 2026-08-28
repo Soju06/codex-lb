@@ -1,13 +1,16 @@
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { createAccountSummary, createAccountTrends } from "@/test/mocks/factories";
+import { formatDateTimeInline } from "@/utils/formatters";
 
 describe("AccountUsagePanel", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    useDateDisplayFormatStore.setState({ dateDisplayFormat: "iso8601" });
   });
 
   afterEach(() => {
@@ -110,6 +113,75 @@ describe("AccountUsagePanel", () => {
     expect(screen.getByText("Request logs total")).toBeInTheDocument();
     expect(screen.getByText(/\$0\.13/)).toBeInTheDocument();
     expect(screen.getByText(/51\.48K tok/)).toBeInTheDocument();
+  });
+
+  it("renders usage reset credit availability when provided", () => {
+    const account = createAccountSummary();
+
+    render(
+      <AccountUsagePanel
+        account={account}
+        trends={null}
+        resetCredits={{ availableCount: 3 }}
+      />,
+    );
+
+    expect(screen.getByText("Usage resets")).toBeInTheDocument();
+    expect(screen.getByText("3 available")).toBeInTheDocument();
+  });
+
+  it("shows the nearest reset-credit expiry when provided", () => {
+    const expiresAt = "2026-01-01T02:34:56.000Z";
+    const isoExpiry = formatDateTimeInline(expiresAt, "iso8601");
+    const account = createAccountSummary({
+      resetCreditNearestExpiresAt: expiresAt,
+    });
+
+    render(
+      <AccountUsagePanel
+        account={account}
+        trends={null}
+        resetCredits={{ availableCount: 3 }}
+      />,
+    );
+
+    expect(
+      screen.getByText((_, element) => {
+        const text = element?.textContent ?? "";
+        return text.startsWith("Expires ") && text.includes("(2h)") && !text.includes("available");
+      }),
+    ).toBeInTheDocument();
+    const row = screen.getByText("Usage resets").closest("div");
+    const rowText = row?.textContent ?? "";
+    expect(rowText.indexOf("Expires ")).toBeGreaterThan(-1);
+    expect(rowText.indexOf("Expires ")).toBeLessThan(rowText.indexOf("3 available"));
+    expect(rowText).toContain(isoExpiry);
+
+    act(() => {
+      useDateDisplayFormatStore.setState({ dateDisplayFormat: "default" });
+    });
+
+    expect(row?.textContent).toContain(formatDateTimeInline(expiresAt, "default"));
+    expect(row?.textContent).not.toContain(isoExpiry);
+  });
+
+  it("renders a usage reset action when provided", () => {
+    const account = createAccountSummary({ accountId: "acc_reset" });
+    const onReset = vi.fn();
+
+    render(
+      <AccountUsagePanel
+        account={account}
+        trends={null}
+        resetCredits={{ availableCount: 1 }}
+        onReset={onReset}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset usage" }));
+
+    expect(onReset).toHaveBeenCalledWith("acc_reset");
+    expect(onReset).toHaveBeenCalledTimes(1);
   });
 
   it("shows the weekly plan legend when scheduled trend data exists", () => {

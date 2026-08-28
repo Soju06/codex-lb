@@ -10,14 +10,25 @@ fully-wired httpx client against the FastAPI app.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+from datetime import datetime, timedelta
 from typing import cast
 
 import pytest
+from sqlalchemy import func, select, text
 
+import app.modules.proxy.file_pin_repository as file_pin_repository_module
 import app.modules.proxy.service as proxy_module
+from app.core.auth.refresh import RefreshError
 from app.core.clients.files import FileProxyError
+from app.core.clients.proxy import ProxyResponseError
+from app.db.models import FileAccountPin, StickySessionKind
+from app.db.session import SessionLocal
+from app.modules.proxy.affinity import _codex_backend_identity, _codex_session_selection_key
+from app.modules.proxy.file_pin_repository import FileAccountPinRepository
+from app.modules.proxy.sticky_repository import StickySessionsRepository
 
 pytestmark = pytest.mark.integration
 
@@ -44,11 +55,12 @@ def _make_auth_json(account_id: str, email: str) -> dict:
     }
 
 
-async def _import_account(async_client, account_id: str, email: str) -> None:
+async def _import_account(async_client, account_id: str, email: str) -> str:
     auth_json = _make_auth_json(account_id, email)
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    return response.json()["accountId"]
 
 
 @pytest.mark.asyncio
@@ -190,6 +202,53 @@ async def test_backend_files_create_repeated_401_after_refresh_fails_over(async_
     assert response.json()["file_id"] == "file_recovered"
     assert captured_account_ids[:2] == [invalidated_account_id, invalidated_account_id]
     assert captured_account_ids[2] != invalidated_account_id
+
+
+@pytest.mark.asyncio
+async def test_backend_files_create_post_401_forced_refresh_claim_timeout_reports_upstream_unavailable(
+    async_client, monkeypatch
+):
+    """Regression (P2 forced-refresh surfaces): when the file-upload post-401
+    forced refresh on the failover account hits a transient cross-replica
+    refresh-CLAIM-CONTENTION timeout, the surface routes through
+    ``_ensure_fresh_with_budget_or_auth_error``, which MUST surface a retryable
+    ``upstream_unavailable`` (502) rather than a bogus 401 ``invalid_api_key``."""
+    await _import_account(async_client, "acc_files_claim_a", "files-claim-a@example.com")
+    await _import_account(async_client, "acc_files_claim_b", "files-claim-b@example.com")
+
+    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None, **kwargs):
+        del payload, headers, access_token, base_url, session, account_id, kwargs
+        # Always 401 so the surface fails over and forces a refresh on the peer.
+        raise FileProxyError(
+            401,
+            {"error": {"message": "token invalidated", "type": "authentication_error", "code": "invalid_api_key"}},
+        )
+
+    first_fresh_account: dict[str, str | None] = {"id": None}
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        if first_fresh_account["id"] is None:
+            first_fresh_account["id"] = account.id
+        if account.id != first_fresh_account["id"]:
+            raise RefreshError(
+                "refresh_claim_timeout",
+                "refresh claim held by another replica",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_create_file", fake_create_file)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    response = await async_client.post(
+        "/backend-api/files",
+        json={"file_name": "x.png", "file_size": 1},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "upstream_unavailable"
 
 
 @pytest.mark.asyncio
@@ -446,45 +505,289 @@ async def test_resolve_file_account_for_responses_returns_pin_when_no_other_affi
                     ],
                 }
             ],
+            "prompt_cache_key": "file-response-soft-cache",
         }
     )
-    resolved = await service._resolve_file_account_for_responses(payload, {})
+    soft_headers = {"session_id": "file-response-soft-session"}
+    resolved = await service._resolve_file_account_for_responses(payload, soft_headers)
     assert resolved == "acc_resp_a"
     # The websocket prep path also surfaces the pin via the same helper.
     ws_payload = dict(payload.to_payload())
     ws_payload["type"] = "response.create"
     prepared = await service._prepare_websocket_response_create_request(
         ws_payload,
-        headers={},
-        codex_session_affinity=False,
-        openai_cache_affinity=False,
+        headers=soft_headers,
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
         sticky_threads_enabled=False,
         openai_cache_affinity_max_age_seconds=300,
         api_key=None,
     )
     assert prepared.request_state.preferred_account_id == "acc_resp_a"
+    assert prepared.affinity_policy.codex_session_source == "session_header"
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_prompt_cache_key_overrides_file_id_pin(async_client, monkeypatch):
-    """An explicit ``prompt_cache_key`` is a stronger affinity signal
-    than the file_id pin and must continue to drive routing.
+async def test_file_account_pin_is_resolved_by_another_proxy_replica(async_client, monkeypatch):
+    await _import_account(async_client, "acc_cross_replica", "cross-replica@example.com")
 
-    The pin still gets recorded by ``create_file``, but the
-    ``/v1/responses`` request with a ``prompt_cache_key`` is allowed to
-    land on a different account because a cache key implies an
-    existing conversation continuation.
-    """
+    from app.core.openai.requests import ResponsesRequest
+    from app.dependencies import get_proxy_service_for_app
+
+    origin = get_proxy_service_for_app(async_client._transport.app)
+    other_replica = proxy_module.ProxyService(origin._repo_factory)
+    await origin._pin_file_account("file_cross_replica", "acc_cross_replica")
+
+    assert await other_replica._resolve_file_account("file_cross_replica") == "acc_cross_replica"
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "instructions": "Summarize the uploaded file.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_file", "file_id": "file_cross_replica"}],
+                }
+            ],
+        }
+    )
+    assert await other_replica._resolve_file_account_for_responses(payload, {}) == "acc_cross_replica"
+
+    preferred_accounts: list[str | None] = []
+
+    async def fake_proxy_files_call(**kwargs):
+        preferred_accounts.append(await kwargs["resolve_preferred_account_id"]())
+        result = {"status": "success"}
+        await kwargs["on_success"](result, "acc_cross_replica")
+        return result, "acc_cross_replica"
+
+    monkeypatch.setattr(other_replica, "_proxy_files_call", fake_proxy_files_call)
+    assert await other_replica.finalize_file("file_cross_replica", {}) == {"status": "success"}
+    assert preferred_accounts == ["acc_cross_replica"]
+
+
+@pytest.mark.asyncio
+async def test_file_account_pin_repository_ignores_expired_rows(async_client):
+    del async_client
+    async with SessionLocal() as session:
+        database_now = await session.scalar(select(func.now()))
+        assert isinstance(database_now, datetime)
+        session.add(
+            FileAccountPin(
+                file_id="file_expired_repository",
+                account_id="acc_expired_repository",
+                expires_at=database_now,
+            )
+        )
+        await session.commit()
+
+    async with SessionLocal() as session:
+        repository = FileAccountPinRepository(session)
+        assert await repository.get_live_account_id("file_expired_repository") is None
+
+
+@pytest.mark.asyncio
+async def test_file_account_pin_same_owner_claim_is_idempotent_and_renews_expiry(async_client):
+    del async_client
+    async with SessionLocal() as session:
+        await FileAccountPinRepository(session).claim(
+            "file_same_owner",
+            "acc_same_owner",
+            ttl_seconds=60,
+        )
+    async with SessionLocal() as session:
+        first_pin = await session.get(FileAccountPin, "file_same_owner")
+        assert first_pin is not None
+        first_expiry = first_pin.expires_at
+
+    async with SessionLocal() as session:
+        await FileAccountPinRepository(session).claim(
+            "file_same_owner",
+            "acc_same_owner",
+            ttl_seconds=120,
+        )
+    async with SessionLocal() as session:
+        renewed_pin = await session.get(FileAccountPin, "file_same_owner")
+        assert renewed_pin is not None
+        assert renewed_pin.account_id == "acc_same_owner"
+        assert renewed_pin.expires_at > first_expiry
+
+
+@pytest.mark.asyncio
+async def test_file_account_pin_claim_refreshes_a_stale_successful_insert_expiry(
+    async_client,
+    monkeypatch,
+):
+    del async_client
+    stale_insert = text(
+        """
+        INSERT INTO file_account_pins (file_id, account_id, expires_at)
+        VALUES (
+            :file_id,
+            :account_id,
+            (strftime('%Y-%m-%d %H:%M:%f', 'now', '-' || :ttl || ' seconds') || '000')
+        )
+        RETURNING account_id
+        """
+    )
+    monkeypatch.setattr(file_pin_repository_module, "_SQLITE_CLAIM", stale_insert)
+
+    async with SessionLocal() as session:
+        await FileAccountPinRepository(session).claim(
+            "file_stale_insert_candidate",
+            "acc_stale_insert_candidate",
+            ttl_seconds=120,
+        )
+
+    async with SessionLocal() as session:
+        database_now = await session.scalar(select(func.now()))
+        pin = await session.get(FileAccountPin, "file_stale_insert_candidate")
+        assert isinstance(database_now, datetime)
+        assert pin is not None
+        assert pin.expires_at > database_now + timedelta(seconds=100)
+
+
+@pytest.mark.asyncio
+async def test_file_account_pin_claim_rolls_back_when_post_claim_refresh_does_not_match(
+    async_client,
+    monkeypatch,
+):
+    del async_client
+    monkeypatch.setattr(
+        file_pin_repository_module,
+        "_SQLITE_REFRESH",
+        text(
+            """
+            UPDATE file_account_pins
+            SET expires_at = expires_at
+            WHERE file_id = :file_id
+              AND account_id = :account_id
+              AND 0 = 1
+            RETURNING account_id
+            """
+        ),
+    )
+
+    async with SessionLocal() as session:
+        with pytest.raises(RuntimeError, match="Failed to refresh file account pin after claim"):
+            await FileAccountPinRepository(session).claim(
+                "file_failed_post_claim_refresh",
+                "acc_failed_post_claim_refresh",
+                ttl_seconds=120,
+            )
+
+    async with SessionLocal() as session:
+        assert await session.get(FileAccountPin, "file_failed_post_claim_refresh") is None
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_file_account_pin_is_observed_without_local_cache(async_client):
+    from app.dependencies import get_proxy_service_for_app
+
+    first_replica = get_proxy_service_for_app(async_client._transport.app)
+    second_replica = proxy_module.ProxyService(first_replica._repo_factory)
+    await first_replica._pin_file_account("file_claim_lifecycle", "acc_claim_a")
+    assert await first_replica._resolve_file_account("file_claim_lifecycle") == "acc_claim_a"
+
+    async with SessionLocal() as session:
+        database_now = await session.scalar(select(func.now()))
+        assert isinstance(database_now, datetime)
+        pin = await session.get(FileAccountPin, "file_claim_lifecycle")
+        assert pin is not None
+        pin.expires_at = database_now - timedelta(seconds=1)
+        session.add(
+            FileAccountPin(
+                file_id="file_cleanup_expired",
+                account_id="acc_cleanup_expired",
+                expires_at=database_now - timedelta(seconds=1),
+            )
+        )
+        await session.commit()
+
+    await second_replica._pin_file_account("file_claim_lifecycle", "acc_claim_b")
+
+    async with SessionLocal() as session:
+        assert await session.get(FileAccountPin, "file_cleanup_expired") is None
+
+    assert await first_replica._resolve_file_account("file_claim_lifecycle") == "acc_claim_b"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_file_account_pin_claims_choose_one_durable_owner(async_client):
+    from app.dependencies import get_proxy_service_for_app
+
+    app_service = get_proxy_service_for_app(async_client._transport.app)
+    start = asyncio.Event()
+
+    async def claim(account_id: str) -> tuple[str, str]:
+        replica = proxy_module.ProxyService(app_service._repo_factory)
+        await start.wait()
+        try:
+            await replica._pin_file_account("file_concurrent_claim", account_id)
+        except ProxyResponseError as exc:
+            return account_id, str(exc.payload["error"]["code"])
+        return account_id, "claimed"
+
+    claims = [
+        asyncio.create_task(claim("acc_race_a")),
+        asyncio.create_task(claim("acc_race_b")),
+    ]
+    start.set()
+    results = await asyncio.gather(*claims)
+
+    winners = [account_id for account_id, outcome in results if outcome == "claimed"]
+    conflicts = [account_id for account_id, outcome in results if outcome == "continuity_owner_conflict"]
+    assert len(winners) == 1
+    assert len(conflicts) == 1
+
+    observer = proxy_module.ProxyService(app_service._repo_factory)
+    assert await observer._resolve_file_account("file_concurrent_claim") == winners[0]
+
+
+@pytest.mark.asyncio
+async def test_live_file_account_pin_cannot_be_reassigned_by_another_replica(async_client):
+    await _import_account(async_client, "acc_pin_owner_a", "pin-owner-a@example.com")
+    await _import_account(async_client, "acc_pin_owner_b", "pin-owner-b@example.com")
+
+    from app.dependencies import get_proxy_service_for_app
+
+    origin = get_proxy_service_for_app(async_client._transport.app)
+    other_replica = proxy_module.ProxyService(origin._repo_factory)
+    await origin._pin_file_account("file_immutable_owner", "acc_pin_owner_a")
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await other_replica._pin_file_account("file_immutable_owner", "acc_pin_owner_b")
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
+    assert await other_replica._resolve_file_account("file_immutable_owner") == "acc_pin_owner_a"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_file_id_pin_overrides_prompt_cache_key(async_client, monkeypatch):
+    """A prompt-cache key is locality; an account-scoped file is ownership."""
     await _import_account(async_client, "acc_pck_a", "pck-a@example.com")
     await _import_account(async_client, "acc_pck_b", "pck-b@example.com")
 
     create_account_holder: dict[str, str] = {}
+    stream_account_ids: list[str] = []
 
     async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None, **kwargs):
         create_account_holder["account_id"] = account_id
         return {"file_id": "file_pck", "upload_url": "https://blob.example/sas?t=p"}
 
-    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        stream_account_ids.append(account_id)
         yield (
             "event: response.completed\ndata: "
             + json.dumps(
@@ -517,11 +820,30 @@ async def test_v1_responses_prompt_cache_key_overrides_file_id_pin(async_client,
     )
     assert create_resp.status_code == 200
 
-    # Use the helper directly to verify the precedence rule rather than
-    # inspecting the load-balancer's choice (which depends on capacity
-    # weights / sticky tables that are repo-scoped). The contract:
-    # ``_resolve_file_account_for_responses`` must return ``None`` when
-    # a stronger affinity signal is set.
+    response = await async_client.post(
+        "/v1/responses",
+        headers={"session_id": "file-soft-session"},
+        json={
+            "model": "gpt-5.2",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Continue."},
+                        {"type": "input_file", "file_id": "file_pck"},
+                    ],
+                }
+            ],
+            "prompt_cache_key": "thread-123",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert stream_account_ids == [create_account_holder["account_id"]]
+
+    # Keep the resolver assertion as a narrow diagnostic for precedence drift.
     from app.core.openai.requests import ResponsesRequest
     from app.dependencies import get_proxy_service_for_app
 
@@ -543,7 +865,113 @@ async def test_v1_responses_prompt_cache_key_overrides_file_id_pin(async_client,
         }
     )
     resolved = await service._resolve_file_account_for_responses(payload, {})
-    assert resolved is None
+    assert resolved is not None
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_file_pin_does_not_rewrite_existing_thread_row(
+    async_client,
+    monkeypatch,
+):
+    from app.dependencies import get_proxy_service_for_app
+
+    thread_owner_chatgpt_id = "acc_file_pin_thread_owner"
+    file_owner_chatgpt_id = "acc_file_pin_file_owner"
+    thread_owner_id = await _import_account(
+        async_client,
+        thread_owner_chatgpt_id,
+        "file-pin-thread-owner@example.com",
+    )
+    file_owner_id = await _import_account(
+        async_client,
+        file_owner_chatgpt_id,
+        "file-pin-file-owner@example.com",
+    )
+    process_session = "file-pin-process"
+    thread_headers = {"session-id": process_session, "thread-id": "file-pin-thread"}
+    sibling_headers = {"session-id": process_session, "thread-id": "file-pin-sibling"}
+    thread_key = _codex_backend_identity(thread_headers).thread_selection_key
+    sibling_key = _codex_backend_identity(sibling_headers).thread_selection_key
+    process_key = _codex_session_selection_key(process_session)
+    assert thread_key is not None
+    assert sibling_key is not None
+
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            thread_key,
+            thread_owner_id,
+            kind=StickySessionKind.PROMPT_CACHE,
+        )
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    await service._pin_file_account("file_thread_locality", file_owner_id)
+    seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        del payload, headers, access_token, kwargs
+        seen.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_file_pin_thread"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    pinned_response = await async_client.post(
+        "/backend-api/codex/responses",
+        headers=thread_headers,
+        json={
+            "model": "gpt-5.2",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Read the file."},
+                        {"type": "input_file", "file_id": "file_thread_locality"},
+                    ],
+                }
+            ],
+            "stream": True,
+        },
+    )
+    assert pinned_response.status_code == 200
+    assert seen == [file_owner_chatgpt_id]
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        assert await repo.get_account_id(thread_key, kind=StickySessionKind.PROMPT_CACHE) == thread_owner_id
+        assert await repo.get_account_id(process_key, kind=StickySessionKind.CODEX_SESSION) == file_owner_id
+        assert await repo.get_account_id(sibling_key, kind=StickySessionKind.PROMPT_CACHE) is None
+
+    unpinned_response = await async_client.post(
+        "/backend-api/codex/responses",
+        headers=thread_headers,
+        json={
+            "model": "gpt-5.2",
+            "instructions": "You are a helpful assistant.",
+            "input": "Continue without the file.",
+            "stream": True,
+        },
+    )
+    assert unpinned_response.status_code == 200
+    assert seen == [file_owner_chatgpt_id, thread_owner_chatgpt_id]
+
+    sibling_response = await async_client.post(
+        "/backend-api/codex/responses",
+        headers=sibling_headers,
+        json={
+            "model": "gpt-5.2",
+            "instructions": "You are a helpful assistant.",
+            "input": "Sibling thread without a file.",
+            "stream": True,
+        },
+    )
+    assert sibling_response.status_code == 200
+    assert seen == [file_owner_chatgpt_id, thread_owner_chatgpt_id, file_owner_chatgpt_id]
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        assert await repo.get_account_id(thread_key, kind=StickySessionKind.PROMPT_CACHE) == thread_owner_id
+        assert await repo.get_account_id(process_key, kind=StickySessionKind.CODEX_SESSION) == file_owner_id
+        assert await repo.get_account_id(sibling_key, kind=StickySessionKind.PROMPT_CACHE) == file_owner_id
 
 
 @pytest.mark.asyncio
@@ -596,16 +1024,8 @@ async def test_derived_prompt_cache_key_does_not_block_file_id_pin(async_client)
 
 
 @pytest.mark.asyncio
-async def test_synthesized_turn_state_does_not_block_file_id_pin(async_client):
-    """Regression: ``ensure_downstream_turn_state`` synthesizes a
-    fresh ``x-codex-turn-state`` header on first turns when the client
-    did not supply one (websocket / HTTP entry points always inject
-    it). The file-pin resolver must treat that synthesizer-generated
-    placeholder as "no turn state" so first-turn upload-then-converse
-    flows still hit the file_id pin. A *client-supplied* turn-state
-    value (anything not matching the synthesizer prefix) must still
-    block the pin lookup.
-    """
+async def test_turn_state_does_not_hide_file_id_pin_resolution(async_client):
+    """Every file owner is resolved before hard-source consistency checks."""
     await _import_account(async_client, "acc_ts_a", "ts-a@example.com")
 
     from app.core.openai.requests import ResponsesRequest
@@ -631,16 +1051,83 @@ async def test_synthesized_turn_state_does_not_block_file_id_pin(async_client):
         }
     )
 
-    # 1) Synthesizer-generated turn_state must NOT block the pin.
+    # Synthesizer-generated turn state does not hide the pin.
     synth_turn_state = ensure_downstream_turn_state({})
     assert synth_turn_state.startswith("turn_")
     headers_synth = {"x-codex-turn-state": synth_turn_state}
     resolved = await service._resolve_file_account_for_responses(payload, headers_synth)
     assert resolved == "acc_ts_a"
 
-    # 2) Client-supplied turn_state (anything not matching the
-    # synthesizer pattern) MUST still block the pin -- a real
-    # continuation marker takes precedence.
+    # Client turn state also cannot hide the pin. The product path later
+    # verifies that both hard sources agree instead of assigning precedence.
     headers_client = {"x-codex-turn-state": "client-conversation-handle-42"}
-    resolved_blocked = await service._resolve_file_account_for_responses(payload, headers_client)
-    assert resolved_blocked is None
+    resolved_with_client_turn_state = await service._resolve_file_account_for_responses(payload, headers_client)
+    assert resolved_with_client_turn_state == "acc_ts_a"
+
+
+@pytest.mark.asyncio
+async def test_file_owner_resolution_preserves_unpinned_and_rejects_partial_or_cross_account_pins(async_client):
+    await _import_account(async_client, "acc_file_strict_a", "file-strict-a@example.com")
+    await _import_account(async_client, "acc_file_strict_b", "file-strict-b@example.com")
+
+    from app.core.openai.requests import ResponsesRequest
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    await service._pin_file_account("file_strict_a", "acc_file_strict_a")
+    await service._pin_file_account("file_strict_b", "acc_file_strict_b")
+
+    def payload_for(*file_ids: str) -> ResponsesRequest:
+        return ResponsesRequest.model_validate(
+            {
+                "model": "gpt-5.2",
+                "instructions": "Read the files.",
+                "input": [{"type": "input_file", "file_id": file_id} for file_id in file_ids],
+            }
+        )
+
+    assert await service._resolve_file_account_for_responses(payload_for("file_missing"), {}) is None
+
+    with pytest.raises(ProxyResponseError) as partial_exc:
+        await service._resolve_file_account_for_responses(payload_for("file_strict_a", "file_missing"), {})
+    assert partial_exc.value.payload["error"]["code"] == "file_owner_unavailable"
+
+    with pytest.raises(ProxyResponseError) as conflict_exc:
+        await service._resolve_file_account_for_responses(payload_for("file_strict_a", "file_strict_b"), {})
+    assert conflict_exc.value.payload["error"]["code"] == "continuity_owner_conflict"
+
+
+@pytest.mark.asyncio
+async def test_file_id_pin_overrides_bare_session_header_aliases(async_client):
+    """Bare process-session aliases cannot hide an account-scoped file owner."""
+    await _import_account(async_client, "acc_session_file_a", "session-file-a@example.com")
+
+    from app.core.openai.requests import ResponsesRequest
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    await service._pin_file_account("file_session_alias", "acc_session_file_a")
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Describe."},
+                        {"type": "input_file", "file_id": "file_session_alias"},
+                    ],
+                }
+            ],
+        }
+    )
+
+    for headers in (
+        {"session-id": "codex-session-123"},
+        {"thread-id": "codex-thread-123"},
+        {"x-codex-session-id": "codex-session-123"},
+    ):
+        resolved = await service._resolve_file_account_for_responses(payload, headers)
+        assert resolved == "acc_session_file_a"

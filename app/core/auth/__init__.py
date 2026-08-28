@@ -39,6 +39,14 @@ class OpenAIAuthClaims(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     chatgpt_account_id: str | None = None
+    chatgpt_user_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "chatgpt_user_id",
+            "user_id",
+            "chatgpt_account_user_id",
+        ),
+    )
     chatgpt_plan_type: str | None = None
     workspace_id: str | None = Field(
         default=None,
@@ -74,7 +82,15 @@ class IdTokenClaims(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     email: str | None = None
+    sub: str | None = None
     chatgpt_account_id: str | None = None
+    chatgpt_user_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "chatgpt_user_id",
+            "chatgpt_account_user_id",
+        ),
+    )
     chatgpt_plan_type: str | None = None
     workspace_id: str | None = Field(
         default=None,
@@ -119,6 +135,18 @@ class AccountClaims:
     workspace_id: str | None = None
     workspace_label: str | None = None
     seat_type: str | None = None
+    chatgpt_user_id: str | None = None
+
+
+def resolve_seat_identity(claims: "IdTokenClaims", auth_claims: "OpenAIAuthClaims | None" = None) -> str | None:
+    """Return the stable per-seat OpenAI principal id (chatgpt_user_id / sub).
+
+    Prefers the ``user-...`` chatgpt_user_id present in the ``https://api.openai.com/auth``
+    claim, then the top-level id-token ``chatgpt_user_id``, then the top-level ``sub``
+    (auth0/google-oauth2 principal). Returns None when nothing usable is present.
+    """
+    resolved_auth = auth_claims if auth_claims is not None else (claims.auth or OpenAIAuthClaims())
+    return clean_account_identity_part(resolved_auth.chatgpt_user_id or claims.chatgpt_user_id or claims.sub)
 
 
 def parse_auth_json(raw: bytes) -> AuthFile:
@@ -154,6 +182,7 @@ def claims_from_auth(auth: AuthFile) -> AccountClaims:
         workspace_id=clean_account_identity_part(auth_claims.workspace_id or claims.workspace_id),
         workspace_label=clean_account_identity_part(auth_claims.workspace_label or claims.workspace_label),
         seat_type=normalize_seat_type(auth_claims.seat_type or claims.seat_type),
+        chatgpt_user_id=resolve_seat_identity(claims, auth_claims),
     )
 
 

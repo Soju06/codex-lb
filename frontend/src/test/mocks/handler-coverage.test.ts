@@ -22,6 +22,7 @@ function extractHandlerPaths(): string[] {
 const EXPECTED_ENDPOINTS = [
 	// health
 	"GET /health",
+	"GET /health/ready",
 	// runtime
 	"GET /api/runtime/version",
 	// dashboard
@@ -29,6 +30,9 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/dashboard/projections",
 	"GET /api/request-logs",
 	"GET /api/request-logs/options",
+	// conversations
+	"GET /api/conversations",
+	"GET /api/conversations/:conversationId",
 	// accounts
 	"GET /api/accounts",
 	"POST /api/accounts/import",
@@ -40,6 +44,8 @@ const EXPECTED_ENDPOINTS = [
 	"PUT /api/accounts/:accountId/limit-warmup",
 	"PUT /api/accounts/:accountId/routing-policy",
 	"GET /api/accounts/:accountId/trends",
+	"GET /api/accounts/:accountId/usage-reset-credits",
+	"POST /api/accounts/:accountId/usage-reset-credits/consume",
 	"POST /api/accounts/:accountId/export",
 	"POST /api/accounts/:accountId/export/auth",
 	"DELETE /api/accounts/:accountId",
@@ -64,8 +70,11 @@ const EXPECTED_ENDPOINTS = [
 	// settings
 	"GET /api/settings",
 	"PUT /api/settings",
+	"GET /api/settings/telemetry",
+	"PUT /api/settings/telemetry",
 	"GET /api/settings/upstream-proxy",
 	"POST /api/settings/upstream-proxy/endpoints",
+	"POST /api/settings/upstream-proxy/endpoints/:endpointId/test",
 	"POST /api/settings/upstream-proxy/pools",
 	"POST /api/settings/upstream-proxy/pools/:poolId/members",
 	"PUT /api/settings/upstream-proxy/accounts/:accountId/binding",
@@ -86,6 +95,10 @@ const EXPECTED_ENDPOINTS = [
 	"DELETE /api/firewall/ips/:ipAddress",
 	// models
 	"GET /api/models",
+	"GET /api/model-sources/",
+	"POST /api/model-sources/",
+	"PATCH /api/model-sources/:sourceId",
+	"DELETE /api/model-sources/:sourceId",
 	// api-keys
 	"GET /api/api-keys/",
 	"POST /api/api-keys/",
@@ -94,6 +107,17 @@ const EXPECTED_ENDPOINTS = [
 	"POST /api/api-keys/:keyId/regenerate",
 	"GET /api/api-keys/:keyId/trends",
 	"GET /api/api-keys/:keyId/usage-7d",
+	// automations
+	"GET /api/automations",
+	"GET /api/automations/options",
+	"GET /api/automations/runs",
+	"GET /api/automations/runs/options",
+	"GET /api/automations/runs/:runId/details",
+	"POST /api/automations",
+	"PATCH /api/automations/:automationId",
+	"DELETE /api/automations/:automationId",
+	"POST /api/automations/:automationId/run-now",
+	"GET /api/automations/:automationId/runs",
 ];
 
 describe("MSW handler coverage", () => {

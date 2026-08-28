@@ -463,6 +463,14 @@
       consult and abandonment follow it as deferred cleanup, so a slow
       durable store cannot delay the client-visible terminal
 
+- [x] 2.94 Poison revocation fences on the arm's own provenance and
+      downgrades to a weaker fence that armed during the speculative
+      window, so disproved poison evidence cannot outlive its revocation
+
+- [x] 2.95 The idle-exhaustion consult and abandonment run as an owned
+      registered task created before the terminal frame is yielded, so a
+      consumer closing the generator at that yield cannot skip them
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

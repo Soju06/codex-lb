@@ -72,8 +72,11 @@ lifecycle remains to retry the abandonment it would otherwise skip. An
 opening recorded by the streaming idle-recovery exhaustion MUST record its
 strike before the terminal event is published — so the cooldown and
 quarantine cover an immediate resend — and MUST run its consult and
-abandonment as cancellation-deferred cleanup after the terminal event, so a
-slow durable store cannot delay the client-visible terminal. The partial
+abandonment as an owned cleanup task created before the terminal event is
+yielded — a consumer closing the generator after receiving that frame
+injects GeneratorExit at the yield, and cleanup only started afterwards
+would never run — with the task registered so it survives the generator,
+never delaying the terminal frame behind the durable store. The partial
 stale-holder cleanup MUST order itself the same way: strike before its
 failure frames are published, abandonment after. The partial stale-holder cleanup's
 deferral MUST begin before its holders are finalized, covering finalization
@@ -192,7 +195,11 @@ opening did not survive persistence MUST be revoked, fenced on the exact arm
 so any concurrent re-arm is preserved; when that arm upgraded a weaker
 quarantine that was active on its own evidence, revocation MUST restore the
 prior reason and deadline rather than evicting the weaker fence with the
-upgrade. That re-evaluation MUST turn on the merged opening itself and not on
+upgrade. Revocation MUST be fenced on the poison arm's own provenance, not
+the raw entry generation, because a weaker fence arming during the
+speculative window bumps the generation while the no-downgrade guard keeps
+the poison reason; that concurrent weaker fence is what revocation
+downgrades to. That re-evaluation MUST turn on the merged opening itself and not on
 the cooldown it leaves: a merge can adopt a cooldown that has already elapsed,
 and such a key is at its threshold with no cooldown left, so the next request
 is the half-open probe the quarantine exists to protect. A `clean_close` opening MUST NOT quarantine the key.

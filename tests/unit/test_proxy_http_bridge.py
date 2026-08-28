@@ -34799,6 +34799,43 @@ async def test_partial_cleanup_strike_lands_before_publication(
     assert count_at_publication == [1], "the strike must be recorded before the failure frames are published"
 
 
+def test_a_weaker_arm_during_the_window_does_not_shield_the_poison_reason() -> None:
+    # A weaker fence arming while a speculative poison arm awaits durable
+    # persistence bumps the entry generation without touching the poison
+    # provenance. The revocation must still recognize its own arm and
+    # downgrade the entry to the weaker fence rather than leaving disproved
+    # poison evidence active for its full deadline.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-window-weaker-arm")
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+        minimum_seconds=700.0,
+    )
+    armed_generation = http_bridge_quarantine_module._http_bridge_quarantine_generation(service, session.key)
+    # The concurrent weaker fence: kept out of the reason by the
+    # no-downgrade guard, but its arrival bumps the generation.
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
+    )
+
+    revoked = http_bridge_quarantine_module._revoke_http_bridge_poison_quarantine(
+        service,
+        session.key,
+        generation=armed_generation,
+    )
+
+    assert revoked is True, "the poison provenance must survive weaker-generation bumps"
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    assert entry.reason == http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON, (
+        "revocation downgrades to the concurrent weaker fence instead of evicting or keeping poison"
+    )
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is False
+
+
 @pytest.mark.asyncio
 async def test_a_stale_miss_does_not_pop_a_just_opened_episode() -> None:
     # A lookup that began before the key's first durable write completed can

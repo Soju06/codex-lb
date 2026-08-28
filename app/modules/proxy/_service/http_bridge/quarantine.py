@@ -48,6 +48,14 @@ class _HTTPBridgeQuarantineEntry:
     consecutive_eventless_timeouts: int = 0
     last_touched_monotonic: float = 0.0
     reason: str | None = None
+    # Generation at the most recent poison arm. Weaker arms during a
+    # speculative poison window bump ``generation`` without touching this,
+    # so a revocation can still recognize its own arm.
+    poison_generation: int = 0
+    # A weaker fence that arrived while the poison reason was active: the
+    # no-downgrade guard keeps the poison reason, and a later revocation of
+    # the poison evidence downgrades to this instead of evicting the entry.
+    suppressed_weaker_reason: str | None = None
 
 
 def _http_bridge_quarantine_registry(
@@ -115,8 +123,17 @@ def _revoke_http_bridge_poison_quarantine(
     if (
         entry is not None
         and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
-        and entry.generation == generation
+        # The poison provenance, not the raw generation: a weaker fence
+        # arming during the speculative window bumps the generation while
+        # the no-downgrade guard keeps the poison reason, and that must not
+        # let disproved poison evidence outlive its revocation.
+        and entry.poison_generation == generation
     ):
+        if entry.suppressed_weaker_reason is not None and entry.quarantined_until > time.monotonic():
+            entry.reason = entry.suppressed_weaker_reason
+            entry.suppressed_weaker_reason = None
+            entry.generation += 1
+            return True
         if restore_reason is not None and restore_until > time.monotonic():
             entry.reason = restore_reason
             entry.quarantined_until = restore_until
@@ -231,6 +248,13 @@ def _quarantine_http_bridge_session(
         and reason != _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
     ):
         entry.reason = reason
+        if reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
+            entry.poison_generation = entry.generation
+    else:
+        # The weaker fence stands on its own evidence; record it so a later
+        # revocation of the poison arm can downgrade to it instead of
+        # evicting the entry.
+        entry.suppressed_weaker_reason = reason
     _prune_http_bridge_quarantine_registry(registry, now)
     session.quarantined = True
     if already_quarantined:

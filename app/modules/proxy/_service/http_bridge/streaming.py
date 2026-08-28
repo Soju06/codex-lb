@@ -4670,16 +4670,6 @@ class _HTTPBridgeStreamingMixin:
                                             keepalive_count,
                                             max_keepalive_count,
                                         )
-                                        yield format_sse_event(
-                                            cast(
-                                                Mapping[str, JsonValue],
-                                                response_failed_event(
-                                                    "stream_idle_timeout",
-                                                    "Upstream did not respond within the keepalive window",
-                                                    response_id=downstream_response_id,
-                                                ),
-                                            )
-                                        )
 
                                         async def _idle_consult_and_clear() -> None:
                                             from app.modules.proxy._service.http_bridge.upstream_events import (
@@ -4719,15 +4709,33 @@ class _HTTPBridgeStreamingMixin:
                                                     session, episode=poison_episode
                                                 )
 
-                                        # The terminal frame is already published and the
-                                        # request detaches next: a client disconnect
-                                        # cancelling the generator mid-consult would abort
-                                        # the only abandonment this opening gets. Defer
-                                        # cancellation like the other funnels, then
-                                        # re-raise it.
+                                        # Created and registered as an owned cleanup task
+                                        # BEFORE the yield: a consumer that closes the
+                                        # generator after receiving the terminal frame
+                                        # injects GeneratorExit at that yield, and any
+                                        # cleanup only started afterwards would never run —
+                                        # while the detached request leaves no lifecycle to
+                                        # retry the abandonment. The task runs concurrently
+                                        # (the frame is not delayed behind the durable
+                                        # store) and survives the generator through the
+                                        # cleanup registry.
                                         idle_settlement_task = asyncio.create_task(
                                             _idle_consult_and_clear(),
                                             name=f"http-bridge-idle-poison-settlement-{session.durable_session_id}",
+                                        )
+                                        idle_cleanup_tasks = getattr(self, "_background_cleanup_tasks", None)
+                                        if idle_cleanup_tasks is not None:
+                                            idle_cleanup_tasks.add(idle_settlement_task)
+                                            idle_settlement_task.add_done_callback(idle_cleanup_tasks.discard)
+                                        yield format_sse_event(
+                                            cast(
+                                                Mapping[str, JsonValue],
+                                                response_failed_event(
+                                                    "stream_idle_timeout",
+                                                    "Upstream did not respond within the keepalive window",
+                                                    response_id=downstream_response_id,
+                                                ),
+                                            )
                                         )
                                         _idle_result, idle_cancellation = await _await_task_deferring_cancellation(
                                             idle_settlement_task

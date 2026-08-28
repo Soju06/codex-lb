@@ -1983,9 +1983,11 @@ class DurableBridgeRepository:
             rebound_from_account_id = operation.account_id
             rebound_from_model = operation.model
             rebound_from_parent_response_id = operation.parent_response_id
-            await self._session.execute(
-                delete(HttpBridgeOperationEvent).where(HttpBridgeOperationEvent.operation_id == operation_id)
-            )
+            # Recovery may rebind an operation that was using the chunked
+            # spool. Clear both spool backends before the replacement starts;
+            # otherwise stale chunks would be mixed with the new transcript
+            # and would also block undispatched rollback detection.
+            await self._delete_operation_spool_material((operation_id,))
             operation.account_id = account_id
             operation.model = model
             operation.parent_response_id = None
@@ -1994,6 +1996,7 @@ class DurableBridgeRepository:
             operation.response_id = None
             operation.event_bytes = 0
             operation.event_spool_complete = False
+            operation.spool_format = HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
             operation.response_output_items_json = None
             operation.response_output_items_complete = False
             operation.response_replay_input_json = None

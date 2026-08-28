@@ -485,6 +485,26 @@
 - [x] 2.99 The anchor-advance suppression fires only after the fresh
       anchor's registration succeeds
 
+- [x] 2.100 The pre-planning circuit load repeats for the canonical key
+      when continuity resolution replaces the incoming key, so aliased
+      paths receive the same quarantine protection
+
+- [x] 2.101 A lost persist whose returned row is neither the writer's own
+      stamp nor its unchanged base resets the one-clear marker, covering
+      equal-count replacements the load path cannot see
+
+- [x] 2.102 The completion's clear of its own session key fences on the
+      generation captured before its settlement and registration awaits,
+      sparing a quarantine armed during them
+
+- [x] 2.103 The grouped funnel writes the episode marker inside the same
+      owned task as the abandonment, so a cancellation between the durable
+      clear and the marker cannot skip it
+
+- [x] 2.104 The stream finalizer awaits a still-running idle settlement
+      before detaching and retiring, keeping the durable owner epoch alive
+      for the abandonment's continuity fence
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

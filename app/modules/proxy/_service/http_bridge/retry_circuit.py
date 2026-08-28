@@ -769,6 +769,21 @@ class _HTTPBridgeRetryCircuitMixin:
                             # spurious trip only allows one extra fenced
                             # abandonment.
                             state.poison_anchor_cleared = False
+                        if (
+                            persisted.updated_at_epoch != now_wall
+                            and persisted.updated_at_epoch != persisted_updated_at_epoch
+                        ):
+                            # This write lost to a foreign replacement row —
+                            # a landed write stamps max(base, now_wall), and
+                            # an unchanged row keeps the base. Adopting the
+                            # foreign epoch below makes later loads see the
+                            # episode as unchanged, so this is the only point
+                            # that can see the replacement; an equal-or-higher
+                            # count hides it from the check above, and a
+                            # marker carried across it would permanently
+                            # refuse the replacement episode its one
+                            # abandonment.
+                            state.poison_anchor_cleared = False
                         state.consecutive_failures = max(0, persisted.consecutive_failures)
                         state.cooldown_until = persisted_cooldown_until
                         state.last_detail = persisted.last_detail

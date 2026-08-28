@@ -213,6 +213,25 @@ def _http_bridge_quarantine_generation(service: Any, key: _HTTPBridgeSessionKey)
     return entry.generation
 
 
+def _http_bridge_quarantine_clear_fence(service: Any, key: _HTTPBridgeSessionKey) -> int | None:
+    """Capture the provenance fence a later completion clear must present.
+
+    Poison entries fence on their poison provenance so a weaker arm during
+    the completion's durable awaits cannot block the clear; other entries
+    fence on the raw generation. ``None`` records that nothing was active at
+    capture, so a quarantine armed afterwards survives the clear.
+    """
+    registry = _http_bridge_quarantine_registry(service)
+    now = time.monotonic()
+    _prune_http_bridge_quarantine_registry(registry, now)
+    entry = registry.get(key)
+    if entry is None or entry.quarantined_until <= now:
+        return None
+    if entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
+        return entry.poison_generation
+    return entry.generation
+
+
 def _quarantine_http_bridge_session(
     service: Any,
     session: _HTTPBridgeSession,
@@ -322,48 +341,54 @@ def _clear_http_bridge_quarantine(
     service: Any,
     session: _HTTPBridgeSession,
     *,
+    key_generation: int | None,
     additional_key: _HTTPBridgeSessionKey | None = None,
     additional_key_generation: int | None = None,
 ) -> None:
-    """A completed response disproves the current and recovery-origin wedges."""
+    """A completed response disproves the wedges captured when it settled.
+
+    Each key clears only against the generation fence captured before the
+    completion's durable awaits: a strike arming a new quarantine during
+    those awaits is fresh evidence this response does not disprove, and it
+    survives the clear. A poison entry fences on its own provenance — a
+    weaker arm during the window bumps the raw generation without disproving
+    the recovery — and a matched clear downgrades to a concurrent weaker
+    fence instead of evicting it.
+    """
     registry = _http_bridge_quarantine_registry(service)
-    session.quarantined = False
-    keys = (session.key,) if additional_key is None or additional_key == session.key else (session.key, additional_key)
-    for key in keys:
-        entry = registry.pop(key, None)
-        if key == additional_key and key != session.key:
-            # A poison entry fences on its own provenance: a weaker arm
-            # during the replay bumps the raw generation without disproving
-            # the recovery, and refusing the clear on that bump would leave
-            # a successfully replayed source classified as poisoned.
-            fence_generation = (
-                entry.poison_generation
-                if entry is not None and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
-                else entry.generation
-                if entry is not None
-                else None
-            )
-            if additional_key_generation is None or entry is None or fence_generation != additional_key_generation:
-                if entry is not None:
-                    registry[key] = entry
-                continue
-            if (
-                entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
-                and entry.suppressed_weaker_reason is not None
-                and entry.suppressed_weaker_until > time.monotonic()
-            ):
-                # The concurrent weaker fence stands on its own evidence:
-                # downgrade to it instead of evicting the entry with the
-                # disproved poison classification.
-                entry.reason = entry.suppressed_weaker_reason
-                entry.quarantined_until = entry.suppressed_weaker_until
-                entry.suppressed_weaker_reason = None
-                entry.suppressed_weaker_until = 0.0
-                entry.generation += 1
-                registry[key] = entry
-                continue
-        if entry is None or entry.quarantined_until <= time.monotonic():
-            continue
+    now = time.monotonic()
+
+    def clear_fenced(key: _HTTPBridgeSessionKey, captured_generation: int | None) -> bool:
+        entry = registry.get(key)
+        if entry is None:
+            return True
+        if entry.quarantined_until <= now:
+            # An inactive entry still carries the eventless strike counter;
+            # a healthy completion resets it regardless of the fence.
+            registry.pop(key, None)
+            return True
+        fence_generation = (
+            entry.poison_generation
+            if entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+            else entry.generation
+        )
+        if captured_generation is None or fence_generation != captured_generation:
+            return False
+        if (
+            entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+            and entry.suppressed_weaker_reason is not None
+            and entry.suppressed_weaker_until > now
+        ):
+            # The concurrent weaker fence stands on its own evidence:
+            # downgrade to it instead of evicting the entry with the
+            # disproved poison classification.
+            entry.reason = entry.suppressed_weaker_reason
+            entry.quarantined_until = entry.suppressed_weaker_until
+            entry.suppressed_weaker_reason = None
+            entry.suppressed_weaker_until = 0.0
+            entry.generation += 1
+            return False
+        registry.pop(key, None)
         _log_http_bridge_event(
             "session_quarantine_cleared",
             key,
@@ -373,3 +398,9 @@ def _clear_http_bridge_quarantine(
             cache_key_family=key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
+        return True
+
+    if clear_fenced(session.key, key_generation):
+        session.quarantined = False
+    if additional_key is not None and additional_key != session.key:
+        clear_fenced(additional_key, additional_key_generation)

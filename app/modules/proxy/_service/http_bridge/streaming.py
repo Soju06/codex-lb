@@ -1489,6 +1489,7 @@ class _HTTPBridgeStreamingMixin:
             bridge_session_key,
             request_model=payload.model,
         )
+        first_touch_circuit_key = bridge_session_key
         # Set when the quarantine check below suppresses the durable-anchor
         # injection for a full-resend payload; the session hydration and the
         # session-level anchor injection further down must honor it so the
@@ -1650,6 +1651,16 @@ class _HTTPBridgeStreamingMixin:
                 durable_lookup.canonical_key,
                 bridge_session_key.api_key_id,
             )
+            if bridge_session_key != first_touch_circuit_key:
+                # Continuity resolved through a turn-state, previous-response,
+                # or session alias whose canonical key differs from the
+                # incoming one: the poison row lives under the canonical key,
+                # so the pre-planning load runs again for it before the
+                # suppression checks below consult its quarantine.
+                await self._ensure_http_bridge_retry_circuit_loaded_for_key(
+                    bridge_session_key,
+                    request_model=payload.model,
+                )
             live_local_session_exists = await self._http_bridge_has_live_local_session(
                 key=bridge_session_key,
                 incoming_turn_state=incoming_turn_state_header,
@@ -4301,6 +4312,7 @@ class _HTTPBridgeStreamingMixin:
                 )
             yield terminal_event
             return
+        idle_settlement_task: asyncio.Task[None] | None = None
         try:
             if downstream_turn_state is not None and not account_neutral_recovery:
                 await self._register_http_bridge_turn_state(session, downstream_turn_state)
@@ -4843,6 +4855,20 @@ class _HTTPBridgeStreamingMixin:
                 yielded_any = True
         finally:
             with anyio.CancelScope(shield=True):
+                if idle_settlement_task is not None and not idle_settlement_task.done():
+                    # A consumer closing the generator right after the
+                    # terminal idle frame lands here while the settlement is
+                    # still consulting. The task survives through the cleanup
+                    # registry, but the retirement below releases the durable
+                    # owner epoch its abandonment fences on — so the owner
+                    # must outlive the settlement, not merely the task.
+                    try:
+                        await idle_settlement_task
+                    except (Exception, asyncio.CancelledError):
+                        logger.warning(
+                            "HTTP bridge idle poison settlement failed during stream finalization",
+                            exc_info=True,
+                        )
                 await self._detach_http_bridge_request(session, request_state=request_state)
                 session.last_used_at = _service_time().monotonic()
                 await self._maybe_release_idle_http_bridge_session_lease(session)

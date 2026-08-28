@@ -66,9 +66,14 @@ NOT skip finalization of the settled request. Every funnel that runs after
 its failed requests are drained and finalized — the reader settlement, the
 waiterless direct retirement, the partial stale-holder cleanup, the terminal
 settlement, and the streaming idle-recovery exhaustion alike — MUST complete
-its strike, episode consult, abandonment, and retirement under a deferred
-cancellation and re-raise the cancellation afterwards, because no request
-lifecycle remains to retry the abandonment it would otherwise skip. An
+its strike, episode consult, abandonment, episode marker, and retirement
+under a deferred cancellation and re-raise the cancellation afterwards,
+because no request lifecycle remains to retry the abandonment it would
+otherwise skip; the marker in particular MUST be written inside the same
+owned task as the abandonment it records, because a cancellation landing
+between the durable clear and a post-task marker write would leave the
+cleared episode unmarked and a later load would re-arm quarantine from the
+unchanged surviving row. An
 opening recorded by the streaming idle-recovery exhaustion MUST record its
 strike before the terminal event is published — so the cooldown and
 quarantine cover an immediate resend — and MUST run its consult and
@@ -76,7 +81,12 @@ abandonment as an owned cleanup task created before the terminal event is
 yielded — a consumer closing the generator after receiving that frame
 injects GeneratorExit at the yield, and cleanup only started afterwards
 would never run — with the task registered so it survives the generator,
-never delaying the terminal frame behind the durable store. The partial
+never delaying the terminal frame behind the durable store. The stream
+finalizer MUST await a still-running idle settlement task before detaching
+the request and releasing the session, because retirement releases the
+durable owner epoch the abandonment's continuity clear is fenced on, and a
+task that merely survives the generator loses that fence to a concurrent
+retirement. The partial
 stale-holder cleanup MUST order itself the same way: strike before its
 failure frames are published, abandonment after. The partial stale-holder cleanup's
 deferral MUST begin before its holders are finalized, covering finalization
@@ -153,7 +163,12 @@ own replica of the episode as well: the writer MUST reconcile from the
 returned row by adopting it wholesale — count, cooldown, detail, and version
 — without comparing replica wall clocks, so a reset stamped by a lagging
 clock still replaces the local episode and the next strike carries a base
-that actually exists on the row. A durable load MUST adopt the row the same
+that actually exists on the row. A lost write whose returned row is neither
+the writer's own stamp nor its unchanged base MUST reset the one-clear
+marker, even at an equal or higher failure count, because adopting the
+foreign version makes every later load see the replacement episode as
+unchanged and the persist reconciliation is the only point that can observe
+it. A durable load MUST adopt the row the same
 clock-free way whenever no local strike is waiting on its own durable write;
 only a strike between its record and its write keeps its local count
 dominant, and that write's own merge then reconciles it. A load whose lookup
@@ -172,7 +187,12 @@ one-clear marker records that its anchor was already abandoned, in which
 case re-arming would re-fence a recovered key. The first anchor-planning
 pass for a hard key MUST perform this load before any anchor decision, so
 the worker's first touch of an expired at-threshold poison key cannot plan
-the poisoned anchor into the admitted probe.
+the poisoned anchor into the admitted probe. When continuity resolution
+replaces the incoming key with a different canonical key, the load MUST be
+repeated for that canonical key before the suppression checks consult it,
+so a request arriving through a turn-state, previous-response, or session
+alias receives the same quarantine protection as one arriving on the
+canonical key directly.
 
 When the cooldown expires, each worker process MUST admit exactly one probe
 request and MUST keep suppressing its other non-bypassed requests for that
@@ -203,7 +223,12 @@ downgrades to, restored at its own deadline rather than the disproved
 arm's longer floor. A completion's generation-fenced quarantine clear MUST
 apply the same provenance fence and the same downgrade to poison entries,
 so a successful replay is not left classified as poisoned by a concurrent
-weaker arm's generation bump. That re-evaluation MUST turn on the merged opening itself and not on
+weaker arm's generation bump. The completion's clear of its own session key
+MUST fence the same way, on the generation captured before its settlement
+and registration awaits: a strike arming a new quarantine during those
+awaits is evidence the completion does not disprove, and that quarantine
+MUST survive the clear, or the next half-open probe is planned with the
+newly poisoned anchor on a key already marked loaded. That re-evaluation MUST turn on the merged opening itself and not on
 the cooldown it leaves: a merge can adopt a cooldown that has already elapsed,
 and such a key is at its threshold with no cooldown left, so the next request
 is the half-open probe the quarantine exists to protect. A `clean_close` opening MUST NOT quarantine the key.

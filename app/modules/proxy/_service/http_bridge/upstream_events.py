@@ -76,6 +76,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _clear_http_bridge_quarantine,
+    _http_bridge_quarantine_clear_fence,
     _record_http_bridge_quarantine_eventless_timeout,
     _record_http_bridge_quarantine_wedged_pending,
 )
@@ -2444,7 +2445,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 grouped_clear_detail = grouped_poison_detail
                 grouped_clear_strike_failures = grouped_poison_strike_failures
 
-                async def _consult_and_clear_grouped_anchor() -> Any:
+                async def _consult_and_clear_grouped_anchor() -> None:
                     # The episode consult is a durable await of its own: run
                     # it inside the same cancellation-deferred task as the
                     # clear, or a reader cancellation landing mid-consult
@@ -2461,7 +2462,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         ),
                     )
                     if grouped_poison_episode is None:
-                        return None
+                        return
                     durable_cleared = await _abandon_durable_http_bridge_continuity(
                         self,
                         session,
@@ -2475,21 +2476,27 @@ class _HTTPBridgeUpstreamEventsMixin:
                             grouped_previous_response_request_states
                         ),
                     )
-                    return grouped_poison_episode if durable_cleared else None
+                    if not durable_cleared:
+                        return
+                    # A mixed group's abandonment deliberately leaves the
+                    # circuit alive for its safe member, so the episode
+                    # survives and must remember its anchor was already
+                    # cleared — one poisoned anchor is abandoned once. The
+                    # marker belongs inside this owned task: a cancellation
+                    # landing between the durable clear and the marker write
+                    # would otherwise leave the cleared episode unmarked, and
+                    # an ordinary load would re-arm quarantine from the
+                    # unchanged surviving row after the safe replay had
+                    # already recovered the conversation.
+                    await self._http_bridge_mark_poison_anchor_cleared(session, episode=grouped_poison_episode)
 
                 grouped_clear_task = asyncio.create_task(
                     _consult_and_clear_grouped_anchor(),
                     name=f"http-bridge-grouped-anchor-clear-{session.durable_session_id}",
                 )
-                grouped_clear_result, grouped_clear_cancellation = await _await_task_deferring_cancellation(
+                _grouped_clear_result, grouped_clear_cancellation = await _await_task_deferring_cancellation(
                     grouped_clear_task
                 )
-                if grouped_clear_result is not None:
-                    # A mixed group's abandonment deliberately leaves the
-                    # circuit alive for its safe member, so the episode
-                    # survives and must remember its anchor was already
-                    # cleared — one poisoned anchor is abandoned once.
-                    await self._http_bridge_mark_poison_anchor_cleared(session, episode=grouped_clear_result)
                 if grouped_cancellation is None:
                     grouped_cancellation = grouped_clear_cancellation
             if grouped_cancellation is not None:
@@ -2910,6 +2917,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         # and any abandonment authorized before it fences on the old anchor
         # and cannot touch the one registered below.
         completion_circuit_settlement_failed = False
+        completion_quarantine_clear_fence: int | None = None
         if (
             event_type == "response.completed"
             and terminal_request_state is not None
@@ -2917,6 +2925,13 @@ class _HTTPBridgeUpstreamEventsMixin:
             and terminal_request_state.request_kind != "prewarm"
             and not terminal_request_state.skip_request_log
         ):
+            # Captured before the settle and registration awaits below: a
+            # concurrent request failing during those awaits arms a NEW
+            # same-key quarantine whose evidence this completion does not
+            # disprove, and the clear at the bottom must fence on what was
+            # armed when this response proved the session healthy, not on
+            # whatever owns the key by then.
+            completion_quarantine_clear_fence = _http_bridge_quarantine_clear_fence(self, session.key)
             if not terminal_request_state.verified_stale_anchor_replay:
                 circuit_settled = await self._clear_http_bridge_retry_circuit(session)
                 if not circuit_settled:
@@ -3000,6 +3015,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             _clear_http_bridge_quarantine(
                 self,
                 session,
+                key_generation=completion_quarantine_clear_fence,
                 additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
                 additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
             )

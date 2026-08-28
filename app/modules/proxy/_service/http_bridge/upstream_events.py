@@ -1011,7 +1011,7 @@ async def _abandon_durable_http_bridge_continuity(
     *,
     detail: str = "repeated_zero_event_idle_timeout",
     settle_circuit: bool = False,
-    expected_latest_response_id: object = _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
+    expected_continuity: object = _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
 ) -> bool:
     """Clear durable continuity before retiring a repeatedly poisoned bridge.
 
@@ -1023,11 +1023,14 @@ async def _abandon_durable_http_bridge_continuity(
     if session.durable_session_id is None or session.durable_owner_epoch is None:
         return False
     rebind_fence_kwargs: dict[str, Any] = {}
-    if expected_latest_response_id is not _POISON_ANCHOR_CAPTURE_UNAVAILABLE:
-        # Fence the continuity clear on the anchor captured when the episode
-        # was validated: a completion registering a fresh anchor in between
-        # changes the column and the fenced write matches nothing.
-        rebind_fence_kwargs["expected_latest_response_id"] = expected_latest_response_id
+    if expected_continuity is not _POISON_ANCHOR_CAPTURE_UNAVAILABLE:
+        # Fence the continuity clear on both anchors captured when the
+        # episode was validated: a completion registering a fresh response
+        # anchor or a turn-state write landing in between changes a column
+        # and the fenced write matches nothing.
+        expected_response_id, expected_turn_state = cast("tuple[str | None, str | None]", expected_continuity)
+        rebind_fence_kwargs["expected_latest_response_id"] = expected_response_id
+        rebind_fence_kwargs["expected_latest_turn_state"] = expected_turn_state
     try:
         cleared = await service._durable_bridge.rebind_session_account(
             session_id=session.durable_session_id,
@@ -1291,7 +1294,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             session,
                             detail=poison_candidate_detail,
                             settle_circuit=_http_bridge_abandonment_may_settle_circuit(pending_request_states),
-                            expected_latest_response_id=poison_expected_anchor,
+                            expected_continuity=poison_expected_anchor,
                         )
                         if not durable_cleared:
                             _log_http_bridge_event(
@@ -2429,7 +2432,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         self,
                         session,
                         detail=grouped_clear_detail,
-                        expected_latest_response_id=grouped_expected_anchor,
+                        expected_continuity=grouped_expected_anchor,
                         # A mixed group can hold a member with a verified safe
                         # replay whose dispatch claims the circuit generation;
                         # settling under it would remove the fence it depends
@@ -3459,7 +3462,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         session,
                         detail=terminal_poison_detail,
                         settle_circuit=True,
-                        expected_latest_response_id=terminal_expected_anchor,
+                        expected_continuity=terminal_expected_anchor,
                     )
             finally:
                 await _finalize_terminal_settlement(terminal_request_state)

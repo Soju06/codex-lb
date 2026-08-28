@@ -2966,7 +2966,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     session,
                     detail=poison_detail,
                     settle_circuit=_http_bridge_abandonment_may_settle_circuit(retired_request_states),
-                    expected_latest_response_id=poison_expected_anchor,
+                    expected_continuity=poison_expected_anchor,
                 )
                 if durable_cleared:
                     await self._http_bridge_mark_poison_anchor_cleared(session, episode=poison_episode)

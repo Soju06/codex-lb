@@ -933,13 +933,24 @@ class DurableBridgeRepository:
             values=values,
         )
 
-    async def latest_session_response_id(self, *, session_id: str) -> str | None:
-        """Read the durable session's current continuity anchor."""
+    async def latest_session_continuity(self, *, session_id: str) -> tuple[str | None, str | None] | None:
+        """Read the durable session's current continuity anchors.
+
+        Returns ``(latest_response_id, latest_turn_state)``, or ``None`` when
+        the session row does not exist. Both anchors are read together because
+        a continuity clear removes both: fencing on the response id alone
+        would let the clear match while a concurrently registered turn state
+        still occupies the row, deleting continuity the caller never proved
+        dead.
+        """
         result = await self._session.execute(
-            select(HttpBridgeSessionRecord.latest_response_id).where(HttpBridgeSessionRecord.id == session_id)
+            select(
+                HttpBridgeSessionRecord.latest_response_id,
+                HttpBridgeSessionRecord.latest_turn_state,
+            ).where(HttpBridgeSessionRecord.id == session_id)
         )
         row = result.first()
-        return None if row is None else row[0]
+        return None if row is None else (row[0], row[1])
 
     async def rebind_session_account(
         self,
@@ -950,14 +961,16 @@ class DurableBridgeRepository:
         account_id: str,
         clear_continuity: bool = False,
         expected_latest_response_id: object = REBIND_ANCHOR_UNFENCED,
+        expected_latest_turn_state: object = REBIND_ANCHOR_UNFENCED,
     ) -> bool:
         """Persist a replacement account only while this worker owns the lease.
 
-        ``expected_latest_response_id`` fences a continuity clear on the
-        anchor the caller validated: a fresh anchor registered by a
-        concurrent completion changes the column, the fenced UPDATE matches
-        zero rows, and the caller observes a failed clear instead of
-        deleting an anchor its episode never proved dead.
+        ``expected_latest_response_id`` and ``expected_latest_turn_state``
+        fence a continuity clear on the anchors the caller validated: fresh
+        continuity registered by a concurrent completion or turn-state write
+        changes a column, the fenced UPDATE matches zero rows, and the caller
+        observes a failed clear instead of deleting continuity its episode
+        never proved dead.
         """
 
         async with sqlite_writer_section():
@@ -980,6 +993,11 @@ class DurableBridgeRepository:
                         conditions.append(HttpBridgeSessionRecord.latest_response_id.is_(None))
                     else:
                         conditions.append(HttpBridgeSessionRecord.latest_response_id == expected_latest_response_id)
+                if expected_latest_turn_state is not REBIND_ANCHOR_UNFENCED:
+                    if expected_latest_turn_state is None:
+                        conditions.append(HttpBridgeSessionRecord.latest_turn_state.is_(None))
+                    else:
+                        conditions.append(HttpBridgeSessionRecord.latest_turn_state == expected_latest_turn_state)
             result = await self._session.execute(update(HttpBridgeSessionRecord).where(*conditions).values(**values))
             if clear_continuity and bool(getattr(result, "rowcount", 0)):
                 await self._clear_aliases_for_session(session_id)

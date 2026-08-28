@@ -393,6 +393,7 @@ class DurableBridgeSessionCoordinator:
         account_id: str,
         clear_continuity: bool = False,
         expected_latest_response_id: object = REBIND_ANCHOR_UNFENCED,
+        expected_latest_turn_state: object = REBIND_ANCHOR_UNFENCED,
     ) -> bool:
         del api_key_id
         async with self._session() as session:
@@ -403,12 +404,13 @@ class DurableBridgeSessionCoordinator:
                 account_id=account_id,
                 clear_continuity=clear_continuity,
                 expected_latest_response_id=expected_latest_response_id,
+                expected_latest_turn_state=expected_latest_turn_state,
             )
 
-    async def session_latest_response_id(self, *, session_id: str) -> str | None:
-        """Read the session's current continuity anchor for a fenced clear."""
+    async def session_latest_continuity(self, *, session_id: str) -> tuple[str | None, str | None] | None:
+        """Read the session's current continuity anchors for a fenced clear."""
         async with self._session() as session:
-            return await DurableBridgeRepository(session).latest_session_response_id(session_id=session_id)
+            return await DurableBridgeRepository(session).latest_session_continuity(session_id=session_id)
 
     async def release_live_session(
         self,

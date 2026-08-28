@@ -333,6 +333,20 @@
       CAS instead of the global registry lock, so a slow claim no longer
       parks every unrelated hard key behind it
 
+- [x] 2.61 A fenced settle that matches no row reloads the moved row and
+      retries its fence once against the current version — settle-wins,
+      matching the in-process rule — so a completion does not leave the
+      durable row suppressing the key it just proved healthy
+
+- [x] 2.62 The continuity clear captures and fences both continuity columns
+      (response anchor and turn state) at the consult, so a turn-state alias
+      written independently after the capture cannot be deleted by a clear
+      that matched on the response id alone
+
+- [x] 2.63 A strike the upsert dropped for its stale base is dropped from the
+      worker's local episode too: the merge adopts the returned reset lineage
+      instead of retaining the ended episode's count against the reset epoch
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

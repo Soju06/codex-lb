@@ -611,15 +611,25 @@ class _HTTPBridgeRetryCircuitMixin:
                         # A newer durable row with fewer failures than this
                         # worker holds means the lineage restarted (a reset,
                         # possibly already re-struck by another replica).
-                        # The marker belonged to the ended episode, in both
-                        # merge arms; a spurious trip only allows one extra
-                        # fenced abandonment.
-                        if (
+                        # Counts only shrink through a reset or a purge, so
+                        # this write was dropped by the upsert's reset arm:
+                        # its failures belong to the ended episode, and the
+                        # local state must adopt the reset lineage rather
+                        # than keep them. Keeping them would let the next
+                        # strike carry the reset epoch as its base and land
+                        # the old episode's count durably as fresh evidence.
+                        # The marker belonged to the ended episode too; a
+                        # spurious trip only allows one extra fenced
+                        # abandonment.
+                        lineage_reset = (
                             persisted.updated_at_epoch > state.persisted_updated_at_epoch
                             and persisted.consecutive_failures < state.consecutive_failures
-                        ):
+                        )
+                        if lineage_reset:
                             state.poison_anchor_cleared = False
-                        if persisted.updated_at_epoch > state.persisted_updated_at_epoch and not local_failure_is_newer:
+                        if lineage_reset or (
+                            persisted.updated_at_epoch > state.persisted_updated_at_epoch and not local_failure_is_newer
+                        ):
                             state.consecutive_failures = max(0, persisted.consecutive_failures)
                             state.cooldown_until = persisted_cooldown_until
                             state.last_detail = persisted.last_detail
@@ -795,7 +805,7 @@ class _HTTPBridgeRetryCircuitMixin:
         # unfenced clear on this degraded path could delete a fresh anchor a
         # sibling registered after the recheck below. A later strike retries
         # the consult with a working capture.
-        anchor_reader = getattr(self._durable_bridge, "session_latest_response_id", None)
+        anchor_reader = getattr(self._durable_bridge, "session_latest_continuity", None)
         durable_session_id = getattr(session, "durable_session_id", None)
         if anchor_reader is None or durable_session_id is None:
             return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
@@ -808,6 +818,10 @@ class _HTTPBridgeRetryCircuitMixin:
                 _hash_identifier(session.key.affinity_key),
                 exc_info=True,
             )
+            return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
+        if expected_anchor is None:
+            # The durable session row itself is gone; there is no continuity
+            # to clear and no columns for a fence to protect.
             return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
         # The one-clear marker lives in process memory, so a restart or
         # another replica cannot see it. The durable circuit row is the
@@ -1266,10 +1280,34 @@ class _HTTPBridgeRetryCircuitMixin:
             )
             if reset_matched is False and expected_updated_at_epoch is not None:
                 # The fenced reset matched no row: another writer moved it
-                # after this worker's lookup, so dropping the local state
-                # would report settlement while the durable episode
-                # survives to be reloaded. Keep the episode and let the
-                # next clear opportunity retry against the moved row.
+                # after this worker's lookup. This settlement carries the
+                # newer evidence — the completed response proved the key
+                # works — so reload the moved row once and retry the fence
+                # against its current version, the same settle-wins rule the
+                # in-process race already follows (a strike writer undoes
+                # its own row when the registry no longer maps its state).
+                moved = await self._durable_bridge.lookup_retry_circuit(
+                    session_key_kind=key.affinity_kind,
+                    session_key_value=key.affinity_key,
+                    api_key_id=key.api_key_id,
+                )
+                if moved is None or moved.consecutive_failures <= 0:
+                    # The moved row was purged or already reset: settled.
+                    reset_matched = True
+                else:
+                    reset_matched = await self._durable_bridge.clear_retry_circuit(
+                        session_key_kind=key.affinity_kind,
+                        session_key_value=key.affinity_key,
+                        api_key_id=key.api_key_id,
+                        expected_updated_at_epoch=moved.updated_at_epoch,
+                    )
+            if reset_matched is False and expected_updated_at_epoch is not None:
+                # Two fenced attempts both matched nothing: the row is
+                # moving faster than this settlement can chase it, so
+                # dropping the local state would report settlement while the
+                # durable episode survives to be reloaded. Keep the episode
+                # and let the next clear opportunity retry with a freshly
+                # loaded fence.
                 async with self._http_bridge_retry_circuit_lock:
                     if state is not None and self._http_bridge_retry_circuits.get(key) is None:
                         self._http_bridge_retry_circuits[key] = state

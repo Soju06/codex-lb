@@ -2808,6 +2808,10 @@ async def test_claim_release_error_does_not_mask_refresh_body_error(monkeypatch)
             "app_session_terminated",
             "Your session has been terminated. Please sign in again.",
         ),
+        (
+            "invalid_refresh_token",
+            "Refresh token invalid - re-login required.",
+        ),
     ],
 )
 @pytest.mark.asyncio

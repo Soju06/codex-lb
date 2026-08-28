@@ -13,6 +13,7 @@ class _WebSocketServiceProtocol(Protocol):
     _decide_websocket_failover_action: Any
     _downstream_websocket_is_idle: Any
     _drain_deferred_account_error_backoffs: Any
+    _drain_deferred_keyed_stream_health: Any
     _emit_pending_websocket_keepalive: Any
     _emit_websocket_connect_failure: Any
     _emit_websocket_connect_timeout: Any

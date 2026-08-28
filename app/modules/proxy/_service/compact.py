@@ -731,12 +731,11 @@ class _CompactMixin:
                 if owner_account_id == resolved_owner and session_identity is not None
             }
             if len(session_identities) > 1:
-                sources = ", ".join(source for source, _account_id, _session_id in owner_refs)
                 raise ProxyResponseError(
                     502,
                     openai_error(
                         "continuity_owner_conflict",
-                        f"Account-owned continuity sources conflict ({sources}); retry the logical turn.",
+                        "Turn-state owner sessions conflict; retry the logical turn.",
                         error_type="server_error",
                     ),
                 )

@@ -9,6 +9,7 @@ from typing import Any, TypeVar, cast
 
 import anyio
 
+from app.core.balancer.types import UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
@@ -49,6 +50,7 @@ from app.core.usage.live_hub import publish_live_usage
 from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
 from app.core.utils.request_id import reset_request_id, set_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.db.models import Account
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -145,6 +147,7 @@ from app.modules.proxy._service.support import (
     _clear_websocket_deferred_reasoning_downstream_texts,
     _clear_websocket_precreated_replay_fallback,
     _clear_websocket_request_error_overrides,
+    _DeferredKeyedStreamHealthPenalty,
     _HTTPBridgeCompletedDeliveryScope,
     _HTTPBridgeRetryCircuitAttemptSelection,
     _HTTPBridgeSession,
@@ -1785,6 +1788,35 @@ class _HTTPBridgeUpstreamEventsMixin:
                     except asyncio.QueueFull:
                         pass
 
+    async def _handle_or_defer_precreated_stream_health(
+        self: Any,
+        request_state: _WebSocketRequestState | None,
+        account: Account,
+        error: UpstreamError,
+        code: str,
+    ) -> None:
+        """Write account health now, or defer it until reservation settlement.
+
+        Keyed pre-created retry branches run while the request's API-key
+        reservation is still open. An immediate ``_handle_stream_error`` would
+        mutate account health before the reservation settles, violating the
+        settlement-ordering invariant (api-keys spec: the health write waits
+        for settlement, and unconfirmed settlement leaves health unapplied).
+        Queue the classified write on the request state instead;
+        ``_drain_deferred_keyed_stream_health`` applies it after settlement or
+        fallback release commits. Unkeyed requests keep the immediate write.
+        ``account_health_error_handled`` is set either way so terminal
+        finalization does not apply a duplicate penalty.
+        """
+        if request_state is not None and request_state.api_key_reservation is not None:
+            request_state.deferred_keyed_stream_health.append(
+                _DeferredKeyedStreamHealthPenalty(account=account, error=error, code=code)
+            )
+        else:
+            await self._handle_stream_error(account, error, code)
+        if request_state is not None:
+            setattr(request_state, "account_health_error_handled", True)
+
     async def _process_parsed_http_bridge_upstream_event(
         self: Any,
         session: "_HTTPBridgeSession",
@@ -2398,12 +2430,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                     status_request_state.response_id = None
             if status_request_state.propagate_http_errors:
                 _signal_http_bridge_capacity_startup_wait(status_request_state)
-            await self._handle_stream_error(
+            await self._handle_or_defer_precreated_stream_health(
+                status_request_state,
                 session.account,
                 {"message": retry_error_message or "Upstream error"},
                 retry_error_code,
             )
-            setattr(status_request_state, "account_health_error_handled", True)
             retry_consumer_attached = (
                 retry_consumer_attached
                 and status_request_state.event_queue is not None
@@ -2464,13 +2496,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                         if _http_bridge_request_counts_against_queue(status_request_state):
                             session.queued_request_count = max(0, session.queued_request_count - 1)
         elif owner_pinned_quota_error is not None and not is_previous_response_not_found_event:
-            await self._handle_stream_error(
+            await self._handle_or_defer_precreated_stream_health(
+                status_request_state,
                 session.account,
                 {"message": retry_error_message or "Upstream error"},
                 owner_pinned_quota_error,
             )
-            if status_request_state is not None:
-                setattr(status_request_state, "account_health_error_handled", True)
             if (
                 status_request_state is not None
                 and status_request_state.previous_response_id is not None
@@ -2590,13 +2621,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             and retry_error_code != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
             and not is_previous_response_not_found_event
         ):
-            await self._handle_stream_error(
+            await self._handle_or_defer_precreated_stream_health(
+                status_request_state,
                 session.account,
                 {"message": retry_error_message or "Upstream error"},
                 retry_error_code,
             )
-            if status_request_state is not None:
-                setattr(status_request_state, "account_health_error_handled", True)
             if status_request_state is not None and status_request_state.previous_response_id is None:
                 async with session.pending_lock:
                     if status_request_state not in session.pending_requests:

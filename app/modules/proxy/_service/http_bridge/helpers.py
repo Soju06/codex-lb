@@ -208,6 +208,20 @@ _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created
 T = TypeVar("T")
 
 _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR = "_codex_lb_started_at"
+# Provenance marker for bridge failures raised strictly before the current
+# request dispatched upstream. Only exceptions carrying this attribute are
+# safe for the streaming wrapper's raw-HTTP replay.
+_HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR = "http_bridge_pre_submit_failure"
+# Provenance for a bridge failure whose prepared payload carried a continuity
+# anchor the incoming payload does not, making a raw-HTTP replay of the
+# incoming payload continuity-incomplete.
+_HTTP_BRIDGE_PREPARED_ANCHOR_ATTR = "http_bridge_prepared_continuity_anchor"
+# Provenance for a bridge retry-circuit cooldown suppression proved replay-safe
+# at the pre-dispatch submission gate. It cannot be inferred from the error
+# code: ``_raise_proxy_budget_exhausted`` emits the same
+# ``upstream_request_timeout`` for an ordinary pre-submit budget exhaustion,
+# which is overload or host-network evidence and must not be replayed.
+_HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR = "http_bridge_cooldown_suppression"
 _HTTP_BRIDGE_STALE_INFLIGHT_MIN_SECONDS = 120.0
 _HTTP_BRIDGE_STALE_INFLIGHT_TIMEOUT_MULTIPLIER = 6.0
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from collections.abc import Callable
@@ -8,6 +9,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
@@ -18,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 ENCRYPTION_KEY_FINGERPRINT_SENTINEL = "encryption_key_fingerprint"
 _FINGERPRINT_PREFIX_CHARS = 12
+_SQLITE_LOCK_RETRY_DELAYS_SECONDS = (0.05, 0.1, 0.2)
 
 
 class EncryptionKeyFingerprintMismatchError(RuntimeError):
@@ -32,6 +35,11 @@ def compute_encryption_key_fingerprint(key_file: Path | None = None) -> str:
 
 def _fingerprint_prefix(fingerprint: str) -> str:
     return fingerprint[: len("sha256:") + _FINGERPRINT_PREFIX_CHARS]
+
+
+def _is_sqlite_lock_error(exc: OperationalError) -> bool:
+    message = str(exc.orig if exc.orig is not None else exc).lower()
+    return "database is locked" in message or "database is busy" in message
 
 
 async def _stamp_if_absent(session: AsyncSession, fingerprint: str) -> None:
@@ -83,11 +91,20 @@ async def verify_encryption_key_fingerprint(
         session_factory = SessionLocal
 
     local_fingerprint = compute_encryption_key_fingerprint(key_file)
-    async with session_factory() as session:
-        await _stamp_if_absent(session, local_fingerprint)
-        stored = await session.scalar(
-            select(RuntimeSentinel.value).where(RuntimeSentinel.name == ENCRYPTION_KEY_FINGERPRINT_SENTINEL)
-        )
+    stored: str | None = None
+    for attempt, delay_seconds in enumerate((*_SQLITE_LOCK_RETRY_DELAYS_SECONDS, None)):
+        try:
+            async with session_factory() as session:
+                await _stamp_if_absent(session, local_fingerprint)
+                stored = await session.scalar(
+                    select(RuntimeSentinel.value).where(RuntimeSentinel.name == ENCRYPTION_KEY_FINGERPRINT_SENTINEL)
+                )
+        except OperationalError as exc:
+            if delay_seconds is None or not _is_sqlite_lock_error(exc):
+                raise
+            await asyncio.sleep(delay_seconds)
+            continue
+        break
 
     if stored is None or stored == local_fingerprint:
         return

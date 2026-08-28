@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
 
+from app.core.auth import refresh as refresh_module
 from app.core.auth.refresh import RefreshError, TokenRefreshResult
+from app.core.balancer import AccountState, select_account
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountRefreshClaim, AccountStatus, StickySession, StickySessionKind
@@ -121,6 +125,61 @@ async def _commit_peer_reauth(account_id: str, *, refresh_token: str) -> None:
         account.status = AccountStatus.ACTIVE
         account.deactivation_reason = None
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_invalid_refresh_token_payload_requires_reauth_and_excludes_routing(db_setup, monkeypatch):
+    """Exercise the OAuth payload, guarded DB downgrade, and routing exclusion together."""
+    account_id = "acc_invalid_refresh_token"
+    await _create_account(account_id)
+
+    class InvalidRefreshTokenResponse:
+        status = 400
+
+        async def json(self, *, content_type: object = None) -> dict[str, object]:
+            del content_type
+            return {
+                "error": {
+                    "code": "invalid_refresh_token",
+                    "message": "Refresh token invalid - re-login required.",
+                }
+            }
+
+        async def text(self) -> str:
+            return ""
+
+        async def __aenter__(self) -> InvalidRefreshTokenResponse:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class InvalidRefreshTokenSession:
+        def post(self, *_args: object, **_kwargs: object) -> InvalidRefreshTokenResponse:
+            return InvalidRefreshTokenResponse()
+
+    @asynccontextmanager
+    async def fake_lease_http_session(_session: object) -> AsyncIterator[InvalidRefreshTokenSession]:
+        yield InvalidRefreshTokenSession()
+
+    monkeypatch.setattr(refresh_module, "lease_http_session", fake_lease_http_session)
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        account = await repo.get_by_id(account_id)
+        assert account is not None
+        manager = AuthManager(repo, refresh_claims=RefreshClaimCoordinator(claimant_id="invalid-token-test"))
+
+        with pytest.raises(RefreshError) as exc_info:
+            await manager.refresh_account(account)
+
+    assert exc_info.value.code == "invalid_refresh_token"
+    assert exc_info.value.is_permanent is True
+    status, stored_refresh_token, sticky_present = await _account_snapshot(account_id)
+    assert status == AccountStatus.REAUTH_REQUIRED
+    assert stored_refresh_token == "refresh-old"
+    assert sticky_present is False
+    assert select_account([AccountState(account_id=account_id, status=status)]).account is None
 
 
 @pytest.mark.asyncio

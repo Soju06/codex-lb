@@ -200,7 +200,7 @@ def test_identity_conflict_mapping_redacts_domain_exception_identity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_post_import_validation_success_clears_only_new_account_routing(monkeypatch) -> None:
+async def test_post_import_validation_success_clears_imported_and_replaced_account_routing(monkeypatch) -> None:
     repo = SimpleNamespace(get_by_id=AsyncMock(return_value=SimpleNamespace(status=AccountStatus.ACTIVE)))
     service = AccountsService(repo=cast(AccountsRepository, repo))
     service._import_usage_refresh_allowed = AsyncMock(return_value=True)
@@ -219,7 +219,7 @@ async def test_post_import_validation_success_clears_only_new_account_routing(mo
     )
 
     assert warnings == {}
-    assert cleared == ["new-account"]
+    assert cleared == ["new-account", "local-account"]
 
 
 @pytest.mark.asyncio

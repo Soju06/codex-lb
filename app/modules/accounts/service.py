@@ -678,7 +678,7 @@ class AccountsService:
                     validation_succeeded = False
 
             if validation_succeeded:
-                if result.outcome == "imported" and account is not None and account.status == AccountStatus.ACTIVE:
+                if account is not None and account.status == AccountStatus.ACTIVE:
                     clear_account_routing_unavailable(result.account_id)
             else:
                 mark_account_routing_unavailable(result.account_id)

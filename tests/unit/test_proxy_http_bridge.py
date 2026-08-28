@@ -34234,6 +34234,123 @@ async def test_waiterless_funnel_clears_the_anchor_at_the_capped_threshold(
     assert durable_bridge.rebind_session_account.await_args.kwargs["clear_continuity"] is True
 
 
+@pytest.mark.asyncio
+async def test_waiterless_retirement_skips_strikes_for_requests_with_a_safe_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mirror of the terminal and grouped paths: a retired request that still
+    # holds a verified safe replay is about to re-dispatch and claim the
+    # circuit generation, so two such recoverable failures must not open the
+    # circuit, quarantine the key, or clear the durable anchor under it.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        rebind_session_account=AsyncMock(return_value=True),
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
+    service._durable_bridge = durable_bridge
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
+
+    session = None
+    for attempt_number in range(2):
+        owner = _make_eventless_http_bridge_owner(request_id=f"req-safe-replay-{attempt_number}")
+        owner.previous_response_id = "resp-safe-replay"
+        owner.fresh_upstream_request_is_retry_safe = True
+        owner.fresh_upstream_request_text = '{"model": "gpt-5.6-sol"}'
+        session = _make_bridge_session(
+            key_value="bridge-safe-replay-retirement",
+            pending_requests=deque([owner]),
+            queued_request_count=1,
+        )
+        session.durable_session_id = "durable-safe-replay-retirement"
+        session.durable_owner_epoch = 3
+        await service._retire_stale_pending_http_bridge_session(session, detail="stream_incomplete")
+
+    assert session is not None
+    assert session.key not in cast(Any, service)._http_bridge_retry_circuits, (
+        "a request holding a safe replay must not strike the circuit"
+    )
+    durable_bridge.rebind_session_account.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_settled_episode_owes_no_anchor_clear() -> None:
+    # Between a strike and its poison-clear consult, a multiplexed sibling can
+    # complete, settle the circuit, and persist a fresh valid anchor. The
+    # stale strike still holds the detached count; clearing on it would delete
+    # the sibling's anchor. The decision must read the live episode instead.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-stale-episode")
+
+    owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
+    assert owed is False, "a settled episode owes nothing, whatever the stale strike captured"
+
+    # A fresh sub-threshold episode registered after the settle owes nothing
+    # either; the stale captured count must not stand in for the live one.
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=time.monotonic())
+    state.consecutive_failures = 1
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
+    assert owed is False
+
+    state.consecutive_failures = 2
+    owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
+    assert owed is True, "the live episode at threshold still owes exactly one clear"
+
+
+@pytest.mark.asyncio
+async def test_threshold_one_quarantines_on_the_first_poison_strike(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With the abandonment threshold configured to 1, the first terminal
+    # poison strike clears the anchor before the circuit ever opens, and the
+    # terminal frame is published before that clear. Without quarantine cover
+    # armed by that same strike, an immediate client retry is planned with the
+    # dead anchor while the clear is still awaiting I/O.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-threshold-one")
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        http_bridge_retry_circuit_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_anchor_poison_failure_threshold=1),
+    )
+
+    failures = await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+
+    assert failures == 1
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is True, (
+        "the strike that satisfies the effective threshold must arm the quarantine"
+    )
+
+
+@pytest.mark.asyncio
+async def test_precreated_retry_block_for_key_reports_the_source_half_open_lease() -> None:
+    # The same-owner recovery dispatches on a unique internal session while
+    # the circuit that refused it lives on the source hard key. During the
+    # half-open lease the source cooldown is already zero, so reading the
+    # replacement session (no circuit) plus the source cooldown advertised a
+    # ~1s retry-after while the caller was barred for the rest of the lease.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-source-half-open")
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=now)
+    state.consecutive_failures = 2
+    state.cooldown_until = 0.0
+    state.half_open_until = now + 240.0
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+
+    seconds, reason = await service._http_bridge_precreated_retry_block_for_key(session.key)
+
+    assert reason == "hard_key_half_open"
+    assert 200.0 < seconds <= 240.0
+
+
 def test_weaker_quarantine_reason_cannot_downgrade_active_poison_evidence() -> None:
     # One registry entry per key: a wedged-reattach quarantine arriving while
     # the poison quarantine is still active used to overwrite the only record

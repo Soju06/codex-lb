@@ -154,6 +154,29 @@
       half-open lease, keeping `cooldown_until` and `half_open_until`
       mutually exclusive so a stale lease cannot suppress the next probe
 
+- [x] 2.23 An abandonment is owed only while its failure episode is still
+      registered. The clear decision reads the live episode's count and
+      marker instead of the caller's captured count, so a circuit settled by
+      a concurrent multiplexed success (or replaced by a fresh sub-threshold
+      episode) cannot have a stale strike delete the anchor that success
+      just persisted
+
+- [x] 2.24 The waiterless retirement funnel applies the same
+      no-safe-replay test as the terminal and grouped paths before recording
+      its strike or reaching the poison clear; the pre-drain handoff with no
+      request states keeps striking
+
+- [x] 2.25 A configured abandonment threshold below the circuit threshold
+      arms the poison quarantine on the strike that satisfies it, so the
+      terminal frame is never published with the dead anchor uncovered while
+      the clear is still awaiting I/O
+
+- [x] 2.26 The same-owner stale-anchor recovery reads its suppression block
+      from the source circuit key, so a generation claim refused during the
+      half-open lease reports the lease's remaining time instead of a ~1s
+      cooldown. The conflicting retirement-threshold sentence in the delta
+      spec now states the capped rule everywhere
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

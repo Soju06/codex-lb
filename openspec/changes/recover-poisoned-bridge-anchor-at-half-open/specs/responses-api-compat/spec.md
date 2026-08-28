@@ -44,13 +44,14 @@ When such a strike opens the circuit on a poison-class detail, the proxy MUST
 also clear the stored durable continuity anchor for that key. The quarantine
 armed with the strike only suppresses injection in this process and expires,
 so without the durable clear the same dead anchor is restored on the next
-reattach and re-poisons the key after every cooldown. On the terminal and grouped settlement
-paths the configured anchor-poison threshold MUST be capped at the circuit's own
-failure threshold. Above that threshold the key is refused for 60-600s per
-strike, so a higher value cannot be reached at any useful rate. A configured
-value below the circuit threshold MUST still be honoured. The retirement and
-close funnels keep the configured threshold unchanged, because no circuit gates
-those paths first.
+reattach and re-poisons the key after every cooldown. On every settlement path — terminal,
+grouped, retirement, and close alike — the configured anchor-poison threshold
+MUST be capped at the circuit's own failure threshold. Above that threshold
+the key is refused for 60-600s per strike, so a higher value cannot be reached
+at any useful rate. A configured value below the circuit threshold MUST still
+be honoured, and the poison quarantine MUST be armed no later than the strike
+that satisfies that effective threshold, so a clear that fires before the
+circuit opens is never published without quarantine cover.
 
 A grouped settlement whose strikes carry the circuit through that threshold
 MUST clear the anchor as well, after its grouped terminal frames are published.
@@ -371,7 +372,7 @@ Quarantine state MUST be bounded and self-recovering: it is in-memory and sessio
 
 A quarantine armed for reason `retry_circuit_poisoned_anchor` MUST NOT have that reason replaced by a weaker session-scoped fence while it is still active: the registry holds one entry per key, and the wedged-reattach and repeated-eventless fences carry no evidence about the anchor, so letting either overwrite the reason erases the only record that the anchor was proven dead.
 
-The durable anchor abandonment MUST use the same capped threshold as the rest of this capability, in every funnel that can reach it. Comparing the raw configured setting in the retirement funnels leaves the poisoned anchor stored while the circuit is already cooling on it, which is the unreachability this change exists to remove. One poisoned anchor MUST be abandoned once per episode; a fenced or failed abandonment leaves it owed so the next strike retries.
+The durable anchor abandonment MUST use the same capped threshold as the rest of this capability, in every funnel that can reach it. Comparing the raw configured setting in the retirement funnels leaves the poisoned anchor stored while the circuit is already cooling on it, which is the unreachability this change exists to remove. One poisoned anchor MUST be abandoned once per episode; a fenced or failed abandonment leaves it owed so the next strike retries. An abandonment is owed only while its failure episode is still the registered one: a circuit settled by a concurrent success ends the episode, and a stale strike's captured count MUST NOT clear the fresh anchor that success persisted. A retired request that still holds a safe replay MUST NOT strike the circuit or trigger the abandonment on any funnel, matching the terminal and grouped paths; a pre-drain retirement handoff with no request states keeps striking.
 
 A quarantine armed for reason `retry_circuit_poisoned_anchor` MUST remain in force for at least the remaining cooldown of the circuit that armed it plus that circuit's half-open lease, because the probe it exists to protect is only admitted once that cooldown expires and may then be admitted anywhere inside the lease that follows. The default TTL alone MUST NOT be relied on for this: it equals the circuit's maximum cooldown, so at that cooldown the quarantine would otherwise lapse in the same instant the cooldown does and hand the poisoned anchor back to the very request the cooldown was holding.
 

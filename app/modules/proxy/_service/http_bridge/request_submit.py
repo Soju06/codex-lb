@@ -1911,21 +1911,15 @@ class _HTTPBridgeRequestSubmitMixin:
                             )
                         )
                         if not generation_claimed:
+                            # The block lives on the source hard key: this
+                            # replacement session's own unique key never has a
+                            # circuit, and the source key's cooldown alone is
+                            # already zero during its half-open lease.
                             (
                                 suppressed_block_seconds,
                                 suppressed_block_reason,
-                            ) = await self._http_bridge_precreated_retry_block(session)
-                            suppressed_retry_after_seconds = max(
-                                1,
-                                math.ceil(
-                                    max(
-                                        suppressed_block_seconds,
-                                        await self._http_bridge_retry_circuit_cooldown_seconds_for_key(
-                                            circuit_key or session.key,
-                                        ),
-                                    )
-                                ),
-                            )
+                            ) = await self._http_bridge_precreated_retry_block_for_key(circuit_key or session.key)
+                            suppressed_retry_after_seconds = max(1, math.ceil(suppressed_block_seconds))
                             _log_http_bridge_event(
                                 "stale_anchor_replay_generation_suppressed",
                                 circuit_key or session.key,
@@ -2926,7 +2920,19 @@ class _HTTPBridgeRequestSubmitMixin:
         # deliberately empties ``pending_requests`` before retirement. Without
         # that handoff, genuine pre-response failures disappear from circuit
         # accounting while idle closes and request failures look identical.
-        if retired_request_count > 0 and response_events_seen == 0:
+        # Mirror the terminal and grouped settlement paths: a retired request
+        # that still holds a verified safe replay is about to be re-dispatched
+        # and will claim the circuit generation, so it must not strike the
+        # circuit or trigger the poison clear. Only the safe-replay half of
+        # the settlement predicate applies here — an unanchored eventless
+        # owner has no replay to protect and keeps striking, and so does the
+        # pre-drain handoff whose state list is already empty.
+        retired_states_present = [state for state in retired_request_states if state is not None]
+        retirement_strike_eligible = not retired_states_present or any(
+            not (state.fresh_upstream_request_is_retry_safe and state.fresh_upstream_request_text)
+            for state in retired_states_present
+        )
+        if retired_request_count > 0 and response_events_seen == 0 and retirement_strike_eligible:
             consecutive_failures = await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
                 session,
                 detail=retry_circuit_detail or detail,

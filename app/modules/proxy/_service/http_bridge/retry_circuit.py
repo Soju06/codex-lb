@@ -13,7 +13,7 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
     _quarantine_http_bridge_session,
 )
-from app.modules.proxy._service.observability import _hash_identifier
+from app.modules.proxy._service.observability import _hash_identifier, _service_get_settings
 from app.modules.proxy._service.support import (
     _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeRetryCircuitAttemptSelection,
@@ -686,14 +686,24 @@ class _HTTPBridgeRetryCircuitMixin:
         abandonment settles the anchor; a failed one leaves the marker unset so
         the next strike retries it, which is the contract the retirement
         funnels already advertise in their failure telemetry.
+
+        The decision reads the currently registered episode, not the caller's
+        captured count. Between the strike and this consult a multiplexed
+        sibling can complete, settle the circuit, and persist a fresh valid
+        anchor; the caller's detached state still reports the old count, and
+        clearing on it would delete the anchor the sibling just stored. An
+        absent or below-threshold registered episode therefore owes nothing.
         """
         if consecutive_failures is None:
             return False
-        if consecutive_failures < _http_bridge_effective_anchor_poison_threshold(configured_threshold):
-            return False
+        effective_threshold = _http_bridge_effective_anchor_poison_threshold(configured_threshold)
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
-            return state is None or not state.poison_anchor_cleared
+            return (
+                state is not None
+                and state.consecutive_failures >= effective_threshold
+                and not state.poison_anchor_cleared
+            )
 
     async def _http_bridge_mark_poison_anchor_cleared(self: Any, session: _HTTPBridgeSession) -> None:
         """Record that this episode's poisoned anchor has been abandoned."""
@@ -729,6 +739,41 @@ class _HTTPBridgeRetryCircuitMixin:
                 if state.consecutive_failures >= _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD
                 else 0.0
             )
+        if half_open_remaining > cooldown_remaining:
+            return half_open_remaining, "hard_key_half_open"
+        return cooldown_remaining, "hard_key_cooldown"
+
+    async def _http_bridge_precreated_retry_block_for_key(
+        self: Any,
+        key: _HTTPBridgeSessionKey,
+    ) -> tuple[float, str]:
+        """Return ``(seconds_blocked, reason)`` for a suppressed replacement.
+
+        The same-owner stale-anchor recovery dispatches on a unique internal
+        session while the circuit that refused it lives on the source hard
+        key, so the block has to be read from that key. During the half-open
+        lease the cooldown is already zero; reading only the replacement
+        session (which has no circuit) and the source key's cooldown
+        advertises a ~1s retry-after while the caller is barred for the rest
+        of the lease.
+        """
+        if key.strength != "hard":
+            return 0.0, "none"
+        now = time.monotonic()
+        async with self._http_bridge_retry_circuit_lock:
+            state = self._http_bridge_retry_circuits.get(key)
+            local_cooldown_remaining = max(0.0, state.cooldown_until - now) if state is not None else 0.0
+            half_open_remaining = (
+                max(0.0, state.half_open_until - now)
+                if state is not None and state.consecutive_failures >= _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD
+                else 0.0
+            )
+        cooldown_remaining = max(
+            local_cooldown_remaining,
+            await self._http_bridge_retry_circuit_cooldown_seconds_for_key(key),
+        )
+        if cooldown_remaining <= 0.0 and half_open_remaining <= 0.0:
+            return 0.0, "none"
         if half_open_remaining > cooldown_remaining:
             return half_open_remaining, "hard_key_half_open"
         return cooldown_remaining, "hard_key_cooldown"
@@ -850,6 +895,23 @@ class _HTTPBridgeRetryCircuitMixin:
                         backoff,
                         detail,
                     )
+                if poison_class_failure and not quarantine_poisoned_anchor:
+                    # A configured abandonment threshold below the circuit
+                    # threshold clears the anchor before the circuit ever
+                    # opens, and the terminal frame is published before that
+                    # clear. The quarantine has to cover this window too, or
+                    # an immediate client retry is planned with the dead
+                    # anchor while the clear is still awaiting I/O.
+                    configured_poison_threshold = getattr(
+                        _service_get_settings(),
+                        "http_responses_session_bridge_anchor_poison_failure_threshold",
+                        threshold,
+                    )
+                    if state.consecutive_failures >= _http_bridge_effective_anchor_poison_threshold(
+                        configured_poison_threshold
+                    ):
+                        quarantine_poisoned_anchor = True
+                        quarantine_cooldown_remaining = max(0.0, state.cooldown_until - now)
         if duplicate_attempt is not None:
             return await self._await_http_bridge_retry_circuit_attempt_settlement(
                 session,

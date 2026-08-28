@@ -607,57 +607,39 @@ class _HTTPBridgeRetryCircuitMixin:
                 async with self._http_bridge_retry_circuit_lock:
                     current = self._http_bridge_retry_circuits.get(session.key)
                     if current is state:
-                        local_failure_is_newer = state.last_failure_monotonic > state.last_durable_load_monotonic
-                        # A newer durable row with fewer failures than this
-                        # worker holds means the lineage restarted (a reset,
-                        # possibly already re-struck by another replica).
-                        # Counts only shrink through a reset or a purge, so
-                        # this write was dropped by the upsert's reset arm:
-                        # its failures belong to the ended episode, and the
-                        # local state must adopt the reset lineage rather
-                        # than keep them. Keeping them would let the next
-                        # strike carry the reset epoch as its base and land
-                        # the old episode's count durably as fresh evidence.
-                        # The marker belonged to the ended episode too; a
-                        # spurious trip only allows one extra fenced
-                        # abandonment.
-                        lineage_reset = (
-                            persisted.updated_at_epoch > state.persisted_updated_at_epoch
-                            and persisted.consecutive_failures < state.consecutive_failures
-                        )
-                        if lineage_reset:
+                        # The upsert returns the post-write row: when this
+                        # write landed the row reflects it, and when its base
+                        # mismatched the row is the lineage that owns the key
+                        # now and this writer must reconcile from it. Strikes
+                        # for one key are serialized across their durable
+                        # awaits, so no local failure can be recorded while
+                        # this persist is in flight, and the returned row is
+                        # adopted wholesale. Adoption compares no wall
+                        # clocks: a reset stamped by a lagging replica clock
+                        # still replaces the local episode, and taking the
+                        # row's epoch exactly — never the max — is what lets
+                        # the next strike carry a base that actually exists.
+                        if persisted.consecutive_failures < state.consecutive_failures:
+                            # The row does not carry this worker's failures:
+                            # the lineage was reset, purged, or replaced.
+                            # The marker belonged to the ended episode; a
+                            # spurious trip only allows one extra fenced
+                            # abandonment.
                             state.poison_anchor_cleared = False
-                        if lineage_reset or (
-                            persisted.updated_at_epoch > state.persisted_updated_at_epoch and not local_failure_is_newer
-                        ):
-                            state.consecutive_failures = max(0, persisted.consecutive_failures)
-                            state.cooldown_until = persisted_cooldown_until
-                            state.last_detail = persisted.last_detail
-                            if state.consecutive_failures == 0:
-                                # A newer zero-failure row is a durable
-                                # reset ending the marker's episode.
-                                state.poison_anchor_cleared = False
-                        else:
-                            state.consecutive_failures = max(state.consecutive_failures, persisted.consecutive_failures)
-                            state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
-                            if local_failure_is_newer:
-                                state.last_detail = state.last_detail or persisted.last_detail
-                            else:
-                                state.last_detail = persisted.last_detail or state.last_detail
+                        state.consecutive_failures = max(0, persisted.consecutive_failures)
+                        state.cooldown_until = persisted_cooldown_until
+                        state.last_detail = persisted.last_detail
+                        if state.consecutive_failures == 0:
+                            # A zero-failure row is a durable reset ending
+                            # the marker's episode.
+                            state.poison_anchor_cleared = False
                         if state.cooldown_until > now_monotonic:
                             # A cooling key is not probing: drop any leftover
                             # half-open lease so the admission gate cannot
                             # read it as an in-flight probe after this
                             # cooldown expires.
                             state.half_open_until = 0.0
-                        state.persisted_updated_at_epoch = max(
-                            state.persisted_updated_at_epoch,
-                            persisted.updated_at_epoch,
-                        )
-                        # This write is now the durable baseline for the
-                        # captured local failure. A failure recorded while
-                        # the write was in flight still has a later
-                        # monotonic timestamp and will remain dominant.
+                        state.persisted_updated_at_epoch = persisted.updated_at_epoch
                         state.last_durable_load_monotonic = max(
                             state.last_durable_load_monotonic,
                             now_monotonic,

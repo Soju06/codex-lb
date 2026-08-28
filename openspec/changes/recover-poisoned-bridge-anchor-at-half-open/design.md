@@ -33,11 +33,20 @@ false cooldowns and can authorize abandoning a fresh anchor. Distinguishing
 same-lineage concurrency from cross-reset staleness precisely would require
 a durable lineage identity column, which is out of scope for this change.
 
-## Why a worker adopts a returned reset lineage
+## Why the persist merge adopts the returned row wholesale
 
-Retaining the ended episode's failures against the new base would hand the
-next strike the reset epoch as its base, landing the old count durably as
-fresh evidence and reopening cooldown after a single post-settlement failure.
+The upsert returns the post-write row: when the write landed the row
+reflects it, and when its base mismatched the row is the lineage that owns
+the key now. Strikes for one key are serialized across their durable awaits,
+so no local failure can be recorded while a persist is in flight, and the
+returned row is simply adopted — count, cooldown, detail, and version.
+Adoption compares no wall clocks: an earlier condition required the reset to
+look "newer" than the local base, which permanently wedged a worker whenever
+the resetting replica's clock lagged — the worker kept a false count and
+cooldown, and the strict base-match upsert rejected every later strike
+because its base epoch no longer existed on the row. Taking the row's epoch
+exactly, never the max of two clocks, is what re-arms the next strike with a
+base that exists.
 
 ## Why an outraced settle retries once
 
@@ -64,6 +73,18 @@ by design. A process that rehydrates the row without the marker abandons the
 anchor one strike earlier than a fresh episode would, against a key whose
 requests are already failing eventlessly — an accepted, bounded trade until
 an episode marker is persisted with the row.
+
+## Accepted residual: probe admission is process-local
+
+The exactly-one-probe guarantee holds per worker process. In a multi-replica
+deployment each replica that loads the expired durable cooldown can arm its
+own local half-open lease and admit its own probe, so up to one probe per
+replica can reach upstream concurrently; the durable generation claim
+coordinates only verified stale-anchor replays. Coordinating ordinary probe
+admission across replicas would require a durable lease (a schema change and
+a durable write on the hot admission path), out of scope for this change.
+The exposure is bounded: probes are one request per replica per cooldown
+window, and a poisoned anchor is already quarantined out of probe planning.
 
 ## Accepted residual: remote half-open lease deadline is not durable
 

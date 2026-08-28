@@ -373,6 +373,19 @@
       weaker-fence entries; an active poison quarantine survives overflow
       until its required cooldown-plus-lease deadline
 
+- [x] 2.70 The exactly-one-probe requirement is scoped to the worker
+      process; the multi-replica probe-admission residual is recorded in
+      design.md rather than promised by the spec
+
+- [x] 2.71 The persist merge adopts the returned row wholesale without
+      comparing replica wall clocks, so a reset stamped by a lagging clock
+      still replaces the local episode and re-arms a base that exists
+
+- [x] 2.72 The partial stale-holder cleanup routes its opening strike
+      through the same fenced consult and abandonment as the other funnels,
+      under deferred cancellation, with a surviving safe-replay holder
+      blocking the settle
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

@@ -63,11 +63,11 @@ Unlike the strike, the durable clear MUST NOT precede the terminal frame; a
 resend arriving in that window is already covered by the quarantine. Because
 the frame has already been published, a cancellation escaping the clear MUST
 NOT skip finalization of the settled request. Every funnel that runs after
-its failed requests are drained and finalized — the reader settlement and the
-waiterless direct retirement alike — MUST complete its strike, episode
-consult, abandonment, and retirement under a deferred cancellation and
-re-raise the cancellation afterwards, because no request lifecycle remains to
-retry the abandonment it would otherwise skip.
+its failed requests are drained and finalized — the reader settlement, the
+waiterless direct retirement, and the partial stale-holder cleanup alike —
+MUST complete its strike, episode consult, abandonment, and retirement under
+a deferred cancellation and re-raise the cancellation afterwards, because no
+request lifecycle remains to retry the abandonment it would otherwise skip.
 
 A quarantine armed from a local opening MUST be re-armed against the merged
 cooldown when durable persistence returns a longer deadline, so its floor
@@ -133,13 +133,17 @@ replaced, or outrun while it waited, including a write whose base predates a
 reset row that another replica has already re-struck — MUST be dropped whole,
 leaving the row's count, cooldown, detail, and update time unchanged, and the
 writer MUST reconcile from the returned row. The drop applies to the writer's
-own replica of the episode as well: when the upsert returns a restarted
-lineage — a newer row holding fewer failures — the worker MUST adopt that
-lineage in place of its local count.
+own replica of the episode as well: the writer MUST reconcile from the
+returned row by adopting it wholesale — count, cooldown, detail, and version
+— without comparing replica wall clocks, so a reset stamped by a lagging
+clock still replaces the local episode and the next strike carries a base
+that actually exists on the row.
 
-When the cooldown expires, the proxy MUST admit exactly one probe request and
-MUST keep suppressing other non-bypassed requests for that key while that
-probe may still be running. When the circuit opens on an eventless
+When the cooldown expires, each worker process MUST admit exactly one probe
+request and MUST keep suppressing its other non-bypassed requests for that
+key while that probe may still be running. Probe admission is process-local:
+the half-open lease is not persisted, and replicas do not coordinate probe
+admission (an accepted residual recorded in this change's `design.md`). When the circuit opens on an eventless
 poison-class failure (`stream_incomplete` or `stream_idle_timeout` with no
 observed response event), the proxy MUST quarantine the session key as
 specified under the silent-session quarantine requirement, so the probe

@@ -34117,6 +34117,107 @@ async def test_a_dropped_stale_strike_adopts_the_reset_lineage() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_reset_stamped_by_a_lagging_clock_is_adopted() -> None:
+    # A completion on a replica whose wall clock lags this worker resets the
+    # row with an updated_at_epoch below the old episode's. Requiring the
+    # reset to look "newer" wedged this worker permanently: it kept the false
+    # count and cooldown, and the strict base-match upsert rejected every
+    # later strike because its base epoch no longer exists on the row.
+    # Adoption must not order replica clocks, and must take the row's epoch
+    # exactly so the next strike carries a base that actually exists.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-lagging-clock-reset")
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=now)
+    state.consecutive_failures = 2
+    state.last_detail = "stream_incomplete"
+    state.poison_anchor_cleared = True
+    state.persisted_updated_at_epoch = time.time() + 30.0
+    state.last_durable_load_monotonic = now - 1.0
+    state.last_failure_monotonic = now
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    reset_epoch = time.time() - 5.0
+    reset_row = SimpleNamespace(
+        consecutive_failures=0,
+        cooldown_until_epoch=0.0,
+        last_detail=None,
+        updated_at_epoch=reset_epoch,
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=reset_row),
+        persist_retry_circuit=AsyncMock(return_value=reset_row),
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    await service._persist_http_bridge_retry_circuit(session, state)
+
+    assert state.consecutive_failures == 0, (
+        "a reset stamped by a lagging replica clock is still a reset; the local episode must adopt it"
+    )
+    assert state.persisted_updated_at_epoch == reset_epoch, (
+        "the adopted base must be the row's exact epoch, not the max of two replica clocks"
+    )
+    assert state.poison_anchor_cleared is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("survivor_holds_safe_replay", [False, True])
+async def test_partial_stale_cleanup_clears_the_poisoned_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+    survivor_holds_safe_replay: bool,
+) -> None:
+    # A stale gate holder removed while another request keeps the session
+    # alive strikes the circuit with the poison-class gate-timeout detail,
+    # but this path used to skip the consult and abandonment entirely: the
+    # circuit opened and quarantined, and if the survivor never completed the
+    # quarantine expired and the stored dead anchor was injected again. The
+    # partial cleanup must run the same fenced consult and abandonment as the
+    # terminal, grouped, and retirement funnels; a surviving safe-replay
+    # holder still blocks the settle, because it is about to re-dispatch and
+    # claim the circuit generation.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    durable_bridge = SimpleNamespace(
+        **_stateful_retry_circuit_persistence(),
+        rebind_session_account=AsyncMock(return_value=True),
+    )
+    service._durable_bridge = durable_bridge
+    survivor = _make_eventless_http_bridge_owner(request_id="req-partial-survivor")
+    if survivor_holds_safe_replay:
+        survivor.fresh_upstream_request_is_retry_safe = True
+        survivor.fresh_upstream_request_text = '{"type":"response.create","input":"continue"}'
+    session = _make_bridge_session(
+        key_value="bridge-partial-cleanup-poison",
+        pending_requests=deque([survivor]),
+        queued_request_count=1,
+    )
+    session.durable_session_id = "durable-partial-cleanup-poison"
+    session.durable_owner_epoch = 6
+
+    for failure_number in range(2):
+        stale_owner = _make_eventless_http_bridge_owner(request_id=f"req-partial-stale-{failure_number}")
+        async with session.pending_lock:
+            session.pending_requests.append(stale_owner)
+            session.queued_request_count += 1
+        await service._fail_stale_http_bridge_pending_requests(
+            session,
+            [stale_owner],
+            detail="response_create_gate_timeout_stuck_pending",
+        )
+
+    durable_bridge.rebind_session_account.assert_awaited_once()
+    rebind_kwargs = durable_bridge.rebind_session_account.await_args.kwargs
+    assert rebind_kwargs["clear_continuity"] is True
+    assert rebind_kwargs["expected_latest_response_id"] == "resp_poisoned_anchor"
+    assert rebind_kwargs["expected_latest_turn_state"] is None
+    if survivor_holds_safe_replay:
+        durable_bridge.clear_retry_circuit.assert_not_awaited()
+    else:
+        assert durable_bridge.clear_retry_circuit.await_count >= 1, (
+            "with no safe replay left on the session the abandonment settles the circuit"
+        )
+
+
+@pytest.mark.asyncio
 async def test_poison_quarantined_anchor_rejection_fails_fast_to_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

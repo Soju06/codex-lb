@@ -2759,18 +2759,13 @@ class _HTTPBridgeRequestSubmitMixin:
                 if _http_bridge_request_counts_against_queue(request_state):
                     session.queued_request_count = max(0, session.queued_request_count - 1)
                 stale_requests.append(request_state)
+            surviving_request_states = list(session.pending_requests)
         if not stale_requests:
             return
         # A stale gate holder that streamed response events without ever
         # receiving ``response.created`` proves the reattach wedge (#1534)
         # even when the session itself survives with other active requests.
         _record_http_bridge_quarantine_wedged_pending(self, session, stale_requests)
-        if response_events_seen == 0:
-            await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
-                session,
-                detail=detail,
-                selection=retry_circuit_attempt_selection,
-            )
         await self._fail_pending_websocket_requests(
             account=session.account,
             account_id_value=session.account.id,
@@ -2782,6 +2777,71 @@ class _HTTPBridgeRequestSubmitMixin:
             response_create_gate=session.response_create_gate,
             penalize_account=False,
         )
+        if response_events_seen == 0:
+            partial_strike_detail = detail
+
+            async def _partial_cleanup_strike_and_clear() -> None:
+                consecutive_failures = await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
+                    session,
+                    detail=partial_strike_detail,
+                    selection=retry_circuit_attempt_selection,
+                )
+                poison_detail = _http_bridge_anchor_poison_detail(partial_strike_detail)
+                if poison_detail is None:
+                    return
+                # The consult returns the exact episode it validated; the
+                # marker below scopes to it.
+                poison_episode, poison_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
+                    session,
+                    consecutive_failures=consecutive_failures,
+                    configured_threshold=(
+                        _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                    ),
+                )
+                if poison_episode is None:
+                    return
+                durable_cleared = await _abandon_durable_http_bridge_continuity(
+                    self,
+                    session,
+                    detail=poison_detail,
+                    # A surviving safe-replay holder is about to re-dispatch
+                    # and claim the circuit generation; settling under it
+                    # would strip that fence, so survivors count alongside
+                    # the removed holders.
+                    settle_circuit=_http_bridge_abandonment_may_settle_circuit(
+                        [*stale_requests, *surviving_request_states]
+                    ),
+                    expected_continuity=poison_expected_anchor,
+                )
+                if durable_cleared:
+                    await self._http_bridge_mark_poison_anchor_cleared(session, episode=poison_episode)
+                    return
+                if session.durable_session_id is not None:
+                    _log_http_bridge_event(
+                        "durable_anchor_poison_clear_failed",
+                        session.key,
+                        account_id=session.account.id,
+                        model=session.request_model,
+                        pending_count=len(stale_requests),
+                        detail=poison_detail,
+                        cache_key_family=session.key.affinity_kind,
+                        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                    )
+
+            # The removed holders are already finalized above, so a
+            # cancellation escaping the strike or the consult would leave an
+            # at-threshold poisoned anchor stored with the surviving request
+            # as the only lifecycle left — and if it never completes, the
+            # quarantine expires and the dead anchor is re-injected. Defer
+            # cancellation across the settlement like the other funnels,
+            # then re-raise it.
+            partial_cleanup_task = asyncio.create_task(
+                _partial_cleanup_strike_and_clear(),
+                name=f"http-bridge-partial-cleanup-poison-settlement-{session.durable_session_id}",
+            )
+            _partial_result, partial_cancellation = await _await_task_deferring_cancellation(partial_cleanup_task)
+            if partial_cancellation is not None:
+                raise partial_cancellation
 
     def _classify_http_bridge_stale_gate_holders(
         self: Any,

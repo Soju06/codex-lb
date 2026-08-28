@@ -1957,14 +1957,14 @@ class _HTTPBridgeRequestSubmitMixin:
                         and request_state.verified_stale_anchor_retry_circuit_generation_captured
                     ):
                         circuit_key = request_state.verified_stale_anchor_retry_circuit_key
-                        generation_claimed = bool(
-                            circuit_key is not None
-                            and await self._claim_http_bridge_retry_circuit_generation(
+                        claim_outcome: bool | None = False
+                        if circuit_key is not None:
+                            claim_outcome = await self._claim_http_bridge_retry_circuit_generation(
                                 key=circuit_key,
                                 captured=request_state.verified_stale_anchor_retry_circuit_generation_captured,
                                 generation=request_state.verified_stale_anchor_retry_circuit_generation,
                             )
-                        )
+                        generation_claimed = claim_outcome is True
                         if not generation_claimed:
                             # The block lives on the source hard key: this
                             # replacement session's own unique key never has a
@@ -1975,10 +1975,12 @@ class _HTTPBridgeRequestSubmitMixin:
                                 suppressed_block_reason,
                             ) = await self._http_bridge_precreated_retry_block_for_key(
                                 circuit_key or session.key,
-                                # The claim that beat this dispatch holds the
-                                # half-open lease, possibly in another process
-                                # whose deadline is not persisted.
-                                assume_remote_half_open_lease=True,
+                                # Only a confirmed CAS loss proves a probe
+                                # holds the lease somewhere; a claim that
+                                # timed out or errored is infrastructure
+                                # trouble and must not advertise a
+                                # 600-second wait no probe owns.
+                                assume_remote_half_open_lease=claim_outcome is False,
                             )
                             suppressed_retry_after_seconds = max(1, math.ceil(suppressed_block_seconds))
                             _log_http_bridge_event(
@@ -2822,6 +2824,18 @@ class _HTTPBridgeRequestSubmitMixin:
         partial_strike_detail = detail
 
         async def _finalize_and_settle_partial_cleanup() -> None:
+            # The strike lands before the failure frames are published, so a
+            # client that resends the moment it sees the end-of-stream
+            # sentinel already meets the cooldown and quarantine this strike
+            # armed. The durable abandonment stays after publication per the
+            # ordering contract.
+            consecutive_failures: int | None = None
+            if response_events_seen == 0:
+                consecutive_failures = await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
+                    session,
+                    detail=partial_strike_detail,
+                    selection=retry_circuit_attempt_selection,
+                )
             await self._fail_pending_websocket_requests(
                 account=session.account,
                 account_id_value=session.account.id,
@@ -2834,11 +2848,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 penalize_account=False,
             )
             if response_events_seen == 0:
-                consecutive_failures = await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
-                    session,
-                    detail=partial_strike_detail,
-                    selection=retry_circuit_attempt_selection,
-                )
                 poison_detail = _http_bridge_anchor_poison_detail(partial_strike_detail)
                 if poison_detail is None:
                     return

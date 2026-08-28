@@ -1481,6 +1481,14 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_fresh_bridge_proof: _VerifiedDurableFullResend | None = None
         force_local_recovery_creation = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
+        # First-touch circuit load before any anchor planning: an expired
+        # at-threshold poison row recorded by another replica arms this
+        # worker's quarantine here, so the suppression checks below see it
+        # instead of planning the poisoned anchor into the probe's payload.
+        await self._ensure_http_bridge_retry_circuit_loaded_for_key(
+            bridge_session_key,
+            request_model=payload.model,
+        )
         # Set when the quarantine check below suppresses the durable-anchor
         # injection for a full-resend payload; the session hydration and the
         # session-level anchor injection further down must honor it so the
@@ -4640,20 +4648,44 @@ class _HTTPBridgeStreamingMixin:
                                                 yield keepalive_event
                                             continue
                                         idle_selection = timed_out_retry_circuit_attempt_selection
+                                        # The strike precedes the terminal frame (its
+                                        # quarantine must cover an immediate resend), but
+                                        # the durable clear follows it: publishing first
+                                        # keeps a slow durable store from delaying the
+                                        # client-visible terminal.
+                                        record_failure = (
+                                            self._record_http_bridge_retry_circuit_failure_for_attempt_selection
+                                        )
+                                        idle_consecutive_failures = await record_failure(
+                                            session,
+                                            detail="stream_idle_timeout",
+                                            selection=idle_selection,
+                                        )
+                                        if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
+                                            stream_idle_timeout_total.labels(surface="http_bridge").inc()
+                                        logger.info(
+                                            "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s "
+                                            "max_keepalive_count=%s",
+                                            request_state.request_id,
+                                            keepalive_count,
+                                            max_keepalive_count,
+                                        )
+                                        yield format_sse_event(
+                                            cast(
+                                                Mapping[str, JsonValue],
+                                                response_failed_event(
+                                                    "stream_idle_timeout",
+                                                    "Upstream did not respond within the keepalive window",
+                                                    response_id=downstream_response_id,
+                                                ),
+                                            )
+                                        )
 
-                                        async def _idle_strike_and_clear() -> None:
+                                        async def _idle_consult_and_clear() -> None:
                                             from app.modules.proxy._service.http_bridge.upstream_events import (
                                                 _abandon_durable_http_bridge_continuity,
                                             )
 
-                                            record_failure = (
-                                                self._record_http_bridge_retry_circuit_failure_for_attempt_selection
-                                            )
-                                            consecutive_failures = await record_failure(
-                                                session,
-                                                detail="stream_idle_timeout",
-                                                selection=idle_selection,
-                                            )
                                             poison_detail = _http_bridge_anchor_poison_detail("stream_idle_timeout")
                                             if poison_detail is None:
                                                 return
@@ -4662,7 +4694,7 @@ class _HTTPBridgeStreamingMixin:
                                                 poison_expected_anchor,
                                             ) = await self._http_bridge_poison_anchor_clear_owed(
                                                 session,
-                                                consecutive_failures=consecutive_failures,
+                                                consecutive_failures=idle_consecutive_failures,
                                                 configured_threshold=getattr(
                                                     _service_get_settings(),
                                                     "http_responses_session_bridge_anchor_poison_failure_threshold",
@@ -4687,15 +4719,14 @@ class _HTTPBridgeStreamingMixin:
                                                     session, episode=poison_episode
                                                 )
 
-                                        # The terminal frame below ends this stream and the
-                                        # request detaches: a client disconnect cancelling the
-                                        # generator mid-consult would otherwise abort the only
-                                        # abandonment this opening gets, leaving the dead
-                                        # anchor stored past the process-local quarantine.
-                                        # Defer cancellation like the other funnels, then
+                                        # The terminal frame is already published and the
+                                        # request detaches next: a client disconnect
+                                        # cancelling the generator mid-consult would abort
+                                        # the only abandonment this opening gets. Defer
+                                        # cancellation like the other funnels, then
                                         # re-raise it.
                                         idle_settlement_task = asyncio.create_task(
-                                            _idle_strike_and_clear(),
+                                            _idle_consult_and_clear(),
                                             name=f"http-bridge-idle-poison-settlement-{session.durable_session_id}",
                                         )
                                         _idle_result, idle_cancellation = await _await_task_deferring_cancellation(
@@ -4703,25 +4734,6 @@ class _HTTPBridgeStreamingMixin:
                                         )
                                         if idle_cancellation is not None:
                                             raise idle_cancellation
-                                        if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
-                                            stream_idle_timeout_total.labels(surface="http_bridge").inc()
-                                        logger.info(
-                                            "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s "
-                                            "max_keepalive_count=%s",
-                                            request_state.request_id,
-                                            keepalive_count,
-                                            max_keepalive_count,
-                                        )
-                                        yield format_sse_event(
-                                            cast(
-                                                Mapping[str, JsonValue],
-                                                response_failed_event(
-                                                    "stream_idle_timeout",
-                                                    "Upstream did not respond within the keepalive window",
-                                                    response_id=downstream_response_id,
-                                                ),
-                                            )
-                                        )
                                         break
                             elif response_started:
                                 if await completed_delivery_suppresses_idle_timeout(

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import anyio
@@ -135,6 +136,26 @@ class _HTTPBridgeRetryCircuitState:
     poison_anchor_cleared: bool = False
 
 
+@dataclass(slots=True)
+class _HTTPBridgeRetryCircuitKeyProbe:
+    """Key-scoped stand-in for the planning-time first-touch load.
+
+    Planning runs before any bridge session exists, but the load path and the
+    quarantine arm only need the key plus logging context; the probe carries
+    exactly that so an at-threshold poison row recorded by another replica can
+    arm this worker's quarantine before the anchor is planned into a payload.
+    """
+
+    key: _HTTPBridgeSessionKey
+    request_model: str | None = None
+    account: Any = None
+    quarantined: bool = False
+
+    def __post_init__(self) -> None:
+        if self.account is None:
+            self.account = SimpleNamespace(id=None)
+
+
 def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: Any = None) -> None:
     if reset_transient_cache is not None:
         reset_transient_cache()
@@ -244,8 +265,16 @@ class _HTTPBridgeRetryCircuitMixin:
         key: _HTTPBridgeSessionKey,
         captured: bool,
         generation: tuple[int, float, int, float, int, float, float] | None,
-    ) -> bool:
-        """Atomically linearize replay admission against the captured circuit."""
+    ) -> bool | None:
+        """Atomically linearize replay admission against the captured circuit.
+
+        ``True`` means claimed; ``False`` means a confirmed loss — the durable
+        CAS answered and matched nothing, or local state already advanced past
+        the capture; ``None`` means the claim could not be decided (timeout,
+        durable error, or the capability being absent), which is
+        infrastructure trouble rather than evidence that a remote probe holds
+        the lease.
+        """
         if not captured:
             return False
         expected_admission_generation = generation[0] if generation is not None else 0
@@ -257,7 +286,7 @@ class _HTTPBridgeRetryCircuitMixin:
         expected_local_cooldown = generation[6] if generation is not None else 0.0
         claim_generation = getattr(self._durable_bridge, "claim_retry_circuit_generation", None)
         if not callable(claim_generation):
-            return False
+            return None
 
         # Local failure recording for this key serializes on the key lock,
         # so holding it across the durable CAS keeps the claim linearized
@@ -296,7 +325,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     _hash_identifier(key.affinity_key),
                     exc_info=True,
                 )
-                return False
+                return None
             if claimed is None:
                 return False
             async with self._http_bridge_retry_circuit_lock:
@@ -305,6 +334,28 @@ class _HTTPBridgeRetryCircuitMixin:
             return True
         finally:
             key_lock.release()
+
+    async def _ensure_http_bridge_retry_circuit_loaded_for_key(
+        self: Any,
+        key: _HTTPBridgeSessionKey,
+        *,
+        request_model: str | None,
+    ) -> None:
+        """First-touch durable load so a poison row arms quarantine pre-planning.
+
+        The submit-time load runs after the payload is already planned and
+        serialized, so on this worker's very first touch of an expired
+        at-threshold poison key the probe would carry the poisoned anchor.
+        Loading once per key before anchor planning closes that window; every
+        later request hits the loaded-keys check and pays nothing.
+        """
+        if key.strength != "hard":
+            return
+        async with self._http_bridge_retry_circuit_lock:
+            if key in self._http_bridge_retry_circuit_loaded_keys:
+                return
+        probe: Any = _HTTPBridgeRetryCircuitKeyProbe(key=key, request_model=request_model)
+        await self._load_http_bridge_retry_circuit(probe)
 
     async def _http_bridge_retry_circuit_current_count(self: Any, session: _HTTPBridgeSession) -> int:
         async with self._http_bridge_retry_circuit_lock:
@@ -589,6 +640,12 @@ class _HTTPBridgeRetryCircuitMixin:
             # against.
             arm_poison_quarantine = (
                 not local_failure_is_newer
+                # An episode whose one-clear marker is set already abandoned
+                # its anchor (a completed verified replay deliberately keeps
+                # the row and clears the quarantine); re-arming off the
+                # unchanged row would re-fence the recovered key for another
+                # full deadline.
+                and not state.poison_anchor_cleared
                 and state.consecutive_failures
                 >= _http_bridge_effective_anchor_poison_threshold(
                     getattr(

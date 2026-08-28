@@ -69,9 +69,13 @@ settlement, and the streaming idle-recovery exhaustion alike — MUST complete
 its strike, episode consult, abandonment, and retirement under a deferred
 cancellation and re-raise the cancellation afterwards, because no request
 lifecycle remains to retry the abandonment it would otherwise skip. An
-opening recorded by the streaming idle-recovery exhaustion MUST route
-through the same fenced consult and abandonment as the other funnels before
-its terminal event completes the stream. The partial stale-holder cleanup's
+opening recorded by the streaming idle-recovery exhaustion MUST record its
+strike before the terminal event is published — so the cooldown and
+quarantine cover an immediate resend — and MUST run its consult and
+abandonment as cancellation-deferred cleanup after the terminal event, so a
+slow durable store cannot delay the client-visible terminal. The partial
+stale-holder cleanup MUST order itself the same way: strike before its
+failure frames are published, abandonment after. The partial stale-holder cleanup's
 deferral MUST begin before its holders are finalized, covering finalization
 and settlement as one owned task, because a cancellation landing inside
 finalization otherwise re-raises before the settlement exists.
@@ -160,7 +164,12 @@ settled cooldown. Adopting a replacement episode MUST invalidate the local half-
 lease even when the adopted cooldown has already elapsed, and a poison row at
 the effective configured abandonment threshold adopted from a durable load
 MUST arm this worker's process-local poison quarantine, since the replica
-that recorded the strikes cannot arm it here.
+that recorded the strikes cannot arm it here — unless the local episode's
+one-clear marker records that its anchor was already abandoned, in which
+case re-arming would re-fence a recovered key. The first anchor-planning
+pass for a hard key MUST perform this load before any anchor decision, so
+the worker's first touch of an expired at-threshold poison key cannot plan
+the poisoned anchor into the admitted probe.
 
 When the cooldown expires, each worker process MUST admit exactly one probe
 request and MUST keep suppressing its other non-bypassed requests for that
@@ -430,7 +439,7 @@ A quarantine armed for reason `retry_circuit_poisoned_anchor` MUST NOT have that
 
 The durable anchor abandonment MUST use the same capped threshold as the rest of this capability, in every funnel that can reach it. One poisoned anchor MUST be abandoned once per episode; a fenced or failed abandonment leaves it owed so the next strike retries. An abandonment is owed only while its failure episode is still the registered one: a circuit settled by a concurrent success ends the episode, and a stale strike's captured count MUST NOT clear the fresh anchor that success persisted. An abandonment is also owed only while continuity actually remains: a durable session whose continuity columns are all empty owes nothing, because a clear there removes no failure cause, and the settle it authorized would reset a circuit cooling on genuinely unanchored failures. The continuity clear itself MUST be fenced on both continuity columns — the response anchor and the turn state — captured together when the episode was validated, and a completion MUST settle the circuit before it registers its fresh anchor, so a clear authorized against the poisoned anchor matches nothing once fresh continuity exists. When that settlement fails and the old episode is restored, the completion MUST NOT clear the quarantine, and the restored episode's owed abandonment MUST be suppressed: its recorded failures were all against the anchor this completion superseded, so it must not fire against the fresh one; the cooldown stands until the next settle opportunity. A retired request that still holds a safe replay MUST NOT strike the circuit or trigger the abandonment on any funnel, matching the terminal and grouped paths; a pre-drain retirement handoff with no request states keeps striking. A completed verified stale-anchor replay MUST keep the source key's circuit and its durable row, and the one-clear marker on that surviving episode is process-local (see this change's `design.md` for the accepted tradeoff).
 
-A quarantine armed for reason `retry_circuit_poisoned_anchor` MUST remain in force for at least the remaining cooldown of the circuit that armed it plus that circuit's half-open lease, because the probe it exists to protect is only admitted once that cooldown expires and may then be admitted anywhere inside the lease that follows. The quarantine registry's size cap MUST NOT evict such an entry before that deadline: the cap evicts only expired or weaker-fence entries and holds as a correctness bound rather than an unconditional one during an incident that quarantines more keys than the cap at once. The default TTL alone MUST NOT be relied on for this: it equals the circuit's maximum cooldown, so at that cooldown the quarantine would otherwise lapse in the same instant the cooldown does and hand the poisoned anchor back to the very request the cooldown was holding.
+A quarantine armed for reason `retry_circuit_poisoned_anchor` MUST remain in force for at least the remaining cooldown of the circuit that armed it plus that circuit's half-open lease, because the probe it exists to protect is only admitted once that cooldown expires and may then be admitted anywhere inside the lease that follows. A suppression that assumes a remote half-open lease MUST be driven only by a confirmed dispatch-claim loss — a durable CAS that answered and matched nothing — never by a claim that timed out or errored, which is infrastructure trouble no probe owns. The quarantine registry's size cap MUST NOT evict such an entry before that deadline: the cap evicts only expired or weaker-fence entries and holds as a correctness bound rather than an unconditional one during an incident that quarantines more keys than the cap at once. The default TTL alone MUST NOT be relied on for this: it equals the circuit's maximum cooldown, so at that cooldown the quarantine would otherwise lapse in the same instant the cooldown does and hand the poisoned anchor back to the very request the cooldown was holding.
 
 #### Scenario: Reattach streams events but response.created is never assigned (#1534)
 

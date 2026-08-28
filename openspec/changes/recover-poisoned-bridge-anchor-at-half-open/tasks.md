@@ -445,6 +445,24 @@
 - [x] 2.88 Revoking a speculative poison arm restores a weaker quarantine
       the arm upgraded, preserving the independently justified fence
 
+- [x] 2.89 The first anchor-planning pass loads the circuit for a hard key
+      before any anchor decision, closing the first-touch window where an
+      expired poison row's anchor was planned into the probe
+
+- [x] 2.90 The load-arm verdict honors the one-clear marker, so a kept row
+      from a completed verified replay does not re-fence the recovered key
+
+- [x] 2.91 The generation claim reports confirmed losses, outages, and
+      claims distinctly; only a confirmed CAS loss drives the remote-lease
+      retry-after fallback
+
+- [x] 2.92 The partial-cleanup strike is recorded before its failure frames
+      are published, keeping quarantine cover ahead of an immediate resend
+
+- [x] 2.93 The idle-exhaustion strike precedes the terminal frame and its
+      consult and abandonment follow it as deferred cleanup, so a slow
+      durable store cannot delay the client-visible terminal
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

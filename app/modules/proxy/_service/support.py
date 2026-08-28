@@ -898,6 +898,11 @@ class _HTTPBridgeResponseCreateAttempt:
     ordinal: int
     disarmed: bool = False
     response_observed: bool = False
+    # A non-terminal response event (a deferred-reasoning prelude, for
+    # example) proves the attempt was answered midstream even when ordinary
+    # event accounting was deliberately skipped. A later terminal failure
+    # frame must then not be charged as a pre-response strike.
+    non_terminal_response_observed: bool = False
     retry_circuit_failure_recorded: bool = False
     retry_circuit_failure_settled: anyio.Event | None = None
 
@@ -1520,6 +1525,8 @@ def _mark_response_create_attempt_observed(
     attempt = request_state.response_create_attempt
     if attempt is not None:
         attempt.response_observed = True
+        if event_type not in {"response.failed", "response.incomplete"}:
+            attempt.non_terminal_response_observed = True
 
 
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:

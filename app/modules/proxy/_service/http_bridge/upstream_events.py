@@ -2373,7 +2373,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                         self,
                         session,
                         detail=grouped_poison_detail,
-                        settle_circuit=True,
+                        # A mixed group can hold a member with a verified safe
+                        # replay whose dispatch claims the circuit generation;
+                        # settling under it would remove the fence it depends
+                        # on, same as the retirement funnels.
+                        settle_circuit=_http_bridge_abandonment_may_settle_circuit(
+                            grouped_previous_response_request_states
+                        ),
                     ),
                     name=f"http-bridge-grouped-anchor-clear-{session.durable_session_id}",
                 )

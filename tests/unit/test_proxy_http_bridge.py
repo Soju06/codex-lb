@@ -1088,6 +1088,38 @@ def _make_eventless_http_bridge_owner(
     )
 
 
+def _stateful_retry_circuit_persistence() -> dict[str, AsyncMock]:
+    """Retry-circuit persistence stubs that behave like the repository: a
+    persist stores the row, a lookup re-observes it, a clear deletes it. The
+    live-episode consult before a poison clear requires the durable row to
+    exist, so fixtures that model real strikes must model the row too."""
+    holder: dict[str, Any] = {"row": None}
+
+    async def _persist(**kwargs: Any) -> Any:
+        holder["row"] = SimpleNamespace(
+            consecutive_failures=kwargs.get("consecutive_failures", 0),
+            cooldown_until_epoch=kwargs.get("cooldown_until_epoch", 0.0),
+            last_detail=kwargs.get("last_detail"),
+            updated_at_epoch=kwargs.get("updated_at_epoch", time.time()),
+        )
+        return holder["row"]
+
+    async def _lookup(**kwargs: Any) -> Any:
+        del kwargs
+        return holder["row"]
+
+    async def _clear(**kwargs: Any) -> None:
+        del kwargs
+        holder["row"] = None
+        return None
+
+    return {
+        "lookup_retry_circuit": AsyncMock(side_effect=_lookup),
+        "persist_retry_circuit": AsyncMock(side_effect=_persist),
+        "clear_retry_circuit": AsyncMock(side_effect=_clear),
+    }
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("include_sibling", [False, True])
 async def test_http_bridge_eventless_anchored_precreated_retry_stays_fail_closed(
@@ -29342,8 +29374,7 @@ async def test_http_bridge_repeated_zero_event_idle_timeouts_poison_anchor_with_
     session.durable_session_id = "durable-anchor-poison"
     session.durable_owner_epoch = 3
     durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(),
+        **_stateful_retry_circuit_persistence(),
         rebind_session_account=AsyncMock(return_value=True),
     )
     service._durable_bridge = durable_bridge
@@ -29396,8 +29427,7 @@ async def test_http_bridge_repeated_zero_event_stream_incompletes_poison_anchor_
     session.durable_session_id = "durable-anchor-poison-stream-incomplete"
     session.durable_owner_epoch = 3
     durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(),
+        **_stateful_retry_circuit_persistence(),
         rebind_session_account=AsyncMock(return_value=True),
     )
     service._durable_bridge = durable_bridge
@@ -29442,8 +29472,7 @@ async def test_http_bridge_retire_stale_pending_poisons_anchor_after_repeated_ev
     # must clear the poisoned durable anchor once the threshold is reached.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(),
+        **_stateful_retry_circuit_persistence(),
         rebind_session_account=AsyncMock(return_value=True),
     )
     service._durable_bridge = durable_bridge
@@ -29488,8 +29517,7 @@ async def test_http_bridge_retire_stale_pending_reattempts_failed_poison_clear(
     # each failed clear stays visible in the poison-clear telemetry.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(),
+        **_stateful_retry_circuit_persistence(),
         rebind_session_account=AsyncMock(return_value=False),
     )
     service._durable_bridge = durable_bridge
@@ -29621,8 +29649,7 @@ async def test_http_bridge_retire_stale_pending_clean_close_never_poisons_anchor
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(),
+        **_stateful_retry_circuit_persistence(),
         rebind_session_account=AsyncMock(return_value=True),
     )
     service._durable_bridge = durable_bridge
@@ -29667,8 +29694,7 @@ async def test_http_bridge_anchor_poisoning_waits_when_durable_clear_fails(
         else AsyncMock(return_value=clear_outcome)
     )
     durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(),
+        **_stateful_retry_circuit_persistence(),
         rebind_session_account=rebind,
     )
     service._durable_bridge = durable_bridge
@@ -32917,8 +32943,7 @@ async def test_terminal_poison_strike_clears_the_durable_anchor(
     session.durable_owner_epoch = 1
     rebind = AsyncMock(return_value=True)
     service._durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(return_value=None),
+        **_stateful_retry_circuit_persistence(),
         rebind_session_account=rebind,
     )
     service._handle_stream_error = AsyncMock()  # type: ignore[method-assign]
@@ -33047,7 +33072,20 @@ async def test_terminal_anchor_clear_runs_after_the_terminal_frame_is_published(
         return True
 
     monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", _record)
-    service._durable_bridge = SimpleNamespace(rebind_session_account=_rebind)
+    service._durable_bridge = SimpleNamespace(
+        rebind_session_account=_rebind,
+        # The stubbed recorder registers the episode locally; the durable row
+        # backing it has to be visible to the clear gate's episode consult.
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=time.time() + 60.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=time.time(),
+            )
+        ),
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
 
     await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
@@ -33089,8 +33127,7 @@ async def test_grouped_poison_strikes_clear_the_durable_anchor() -> None:
 
     rebind = AsyncMock(return_value=True)
     service._durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(return_value=None),
+        **_stateful_retry_circuit_persistence(),
         rebind_session_account=rebind,
     )
     service._handle_stream_error = AsyncMock()  # type: ignore[method-assign]
@@ -33137,7 +33174,20 @@ async def test_terminal_settlement_is_finalized_when_the_anchor_clear_is_cancell
     monkeypatch.setattr(service, "_finalize_websocket_request_state", _finalize)
     monkeypatch.setattr(service, "_maybe_release_idle_http_bridge_session_lease", AsyncMock())
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
-    service._durable_bridge = SimpleNamespace(rebind_session_account=_rebind)
+    service._durable_bridge = SimpleNamespace(
+        rebind_session_account=_rebind,
+        # The stubbed recorder registers the episode locally; the durable row
+        # backing it has to be visible to the clear gate's episode consult.
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=time.time() + 60.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=time.time(),
+            )
+        ),
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
 
     with pytest.raises(asyncio.CancelledError):
         await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
@@ -34203,8 +34253,7 @@ async def test_grouped_strike_skips_requests_that_still_have_a_safe_replay() -> 
 
     rebind = AsyncMock(return_value=True)
     service._durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(return_value=None),
+        **_stateful_retry_circuit_persistence(),
         rebind_session_account=rebind,
     )
     service._handle_stream_error = AsyncMock()  # type: ignore[method-assign]
@@ -34215,6 +34264,141 @@ async def test_grouped_strike_skips_requests_that_still_have_a_safe_replay() -> 
     assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False, (
         "two safely replayable requests must not open the circuit between them"
     )
+
+
+@pytest.mark.asyncio
+async def test_mixed_group_clear_preserves_the_circuit_for_the_safe_member() -> None:
+    # Two unsafe eventless members open the circuit and prove the anchor dead,
+    # but a third member holding a verified safe replay claims the circuit
+    # generation at dispatch. The grouped clear must still abandon the anchor
+    # while leaving the circuit unsettled, exactly as the retirement funnels
+    # decide it, or the settle removes the fence that replay depends on.
+    service, session, first = _make_terminal_error_bridge_fixture(
+        request_id="req-grouped-mixed-1",
+        key_value="sid-grouped-mixed",
+        response_event_count=0,
+    )
+    session.durable_session_id = "durable-grouped-mixed"
+    session.durable_owner_epoch = 1
+    from app.modules.proxy._service.support import _HTTPBridgeResponseCreateAttempt
+
+    members: list[proxy_service._WebSocketRequestState] = [first]
+    for ordinal in (2, 3):
+        member = proxy_service._WebSocketRequestState(
+            request_id=f"req-grouped-mixed-{ordinal}",
+            model="gpt-5.4",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=1.0 + ordinal,
+            previous_response_id="resp_dead_anchor",
+            event_queue=asyncio.Queue(),
+            transport="http",
+            skip_request_log=True,
+        )
+        member.response_create_attempt = _HTTPBridgeResponseCreateAttempt(ordinal=ordinal)
+        session.pending_requests.append(member)
+        members.append(member)
+    session.queued_request_count = 3
+    safe_member = members[2]
+    safe_member.fresh_upstream_request_is_retry_safe = True
+    safe_member.fresh_upstream_request_text = '{"type":"response.create","model":"gpt-5.4","input":"hi"}'
+
+    rebind = AsyncMock(return_value=True)
+    service._durable_bridge = SimpleNamespace(
+        **_stateful_retry_circuit_persistence(),
+        rebind_session_account=rebind,
+    )
+    service._handle_stream_error = AsyncMock()  # type: ignore[method-assign]
+
+    await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+
+    rebind.assert_awaited_once()
+    assert session.key in cast(Any, service)._http_bridge_retry_circuits, (
+        "the safe member's claimed generation must survive the grouped clear"
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_frame_after_a_reasoning_prelude_is_not_a_pre_response_strike() -> None:
+    # A deferred-reasoning prelude marks the attempt observed without counting
+    # a response event. A later terminal failure frame is then a midstream
+    # failure: charging it as pre-response let repeated occurrences quarantine
+    # the key and clear a valid anchor.
+    from app.modules.proxy._service.support import (
+        _HTTPBridgeResponseCreateAttempt,
+        _mark_response_create_attempt_observed,
+    )
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-prelude-midstream")
+    service._durable_bridge = SimpleNamespace(**_stateful_retry_circuit_persistence())
+
+    prelude_state = _make_eventless_http_bridge_owner(request_id="req-prelude")
+    prelude_attempt = _HTTPBridgeResponseCreateAttempt(ordinal=1)
+    prelude_state.response_create_attempt = prelude_attempt
+    _mark_response_create_attempt_observed(prelude_state, "response.reasoning_summary_text.delta")
+    _mark_response_create_attempt_observed(prelude_state, "response.failed")
+    assert prelude_attempt.non_terminal_response_observed is True
+
+    failures = await service._record_http_bridge_retry_circuit_failure(
+        session,
+        detail="stream_incomplete",
+        attempt=prelude_attempt,
+        terminal_pre_response_frame=True,
+    )
+
+    assert failures is None, "a midstream failure after a prelude must not consume a pre-response strike"
+    assert session.key not in cast(Any, service)._http_bridge_retry_circuits
+
+    # The case the assertion exists for is preserved: a terminal frame that
+    # was itself the attempt's first observed event still strikes.
+    first_observation_state = _make_eventless_http_bridge_owner(request_id="req-first-observation")
+    first_observation = _HTTPBridgeResponseCreateAttempt(ordinal=2)
+    first_observation_state.response_create_attempt = first_observation
+    _mark_response_create_attempt_observed(first_observation_state, "response.failed")
+    assert first_observation.non_terminal_response_observed is False
+
+    failures = await service._record_http_bridge_retry_circuit_failure(
+        session,
+        detail="stream_incomplete",
+        attempt=first_observation,
+        terminal_pre_response_frame=True,
+    )
+    assert failures == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_fenced_settle_restores_the_episode_for_retry() -> None:
+    # A fenced durable delete failing means the row this worker wrote is known
+    # to have survived, so the settle did not complete: the popped episode
+    # comes back with its fence and the next clear opportunity retries the
+    # delete, instead of a later load resurrecting the row as a fresh
+    # cooldown against a cause that is already gone.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-settle-retry")
+    row = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+    clear_mock = AsyncMock(side_effect=[Exception("db contention"), None])
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=row),
+        clear_retry_circuit=clear_mock,
+    )
+
+    await service._clear_http_bridge_retry_circuit(session)
+
+    assert session.key in cast(Any, service)._http_bridge_retry_circuits, (
+        "a failed fenced delete is not a completed settlement; the episode must survive for retry"
+    )
+
+    await service._clear_http_bridge_retry_circuit(session)
+
+    assert clear_mock.await_count == 2
+    assert session.key not in cast(Any, service)._http_bridge_retry_circuits
 
 
 @pytest.mark.asyncio
@@ -34295,8 +34479,7 @@ async def test_waiterless_funnel_clears_the_anchor_at_the_capped_threshold(
     # one after the quarantine lapsed) could inject it again.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(),
+        **_stateful_retry_circuit_persistence(),
         rebind_session_account=AsyncMock(return_value=True),
     )
     service._durable_bridge = durable_bridge
@@ -34330,10 +34513,8 @@ async def test_waiterless_retirement_skips_strikes_for_requests_with_a_safe_repl
     # circuit, quarantine the key, or clear the durable anchor under it.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(return_value=None),
+        **_stateful_retry_circuit_persistence(),
         rebind_session_account=AsyncMock(return_value=True),
-        clear_retry_circuit=AsyncMock(return_value=None),
     )
     service._durable_bridge = durable_bridge
     monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
@@ -34368,6 +34549,8 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
     # the sibling's anchor. The decision must read the live episode instead.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="bridge-stale-episode")
+    durable_lookup = AsyncMock(return_value=None)
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=durable_lookup)
 
     owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
     assert owed is False, "a settled episode owes nothing, whatever the stale strike captured"
@@ -34380,9 +34563,21 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
     owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
     assert owed is False
 
+    # A live at-threshold episode without its durable row owes nothing
+    # either: the row is the episode's replica-visible record, and the
+    # completion that settled it elsewhere deleted the row with the reset.
     state.consecutive_failures = 2
     owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
-    assert owed is True, "the live episode at threshold still owes exactly one clear"
+    assert owed is False, "no durable row means the episode already ended durably"
+
+    durable_lookup.return_value = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+    owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
+    assert owed is True, "the live durably-backed episode at threshold owes exactly one clear"
 
 
 @pytest.mark.asyncio

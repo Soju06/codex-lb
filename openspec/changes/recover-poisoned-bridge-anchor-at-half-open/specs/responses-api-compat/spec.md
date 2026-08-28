@@ -22,7 +22,10 @@ MUST record one failure for that request
 lifecycle through the same attempt-scoped recorder, because that failure
 settles through the terminal path rather than a retirement and would
 otherwise never advance the circuit; a later retirement of the same lifecycle
-MUST NOT count it again. A failure the proxy can still replay safely MUST NOT
+MUST NOT count it again. An attempt that observed any non-terminal response
+event — a deferred-reasoning prelude whose ordinary event accounting was
+deliberately skipped included — was answered midstream, and a terminal frame
+that follows it MUST NOT be charged as a pre-response strike. A failure the proxy can still replay safely MUST NOT
 advance the circuit: the request is not stranded, the verified stale-anchor
 replay that follows depends on the circuit generation it captured, and counting
 there both disturbs that fence and charges the key for a failure it recovered

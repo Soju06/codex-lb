@@ -699,11 +699,35 @@ class _HTTPBridgeRetryCircuitMixin:
         effective_threshold = _http_bridge_effective_anchor_poison_threshold(configured_threshold)
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
-            return (
+            live_episode_owes = (
                 state is not None
                 and state.consecutive_failures >= effective_threshold
                 and not state.poison_anchor_cleared
             )
+        if not live_episode_owes:
+            return False
+        # The one-clear marker lives in process memory, so a restart or
+        # another replica cannot see it. The durable circuit row is the
+        # episode's replica-visible record instead: a completed response
+        # settles the circuit and deletes the row, and the fresh anchor that
+        # completion persisted must not be deleted by a stale local episode
+        # that survived the reset. No durable row, nothing owed; a lookup
+        # failure proves nothing either, and the next strike retries.
+        try:
+            persisted = await self._durable_bridge.lookup_retry_circuit(
+                session_key_kind=session.key.affinity_kind,
+                session_key_value=session.key.affinity_key,
+                api_key_id=session.key.api_key_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to confirm durable retry-circuit episode before anchor clear bridge_kind=%s bridge_key=%s",
+                session.key.affinity_kind,
+                _hash_identifier(session.key.affinity_key),
+                exc_info=True,
+            )
+            return False
+        return persisted is not None
 
     async def _http_bridge_mark_poison_anchor_cleared(self: Any, session: _HTTPBridgeSession) -> None:
         """Record that this episode's poisoned anchor has been abandoned."""
@@ -834,7 +858,11 @@ class _HTTPBridgeRetryCircuitMixin:
                     attempt=scoped_attempt,
                     detail=detail,
                 )
-            if scoped_attempt.disarmed or (scoped_attempt.response_observed and not terminal_pre_response_frame):
+            if (
+                scoped_attempt.disarmed
+                or (scoped_attempt.response_observed and not terminal_pre_response_frame)
+                or (terminal_pre_response_frame and scoped_attempt.non_terminal_response_observed)
+            ):
                 return None
 
         await self._load_http_bridge_retry_circuit(session)
@@ -852,7 +880,15 @@ class _HTTPBridgeRetryCircuitMixin:
             if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_recorded:
                 duplicate_attempt = scoped_attempt
             elif scoped_attempt is not None and (
-                scoped_attempt.disarmed or (scoped_attempt.response_observed and not terminal_pre_response_frame)
+                scoped_attempt.disarmed
+                or (scoped_attempt.response_observed and not terminal_pre_response_frame)
+                # ``terminal_pre_response_frame`` exists because the terminal
+                # frame itself marks the attempt observed. It must not also
+                # steamroll genuine midstream evidence: a deferred-reasoning
+                # prelude observed a non-terminal response event without
+                # counting it, so a later terminal failure is a midstream
+                # failure, not a pre-response strike.
+                or (terminal_pre_response_frame and scoped_attempt.non_terminal_response_observed)
             ):
                 return None
             else:
@@ -1036,6 +1072,22 @@ class _HTTPBridgeRetryCircuitMixin:
                 _hash_identifier(session.key.affinity_key),
                 exc_info=True,
             )
+            # A fenced delete failing means a durable row this worker wrote
+            # is known to have survived, so this is not a completed
+            # settlement: put the popped episode back (unless a newer one
+            # already took the key) so the process keeps its version fence
+            # and the next clear opportunity retries the fenced delete,
+            # instead of a later load resurrecting the row as a fresh
+            # cooldown against a cause that is already gone. An unfenced
+            # best-effort delete after a failed load proves nothing about
+            # any row and keeps its old settle-anyway semantics.
+            if state is not None and expected_updated_at_epoch is not None:
+                async with self._http_bridge_retry_circuit_lock:
+                    if self._http_bridge_retry_circuits.get(session.key) is None:
+                        self._http_bridge_retry_circuits[session.key] = state
+                        self._http_bridge_retry_circuit_loaded_keys.add(session.key)
+                        self._http_bridge_retry_circuit_persisted_keys.add(session.key)
+                return
         if state is None:
             return
         if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:

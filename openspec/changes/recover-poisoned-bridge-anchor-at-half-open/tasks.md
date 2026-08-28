@@ -189,6 +189,26 @@
       requirement that a safely replayable request is the only thing that
       may hold the circuit open
 
+- [x] 2.29 The one-clear decision also requires the durable circuit row to
+      still exist. The in-memory marker cannot cross a restart or a replica,
+      but a completed response deletes the row with its reset, so a stale
+      local episode that survived the reset can no longer delete the fresh
+      anchor that completion persisted
+
+- [x] 2.30 A grouped clear computes its settle decision over the grouped
+      request states like the retirement funnels do, so a mixed group's safe
+      member keeps the circuit generation its replay claims
+
+- [x] 2.31 An attempt that observed a non-terminal response event (a
+      deferred-reasoning prelude) is answered midstream: a terminal failure
+      frame after it no longer consumes a pre-response strike, while a
+      terminal frame that was itself the first observation still does
+
+- [x] 2.32 A fenced durable delete that fails restores the popped episode
+      with its version fence, so the settle is retried at the next clear
+      opportunity instead of a later load resurrecting the surviving row as
+      a fresh cooldown
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

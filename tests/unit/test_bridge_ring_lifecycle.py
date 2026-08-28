@@ -585,6 +585,7 @@ async def test_supersession_is_fenced_against_lagging_clock_strikes(
             api_key_scope="key-1",
             expected_updated_at_epoch=2000.0,
             expected_consecutive_failures=1,
+            expected_last_detail="stream_incomplete",
             last_detail="anchor_superseded",
         )
         assert stale_supersession is False, "a supersession behind a lagging-clock strike must miss its fence"
@@ -601,8 +602,23 @@ async def test_supersession_is_fenced_against_lagging_clock_strikes(
             api_key_scope="key-1",
             expected_updated_at_epoch=2000.0,
             expected_consecutive_failures=2,
+            expected_last_detail="stream_incomplete",
             last_detail="anchor_superseded",
         )
+        assert current_supersession is True
+        # A second completion's forward supersession finds the sentinel
+        # already in place and must not claim ownership of it.
+        double_supersession = await repository.supersede_retry_circuit_detail(
+            session_key_kind="session_header",
+            session_key_value="sid-supersede-fence",
+            api_key_scope="key-1",
+            expected_updated_at_epoch=2000.0,
+            expected_consecutive_failures=2,
+            expected_last_detail="stream_incomplete",
+            last_detail="anchor_superseded",
+        )
+        assert double_supersession is False, "only one completion owns the supersession of a shared row"
+        current_supersession = True
         assert current_supersession is True
         await session.refresh(row)
         assert row.last_detail == "anchor_superseded"

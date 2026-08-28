@@ -376,7 +376,12 @@ class _HTTPBridgeSessionRegistryMixin:
             local_alias_was_published=not defer_durable_publication,
         )
         if not defer_durable_publication:
-            return True
+            # The in-memory alias stands either way, but the caller's
+            # quarantine clear and supersession are gated on the durable
+            # anchor actually advancing: a swallowed durable failure here
+            # left the old poisoned anchor stored for other replicas while
+            # this worker cleared its only protection.
+            return durable_result == DurableBridgeAliasRegistration.REGISTERED
         if durable_result != DurableBridgeAliasRegistration.REGISTERED:
             return False
         async with self._http_bridge_lock:

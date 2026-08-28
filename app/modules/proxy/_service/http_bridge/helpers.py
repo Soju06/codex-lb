@@ -899,12 +899,20 @@ def _http_bridge_request_state_holds_safe_replay(request_state: Any) -> bool:
     still available. ``_retry_http_bridge_request_on_fresh_upstream`` leaves
     the proof fields in place after consuming the replay, so a request whose
     permitted replay already failed is stranded like any other: it must strike
-    the circuit and must not keep an abandonment from settling it.
+    the circuit and must not keep an abandonment from settling it. The same
+    retry path also refuses a request that has observed a response event, so a
+    started response holds no replay either — counting it would leave the
+    circuit cooling for its full backoff after a successful abandonment, for a
+    replay that can never dispatch.
     """
     return bool(
         getattr(request_state, "fresh_upstream_request_is_retry_safe", False)
         and getattr(request_state, "fresh_upstream_request_text", None)
         and getattr(request_state, "replay_count", 0) == 0
+        and getattr(request_state, "response_event_count", 0) == 0
+        # A deferred-reasoning prelude marks the response started without
+        # counting a response event, and a started response cannot replay.
+        and not getattr(request_state, "upstream_model_output_seen", False)
     )
 
 

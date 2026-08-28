@@ -583,6 +583,86 @@
 - [x] 2.123 A settle with neither a local episode nor a durable
       observation is refused as owed instead of issuing an unfenced reset
 
+- [x] 2.124 The submit-time poison gate hands back the half-open probe it
+      claimed when failing closed, so the corrected resend is not
+      suppressed by a phantom lease
+
+- [x] 2.125 The terminal settlement's deferral covers its publication
+      awaits, so a cancellation between the queued frame and its sentinel
+      cannot skip the consult, abandonment, and marker
+
+- [x] 2.126 A request that observed a response event holds no safe replay
+      and no longer blocks settlement, matching the retry path's own
+      refusal
+
+- [x] 2.127 Deferred-reasoning prelude evidence also marks the response
+      started for the safe-replay predicate, since it deliberately leaves
+      the counted events at zero
+
+- [x] 2.128 The submit-time gate hands back only a half-open probe this
+      request itself claimed, never a lease another request is flying
+
+- [x] 2.129 The owed poison class survives a later non-poison strike
+      overwriting the durable detail, and any next strike retries the owed
+      clear, fenced on the exact reconciled lineage
+
+- [x] 2.130 A claim CAS miss advertises a remote probe only when the
+      admission generation advanced; sibling resets, purges, and lookup
+      outages report the timer the fresh row actually carries
+
+- [x] 2.131 The probe handback identifies this admission's claim by
+      deadline value, covering a claim made after the load dropped a stale
+      lease
+
+- [x] 2.132 The anchor-advance suppression is a transitional fence applied
+      before the fresh anchor is published and rolled back when the
+      registration fails, closing the consult window without stranding the
+      old anchor
+
+- [x] 2.133 A claim CAS miss advertises a remote probe only for an
+      at-threshold row whose admission generation advanced past the
+      captured one, excluding probe-then-reset and recreated lineages
+
+- [x] 2.134 A poison strike recorded over the supersession sentinel resets
+      the marker, starting a new abandonment story for the fresh anchor
+
+- [x] 2.135 The supersession rollback restores only the exact captured
+      episode and lineage, never a replacement state
+
+- [x] 2.136 The persist merge treats a returned count or detail the write
+      did not submit as foreign evidence, resetting the marker a same-base
+      lagging-clock merge would otherwise carry across
+
+- [x] 2.137 The claim-miss probe inference is lineage-aware: an admission
+      generation advanced in an earlier reset lineage is not a probe in
+      the new one
+
+- [x] 2.138 The supersession fence carries the expected prior detail both
+      ways, so exactly one completion owns each transition and a loser's
+      rollback cannot destroy the winner's supersession
+
+- [x] 2.139 The probe handback clears only the exact lease token captured
+      immediately after admission, never a lease another submission
+      installed later
+
+- [x] 2.140 The completion's quarantine clear is gated on the fresh
+      anchor's durable registration confirming, so a swallowed alias
+      failure cannot strip the last protection from the stored old anchor
+
+- [x] 2.141 The planning-miss hard cap is enforced at insertion, holding
+      through concurrent bursts that pass the pre-await sweep
+
+- [x] 2.142 Handing a probe back restores the consumed transition marker,
+      so the corrected resend re-claims the lease and follow-ups stay
+      suppressed behind it
+
+- [x] 2.143 A failed registration after a successful settle re-seeds the
+      durable poison row on the zeroed lineage, keeping every replica
+      armed against the still-stored old anchor
+
+- [x] 2.144 The claimed-probe token is handed out by the admission's claim
+      under its own lock, exact under any interleaving
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

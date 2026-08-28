@@ -695,6 +695,7 @@ class DurableBridgeRepository:
         api_key_scope: str,
         expected_updated_at_epoch: float,
         expected_consecutive_failures: int,
+        expected_last_detail: str,
         last_detail: str,
     ) -> bool:
         """Rewrite a surviving row's failure detail under its version fence.
@@ -717,6 +718,13 @@ class DurableBridgeRepository:
                     HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
                     HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch,
                     HttpBridgeRetryCircuit.consecutive_failures == expected_consecutive_failures,
+                    # The prior detail is part of the fence: two completions
+                    # can otherwise both believe they own the supersession of
+                    # one shared row, and the loser's rollback would destroy
+                    # the winner's — re-poisoning a freshly registered
+                    # anchor. With this fence exactly one write owns each
+                    # transition, forward and back.
+                    HttpBridgeRetryCircuit.last_detail == expected_last_detail,
                 )
                 .values(last_detail=last_detail)
             )

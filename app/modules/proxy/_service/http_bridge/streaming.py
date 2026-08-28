@@ -123,7 +123,6 @@ from app.modules.proxy._service.http_bridge.quarantine import (
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
     _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
-    _http_bridge_anchor_poison_detail,
     _http_bridge_retry_circuit_suppression_message,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -4693,7 +4692,9 @@ class _HTTPBridgeStreamingMixin:
                                                 _abandon_durable_http_bridge_continuity,
                                             )
 
-                                            poison_detail = _http_bridge_anchor_poison_detail("stream_idle_timeout")
+                                            poison_detail = await self._http_bridge_effective_anchor_poison_detail(
+                                                session, "stream_idle_timeout"
+                                            )
                                             if poison_detail is None:
                                                 return
                                             (

@@ -1293,7 +1293,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 selection=retry_circuit_attempt_selection,
                             )
                         )
-                        poison_candidate_detail = _http_bridge_anchor_poison_detail(reader_strike_detail)
+                        poison_candidate_detail = await self._http_bridge_effective_anchor_poison_detail(
+                            session, reader_strike_detail
+                        )
                         poison_episode = None
                         poison_expected_anchor: object = _POISON_ANCHOR_CAPTURE_UNAVAILABLE
                         if poison_candidate_detail is not None and observed_response_events == 0:
@@ -2290,7 +2292,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # the single-request path. Keep the highest count and its poison
                 # detail; discarding them left the grouped branch returning with
                 # the durable anchor still stored.
-                grouped_poison_candidate = _http_bridge_anchor_poison_detail(grouped_terminal_detail)
+                grouped_poison_candidate = await self._http_bridge_effective_anchor_poison_detail(
+                    session, grouped_terminal_detail
+                )
                 if grouped_poison_candidate is not None and grouped_strike_failures is not None:
                     if grouped_strike_failures > grouped_poison_strike_failures:
                         grouped_poison_strike_failures = grouped_strike_failures
@@ -2922,6 +2926,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         # and cannot touch the one registered below.
         completion_circuit_settlement_failed = False
         completion_quarantine_clear_fence: int | None = None
+        completion_pre_settle_poison_detail: str | None = None
         if (
             event_type == "response.completed"
             and terminal_request_state is not None
@@ -2936,6 +2941,14 @@ class _HTTPBridgeUpstreamEventsMixin:
             # armed when this response proved the session healthy, not on
             # whatever owns the key by then.
             completion_quarantine_clear_fence = _http_bridge_quarantine_clear_fence(self, session.key)
+            async with self._http_bridge_retry_circuit_lock:
+                pre_settle_state = self._http_bridge_retry_circuits.get(session.key)
+                if pre_settle_state is not None:
+                    completion_pre_settle_poison_detail = (
+                        pre_settle_state.last_detail
+                        if _http_bridge_anchor_poison_detail(pre_settle_state.last_detail) is not None
+                        else pre_settle_state.owed_poison_detail
+                    )
             if not terminal_request_state.verified_stale_anchor_replay:
                 circuit_settled = await self._clear_http_bridge_retry_circuit(session)
                 if not circuit_settled:
@@ -2947,12 +2960,25 @@ class _HTTPBridgeUpstreamEventsMixin:
                     # process-local quarantine expires.
                     completion_circuit_settlement_failed = True
 
+        completion_anchor_registration_confirmed = True
         if (
             response_id is not None
             and matched_request_state is not None
             and event_type == "response.completed"
             and not completed_empty_prewarm
         ):
+            anchor_advance_supersession = None
+            if completion_circuit_settlement_failed:
+                # Applied BEFORE the fresh anchor is published: a concurrent
+                # funnel's consult whose continuity read lands between the
+                # publication and a later suppression would validate the old
+                # poison row and fence its rebind on the anchor just
+                # registered, deleting it. The suppression is transitional —
+                # rolled back below when the registration fails, so the old
+                # anchor never becomes uncleareable.
+                anchor_advance_supersession = await self._http_bridge_suppress_poison_clear_after_anchor_advance(
+                    session
+                )
             alias_registered = await self._register_http_bridge_previous_response_id(
                 session,
                 response_id,
@@ -2964,11 +2990,26 @@ class _HTTPBridgeUpstreamEventsMixin:
                 ),
                 pending_tool_calls=_durable_pending_tool_call_manifest(matched_request_state, payload),
             )
-            if alias_registered and completion_circuit_settlement_failed:
-                # The fresh anchor persisted: the restored episode's
-                # failures were all against the superseded one, so its owed
-                # clear must not fire against the anchor just registered.
-                await self._http_bridge_suppress_poison_clear_after_anchor_advance(session)
+            completion_anchor_registration_confirmed = alias_registered
+            if not alias_registered and anchor_advance_supersession is not None:
+                await self._http_bridge_restore_poison_clear_after_failed_anchor_advance(
+                    session, anchor_advance_supersession
+                )
+            if (
+                not alias_registered
+                and not completion_circuit_settlement_failed
+                and completion_pre_settle_poison_detail is not None
+            ):
+                # The settle-before-registration ordering already zeroed the
+                # durable circuit, but the registration failure means the
+                # OLD poisoned anchor is still the stored one. Without
+                # durable evidence the next planning load revokes the kept
+                # local quarantine as a disproved episode and other replicas
+                # never arm; re-seed the row so the poison protection holds
+                # everywhere until a real recovery lands.
+                await self._http_bridge_restore_poison_row_after_failed_registration(
+                    session, completion_pre_settle_poison_detail
+                )
             if not alias_registered and is_http_bridge_account_neutral_replay(
                 kind=session.key.affinity_kind,
                 key=session.key.affinity_key,
@@ -3008,6 +3049,11 @@ class _HTTPBridgeUpstreamEventsMixin:
             # cooldown cannot hand the next attach a poisoned injection while
             # the settle retries at the next opportunity.
             and not completion_circuit_settlement_failed
+            # A durable alias write that failed leaves the OLD anchor as the
+            # stored one even though this worker's completion succeeded: a
+            # replica or a restart would re-inject it, and the quarantine is
+            # the only protection left once the circuit was settled.
+            and completion_anchor_registration_confirmed
         ):
             # The quarantine clears only after the fresh anchor persisted:
             # a failed alias write rewrites the event to response.failed
@@ -3384,7 +3430,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     attempt=terminal_request_state.response_create_attempt,
                     terminal_pre_response_frame=True,
                 )
-                terminal_poison_detail = _http_bridge_anchor_poison_detail(error_code)
+                terminal_poison_detail = await self._http_bridge_effective_anchor_poison_detail(session, error_code)
 
         matched_event_queue = (
             completed_event_queue
@@ -3405,84 +3451,111 @@ class _HTTPBridgeUpstreamEventsMixin:
             # persisted, so keep the operation fenced as acknowledged while
             # retaining the failure SSE for the client.
             matched_terminal_state = "acknowledged"
-        if matched_request_state is not None and not suppress_downstream_event:
-            for deferred_text in matched_deferred_texts:
-                await _persist_http_bridge_operation_event(
-                    self,
-                    session,
-                    matched_request_state,
-                    deferred_text,
-                    terminal=False,
-                )
-        if matched_request_state is not None and matched_event_queue is not None and not suppress_downstream_event:
-            for deferred_text in matched_deferred_texts:
-                await matched_event_queue.put(deferred_text)
-        matched_terminal_enqueued = False
-        if matched_request_state is not None and not suppress_downstream_event:
-            matched_terminal_enqueued = await _persist_http_bridge_operation_event(
-                self,
-                session,
-                matched_request_state,
-                event_block,
-                terminal=event_type in {"response.completed", "response.failed", "response.incomplete", "error"},
-                terminal_state=matched_terminal_state,
-                terminal_event_queue=matched_event_queue,
-                terminal_delivery_scope=(completed_delivery_scope if completed_event_queue_claimed else None),
-            )
-        if (
-            matched_request_state is not None
-            and matched_event_queue is not None
-            and not suppress_downstream_event
-            and matched_terminal_enqueued is not True
-        ):
-            await matched_event_queue.put(event_block)
 
-        if terminal_request_state is None:
-            return
-
-        terminal_event_queue = (
-            completed_event_queue if completed_event_queue_claimed else terminal_request_state.event_queue
-        )
-        terminal_enqueued = matched_terminal_enqueued if terminal_request_state is matched_request_state else False
-        if terminal_request_state is not matched_request_state:
-            deferred_texts = _pop_websocket_deferred_reasoning_downstream_texts(terminal_request_state)
-            for deferred_text in deferred_texts:
-                if not suppress_downstream_event:
+        async def _publish_matched_and_terminal_frames() -> None:
+            nonlocal matched_terminal_enqueued
+            if matched_request_state is not None and not suppress_downstream_event:
+                for deferred_text in matched_deferred_texts:
                     await _persist_http_bridge_operation_event(
                         self,
                         session,
-                        terminal_request_state,
+                        matched_request_state,
                         deferred_text,
                         terminal=False,
                     )
-                if terminal_event_queue is not None:
-                    await terminal_event_queue.put(deferred_text)
-            if not suppress_downstream_event:
-                terminal_enqueued = await _persist_http_bridge_operation_event(
+            if matched_request_state is not None and matched_event_queue is not None and not suppress_downstream_event:
+                for deferred_text in matched_deferred_texts:
+                    await matched_event_queue.put(deferred_text)
+            if matched_request_state is not None and not suppress_downstream_event:
+                matched_terminal_enqueued = await _persist_http_bridge_operation_event(
                     self,
                     session,
-                    terminal_request_state,
+                    matched_request_state,
                     event_block,
-                    terminal=True,
-                    terminal_state=(
-                        "acknowledged"
-                        if continuity_persistence_failed_after_ack and terminal_request_state is matched_request_state
-                        else _http_bridge_operation_state_for_event(event_type)
-                    ),
-                    terminal_event_queue=terminal_event_queue,
+                    terminal=event_type in {"response.completed", "response.failed", "response.incomplete", "error"},
+                    terminal_state=matched_terminal_state,
+                    terminal_event_queue=matched_event_queue,
                     terminal_delivery_scope=(completed_delivery_scope if completed_event_queue_claimed else None),
                 )
-            if terminal_event_queue is not None and terminal_enqueued is not True:
-                await terminal_event_queue.put(event_block)
-        if terminal_event_queue is not None:
-            if terminal_enqueued is not True:
-                await terminal_event_queue.put(None)
-            if completed_event_queue_claimed and completed_delivery_scope is not None:
-                async with session.pending_lock:
-                    # Keep the completed claim authoritative after its producer
-                    # returns. A concurrent timeout may still be finishing
-                    # awaited recovery work before it rechecks this scope.
-                    completed_delivery_scope.terminal_enqueued = True
+            if (
+                matched_request_state is not None
+                and matched_event_queue is not None
+                and not suppress_downstream_event
+                and matched_terminal_enqueued is not True
+            ):
+                await matched_event_queue.put(event_block)
+
+            if terminal_request_state is None:
+                return
+
+            terminal_event_queue = (
+                completed_event_queue if completed_event_queue_claimed else terminal_request_state.event_queue
+            )
+            terminal_enqueued = matched_terminal_enqueued if terminal_request_state is matched_request_state else False
+            if terminal_request_state is not matched_request_state:
+                deferred_texts = _pop_websocket_deferred_reasoning_downstream_texts(terminal_request_state)
+                for deferred_text in deferred_texts:
+                    if not suppress_downstream_event:
+                        await _persist_http_bridge_operation_event(
+                            self,
+                            session,
+                            terminal_request_state,
+                            deferred_text,
+                            terminal=False,
+                        )
+                    if terminal_event_queue is not None:
+                        await terminal_event_queue.put(deferred_text)
+                if not suppress_downstream_event:
+                    terminal_enqueued = await _persist_http_bridge_operation_event(
+                        self,
+                        session,
+                        terminal_request_state,
+                        event_block,
+                        terminal=True,
+                        terminal_state=(
+                            "acknowledged"
+                            if continuity_persistence_failed_after_ack
+                            and terminal_request_state is matched_request_state
+                            else _http_bridge_operation_state_for_event(event_type)
+                        ),
+                        terminal_event_queue=terminal_event_queue,
+                        terminal_delivery_scope=(completed_delivery_scope if completed_event_queue_claimed else None),
+                    )
+                if terminal_event_queue is not None and terminal_enqueued is not True:
+                    await terminal_event_queue.put(event_block)
+            if terminal_event_queue is not None:
+                if terminal_enqueued is not True:
+                    await terminal_event_queue.put(None)
+                if completed_event_queue_claimed and completed_delivery_scope is not None:
+                    async with session.pending_lock:
+                        # Keep the completed claim authoritative after its producer
+                        # returns. A concurrent timeout may still be finishing
+                        # awaited recovery work before it rechecks this scope.
+                        completed_delivery_scope.terminal_enqueued = True
+
+        matched_terminal_enqueued = False
+        terminal_publication_cancellation: asyncio.CancelledError | None = None
+        if terminal_poison_detail is not None and terminal_strike_failures is not None:
+            # Publication and settlement share one deferral for a poison
+            # terminal: a cancellation landing inside the operation
+            # persistence, between the queued frame and its sentinel, or on
+            # any other publication await used to escape before the owned
+            # settlement task even existed — the outer abort finalized the
+            # popped request and the consult, abandonment, and marker never
+            # started, leaving the poisoned durable anchor reusable once the
+            # process-local quarantine expired.
+            terminal_publication_task = asyncio.create_task(
+                _publish_matched_and_terminal_frames(),
+                name=f"http-bridge-terminal-publication-{session.durable_session_id}",
+            )
+            _terminal_publication_result, terminal_publication_cancellation = await _await_task_deferring_cancellation(
+                terminal_publication_task
+            )
+        else:
+            await _publish_matched_and_terminal_frames()
+
+        if terminal_request_state is None:
+            return
 
         if terminal_poison_detail is not None and terminal_strike_failures is not None:
             # The strike above opens the circuit, but the durable anchor that
@@ -3575,6 +3648,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                 )
             finally:
                 await _finalize_terminal_settlement(terminal_request_state)
+            if terminal_settlement_cancellation is None:
+                terminal_settlement_cancellation = terminal_publication_cancellation
             if terminal_settlement_cancellation is not None:
                 raise terminal_settlement_cancellation
         else:

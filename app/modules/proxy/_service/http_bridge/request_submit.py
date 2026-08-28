@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import random
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -102,8 +103,8 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _record_http_bridge_quarantine_wedged_pending,
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
     _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
-    _http_bridge_anchor_poison_detail,
     _http_bridge_retry_circuit_suppression_message,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -994,11 +995,19 @@ class _HTTPBridgeRequestSubmitMixin:
             and request_state.response_event_count == 0
             and request_state.replay_count == 0
         )
+        admission_claimed_leases: list[float] = []
         retry_allowed = await self._http_bridge_precreated_retry_allowed(
             session,
             allow_proof_gated_continuity_replay=allow_proof_gated_continuity_replay,
             allow_operation_fenced_continuity_replay=allow_operation_fenced_continuity_replay,
+            claimed_lease_out=admission_claimed_leases,
         )
+        # The exact lease this admission claimed, handed out by the claim
+        # itself under its own lock: empty when this request claimed
+        # nothing, so a later fail-closed path can hand back only its own
+        # probe and never a lease another submission installed under any
+        # interleaving.
+        claimed_half_open_until = admission_claimed_leases[-1] if admission_claimed_leases else 0.0
         if not retry_allowed:
             block_seconds, block_reason = await self._http_bridge_precreated_retry_block(session)
             retry_after_seconds = max(1, math.ceil(block_seconds))
@@ -1037,6 +1046,32 @@ class _HTTPBridgeRequestSubmitMixin:
             # caches stay a performance bound, never a correctness
             # assumption. Client-supplied anchors are untouched — only the
             # proxy's own injection is refused.
+            async with self._http_bridge_retry_circuit_lock:
+                gate_state = self._http_bridge_retry_circuits.get(session.key)
+                if (
+                    gate_state is not None
+                    and claimed_half_open_until > 0.0
+                    and gate_state.half_open_until == claimed_half_open_until
+                ):
+                    # The admission above claimed the half-open probe for
+                    # this request; failing closed without dispatching would
+                    # leave that phantom lease suppressing the client's
+                    # immediate full-history resend — the very request this
+                    # rejection asks for — for up to the whole lease. Hand
+                    # the probe back, identified by value: a lease unchanged
+                    # since before admission belongs to a request already in
+                    # flight (a proof-gated replay bypasses it), while a
+                    # changed deadline is the claim this admission made —
+                    # including one made after the load replaced a stale
+                    # lease through a fresh adoption.
+                    gate_state.half_open_until = 0.0
+                    # Restore the transition marker the admission consumed:
+                    # a lease is claimed only while an expired cooldown
+                    # transitions to half-open, and leaving both fields at
+                    # zero would admit every follow-up unleased. An expired
+                    # but positive cooldown makes the corrected resend
+                    # re-claim the probe, keeping exactly one in flight.
+                    gate_state.cooldown_until = time.monotonic() - 1.0
             _log_http_bridge_event(
                 "previous_response_poisoned_anchor_fail_fast",
                 session.key,
@@ -1997,6 +2032,12 @@ class _HTTPBridgeRequestSubmitMixin:
                             )
                         generation_claimed = claim_outcome is True
                         if not generation_claimed:
+                            remote_probe_holds_lease = False
+                            if claim_outcome is False and circuit_key is not None:
+                                remote_probe_holds_lease = await self._http_bridge_claim_miss_shows_remote_probe(
+                                    circuit_key,
+                                    request_state.verified_stale_anchor_retry_circuit_generation,
+                                )
                             # The block lives on the source hard key: this
                             # replacement session's own unique key never has a
                             # circuit, and the source key's cooldown alone is
@@ -2006,12 +2047,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                 suppressed_block_reason,
                             ) = await self._http_bridge_precreated_retry_block_for_key(
                                 circuit_key or session.key,
-                                # Only a confirmed CAS loss proves a probe
-                                # holds the lease somewhere; a claim that
-                                # timed out or errored is infrastructure
-                                # trouble and must not advertise a
-                                # 600-second wait no probe owns.
-                                assume_remote_half_open_lease=claim_outcome is False,
+                                assume_remote_half_open_lease=remote_probe_holds_lease,
                             )
                             suppressed_retry_after_seconds = max(1, math.ceil(suppressed_block_seconds))
                             _log_http_bridge_event(
@@ -2884,7 +2920,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 penalize_account=False,
             )
             if response_events_seen == 0:
-                poison_detail = _http_bridge_anchor_poison_detail(partial_strike_detail)
+                poison_detail = await self._http_bridge_effective_anchor_poison_detail(session, partial_strike_detail)
                 if poison_detail is None:
                     return
                 # The consult returns the exact episode it validated; the
@@ -3028,6 +3064,46 @@ class _HTTPBridgeRequestSubmitMixin:
         await self._close_http_bridge_session_bounded(session, reason="retire_after_drain")
         return True
 
+    async def _http_bridge_claim_miss_shows_remote_probe(
+        self: Any,
+        circuit_key: Any,
+        captured_generation: Any,
+    ) -> bool:
+        """Whether a claim CAS miss actually means a probe holds the lease.
+
+        A confirmed CAS loss only says the row moved: a sibling completion
+        resets the row and changes its version without touching the
+        admission generation. Only an advanced admission generation proves a
+        probe won; a reset, purge, strike, or lookup outage must report the
+        timer the fresh row actually carries instead of a 600-second wait no
+        probe owns.
+        """
+        captured_admission_generation = captured_generation[0] if captured_generation else 0
+        captured_lineage_epoch = captured_generation[1] if captured_generation else 0.0
+        try:
+            moved_row = await self._durable_bridge.lookup_retry_circuit(
+                session_key_kind=circuit_key.affinity_kind,
+                session_key_value=circuit_key.affinity_key,
+                api_key_id=circuit_key.api_key_id,
+            )
+        except Exception:
+            return False
+        return bool(
+            moved_row is not None
+            # A lease exists only for an active at-threshold lineage: a
+            # probe-then-reset sequence keeps the advanced generation on a
+            # zero-count row with no timer left, and a purge-and-recreate
+            # restarts generations below the captured one.
+            and moved_row.consecutive_failures >= _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD
+            and getattr(moved_row, "admission_generation", 0) > captured_admission_generation
+            # A reset preserves the admission generation while starting a
+            # new lineage under a new version; only an advance within the
+            # captured lineage is a probe in THIS episode. A same-lineage
+            # strike moves the version too and under-reports here, which
+            # falls back to the timer the fresh row actually carries.
+            and getattr(moved_row, "updated_at_epoch", None) == captured_lineage_epoch
+        )
+
     async def _retire_stale_pending_http_bridge_session(
         self: Any,
         session: "_HTTPBridgeSession",
@@ -3111,7 +3187,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 detail=retry_circuit_detail or detail,
                 selection=retry_circuit_attempt_selection,
             )
-            poison_detail = _http_bridge_anchor_poison_detail(retry_circuit_detail or detail)
+            poison_detail = await self._http_bridge_effective_anchor_poison_detail(
+                session, retry_circuit_detail or detail
+            )
             poison_episode = None
             poison_expected_anchor: object = _POISON_ANCHOR_CAPTURE_UNAVAILABLE
             if poison_detail is not None:

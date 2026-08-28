@@ -269,6 +269,38 @@ async def test_bundle_rejects_workspace_id_label_equivalent_duplicates(db_setup)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("conflict_mode", ["skip", "replace"])
+async def test_bundle_destination_matching_normalizes_email_case(db_setup, conflict_mode):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        existing = _make_account("bundle-case-destination", "Bundle.User@Example.Invalid")
+        existing.chatgpt_account_id = "bundle-case-workspace"
+        existing.workspace_id = "bundle-case-workspace"
+        existing.alias = "destination-alias"
+        await repo.upsert(existing, merge_by_email=False)
+
+        incoming = _make_account("bundle-case-source", "bundle.user@example.invalid")
+        incoming.chatgpt_account_id = "bundle-case-workspace"
+        incoming.workspace_id = "bundle-case-workspace"
+        incoming.alias = "portable-alias"
+        incoming.routing_policy = "normal"
+        incoming.limit_warmup_enabled = False
+        incoming.security_work_authorized = False
+
+        matches = await repo.account_bundle_identity_matches([incoming])
+        assert matches[0] is not None
+        assert matches[0].id == existing.id
+
+        result = await repo.persist_account_bundle([incoming], conflict_mode=conflict_mode)
+        assert result[0].account_id == existing.id
+        assert result[0].outcome == ("skipped" if conflict_mode == "skip" else "replaced")
+
+        stored = (await session.execute(select(Account))).scalars().all()
+        assert len(stored) == 1
+        assert stored[0].alias == ("destination-alias" if conflict_mode == "skip" else "portable-alias")
+
+
+@pytest.mark.asyncio
 async def test_accounts_upsert_with_merge_enabled_serializes_concurrent_same_email(db_setup):
     email = "race@example.com"
     barrier = asyncio.Barrier(2)
@@ -331,6 +363,16 @@ def test_slot_lock_key_serializes_unknown_workspace_overwrite_by_email():
     assert _slot_lock_key(first, preserve_unknown_workspace_duplicates=True) != _slot_lock_key(
         second,
         preserve_unknown_workspace_duplicates=True,
+    )
+
+
+def test_slot_lock_key_normalizes_email_case():
+    upper = _make_account("acc_case_upper", "User@Example.COM")
+    lower = _make_account("acc_case_lower", "user@example.com")
+
+    assert _slot_lock_key(upper, preserve_unknown_workspace_duplicates=False) == _slot_lock_key(
+        lower,
+        preserve_unknown_workspace_duplicates=False,
     )
 
 

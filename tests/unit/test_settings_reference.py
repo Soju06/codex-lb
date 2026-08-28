@@ -69,9 +69,12 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # operator-selectable because startup invariant failures need two supported
 # modes: report-only by default for mixed/self-hosted environments, and
 # fail-fast when CI or strict operators want config drift to abort startup.
-# portable-encrypted-account-bundles adds the operator-controlled upload and
-# plaintext bound justified in that change's proposal/design.
-MAX_SETTINGS_FIELDS = 132
+# 131 -> 132: account_bundle_max_bytes. The operator-controlled upload and
+# plaintext bound are justified in portable-encrypted-account-bundles.
+# 132 -> 133: operation_spool_format. The default remains rows_v1 because a
+# rolling deployment may enable chunks_v2 only after every replica can read it;
+# no existing timeout or size setting can express that compatibility fence.
+MAX_SETTINGS_FIELDS = 133
 
 
 def test_generated_settings_reference_matches_code() -> None:

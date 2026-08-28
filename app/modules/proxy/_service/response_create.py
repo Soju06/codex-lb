@@ -14,10 +14,13 @@ from typing import Any, TypeVar, cast
 from uuid import uuid4
 
 from app.core.clients.proxy import (
+    _AGENT_CONTROL_OUTPUT_ITEM_TYPES,
     CODEX_INSTALLATION_ID_HEADER,
     ImageFetchSession,
     ProxyResponseError,
+    _agent_control_tool_output_occurrences,
     _finalize_responses_lite_reasoning_context,
+    _historical_agent_control_output_occurrences,
     _inline_content_images,
     _normalize_responses_lite_websocket_client_metadata,
     _payload_has_responses_lite_websocket_marker,
@@ -212,6 +215,11 @@ def _response_create_text_with_size_guard(
     request_state: _WebSocketRequestState,
     transport: str,
 ) -> str | None:
+    protected_agent_control_output_occurrences = (
+        _historical_agent_control_output_occurrences(cast(list[JsonValue], payload.input))
+        if isinstance(payload.input, list)
+        else {}
+    )
     upstream_payload = dict(payload.to_payload())
     upstream_payload.pop("stream", None)
     upstream_payload.pop("background", None)
@@ -238,6 +246,7 @@ def _response_create_text_with_size_guard(
         slimmed_payload, slim_summary = slim_payload_for_upstream(
             upstream_payload,
             max_bytes=max_bytes,
+            protected_agent_control_output_occurrences=protected_agent_control_output_occurrences,
         )
         if slim_summary is not None:
             upstream_payload = slimmed_payload
@@ -302,6 +311,7 @@ def _slim_response_create_payload_for_upstream(
     payload: dict[str, JsonValue],
     *,
     max_bytes: int,
+    protected_agent_control_output_occurrences: Mapping[tuple[str, str], tuple[bool, ...]] | None = None,
 ) -> tuple[dict[str, JsonValue], dict[str, int] | None]:
     input_value = payload.get("input")
     if not isinstance(input_value, list) or not input_value:
@@ -314,6 +324,9 @@ def _slim_response_create_payload_for_upstream(
 
     tool_outputs_slimmed = 0
     images_slimmed = 0
+    if protected_agent_control_output_occurrences is None:
+        protected_agent_control_output_occurrences = _agent_control_tool_output_occurrences(historical)
+    agent_control_output_counts: dict[tuple[str, str], int] = {}
 
     slimmed_historical: list[JsonValue] = []
     for item in historical:
@@ -321,7 +334,11 @@ def _slim_response_create_payload_for_upstream(
             slimmed_item,
             item_tool_outputs_slimmed,
             item_images_slimmed,
-        ) = _slim_historical_response_input_item(item)
+        ) = _slim_historical_response_input_item(
+            item,
+            protected_agent_control_output_occurrences=protected_agent_control_output_occurrences,
+            agent_control_output_counts=agent_control_output_counts,
+        )
         tool_outputs_slimmed += item_tool_outputs_slimmed
         images_slimmed += item_images_slimmed
         slimmed_historical.append(slimmed_item)
@@ -449,7 +466,12 @@ def _response_create_recent_suffix_start(input_items: list[JsonValue]) -> int:
     return 0
 
 
-def _slim_historical_response_input_item(item: JsonValue) -> tuple[JsonValue, int, int]:
+def _slim_historical_response_input_item(
+    item: JsonValue,
+    *,
+    protected_agent_control_output_occurrences: Mapping[tuple[str, str], tuple[bool, ...]],
+    agent_control_output_counts: dict[tuple[str, str], int],
+) -> tuple[JsonValue, int, int]:
     if not is_json_mapping(item):
         return item, 0, 0
 
@@ -458,6 +480,15 @@ def _slim_historical_response_input_item(item: JsonValue) -> tuple[JsonValue, in
     images_slimmed = 0
 
     item_type = item_mapping.get("type")
+    if isinstance(item_type, str) and item_type in _AGENT_CONTROL_OUTPUT_ITEM_TYPES:
+        call_id = item_mapping.get("call_id")
+        if isinstance(call_id, str) and call_id:
+            key = (item_type, call_id)
+            occurrence = agent_control_output_counts.get(key, 0)
+            agent_control_output_counts[key] = occurrence + 1
+            namespaced_flags = protected_agent_control_output_occurrences.get(key, ())
+            if occurrence < len(namespaced_flags) and namespaced_flags[occurrence]:
+                return item_mapping, tool_outputs_slimmed, images_slimmed
     if isinstance(item_type, str) and item_type in _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES:
         output = item_mapping.get("output")
         if isinstance(output, str):

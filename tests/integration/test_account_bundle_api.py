@@ -146,11 +146,11 @@ async def test_account_bundle_supports_empty_export_and_rejects_changed_upload(a
 
 @pytest.mark.asyncio
 async def test_account_bundle_failures_are_safe_and_never_cacheable(async_client, monkeypatch) -> None:
-    audit_details: list[dict[str, object] | None] = []
+    audit_events: list[tuple[str, dict[str, object] | None]] = []
     monkeypatch.setattr(
         accounts_api_module.AuditService,
         "log_async",
-        lambda _action, **kwargs: audit_details.append(kwargs.get("details")),
+        lambda action, **kwargs: audit_events.append((action, kwargs.get("details"))),
     )
     malformed = await async_client.post(
         "/api/accounts/bundle/import/preflight",
@@ -195,4 +195,10 @@ async def test_account_bundle_failures_are_safe_and_never_cacheable(async_client
     assert oversized.status_code == 413
     assert oversized.headers["cache-control"].startswith("no-store")
     assert oversized.json()["error"]["code"] == "payload_too_large"
-    assert all(details is None or set(details) <= {"operation", "outcome"} for details in audit_details)
+    assert [action for action, _details in audit_events].count("account_bundle_preflight_failed") == 1
+    assert [action for action, _details in audit_events].count("account_bundle_request_failed") == 3
+    assert all(
+        details is None or set(details) <= {"operation", "outcome"}
+        for _action, details in audit_events
+        if _action == "account_bundle_request_failed"
+    )

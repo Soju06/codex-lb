@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,12 +13,27 @@ class _FakeDurableBridge:
         self.append_result = append_result
         self.update_result = update_result
         self.batches: list[list[str]] = []
+        self.chunk_batches: list[list[str]] = []
+        self.terminal_chunks: list[str] = []
         self.finalized: list[str] = []
         self.updated: list[dict[str, object]] = []
 
     async def append_operation_events(self, *, events, max_bytes: int) -> bool:
         del max_bytes
         self.batches.append([event.event_text for event in events])
+        return self.append_result
+
+    async def append_operation_event_chunk(self, *, events, max_bytes: int) -> bool:
+        del max_bytes
+        self.chunk_batches.append([event.event_text for event in events])
+        return self.append_result
+
+    async def append_terminal_operation_event(self, **kwargs) -> bool:
+        self.terminal_chunks.append(kwargs["event_text"])
+        return self.append_result
+
+    async def append_terminal_operation_chunk(self, **kwargs) -> bool:
+        self.terminal_chunks.append(kwargs["event_text"])
         return self.append_result
 
     async def finalize_operation_event_spool(self, **kwargs) -> bool:
@@ -64,6 +80,28 @@ async def _enqueue(
     )
 
 
+def test_from_settings_defaults_to_rows_and_accepts_chunk_canary() -> None:
+    durable = _FakeDurableBridge()
+
+    default_batcher = HttpBridgeOperationEventBatcher.from_settings(durable, SimpleNamespace())
+    chunk_batcher = HttpBridgeOperationEventBatcher.from_settings(
+        durable,
+        SimpleNamespace(http_responses_session_bridge_operation_spool_format="chunks_v2"),
+    )
+
+    assert default_batcher._spool_format == "rows_v1"
+    assert chunk_batcher._spool_format == "chunks_v2"
+
+
+def test_constructor_rejects_unknown_spool_format() -> None:
+    with pytest.raises(ValueError, match="unsupported"):
+        HttpBridgeOperationEventBatcher(
+            _FakeDurableBridge(),
+            max_bytes=1024,
+            spool_format="unknown",
+        )
+
+
 @pytest.mark.asyncio
 async def test_batches_without_blocking_and_finalizes_terminal_event() -> None:
     durable = _FakeDurableBridge()
@@ -108,7 +146,40 @@ async def test_background_flushes_nonterminal_events_as_one_batch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dropped_batch_is_never_marked_replayable() -> None:
+async def test_chunk_mode_routes_batch_and_terminal_without_legacy_writes() -> None:
+    durable = _FakeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+        spool_format="chunks_v2",
+    )
+    try:
+        await _enqueue(batcher, "one")
+        await _enqueue(batcher, "two")
+        result = await batcher.append_terminal_event(
+            operation_id="op-1",
+            session_id="session-1",
+            instance_id="instance-1",
+            owner_epoch=1,
+            event_text="terminal",
+            max_bytes=1024,
+            state="completed",
+            response_id="resp-1",
+        )
+
+        assert result.persisted is True
+        assert durable.chunk_batches == [["one", "two"]]
+        assert durable.terminal_chunks == ["terminal"]
+        assert durable.batches == []
+    finally:
+        await batcher.close()
+
+
+@pytest.mark.asyncio
+async def test_dropped_batch_requires_fenced_terminal_settlement() -> None:
     durable = _FakeDurableBridge(append_result=False)
     batcher = HttpBridgeOperationEventBatcher(
         durable,
@@ -133,9 +204,9 @@ async def test_dropped_batch_is_never_marked_replayable() -> None:
             state="failed",
         )
         assert result.persisted is False
-        assert result.settlement_required is False
+        assert result.settlement_required is True
         assert durable.finalized == []
-        assert durable.updated[0]["state"] == "failed"
+        assert durable.updated == []
         assert batcher._contexts == {}
         assert batcher._dropped_operations == set()
     finally:
@@ -188,6 +259,30 @@ async def test_terminal_append_failure_settles_operation() -> None:
             "event_spool_complete": False,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_append_false_requires_fallback_settlement() -> None:
+    durable = _FakeDurableBridge(append_result=False)
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+    )
+
+    result = await batcher.append_terminal_event(
+        operation_id="op-1",
+        session_id="session-1",
+        instance_id="instance-1",
+        owner_epoch=7,
+        event_text="terminal",
+        max_bytes=1024,
+        state="failed",
+        response_id="resp-1",
+    )
+
+    assert result.persisted is False
+    assert result.settlement_required is True
 
 
 @pytest.mark.asyncio

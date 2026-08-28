@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from typing import cast
@@ -11,6 +12,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardConflictError
 from app.db.models import AccountStatus
+from app.modules.accounts import service as accounts_service_module
 from app.modules.accounts.account_bundle import (
     AccountBundleError,
     AccountBundleTooLargeError,
@@ -65,6 +67,34 @@ def test_bundle_round_trip_for_zero_one_and_many(accounts: list[BundleAccount]) 
     assert restored.accounts == accounts
     assert b"access-secret" not in encrypted
     assert b"operator@example.com" not in encrypted
+
+
+@pytest.mark.parametrize("field", ["access_token", "refresh_token", "id_token"])
+def test_bundle_credentials_reject_whitespace_only_without_normalizing_tokens(field: str) -> None:
+    values = {
+        "access_token": " access-secret ",
+        "refresh_token": " refresh-secret ",
+        "id_token": " id-secret ",
+    }
+    credentials = BundleCredentials(
+        access_token=values["access_token"],
+        refresh_token=values["refresh_token"],
+        id_token=values["id_token"],
+    )
+    assert getattr(credentials, field) == values[field]
+
+    values[field] = "   "
+    with pytest.raises(ValueError, match="credential cannot be blank"):
+        BundleCredentials(
+            access_token=values["access_token"],
+            refresh_token=values["refresh_token"],
+            id_token=values["id_token"],
+        )
+
+
+def test_bundle_account_rejects_whitespace_only_email() -> None:
+    with pytest.raises(ValueError, match="email cannot be blank"):
+        _account("   ")
 
 
 def test_bundle_uses_fresh_random_encryption_material() -> None:
@@ -212,3 +242,74 @@ async def test_post_import_validation_failure_is_fixed_safe_warning(monkeypatch)
     assert BUNDLE_VALIDATION_AGGREGATE_WARNING == "Some imported accounts could not be validated."
     assert "upstream detail" not in warnings["failed-account"]
     assert unavailable == ["failed-account"]
+
+
+@pytest.mark.asyncio
+async def test_post_import_validation_persists_proxy_required_pause(monkeypatch) -> None:
+    account = SimpleNamespace(
+        id="proxy-required",
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+        reset_at=None,
+        blocked_at=None,
+    )
+    repo = SimpleNamespace(
+        get_by_id=AsyncMock(return_value=account),
+        update_status_if_current=AsyncMock(return_value=True),
+    )
+    service = AccountsService(repo=cast(AccountsRepository, repo))
+    service._import_usage_refresh_allowed = AsyncMock(return_value=False)
+    unavailable: list[str] = []
+    monkeypatch.setattr("app.modules.accounts.service.mark_account_routing_unavailable", unavailable.append)
+
+    warnings = await service._validate_imported_bundle_accounts(
+        [BundlePersistenceResult(account_id=account.id, outcome="imported")]
+    )
+
+    assert warnings == {account.id: BUNDLE_VALIDATION_WARNING}
+    repo.update_status_if_current.assert_awaited_once_with(
+        account.id,
+        AccountStatus.PAUSED,
+        accounts_service_module.IMPORT_PROXY_REQUIRED_PAUSE_REASON,
+        None,
+        blocked_at=None,
+        expected_status=AccountStatus.ACTIVE,
+        expected_deactivation_reason=None,
+        expected_reset_at=None,
+        expected_blocked_at=None,
+    )
+    assert unavailable == [account.id]
+
+
+@pytest.mark.asyncio
+async def test_post_import_validation_uses_one_deadline_for_the_batch(monkeypatch) -> None:
+    accounts = {
+        account_id: SimpleNamespace(id=account_id, status=AccountStatus.ACTIVE)
+        for account_id in ("slow-account", "remaining-account")
+    }
+    repo = SimpleNamespace(get_by_id=AsyncMock(side_effect=lambda account_id: accounts[account_id]))
+    service = AccountsService(repo=cast(AccountsRepository, repo))
+    service._import_usage_refresh_allowed = AsyncMock(return_value=True)
+
+    async def never_finishes(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    refresh = AsyncMock(side_effect=never_finishes)
+    service._usage_updater = cast(UsageUpdater, SimpleNamespace(force_refresh_result=refresh))
+    unavailable: list[str] = []
+    monkeypatch.setattr(accounts_service_module, "BUNDLE_VALIDATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(accounts_service_module, "mark_account_routing_unavailable", unavailable.append)
+
+    warnings = await service._validate_imported_bundle_accounts(
+        [
+            BundlePersistenceResult(account_id="slow-account", outcome="imported"),
+            BundlePersistenceResult(account_id="remaining-account", outcome="imported"),
+        ]
+    )
+
+    assert warnings == {
+        "slow-account": BUNDLE_VALIDATION_WARNING,
+        "remaining-account": BUNDLE_VALIDATION_WARNING,
+    }
+    assert unavailable == ["slow-account", "remaining-account"]
+    assert refresh.await_count == 1

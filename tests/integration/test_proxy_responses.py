@@ -19,7 +19,7 @@ from app.core.config.settings import Settings
 from app.core.openai.models import CompactResponsePayload
 from app.core.types import JsonValue
 from app.core.utils.time import utcnow
-from app.db.models import Account, DashboardSettings, RequestLog
+from app.db.models import Account, DashboardSettings, RequestLog, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
@@ -1369,6 +1369,142 @@ async def test_v1_responses_missing_previous_response_owner_fails_closed_before_
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
     assert response.json()["error"]["message"] == "Previous response owner account is unavailable; retry later."
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_preserves_legacy_raw_owner_conflict(async_client, monkeypatch):
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    raw_owner_id = "acc_prev_http_raw_owner"
+    raw_owner_email = "prev-http-raw-owner@example.com"
+    previous_owner_id = "acc_prev_http_previous_owner"
+    previous_owner_email = "prev-http-previous-owner@example.com"
+    for account_id, email in (
+        (raw_owner_id, raw_owner_email),
+        (previous_owner_id, previous_owner_email),
+    ):
+        auth_json = _make_auth_json(account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+    raw_owner_account_id = generate_unique_account_id(raw_owner_id, raw_owner_email)
+    previous_owner_account_id = generate_unique_account_id(previous_owner_id, previous_owner_email)
+    raw_session = "stream-legacy-raw-conflict"
+
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            raw_session,
+            raw_owner_account_id,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        raise AssertionError("legacy raw continuity conflict must fail before upstream stream attempt")
+        if False:
+            yield ""
+
+    async def fake_resolve_owner(self, *, previous_response_id, api_key, session_id, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return previous_owner_account_id
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_resolve_owner)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.1",
+            "input": "continue",
+            "previous_response_id": "resp_prev_http_raw_conflict",
+            "stream": True,
+        },
+        headers={"session_id": raw_session},
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "continuity_owner_conflict"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_preserves_turn_state_owner_proof(async_client, monkeypatch):
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    owner_id = "acc_prev_http_turn_owner"
+    owner_email = "prev-http-turn-owner@example.com"
+    other_id = "acc_prev_http_other_owner"
+    other_email = "prev-http-other-owner@example.com"
+    for account_id, email in (
+        (owner_id, owner_email),
+        (other_id, other_email),
+    ):
+        auth_json = _make_auth_json(account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+    turn_state = "http_turn_state_owner_proof"
+    async with SessionLocal() as session:
+        owner_account_id = await session.scalar(select(Account.id).where(Account.email == owner_email))
+        assert isinstance(owner_account_id, str)
+        await StickySessionsRepository(session).upsert(
+            turn_state,
+            owner_account_id,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+
+    selected_ids: list[str | None] = []
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        selected_ids.append(account_id)
+        yield 'data: {"type":"response.created","response":{"id":"resp_turn_owner"}}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_turn_owner"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async def fake_turn_state_owner(self, *, turn_state, api_key, fail_on_missing):
+        del self, turn_state, api_key, fail_on_missing
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_compact_turn_state_owner", fake_turn_state_owner)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.1",
+            "input": "continue",
+            "conversation": "conv-turn-owner-proof",
+            "stream": True,
+        },
+        headers={"x-codex-turn-state": turn_state},
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.created"
+    assert selected_ids == [owner_id]
 
 
 @pytest.mark.asyncio

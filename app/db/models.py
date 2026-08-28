@@ -1848,6 +1848,10 @@ class HttpBridgeRecoveryAttemptState(str, Enum):
     REPLAYED = "replayed"
 
 
+HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1 = "rows_v1"
+HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2 = "chunks_v2"
+
+
 class HttpBridgeOperationState(str, Enum):
     SUBMITTED = "submitted"
     UNKNOWN = "unknown"
@@ -1990,6 +1994,12 @@ class HttpBridgeOperationRecord(Base):
     recovery_dispatch_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     event_bytes: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     event_spool_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    spool_format: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
+        server_default=text("'rows_v1'"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
     )
@@ -2039,6 +2049,33 @@ class HttpBridgeOperationEvent(Base):
             name="uq_http_bridge_operation_events_operation_fingerprint",
         ),
         Index("idx_http_bridge_operation_events_operation_sequence", "operation_id", "sequence_number"),
+    )
+
+
+class HttpBridgeOperationEventChunk(Base):
+    """Compressed, ordered SSE blocks for a future chunk-format operation."""
+
+    __tablename__ = "http_bridge_operation_event_chunks"
+
+    operation_id: Mapped[str] = mapped_column(
+        String(80),
+        ForeignKey("http_bridge_operations.operation_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    first_sequence_number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    codec: Mapped[str] = mapped_column(String(64), nullable=False)
+    uncompressed_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("first_sequence_number > 0", name="ck_http_bridge_event_chunks_first_sequence_positive"),
+        CheckConstraint("event_count > 0", name="ck_http_bridge_event_chunks_event_count_positive"),
+        CheckConstraint("uncompressed_bytes >= 0", name="ck_http_bridge_event_chunks_bytes_nonnegative"),
     )
 
 
@@ -2166,6 +2203,7 @@ Index(
     postgresql_where=text("delete_requested_at IS NOT NULL"),
     sqlite_where=text("delete_requested_at IS NOT NULL"),
 )
+Index("idx_accounts_chatgpt_account_id", Account.chatgpt_account_id)
 Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_model_source_time", RequestLog.model_source_id, RequestLog.requested_at)

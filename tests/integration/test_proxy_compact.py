@@ -4,6 +4,7 @@ import contextlib
 import json
 import logging
 from datetime import timedelta, timezone
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
@@ -18,7 +19,7 @@ from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
@@ -611,6 +612,108 @@ async def test_proxy_compact_ignores_file_pin_from_trimmed_optional_history(asyn
     assert seen["upstream_account_id"] == "acc_compact_trim_selected"
     upstream_payload = cast(ResponsesCompactRequest, seen["upstream_payload"]).to_payload()
     assert "file_compact_trimmed_optional" not in json.dumps(upstream_payload)
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_route_rejects_live_durable_turn_state_session_drift(async_client, monkeypatch):
+    from app.dependencies import get_proxy_service_for_app
+
+    email = "compact-turn-state-drift-route@example.com"
+    raw_account_id = "acc_compact_turn_state_drift_route"
+    auth_json = _make_auth_json(raw_account_id, email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+    account_id = generate_unique_account_id(raw_account_id, email)
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    turn_state = "turn-compact-route-session-drift"
+    bridge_key = proxy_module._HTTPBridgeSessionKey("session_header", "compact-route-live-session", None)
+    service._http_bridge_turn_state_index[(turn_state, None)] = bridge_key
+    service._http_bridge_sessions[bridge_key] = SimpleNamespace(
+        key=bridge_key,
+        account=SimpleNamespace(id=account_id),
+        durable_session_id="durable-live-session",
+    )
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_turn_state_target",
+        AsyncMock(return_value=SimpleNamespace(account_id=account_id, session_id="durable-other-session")),
+    )
+    compact = AsyncMock(
+        return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+    )
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
+
+    try:
+        response = await async_client.post(
+            "/backend-api/codex/responses/compact",
+            headers={"x-codex-turn-state": turn_state},
+            json={"model": "gpt-5.1", "instructions": "hi", "input": []},
+        )
+    finally:
+        service._http_bridge_turn_state_index.pop((turn_state, None), None)
+        service._http_bridge_sessions.pop(bridge_key, None)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "continuity_owner_conflict"
+    compact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_route_preserves_legacy_raw_owner_conflict(async_client, monkeypatch):
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    raw_owner_id = "acc_compact_raw_owner_route"
+    raw_owner_email = "compact-raw-owner-route@example.com"
+    previous_owner_id = "acc_compact_previous_owner_route"
+    previous_owner_email = "compact-previous-owner-route@example.com"
+    for account_id, email in (
+        (raw_owner_id, raw_owner_email),
+        (previous_owner_id, previous_owner_email),
+    ):
+        response = await async_client.post(
+            "/api/accounts/import",
+            files={"auth_json": ("auth.json", json.dumps(_make_auth_json(account_id, email)), "application/json")},
+        )
+        assert response.status_code == 200
+    raw_owner_account_id = generate_unique_account_id(raw_owner_id, raw_owner_email)
+    previous_owner_account_id = generate_unique_account_id(previous_owner_id, previous_owner_email)
+    raw_session = "compact-legacy-raw-conflict"
+
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            raw_session,
+            raw_owner_account_id,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+
+    async def fake_previous_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return previous_owner_account_id
+
+    compact = AsyncMock(
+        return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_previous_owner)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers={"session_id": raw_session},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "previous_response_id": "resp_compact_previous_owner_route",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "continuity_owner_conflict"
+    compact.assert_not_awaited()
 
 
 @pytest.mark.asyncio

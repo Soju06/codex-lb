@@ -776,3 +776,176 @@ def test_headerless_live_websocket_keeps_existing_owner_lookup_behavior(app_inst
 
     assert denial.value.status_code == 404
     assert denial.value.json()["error"]["code"] != "required_capability_transport_unsupported"
+
+
+def test_websocket_transport_downgrade_never_applies_to_capability_handshakes(app_instance) -> None:
+    # The websocket-outage 426 is a session-scoped switch to HTTP in codex-rs,
+    # but capability routing resolves only on this transport: downgrading a
+    # capability handshake sends it to an HTTP path that rejects the same
+    # capability with 400, and the client never comes back.
+    from app.modules.proxy._service import support as transport_health
+
+    connected = False
+    transport_health.mark_upstream_websocket_transport_failure()
+    try:
+        with TestClient(app_instance, client=("127.0.0.1", 50000)) as client:
+            assert client.portal is not None
+            key = client.portal.call(_create_api_key, "Capability handshake during outage")
+            # Guard against a vacuous pass: the denial state must still be
+            # armed at the moment the handshake runs.
+            assert transport_health.upstream_websocket_transport_recently_failed() is True
+
+            with client.websocket_connect(
+                "/backend-api/codex/responses",
+                headers={"Authorization": f"Bearer {key}", **_CAPABILITY_HEADERS},
+            ):
+                connected = True
+    finally:
+        transport_health.clear_upstream_websocket_transport_failure()
+
+    assert connected, "a capability handshake must not be downgraded by the websocket-outage denial"
+
+
+@pytest.mark.asyncio
+async def test_capability_signal_in_client_metadata_is_rejected_over_http(async_client: AsyncClient) -> None:
+    # The websocket path resolves a required capability from client_metadata as
+    # well as the header and fails closed to security-work-authorized accounts.
+    # Nothing on the HTTP path applies that constraint, so a metadata-only
+    # signal must be rejected rather than entering ordinary account selection.
+    key = await _create_api_key("Metadata-only capability signal")
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "gpt-5.6-sol",
+            "input": "hello",
+            "client_metadata": {CODEX_LB_REQUIRED_CAPABILITY_HEADER: "trusted_cyber"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json() == _TRANSPORT_DENIAL
+
+
+_METADATA_CAPABILITY_ROUTE_CASES = [
+    pytest.param(
+        "/v1/responses",
+        {"model": "gpt-5.6-sol", "input": "hello"},
+        id="v1-responses",
+    ),
+    pytest.param(
+        "/backend-api/codex/responses/compact",
+        {"model": "gpt-5.6-sol", "instructions": "", "input": "hello"},
+        id="native-compact",
+    ),
+    pytest.param(
+        "/v1/responses/compact",
+        {"model": "gpt-5.6-sol", "input": "hello"},
+        id="v1-compact",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("path", "body"), _METADATA_CAPABILITY_ROUTE_CASES)
+async def test_metadata_only_capability_signal_is_rejected_on_every_responses_route(
+    async_client: AsyncClient, path: str, body: dict[str, Any]
+) -> None:
+    # The Codex-native responses route already rejects a metadata-only
+    # capability signal. Every other HTTP route that parses a
+    # Responses-shaped body must apply the same constraint: the payload
+    # models allow extra fields, so the signal survives parsing and would
+    # otherwise enter ordinary account selection without the
+    # security-work-authorized requirement.
+    key = await _create_api_key(f"Metadata-only capability signal {path}")
+
+    response = await async_client.post(
+        path,
+        headers={"Authorization": f"Bearer {key}"},
+        json={**body, "client_metadata": {CODEX_LB_REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == _TRANSPORT_DENIAL
+
+
+@pytest.mark.asyncio
+async def test_metadata_only_capability_signal_is_rejected_on_signed_internal_bridge(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A legitimate owner forward can never carry the capability key — the
+    # websocket path strips it before payload propagation — so a signal
+    # arriving here is either a spoofed forward or an origin-side guard
+    # gap, and must fail before account routing either way.
+    from app.core.config.settings import get_settings
+    from app.core.openai.requests import ResponsesRequest
+    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
+
+    async def fail_before_bridge_routing(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("metadata-signal internal bridge request must fail before account routing")
+
+    monkeypatch.setattr(ProxyService, "validate_http_bridge_legacy_forward_anchor", fail_before_bridge_routing)
+    monkeypatch.setattr(proxy_api_module, "_stream_responses", fail_before_bridge_routing)
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": "inert",
+            "stream": True,
+            "client_metadata": {CODEX_LB_REQUIRED_CAPABILITY_HEADER: "trusted_cyber"},
+        }
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="origin-inert",
+        target_instance=get_settings().http_responses_session_bridge_instance_id,
+        codex_session_affinity=True,
+        downstream_turn_state="turn_inert",
+    )
+    key = await _create_api_key("Metadata-only internal bridge guard")
+    headers = build_owner_forward_headers(headers={"authorization": f"Bearer {key}"}, payload=payload, context=context)
+
+    response = await async_client.post(
+        "/internal/bridge/responses",
+        headers=headers,
+        json=payload.model_dump_for_forwarding(),
+    )
+
+    assert response.status_code == 400
+    assert response.json() == _TRANSPORT_DENIAL
+
+
+@pytest.mark.asyncio
+async def test_benign_client_metadata_keeps_ordinary_responses_routing(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Only the required-capability key inside client_metadata triggers the
+    # transport denial; unrelated metadata must keep ordinary routing.
+    from fastapi.responses import JSONResponse
+
+    calls = 0
+
+    async def ordinary_compact(*_args: Any, **_kwargs: Any) -> JSONResponse:
+        nonlocal calls
+        calls += 1
+        return JSONResponse({"route": "ordinary"})
+
+    monkeypatch.setattr(proxy_api_module, "_compact_responses", ordinary_compact)
+    key = await _create_api_key("Benign client metadata")
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": "hello",
+            "client_metadata": {"editor": "vscode"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"route": "ordinary"}
+    assert calls == 1

@@ -317,6 +317,9 @@ class Settings(BaseSettings):
     # Bound durable replay storage per operation so a long response cannot
     # exhaust the database. An incomplete spool is never replayed.
     http_responses_session_bridge_operation_event_spool_max_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
+    # Rollout fence: chunks_v2 must be enabled only after every serving replica
+    # runs the dual-reader schema expansion.
+    http_responses_session_bridge_operation_spool_format: Literal["rows_v1", "chunks_v2"] = "rows_v1"
     http_responses_session_bridge_operation_event_spool_batch_size: int = Field(default=32, gt=0, le=256)
     http_responses_session_bridge_operation_event_spool_flush_interval_seconds: float = Field(
         default=0.1,

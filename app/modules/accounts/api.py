@@ -20,7 +20,10 @@ from app.core.exceptions import (
     DashboardNotFoundError,
     DashboardUpstreamError,
 )
-from app.core.middleware.multipart_content_encoding import raise_for_unsupported_multipart_content_encoding
+from app.core.middleware.multipart_content_encoding import (
+    mark_account_bundle_failure_audited,
+    raise_for_unsupported_multipart_content_encoding,
+)
 from app.core.multipart import (
     ACCOUNT_IMPORT_MULTIPART_POLICY,
     MultipartPayloadTooLarge,
@@ -185,6 +188,7 @@ async def export_account_bundle(
             max_bytes=get_settings().account_bundle_max_bytes,
         )
     except Exception as exc:
+        mark_account_bundle_failure_audited(request)
         AuditService.log_async(
             "account_bundle_export_failed",
             actor_ip=request.client.host if request.client else None,
@@ -223,6 +227,7 @@ async def preflight_account_bundle(
             max_bytes=get_settings().account_bundle_max_bytes,
         )
     except Exception as exc:
+        mark_account_bundle_failure_audited(request)
         AuditService.log_async(
             "account_bundle_preflight_failed",
             actor_ip=request.client.host if request.client else None,
@@ -272,6 +277,7 @@ async def commit_account_bundle(
             max_bytes=get_settings().account_bundle_max_bytes,
         )
     except Exception as exc:
+        mark_account_bundle_failure_audited(request)
         AuditService.log_async(
             "account_bundle_import_failed",
             actor_ip=request.client.host if request.client else None,

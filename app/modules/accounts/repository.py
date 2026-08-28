@@ -252,7 +252,7 @@ class AccountsRepository:
                 if existing_by_id is not None and (
                     _same_unknown_workspace_identity(existing_by_id, account)
                     or (
-                        existing_by_id.email == account.email
+                        _normalized_email(existing_by_id.email) == _normalized_email(account.email)
                         and _workspace_slot_key(existing_by_id) == _workspace_slot_key(account)
                         and _can_reuse_email_fallback(existing_by_id, account)
                     )
@@ -299,7 +299,7 @@ class AccountsRepository:
             if dialect_name == "sqlite":
                 await self._acquire_sqlite_merge_lock()
             elif dialect_name == "postgresql":
-                ordered_accounts = sorted(accounts, key=lambda item: (item.email.casefold(), item.id))
+                ordered_accounts = sorted(accounts, key=lambda item: (_normalized_email(item.email), item.id))
                 for account in ordered_accounts:
                     locked_candidates.append(
                         (
@@ -308,7 +308,7 @@ class AccountsRepository:
                         )
                     )
                 if not preserve_unknown_workspace_duplicates:
-                    for email in sorted({account.email for account in accounts}, key=str.casefold):
+                    for email in sorted({_normalized_email(account.email) for account in accounts}):
                         await self._acquire_postgresql_merge_lock(email)
                 lock_keys = {
                     lock_key
@@ -1524,7 +1524,10 @@ class AccountsRepository:
 
     async def _single_account_by_email(self, email: str) -> Account | None:
         result = await self._session.execute(
-            select(Account).where(Account.email == email).order_by(Account.created_at.asc(), Account.id.asc()).limit(2)
+            select(Account)
+            .where(func.lower(Account.email) == _normalized_email(email))
+            .order_by(Account.created_at.asc(), Account.id.asc())
+            .limit(2)
         )
         matches = list(result.scalars().all())
         if not matches:
@@ -1536,7 +1539,7 @@ class AccountsRepository:
     async def _single_unknown_workspace_account_by_email(self, email: str) -> Account | None:
         result = await self._session.execute(
             select(Account)
-            .where(Account.email == email)
+            .where(func.lower(Account.email) == _normalized_email(email))
             .where(Account.workspace_id.is_(None))
             .where(Account.workspace_label.is_(None))
             .order_by(Account.created_at.asc(), Account.id.asc())
@@ -1556,7 +1559,7 @@ class AccountsRepository:
             result = await self._session.execute(
                 select(Account)
                 .where(Account.chatgpt_account_id == account.chatgpt_account_id)
-                .where(Account.email == account.email)
+                .where(func.lower(Account.email) == _normalized_email(account.email))
                 .where(column == value)
                 .order_by(Account.created_at.asc(), Account.id.asc())
                 .limit(1)
@@ -1567,7 +1570,7 @@ class AccountsRepository:
             result = await self._session.execute(
                 select(Account)
                 .where(Account.chatgpt_account_id == account.chatgpt_account_id)
-                .where(Account.email == account.email)
+                .where(func.lower(Account.email) == _normalized_email(account.email))
                 .where(Account.workspace_id.is_(None))
                 .where(Account.workspace_label == account.workspace_label)
                 .order_by(Account.created_at.asc(), Account.id.asc())
@@ -1579,7 +1582,7 @@ class AccountsRepository:
             column, value = workspace_slot
             result = await self._session.execute(
                 select(Account)
-                .where(Account.email == account.email)
+                .where(func.lower(Account.email) == _normalized_email(account.email))
                 .where(column == value)
                 .order_by(Account.created_at.asc(), Account.id.asc())
                 .limit(1)
@@ -1673,7 +1676,7 @@ class AccountsRepository:
             await self._session.execute(text("UPDATE accounts SET id = id WHERE 1 = 0"))
 
     async def _acquire_postgresql_merge_lock(self, email: str) -> None:
-        lock_key = advisory_lock_key("merge-email", email)
+        lock_key = advisory_lock_key("merge-email", _normalized_email(email))
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
             {"lock_key": lock_key},
@@ -1734,19 +1737,20 @@ def _slot_lock_key(account: Account, *, preserve_unknown_workspace_duplicates: b
 def _slot_lock_keys(account: Account, *, preserve_unknown_workspace_duplicates: bool = True) -> tuple[str, ...]:
     keys: list[str] = []
     workspace_key = _workspace_slot_key(account)
+    normalized_email = _normalized_email(account.email) if account.email else None
     if account.chatgpt_account_id:
         if workspace_key:
             keys.append(f"slot:{account.chatgpt_account_id}:{workspace_key}")
-        elif account.email:
-            keys.append(f"slot:{account.chatgpt_account_id}:{account.email}")
-    if account.email and workspace_key:
-        keys.append(f"slot-email:{account.email}:{workspace_key}")
+        elif normalized_email:
+            keys.append(f"slot:{account.chatgpt_account_id}:{normalized_email}")
+    if normalized_email and workspace_key:
+        keys.append(f"slot-email:{normalized_email}:{workspace_key}")
         if not preserve_unknown_workspace_duplicates:
-            keys.append(f"slot-email-unknown:{account.email}")
+            keys.append(f"slot-email-unknown:{normalized_email}")
     if keys:
         return tuple(keys)
-    if account.email and not preserve_unknown_workspace_duplicates:
-        return (f"slot-email-unknown:{account.email}",)
+    if normalized_email and not preserve_unknown_workspace_duplicates:
+        return (f"slot-email-unknown:{normalized_email}",)
     return (f"slot-local:{account.id}",)
 
 
@@ -1755,7 +1759,7 @@ def _upsert_identity_candidate_predicates(account: Account, *, include_email: bo
     if account.chatgpt_account_id:
         predicates.append(Account.chatgpt_account_id == account.chatgpt_account_id)
     if include_email and account.email:
-        predicates.append(Account.email == account.email)
+        predicates.append(func.lower(Account.email) == _normalized_email(account.email))
     return predicates
 
 
@@ -1764,7 +1768,7 @@ def _same_unknown_workspace_identity(existing: Account, incoming: Account) -> bo
         _workspace_slot_key(existing) is None
         and _workspace_slot_key(incoming) is None
         and existing.chatgpt_account_id == incoming.chatgpt_account_id
-        and existing.email == incoming.email
+        and _normalized_email(existing.email) == _normalized_email(incoming.email)
     )
 
 
@@ -1774,6 +1778,10 @@ def _workspace_slot_identity(account: Account) -> tuple[Any, str] | None:
     if account.workspace_label:
         return Account.workspace_label, account.workspace_label
     return None
+
+
+def _normalized_email(email: str) -> str:
+    return email.lower()
 
 
 def _workspace_slot_key(account: Account) -> str | None:
@@ -1819,7 +1827,7 @@ def _validate_bundle_source_identities(
 ) -> None:
     for index, account in enumerate(accounts):
         for other in accounts[:index]:
-            if account.email.casefold() != other.email.casefold():
+            if _normalized_email(account.email) != _normalized_email(other.email):
                 continue
             account_workspace = _workspace_slot_key(account)
             other_workspace = _workspace_slot_key(other)

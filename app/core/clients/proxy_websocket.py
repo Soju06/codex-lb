@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import ssl
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Mapping, NoReturn, Protocol, Sequence, cast
@@ -129,6 +130,16 @@ _LIVE_SIDEBAND_WEBSOCKET_POLICY = _UpstreamWebSocketPolicy(
     enable_direct_ping_timeout=True,
     preserve_close_semantics=True,
 )
+
+# Provenance proving the upstream websocket transport itself failed to come
+# up, as opposed to an account-, route-, or configuration-scoped connect
+# failure that happens to share the sanitized ``upstream_unavailable``
+# envelope. Only the direct upstream open can establish it: a routed open
+# proves nothing beyond the health of that one account's proxy endpoint, and
+# TLS verification failures and host-wide network loss are conditions that
+# switching the request to raw HTTP cannot route around.
+UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL = "upstream_websocket_transport_unavailable"
+
 
 logger = logging.getLogger(__name__)
 
@@ -947,6 +958,8 @@ async def _connect_upstream_websocket(
         raise ProxyResponseError(
             502,
             openai_error("upstream_unavailable", "Request to upstream timed out"),
+            failure_phase="connect",
+            failure_detail=UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL,
         ) from exc
     except InvalidStatus as exc:
         response = exc.response
@@ -965,6 +978,12 @@ async def _connect_upstream_websocket(
             status_code,
             payload,
             failure_phase="connect",
+            # A 5xx upgrade rejection is the edge refusing to carry websockets
+            # at all. The sanitized code cannot carry that provenance: this
+            # policy preserves the upstream body, so the same outage surfaces
+            # as ``upstream_error`` or whatever code the edge returned.
+            # Credential-scoped rejections (401/403/429) stay account evidence.
+            failure_detail=(UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL if status_code >= 500 else None),
         ) from exc
     except InvalidProxy as exc:
         message = (
@@ -985,6 +1004,8 @@ async def _connect_upstream_websocket(
         raise ProxyResponseError(
             502,
             openai_error("upstream_unavailable", message),
+            failure_phase="connect",
+            failure_detail=UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL,
         ) from exc
     except OSError as exc:
         error_code = process_network_error_code(
@@ -998,6 +1019,15 @@ async def _connect_upstream_websocket(
             openai_error(error_code, message),
             failure_phase="connect",
             retryable_same_contract=error_code == PROCESS_NETWORK_UNAVAILABLE_CODE,
+            # Host-wide network loss keeps its account-neutral process
+            # recovery path, and a TLS verification failure is stable endpoint
+            # configuration; neither is an upstream websocket outage that raw
+            # HTTP can route around.
+            failure_detail=(
+                None
+                if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE or isinstance(exc, ssl.SSLError)
+                else UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL
+            ),
         ) from exc
 
     return ArchivingUpstreamWebSocket(

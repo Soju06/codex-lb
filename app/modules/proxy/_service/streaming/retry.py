@@ -1512,16 +1512,27 @@ class _StreamingRetryMixin:
                         )
                         return
                     if require_preferred_account and preferred_account_id is not None:
+                        error_code = "previous_response_owner_unavailable"
                         message = "Previous response owner account is unavailable; retry later."
+                        reason = "owner_account_unavailable"
+                        upstream_error_code = "no_accounts"
+                        if selection.error_code == "continuity_owner_conflict":
+                            error_code = "continuity_owner_conflict"
+                            message = (
+                                selection.error_message
+                                or "Account-owned continuity sources conflict; retry the logical turn"
+                            )
+                            reason = "owner_conflict"
+                            upstream_error_code = selection.error_code
                         _record_continuity_fail_closed(
                             surface="http_stream",
-                            reason="owner_account_unavailable",
+                            reason=reason,
                             previous_response_id=payload.previous_response_id,
                             session_id=headers.get("x-codex-turn-state") or headers.get("session_id"),
-                            upstream_error_code="no_accounts",
+                            upstream_error_code=upstream_error_code,
                         )
                         event = response_failed_event(
-                            "previous_response_owner_unavailable",
+                            error_code,
                             message,
                             response_id=request_id,
                         )
@@ -1533,7 +1544,7 @@ class _StreamingRetryMixin:
                             model=payload.model,
                             latency_ms=int((time.monotonic() - start) * 1000),
                             status="error",
-                            error_code="previous_response_owner_unavailable",
+                            error_code=error_code,
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
@@ -1652,16 +1663,27 @@ class _StreamingRetryMixin:
                             request_id,
                         )
                     else:
+                        error_code = "previous_response_owner_unavailable"
                         message = "Previous response owner account is unavailable; retry later."
+                        reason = "owner_account_unavailable"
+                        upstream_error_code = "upstream_unavailable"
+                        if selection.error_code == "continuity_owner_conflict":
+                            error_code = "continuity_owner_conflict"
+                            message = (
+                                selection.error_message
+                                or "Account-owned continuity sources conflict; retry the logical turn"
+                            )
+                            reason = "owner_conflict"
+                            upstream_error_code = selection.error_code
                         _record_continuity_fail_closed(
                             surface="http_stream",
-                            reason="owner_account_unavailable",
+                            reason=reason,
                             previous_response_id=payload.previous_response_id,
                             session_id=headers.get("x-codex-turn-state") or headers.get("session_id"),
-                            upstream_error_code="upstream_unavailable",
+                            upstream_error_code=upstream_error_code,
                         )
                         event = response_failed_event(
-                            "previous_response_owner_unavailable",
+                            error_code,
                             message,
                             response_id=request_id,
                         )
@@ -1673,7 +1695,7 @@ class _StreamingRetryMixin:
                             model=payload.model,
                             latency_ms=int((time.monotonic() - start) * 1000),
                             status="error",
-                            error_code="previous_response_owner_unavailable",
+                            error_code=error_code,
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,

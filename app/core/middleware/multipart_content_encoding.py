@@ -25,6 +25,7 @@ _LIMITED_MULTIPART_PATHS = frozenset(
 )
 _OPENAI_MULTIPART_PATH_PREFIXES = ("/backend-api", "/v1")
 _ACCOUNT_BUNDLE_PATH_PREFIX = "/api/accounts/bundle/"
+_ACCOUNT_BUNDLE_AUDIT_CONTEXT_STATE = "_codex_lb_account_bundle_audit_context"
 _CONTENT_ENCODING_GATE_HANDLED_STATE = "_codex_lb_multipart_content_encoding_gate_handled"
 _UNSUPPORTED_CONTENT_ENCODING_STATE = "_codex_lb_unsupported_multipart_content_encoding"
 
@@ -99,6 +100,12 @@ def raise_for_unsupported_multipart_content_encoding(request: Request) -> None:
         raise UnsupportedMultipartContentEncoding
 
 
+def mark_account_bundle_failure_audited(request: Request) -> None:
+    context = getattr(request.state, _ACCOUNT_BUNDLE_AUDIT_CONTEXT_STATE, None)
+    if isinstance(context, dict):
+        context["failure_audited"] = True
+
+
 class MultipartContentEncodingMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -110,6 +117,11 @@ class MultipartContentEncodingMiddleware:
 
         route_path = _canonical_route_path(scope)
         if route_path.startswith(_ACCOUNT_BUNDLE_PATH_PREFIX):
+            state = scope.setdefault("state", {})
+            audit_context = state.setdefault(
+                _ACCOUNT_BUNDLE_AUDIT_CONTEXT_STATE,
+                {"failure_audited": False},
+            )
             original_send = send
 
             async def send(message):
@@ -119,7 +131,7 @@ class MultipartContentEncodingMiddleware:
                     headers["Pragma"] = "no-cache"
                     headers["Expires"] = "0"
                     status = int(message["status"])
-                    if status >= 400:
+                    if status >= 400 and not audit_context["failure_audited"]:
                         client = scope.get("client")
                         AuditService.log_async(
                             "account_bundle_request_failed",

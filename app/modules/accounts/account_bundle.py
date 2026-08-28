@@ -43,6 +43,13 @@ class BundleCredentials(BaseModel):
     refresh_token: str = Field(min_length=1)
     id_token: str = Field(min_length=1)
 
+    @field_validator("access_token", "refresh_token", "id_token")
+    @classmethod
+    def reject_blank_credentials(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("credential cannot be blank")
+        return value
+
     @model_validator(mode="after")
     def reject_api_key_for_chatgpt(self) -> BundleCredentials:
         if self.openai_api_key is not None:
@@ -65,6 +72,13 @@ class BundleAccount(BaseModel):
     limit_warmup_enabled: bool = False
     security_work_authorized: bool = False
     credentials: BundleCredentials
+
+    @field_validator("email")
+    @classmethod
+    def reject_blank_email(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("email cannot be blank")
+        return value
 
     @field_validator(
         "chatgpt_account_id",
@@ -94,7 +108,7 @@ class AccountBundlePayload(BaseModel):
         seen: set[tuple[str, str | None, str | None]] = set()
         for account in self.accounts:
             identity = (
-                account.email.casefold(),
+                account.email.lower(),
                 account.chatgpt_account_id,
                 account.workspace_id or account.workspace_label,
             )

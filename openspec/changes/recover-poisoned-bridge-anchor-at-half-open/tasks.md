@@ -292,6 +292,17 @@
       timer-specific message helper, completing the half-open/cooldown
       reporting requirement on the third and last hard-coded site
 
+- [x] 2.52 A completion settles the circuit before it registers the fresh
+      anchor, the consult captures the durable anchor with its validation
+      reads, and the abandonment fences its continuity clear on that
+      captured anchor, so a clear authorized against the poisoned anchor
+      can never delete one a completion registered afterwards
+
+- [x] 2.53 The strike's mutation clock is sampled after the keyed wait and
+      the durable load, so a wait approaching the base backoff cannot
+      persist an already-aged cooldown or make the fresh failure look older
+      than the durable load for merge bookkeeping
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

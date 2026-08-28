@@ -52,6 +52,10 @@ _CLAIM_CAS_ATTEMPTS = 5
 _SESSION_ID_LOOKUP_CHUNK_SIZE = 500
 
 
+# Sentinel: rebind continuity clears without an anchor fence (legacy callers).
+REBIND_ANCHOR_UNFENCED: object = object()
+
+
 class DurableBridgeAliasRegistration(StrEnum):
     REGISTERED = "registered"
     OWNER_FENCED = "owner_fenced"
@@ -920,6 +924,14 @@ class DurableBridgeRepository:
             values=values,
         )
 
+    async def latest_session_response_id(self, *, session_id: str) -> str | None:
+        """Read the durable session's current continuity anchor."""
+        result = await self._session.execute(
+            select(HttpBridgeSessionRecord.latest_response_id).where(HttpBridgeSessionRecord.id == session_id)
+        )
+        row = result.first()
+        return None if row is None else row[0]
+
     async def rebind_session_account(
         self,
         *,
@@ -928,11 +940,24 @@ class DurableBridgeRepository:
         owner_epoch: int,
         account_id: str,
         clear_continuity: bool = False,
+        expected_latest_response_id: object = REBIND_ANCHOR_UNFENCED,
     ) -> bool:
-        """Persist a replacement account only while this worker owns the lease."""
+        """Persist a replacement account only while this worker owns the lease.
+
+        ``expected_latest_response_id`` fences a continuity clear on the
+        anchor the caller validated: a fresh anchor registered by a
+        concurrent completion changes the column, the fenced UPDATE matches
+        zero rows, and the caller observes a failed clear instead of
+        deleting an anchor its episode never proved dead.
+        """
 
         async with sqlite_writer_section():
             values: dict[str, object] = {"account_id": account_id}
+            conditions = [
+                HttpBridgeSessionRecord.id == session_id,
+                HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+            ]
             if clear_continuity:
                 values.update(
                     latest_turn_state=None,
@@ -941,15 +966,12 @@ class DurableBridgeRepository:
                     latest_input_full_fingerprint=None,
                     latest_pending_tool_calls_json=None,
                 )
-            result = await self._session.execute(
-                update(HttpBridgeSessionRecord)
-                .where(
-                    HttpBridgeSessionRecord.id == session_id,
-                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
-                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
-                )
-                .values(**values)
-            )
+                if expected_latest_response_id is not REBIND_ANCHOR_UNFENCED:
+                    if expected_latest_response_id is None:
+                        conditions.append(HttpBridgeSessionRecord.latest_response_id.is_(None))
+                    else:
+                        conditions.append(HttpBridgeSessionRecord.latest_response_id == expected_latest_response_id)
+            result = await self._session.execute(update(HttpBridgeSessionRecord).where(*conditions).values(**values))
             if clear_continuity and bool(getattr(result, "rowcount", 0)):
                 await self._clear_aliases_for_session(session_id)
             await self._session.commit()

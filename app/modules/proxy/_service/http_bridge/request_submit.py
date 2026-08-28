@@ -98,6 +98,7 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _record_http_bridge_quarantine_wedged_pending,
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
     _http_bridge_anchor_poison_detail,
     _http_bridge_retry_circuit_suppression_message,
 )
@@ -2939,11 +2940,12 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             poison_detail = _http_bridge_anchor_poison_detail(retry_circuit_detail or detail)
             poison_episode = None
+            poison_expected_anchor: object = _POISON_ANCHOR_CAPTURE_UNAVAILABLE
             if poison_detail is not None:
                 # The consult returns the exact episode it validated; the
                 # marker below scopes to it, so a settle landing between the
                 # consult and the rebind cannot be marked onto a replacement.
-                poison_episode = await self._http_bridge_poison_anchor_clear_owed(
+                poison_episode, poison_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
                     session,
                     consecutive_failures=consecutive_failures,
                     configured_threshold=(
@@ -2964,6 +2966,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     session,
                     detail=poison_detail,
                     settle_circuit=_http_bridge_abandonment_may_settle_circuit(retired_request_states),
+                    expected_latest_response_id=poison_expected_anchor,
                 )
                 if durable_cleared:
                     await self._http_bridge_mark_poison_anchor_cleared(session, episode=poison_episode)

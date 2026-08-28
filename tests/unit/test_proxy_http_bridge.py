@@ -33343,9 +33343,60 @@ async def test_episode_consult_rechecks_after_the_durable_lookup() -> None:
 
     service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(side_effect=lookup_while_sibling_settles))
 
-    owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
+    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
+        session, consecutive_failures=2, configured_threshold=7
+    )
 
     assert owed is None, "the consult must re-check the live episode after its durable await"
+
+
+@pytest.mark.asyncio
+async def test_poison_clear_is_fenced_on_the_anchor_captured_at_the_consult() -> None:
+    # The consult captures the durable session anchor with its validation
+    # reads, and the abandonment fences its continuity clear on it. With the
+    # completion path settling the circuit before it registers a fresh
+    # anchor, a completion the consult did not veto changes the anchor after
+    # this capture and the fenced clear matches nothing.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-fenced-clear")
+    session.durable_session_id = "durable-fenced-clear"
+    session.durable_owner_epoch = 4
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=time.monotonic())
+    state.consecutive_failures = 2
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    rebind = AsyncMock(return_value=True)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=time.time() + 60.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=time.time(),
+            )
+        ),
+        session_latest_response_id=AsyncMock(return_value="resp_poisoned_anchor"),
+        rebind_session_account=rebind,
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    episode, captured = await service._http_bridge_poison_anchor_clear_owed(
+        session, consecutive_failures=2, configured_threshold=7
+    )
+    assert episode is state
+    assert captured == "resp_poisoned_anchor"
+
+    cleared = await http_bridge_upstream_events_module._abandon_durable_http_bridge_continuity(
+        service,
+        session,
+        detail="repeated_zero_event_stream_incomplete",
+        expected_latest_response_id=captured,
+    )
+
+    assert cleared is True
+    assert rebind.await_args is not None
+    assert rebind.await_args.kwargs["expected_latest_response_id"] == "resp_poisoned_anchor", (
+        "the continuity clear must fence on the anchor the episode was validated against"
+    )
 
 
 @pytest.mark.asyncio
@@ -34807,7 +34858,9 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
     durable_lookup = AsyncMock(return_value=None)
     service._durable_bridge = SimpleNamespace(lookup_retry_circuit=durable_lookup)
 
-    owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
+    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
+        session, consecutive_failures=2, configured_threshold=7
+    )
     assert owed is None, "a settled episode owes nothing, whatever the stale strike captured"
 
     # A fresh sub-threshold episode registered after the settle owes nothing
@@ -34815,14 +34868,18 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
     state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=time.monotonic())
     state.consecutive_failures = 1
     cast(Any, service)._http_bridge_retry_circuits[session.key] = state
-    owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
+    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
+        session, consecutive_failures=2, configured_threshold=7
+    )
     assert owed is None
 
     # A live at-threshold episode without its durable row owes nothing
     # either: the row is the episode's replica-visible record, and the
     # completion that settled it elsewhere deleted the row with the reset.
     state.consecutive_failures = 2
-    owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
+    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
+        session, consecutive_failures=2, configured_threshold=7
+    )
     assert owed is None, "no durable row means the episode already ended durably"
 
     # A settle updates the row to zero rather than deleting it, so a reset
@@ -34833,7 +34890,9 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
         last_detail=None,
         updated_at_epoch=time.time(),
     )
-    owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
+    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
+        session, consecutive_failures=2, configured_threshold=7
+    )
     assert owed is None, "a row reset to zero proves the episode already ended"
 
     durable_lookup.return_value = SimpleNamespace(
@@ -34842,7 +34901,9 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
         last_detail="stream_incomplete",
         updated_at_epoch=time.time(),
     )
-    owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
+    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
+        session, consecutive_failures=2, configured_threshold=7
+    )
     assert owed is state, "the consult returns the exact live episode that owes the clear"
 
 

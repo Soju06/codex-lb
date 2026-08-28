@@ -45,6 +45,9 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES = {
     "missing_response_created_timeout": "stream_idle_timeout",
     "response_create_gate_timeout_stuck_pending": "stream_idle_timeout",
 }
+# Sentinel: the consult could not capture the durable anchor; the
+# abandonment then clears continuity unfenced (degraded, logged).
+_POISON_ANCHOR_CAPTURE_UNAVAILABLE: object = object()
 _HTTP_BRIDGE_ANCHOR_POISON_DETAILS = {
     "stream_idle_timeout": "repeated_zero_event_idle_timeout",
     "stream_incomplete": "repeated_zero_event_stream_incomplete",
@@ -725,14 +728,17 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         consecutive_failures: int | None,
         configured_threshold: int,
-    ) -> "_HTTPBridgeRetryCircuitState | None":
-        """Return the episode that still owes the poisoned anchor an abandonment.
+    ) -> "tuple[_HTTPBridgeRetryCircuitState | None, object]":
+        """Return the owed episode and the durable anchor captured with it.
 
-        Returns the validated registered episode, or ``None`` when nothing is
-        owed. The caller passes exactly this episode to the post-abandonment
-        marker: capturing it separately after the consult reopened the race
-        the consult exists to close, and a ``None`` capture turned the marker
-        into a wildcard on whatever episode was registered by then.
+        Returns ``(episode, captured_anchor)`` — the validated registered
+        episode (or ``None`` when nothing is owed) and the durable session's
+        continuity anchor sampled before the validation reads. The caller
+        passes exactly this episode to the post-abandonment marker and fences
+        the continuity clear on the captured anchor: with the completion path
+        settling the circuit before it registers a fresh anchor, any
+        completion this consult did not veto changes the anchor after this
+        capture, and the fenced clear then matches nothing.
 
         Capping the poison threshold at the circuit threshold is what makes the
         clear reachable at all, but it also means every later strike in the
@@ -749,7 +755,7 @@ class _HTTPBridgeRetryCircuitMixin:
         absent or below-threshold registered episode therefore owes nothing.
         """
         if consecutive_failures is None:
-            return None
+            return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
         effective_threshold = _http_bridge_effective_anchor_poison_threshold(configured_threshold)
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
@@ -759,7 +765,21 @@ class _HTTPBridgeRetryCircuitMixin:
                 and not state.poison_anchor_cleared
             )
         if not live_episode_owes:
-            return None
+            return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
+        expected_anchor: object = _POISON_ANCHOR_CAPTURE_UNAVAILABLE
+        anchor_reader = getattr(self._durable_bridge, "session_latest_response_id", None)
+        durable_session_id = getattr(session, "durable_session_id", None)
+        if anchor_reader is not None and durable_session_id is not None:
+            try:
+                expected_anchor = await anchor_reader(session_id=durable_session_id)
+            except Exception:
+                logger.warning(
+                    "Failed to capture durable anchor before poison clear bridge_kind=%s bridge_key=%s",
+                    session.key.affinity_kind,
+                    _hash_identifier(session.key.affinity_key),
+                    exc_info=True,
+                )
+                expected_anchor = _POISON_ANCHOR_CAPTURE_UNAVAILABLE
         # The one-clear marker lives in process memory, so a restart or
         # another replica cannot see it. The durable circuit row is the
         # episode's replica-visible record instead: a completed response
@@ -783,9 +803,9 @@ class _HTTPBridgeRetryCircuitMixin:
                 _hash_identifier(session.key.affinity_key),
                 exc_info=True,
             )
-            return None
+            return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
         if persisted is None or persisted.consecutive_failures < effective_threshold:
-            return None
+            return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
         # Re-check the live episode after the durable await: a multiplexed
         # sibling can complete, settle the registry, and reset the row while
         # the lookup was in flight, and the stale snapshot must not authorize
@@ -797,8 +817,8 @@ class _HTTPBridgeRetryCircuitMixin:
                 and state.consecutive_failures >= effective_threshold
                 and not state.poison_anchor_cleared
             ):
-                return state
-            return None
+                return state, expected_anchor
+            return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
 
     async def _http_bridge_mark_poison_anchor_cleared(
         self: Any,
@@ -952,7 +972,6 @@ class _HTTPBridgeRetryCircuitMixin:
         base_backoff = max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS)
         max_backoff = max(base_backoff, _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS)
         clean_close_max_backoff = max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS)
-        now = time.monotonic()
         duplicate_attempt: _HTTPBridgeResponseCreateAttempt | None = None
         state: _HTTPBridgeRetryCircuitState | None = None
         poison_class_failure = _http_bridge_anchor_poison_detail(detail) is not None
@@ -972,6 +991,11 @@ class _HTTPBridgeRetryCircuitMixin:
             # not-yet-reset row, and this strike would then extend the ended
             # episode instead of opening a fresh one.
             await self._load_http_bridge_retry_circuit(session)
+            # Sampled after the keyed wait and the load: a wait approaching
+            # the base backoff would otherwise persist an already-aged
+            # cooldown and make the fresh failure look older than the
+            # durable load for merge bookkeeping.
+            now = time.monotonic()
             async with self._http_bridge_retry_circuit_lock:
                 if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_recorded:
                     duplicate_attempt = scoped_attempt

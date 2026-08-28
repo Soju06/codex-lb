@@ -80,6 +80,7 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _record_http_bridge_quarantine_wedged_pending,
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
     _http_bridge_anchor_poison_detail,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -1010,6 +1011,7 @@ async def _abandon_durable_http_bridge_continuity(
     *,
     detail: str = "repeated_zero_event_idle_timeout",
     settle_circuit: bool = False,
+    expected_latest_response_id: object = _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
 ) -> bool:
     """Clear durable continuity before retiring a repeatedly poisoned bridge.
 
@@ -1020,6 +1022,12 @@ async def _abandon_durable_http_bridge_continuity(
     """
     if session.durable_session_id is None or session.durable_owner_epoch is None:
         return False
+    rebind_fence_kwargs: dict[str, Any] = {}
+    if expected_latest_response_id is not _POISON_ANCHOR_CAPTURE_UNAVAILABLE:
+        # Fence the continuity clear on the anchor captured when the episode
+        # was validated: a completion registering a fresh anchor in between
+        # changes the column and the fenced write matches nothing.
+        rebind_fence_kwargs["expected_latest_response_id"] = expected_latest_response_id
     try:
         cleared = await service._durable_bridge.rebind_session_account(
             session_id=session.durable_session_id,
@@ -1028,6 +1036,7 @@ async def _abandon_durable_http_bridge_continuity(
             owner_epoch=session.durable_owner_epoch,
             account_id=session.account.id,
             clear_continuity=True,
+            **rebind_fence_kwargs,
         )
     except Exception:
         logger.warning("Failed to abandon poisoned HTTP bridge continuity", exc_info=True)
@@ -1264,10 +1273,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                         )
                         poison_candidate_detail = _http_bridge_anchor_poison_detail(reader_strike_detail)
                         poison_episode = None
+                        poison_expected_anchor: object = _POISON_ANCHOR_CAPTURE_UNAVAILABLE
                         if poison_candidate_detail is not None and observed_response_events == 0:
                             # The consult returns the exact episode it
                             # validated; the marker below scopes to it.
-                            poison_episode = await self._http_bridge_poison_anchor_clear_owed(
+                            poison_episode, poison_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
                                 session,
                                 consecutive_failures=consecutive_failures,
                                 configured_threshold=(
@@ -1281,6 +1291,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             session,
                             detail=poison_candidate_detail,
                             settle_circuit=_http_bridge_abandonment_may_settle_circuit(pending_request_states),
+                            expected_latest_response_id=poison_expected_anchor,
                         )
                         if not durable_cleared:
                             _log_http_bridge_event(
@@ -2405,7 +2416,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     # consult reads the live registered episode, so a
                     # sibling settle during grouped publication vetoes the
                     # clear.
-                    grouped_poison_episode = await self._http_bridge_poison_anchor_clear_owed(
+                    grouped_poison_episode, grouped_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
                         session,
                         consecutive_failures=grouped_clear_strike_failures,
                         configured_threshold=(
@@ -2418,6 +2429,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         self,
                         session,
                         detail=grouped_clear_detail,
+                        expected_latest_response_id=grouped_expected_anchor,
                         # A mixed group can hold a member with a verified safe
                         # replay whose dispatch claims the circuit generation;
                         # settling under it would remove the fence it depends
@@ -2853,6 +2865,29 @@ class _HTTPBridgeUpstreamEventsMixin:
             and completed_usage.output_tokens == 0
         )
 
+        # The circuit settle and quarantine clear run BEFORE the fresh
+        # anchor is registered. A poison abandonment fences its continuity
+        # clear on the anchor captured when its episode was validated, and
+        # settle-first ordering is what makes that fence airtight: any
+        # consult that runs after this settle is vetoed by the reset row,
+        # and any abandonment authorized before it fences on the old anchor
+        # and cannot touch the one registered below.
+        if (
+            event_type == "response.completed"
+            and terminal_request_state is not None
+            and not terminal_request_state.suppressed_duplicate_tool_call
+            and terminal_request_state.request_kind != "prewarm"
+            and not terminal_request_state.skip_request_log
+        ):
+            if not terminal_request_state.verified_stale_anchor_replay:
+                await self._clear_http_bridge_retry_circuit(session)
+            _clear_http_bridge_quarantine(
+                self,
+                session,
+                additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
+                additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
+            )
+
         if (
             response_id is not None
             and matched_request_state is not None
@@ -3031,22 +3066,6 @@ class _HTTPBridgeUpstreamEventsMixin:
             if terminal_request_state.input_item_count > 0:
                 session.last_completed_input_count = terminal_request_state.input_item_count
                 session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
-
-        if (
-            event_type == "response.completed"
-            and terminal_request_state is not None
-            and not terminal_request_state.suppressed_duplicate_tool_call
-            and terminal_request_state.request_kind != "prewarm"
-            and not terminal_request_state.skip_request_log
-        ):
-            if not terminal_request_state.verified_stale_anchor_replay:
-                await self._clear_http_bridge_retry_circuit(session)
-            _clear_http_bridge_quarantine(
-                self,
-                session,
-                additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
-                additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
-            )
 
         normalize_error_event = (
             terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract
@@ -3412,7 +3431,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             # circuit and persisted a fresh anchor, and this clear must not
             # delete it.
             try:
-                terminal_clear_episode = await self._http_bridge_poison_anchor_clear_owed(
+                terminal_clear_episode, terminal_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
                     session,
                     consecutive_failures=terminal_strike_failures,
                     configured_threshold=(
@@ -3425,6 +3444,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         session,
                         detail=terminal_poison_detail,
                         settle_circuit=True,
+                        expected_latest_response_id=terminal_expected_anchor,
                     )
             finally:
                 await _finalize_terminal_settlement(terminal_request_state)

@@ -1953,7 +1953,6 @@ class DurableBridgeRepository:
         use_bounded_protection = len(protected_ids) > _PROTECTED_OPERATION_ID_SAFE_LIMIT
         ambiguous_states = ("unknown", "acknowledged")
         stale_owner = or_(
-            HttpBridgeSessionRecord.owner_instance_id.is_(None),
             HttpBridgeSessionRecord.lease_expires_at.is_(None),
             HttpBridgeSessionRecord.lease_expires_at <= lease_expired_before,
         )
@@ -2009,8 +2008,7 @@ class DurableBridgeRepository:
                     )
                     .limit(page_size)
                 )
-                if not use_bounded_protection:
-                    statement = statement.with_for_update()
+                statement = statement.with_for_update()
                 selected = await self._session.execute(statement)
                 page = list(selected.all())
                 if not page:
@@ -2047,7 +2045,15 @@ class DurableBridgeRepository:
                     HttpBridgeSessionRecord.owner_epoch == owner_epoch,
                 ]
                 if owner_instance_id is None:
-                    owner_predicates.append(HttpBridgeSessionRecord.owner_instance_id.is_(None))
+                    owner_predicates.extend(
+                        (
+                            HttpBridgeSessionRecord.owner_instance_id.is_(None),
+                            or_(
+                                HttpBridgeSessionRecord.lease_expires_at.is_(None),
+                                HttpBridgeSessionRecord.lease_expires_at <= lease_expired_before,
+                            ),
+                        )
+                    )
                     owner_lease_outcome = "ownerless"
                 else:
                     owner_predicates.extend(

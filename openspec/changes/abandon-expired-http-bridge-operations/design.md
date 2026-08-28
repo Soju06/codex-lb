@@ -90,6 +90,10 @@ then requires:
 An owned session's lease must have been expired for at least one full durable
 lease period. This cross-replica grace protects a still-running owner from a
 single renewal blip while preserving eventual convergence after owner loss.
+The same grace applies after `release_session` clears the owner and records
+`lease_expires_at=now`, because the releasing replica may still be finalizing
+pending work. PostgreSQL retains the operation/session row lock on both the
+normal predicate path and the oversized-protection bounded-page path.
 
 The final update is a single conditional update inside the write transaction.
 The state check prevents a late `update_operation` or recovery claim from
@@ -109,6 +113,12 @@ When operation admission finds `abandoned`, it never calls
 parameter. This is the same public contract used for a dead durable owner and
 lets Codex construct a safe full-history retry; it does not require the proxy
 to guess whether the original ambiguous request was accepted.
+
+A hard turn-state operation can be fenced without carrying
+`previous_response_id`. For that shape the error keeps the canonical
+`previous_response_not_found` code but omits the inapplicable parameter and
+explicitly requests a full-history retry, causing Codex to discard the hard
+continuity anchor instead of repeating the abandoned fingerprint.
 
 ### 5. Observe only low-cardinality abandonment metadata
 

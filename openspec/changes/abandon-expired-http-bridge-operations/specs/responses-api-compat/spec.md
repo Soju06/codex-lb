@@ -11,6 +11,12 @@ detached bridge request is pending for that operation, and the durable owning
 session has no owner or an owner lease that has remained expired for at least
 one additional durable lease period.
 
+An ownerless session produced by a graceful lease release MUST remain
+ineligible until its recorded `lease_expires_at` has aged through that same
+durable lease period. Candidate reads MUST lock the operation and session rows
+on PostgreSQL on both the normal predicate path and the oversized-protection
+bounded-page path.
+
 The transition MUST atomically compare the operation state, `updated_at`,
 durable event-spool progress, session owner instance, and owner epoch. A
 concurrent recovery claim, owner renewal/takeover, or status proof MUST win
@@ -55,6 +61,15 @@ be starved by a protected prefix.
   unprotected operation
 - **AND** the protected operations remain unchanged
 
+#### Scenario: oversized protection keeps the session lock fence
+
+- **GIVEN** the local protection snapshot requires the bounded-page path
+- **WHEN** PostgreSQL selects an abandonment candidate
+- **THEN** the candidate operation and owning session rows remain locked until
+  the abandonment transaction commits
+- **AND** a concurrent renewal or takeover cannot commit behind the stale
+  candidate snapshot
+
 #### Scenario: live owner is not abandoned
 
 - **GIVEN** an ambiguous operation is older than the inactivity cutoff
@@ -70,6 +85,15 @@ be starved by a protected prefix.
 - **WHEN** another replica runs the bridge maintenance sweep
 - **THEN** the operation remains `unknown` or `acknowledged`
 - **AND** the original owner may still renew or finalize it
+
+#### Scenario: a recent ownerless release is not abandoned
+
+- **GIVEN** an ambiguous operation is older than the inactivity cutoff
+- **AND** its durable session was released to ownerless less than one durable
+  lease period ago
+- **WHEN** another replica runs the bridge maintenance sweep
+- **THEN** the operation remains `unknown` or `acknowledged`
+- **AND** the releasing replica may finish its pending settlement
 
 #### Scenario: pending local work is not abandoned
 
@@ -111,3 +135,15 @@ be starved by a protected prefix.
   `previous_response_not_found` and parameter `previous_response_id`
 - **AND** the error uses the canonical continuity contract that allows Codex
   to retry without `previous_response_id`
+
+#### Scenario: abandoned hard turn-state requests full-history recovery
+
+- **GIVEN** operation admission finds an existing hard turn-state operation in
+  `abandoned`
+- **AND** the request has no `previous_response_id`
+- **WHEN** the client sends the same continuation again
+- **THEN** the proxy does not claim, reset, or dispatch that operation
+- **AND** it returns HTTP 400 with error code `previous_response_not_found`
+  without a `previous_response_id` parameter
+- **AND** the error instructs Codex to discard the hard continuity anchor and
+  resend full history

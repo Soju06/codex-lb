@@ -469,6 +469,76 @@ async def test_submit_abandoned_operation_returns_full_history_recovery_without_
 
 
 @pytest.mark.asyncio
+async def test_submit_abandoned_hard_turn_state_requests_full_history_without_previous_response_param(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    send_text = AsyncMock()
+    session = _make_bridge_session(key_value="abandoned-hard-turn-state")
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    session.durable_session_id = "durable-abandoned-hard-turn-state"
+    session.durable_owner_epoch = 4
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-abandoned-hard-turn-state",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+        request_text='{"type":"response.create","input":"retry"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    abandoned = SimpleNamespace(
+        operation_id="operation-abandoned-hard-turn-state",
+        session_id=session.durable_session_id,
+        state="abandoned",
+        created=False,
+        event_spool_complete=False,
+        response_id=None,
+    )
+    claim_unknown = AsyncMock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=AsyncMock(return_value=abandoned),
+            get_operation=AsyncMock(return_value=abandoned),
+            record_operation=AsyncMock(return_value=abandoned),
+            claim_unknown_operation_for_recovery=claim_unknown,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_instance_id="instance-abandoned-hard-turn-state",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-abandoned-hard-turn-state",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.payload["error"]["type"] == "invalid_request_error"
+    assert exc_info.value.payload["error"]["code"] == "previous_response_not_found"
+    assert "param" not in exc_info.value.payload["error"]
+    assert "full history" in exc_info.value.payload["error"]["message"]
+    claim_unknown.assert_not_awaited()
+    send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_submit_hard_turn_walks_race_path_chain_before_recording(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -20,6 +20,9 @@
       coordinator-owned keyset cursor across heartbeats.
 - [x] 2.7 Add one durable lease period of cross-replica grace before an owned
       operation becomes eligible, and emit the specified abandonment reason.
+- [x] 2.8 Apply the same grace to recently released ownerless sessions, retain
+      PostgreSQL row locking on oversized sweeps, and return a distinct
+      parameterless full-history contract for abandoned hard turn-state work.
 
 ## 3. Verification
 
@@ -36,3 +39,5 @@
 - [x] 3.6 Cover a protected prefix larger than the scan budget and prove that a
       later sweep resumes and cleans up a later unprotected operation.
 - [x] 3.7 Cover the lease-expiry grace and the structured abandonment reason.
+- [x] 3.8 Cover ownerless-release grace, oversized-path row locking, and
+      abandoned hard turn-state recovery.

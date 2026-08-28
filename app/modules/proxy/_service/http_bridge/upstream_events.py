@@ -495,8 +495,6 @@ async def _update_http_bridge_operation_state(
                                 exc_info=True,
                             )
                         if snapshot is not None:
-                            response_replay_input_json = snapshot
-                            response_replay_input_complete = True
                             recovered_turn_count = max(0, int(getattr(request_state, "recovery_replay_turn_count", 0)))
                             # A recovery replay contains the completed ancestor
                             # turns; the operation being persisted is one more
@@ -511,15 +509,37 @@ async def _update_http_bridge_operation_state(
                                 )
                                 + 1
                             )
-                            _log_http_bridge_event(
-                                "complete_transcript_replay_snapshot_persisted",
-                                session.key,
-                                account_id=session.account.id,
-                                model=getattr(request_state, "model", None),
-                                detail=f"bytes={len(snapshot.encode('utf-8'))}",
-                                cache_key_family=session.key.affinity_kind,
-                                model_class=request_model_class,
+                            max_turns = int(
+                                getattr(
+                                    _service_get_settings(),
+                                    "http_responses_session_bridge_complete_transcript_max_turns",
+                                    256,
+                                )
                             )
+                            if response_replay_input_turn_count <= max_turns:
+                                response_replay_input_json = snapshot
+                                response_replay_input_complete = True
+                                _log_http_bridge_event(
+                                    "complete_transcript_replay_snapshot_persisted",
+                                    session.key,
+                                    account_id=session.account.id,
+                                    model=getattr(request_state, "model", None),
+                                    detail=f"bytes={len(snapshot.encode('utf-8'))}",
+                                    cache_key_family=session.key.affinity_kind,
+                                    model_class=request_model_class,
+                                )
+                            else:
+                                _log_http_bridge_event(
+                                    "complete_transcript_replay_snapshot_skipped",
+                                    session.key,
+                                    account_id=session.account.id,
+                                    model=getattr(request_state, "model", None),
+                                    detail=(
+                                        f"represented_turns={response_replay_input_turn_count};max_turns={max_turns}"
+                                    ),
+                                    cache_key_family=session.key.affinity_kind,
+                                    model_class=request_model_class,
+                                )
         update_kwargs: dict[str, Any] = {
             "operation_id": operation_id,
             "session_id": session_id,

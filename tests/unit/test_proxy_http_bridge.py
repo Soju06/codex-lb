@@ -6942,6 +6942,122 @@ async def test_complete_transcript_recovery_rebinds_durable_operation(
 
 
 @pytest.mark.asyncio
+async def test_complete_transcript_recovery_rejects_continuation_at_turn_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-turn-limit")
+    session.durable_session_id = "durable-recovery-turn-limit"
+    session.durable_owner_epoch = 1
+    rebind_operation = AsyncMock()
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-recovery-turn-limit",
+            model="gpt-test",
+            request_text='{"type":"response.create","previous_response_id":"resp-parent","input":[]}',
+            previous_response_id="resp-parent",
+            complete_transcript_recovery_anchor=None,
+            operation_id="op-turn-limit",
+            operation_fingerprint="fingerprint-turn-limit",
+            operation_parent_response_id="resp-parent",
+            operation_registered=True,
+            operation_dispatched=True,
+            operation_attempt_generation=0,
+            response_event_count=0,
+            replay_count=0,
+            upstream_model_output_seen=False,
+            downstream_visible=False,
+            last_downstream_sequence_number=None,
+        ),
+    )
+    get_transcript = AsyncMock(return_value=[SimpleNamespace(represented_turn_count=1)])
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=get_transcript,
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=1,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-recovery-turn-limit",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_retry_circuit_generation", AsyncMock(return_value=(True, None)))
+
+    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    rebind_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_partial_transcript_recovery_rejects_continuation_at_turn_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="unsafe-turn-limit")
+    session.durable_session_id = "durable-unsafe-turn-limit"
+    session.durable_owner_epoch = 1
+    rebind_operation = AsyncMock()
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-unsafe-turn-limit",
+            model="gpt-test",
+            request_text='{"type":"response.create","previous_response_id":"resp-parent","input":[]}',
+            previous_response_id="resp-parent",
+            operation_parent_response_id="resp-parent",
+            operation_id="op-unsafe-turn-limit",
+            operation_registered=True,
+            operation_dispatched=True,
+            operation_attempt_generation=0,
+            response_event_count=1,
+            unsafe_partial_replay_count=0,
+        ),
+    )
+    get_transcript = AsyncMock(return_value=[SimpleNamespace(represented_turn_count=1)])
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=get_transcript,
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_unsafe_partial_replay_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=1,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-unsafe-turn-limit",
+        ),
+    )
+
+    recovered = await http_bridge_upstream_events_module._try_unsafe_partial_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    rebind_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_complete_transcript_root_recovery_keeps_zero_ancestor_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

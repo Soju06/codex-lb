@@ -1358,6 +1358,7 @@ async def _try_complete_transcript_recovery(
     if not callable(get_transcript):
         return False
     replay_turn_count = 0
+    replay_text: str | None = None
     try:
         turns = await get_transcript(
             response_id=recovery_anchor,
@@ -1370,18 +1371,20 @@ async def _try_complete_transcript_recovery(
         max_input_items = int(
             getattr(settings, "http_responses_session_bridge_complete_transcript_max_input_items", 4096)
         )
+        max_turns = int(getattr(settings, "http_responses_session_bridge_complete_transcript_max_turns", 256))
         max_bytes = int(
             getattr(settings, "http_responses_session_bridge_complete_transcript_max_bytes", 8 * 1024 * 1024)
         )
         if turns:
             replay_turn_count = sum(max(1, int(getattr(turn, "represented_turn_count", 1))) for turn in turns)
-            replay_text = build_complete_replay_payload(
-                turns,
-                continuation_request_text=request_state.request_text,
-                allow_unanchored_continuation=root_recovery,
-                max_input_items=max_input_items,
-                max_bytes=max_bytes,
-            )
+            if replay_turn_count + 1 <= max_turns:
+                replay_text = build_complete_replay_payload(
+                    turns,
+                    continuation_request_text=request_state.request_text,
+                    allow_unanchored_continuation=root_recovery,
+                    max_input_items=max_input_items,
+                    max_bytes=max_bytes,
+                )
         elif root_recovery:
             # The client supplied a complete root snapshot; it has no
             # durable ancestor turns to carry forward. The replacement
@@ -1758,13 +1761,16 @@ async def _try_unsafe_partial_transcript_recovery(
             )
             if turns:
                 replay_turn_count = sum(max(1, int(getattr(turn, "represented_turn_count", 1))) for turn in turns)
-                replay_text = build_complete_replay_payload(
-                    turns,
-                    continuation_request_text=request_text,
-                    allow_unanchored_continuation=True,
-                    max_input_items=max_input_items,
-                    max_bytes=max_bytes,
-                )
+                if replay_turn_count + 1 <= int(
+                    getattr(settings, "http_responses_session_bridge_complete_transcript_max_turns", 256)
+                ):
+                    replay_text = build_complete_replay_payload(
+                        turns,
+                        continuation_request_text=request_text,
+                        allow_unanchored_continuation=True,
+                        max_input_items=max_input_items,
+                        max_bytes=max_bytes,
+                    )
         elif not recovery_anchor:
             # A root request can still be replayed if its body is already a
             # complete, account-neutral history. Never invent a parent for a

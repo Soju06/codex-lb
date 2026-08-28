@@ -117,7 +117,7 @@ from app.modules.proxy._service.http_bridge.owner_forwarding import (
     _owner_forward_failure_allows_local_recovery,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
-    _http_bridge_quarantine_generation,
+    _http_bridge_quarantine_clear_fence,
     _http_bridge_session_key_poison_quarantined,
     _http_bridge_session_key_quarantined,
 )
@@ -3082,7 +3082,12 @@ class _HTTPBridgeStreamingMixin:
             ) -> None:
                 nonlocal verified_stale_anchor_quarantine_generation
 
-                verified_stale_anchor_quarantine_generation = _http_bridge_quarantine_generation(
+                # Provenance-aware capture: the completion's clear fences a
+                # poison entry on its poison provenance, so capturing the raw
+                # generation here would mismatch whenever a weaker fence
+                # bumped it before this replay began, refusing the clear for
+                # a source the replay just recovered.
+                verified_stale_anchor_quarantine_generation = _http_bridge_quarantine_clear_fence(
                     self,
                     recovery_session.key,
                 )

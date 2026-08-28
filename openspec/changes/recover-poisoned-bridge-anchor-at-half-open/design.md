@@ -94,3 +94,15 @@ suppression message reports the configured half-open lease duration as the
 retry-after upper bound rather than the remote probe's actual remaining
 lease; persisting the lease deadline would require a schema change and a
 durable write on the admission path, out of scope for this change.
+
+## Accepted residual: planning-time circuit load is once per key per process
+
+The pre-planning durable load runs on a worker's first touch of a hard key
+(and again when continuity resolution replaces it with a different canonical
+key). A poison circuit opened by another replica after that load reaches
+this worker at its next submit-time refresh, which runs on every dispatch —
+so at most one probe per process per key can be planned with a remotely
+poisoned anchor before the quarantine arms, and that probe's failure feeds
+the same strike, consult, and abandonment recovery as any other. The
+alternative, a durable read on every planning pass, doubles hot-path durable
+reads to remove a self-healing single-probe race, and is not taken.

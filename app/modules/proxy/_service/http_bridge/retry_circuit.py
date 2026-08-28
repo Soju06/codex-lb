@@ -126,6 +126,10 @@ class _HTTPBridgeRetryCircuitState:
     last_detail: str | None = None
     last_touched_monotonic: float = 0.0
     persisted_updated_at_epoch: float = 0.0
+    # Admission generation observed with the epoch above: a replica's replay
+    # claim bumps only this column, so the settle fence must carry it or a
+    # reset can clear the circuit beneath a claim it never observed.
+    persisted_admission_generation: int = 0
     last_failure_monotonic: float = 0.0
     last_durable_load_monotonic: float = 0.0
     half_open_until: float = 0.0
@@ -641,6 +645,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 # window it never opened.
                 state.half_open_until = 0.0
             state.persisted_updated_at_epoch = persisted.updated_at_epoch
+            state.persisted_admission_generation = getattr(persisted, "admission_generation", 0)
             state.last_touched_monotonic = now_monotonic
             state.last_durable_load_monotonic = now_monotonic
             self._http_bridge_retry_circuit_loaded_keys.add(key)
@@ -798,9 +803,15 @@ class _HTTPBridgeRetryCircuitMixin:
                             # cooldown expires.
                             state.half_open_until = 0.0
                         state.persisted_updated_at_epoch = persisted.updated_at_epoch
+                        state.persisted_admission_generation = getattr(persisted, "admission_generation", 0)
+                        # Post-write time, not this persist's entry time: a
+                        # load that started while the durable write was in
+                        # flight can carry a start stamp later than the entry
+                        # time while its row snapshot predates the write, and
+                        # the stale-load guard compares against this value.
                         state.last_durable_load_monotonic = max(
                             state.last_durable_load_monotonic,
-                            now_monotonic,
+                            time.monotonic(),
                         )
             async with self._http_bridge_retry_circuit_lock:
                 if self._http_bridge_retry_circuits.get(session.key) is state:
@@ -1501,6 +1512,7 @@ class _HTTPBridgeRetryCircuitMixin:
             expected_updated_at_epoch = (
                 state.persisted_updated_at_epoch if state is not None and state.persisted_updated_at_epoch > 0 else None
             )
+            expected_admission_generation = state.persisted_admission_generation if state is not None else None
         # A confirmed miss has no version fence to protect a row created
         # concurrently, so leave the durable row untouched when no state was
         # observed. Preserve the existing best-effort clear on read failures,
@@ -1516,6 +1528,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 session_key_value=key.affinity_key,
                 api_key_id=key.api_key_id,
                 expected_updated_at_epoch=expected_updated_at_epoch,
+                expected_admission_generation=expected_admission_generation,
             )
             if reset_matched is False and expected_updated_at_epoch is not None:
                 # The fenced reset matched no row: another writer moved it
@@ -1533,12 +1546,25 @@ class _HTTPBridgeRetryCircuitMixin:
                 if moved is None or moved.consecutive_failures <= 0:
                     # The moved row was purged or already reset: settled.
                     reset_matched = True
+                elif (
+                    expected_admission_generation is not None
+                    and moved.updated_at_epoch == expected_updated_at_epoch
+                    and getattr(moved, "admission_generation", 0) != expected_admission_generation
+                ):
+                    # Same failure observation, advanced admission
+                    # generation: a replica claimed the replay admission
+                    # this circuit fences, and the claim deliberately holds
+                    # the circuit open for its dispatch. Chasing the moved
+                    # generation here would clear it anyway — leave the
+                    # settlement owed instead.
+                    pass
                 else:
                     reset_matched = await self._durable_bridge.clear_retry_circuit(
                         session_key_kind=key.affinity_kind,
                         session_key_value=key.affinity_key,
                         api_key_id=key.api_key_id,
                         expected_updated_at_epoch=moved.updated_at_epoch,
+                        expected_admission_generation=getattr(moved, "admission_generation", None),
                     )
             if reset_matched is False and expected_updated_at_epoch is not None:
                 # Two fenced attempts both matched nothing: the row is
@@ -1576,6 +1602,19 @@ class _HTTPBridgeRetryCircuitMixin:
                         self._http_bridge_retry_circuit_loaded_keys.add(key)
                         self._http_bridge_retry_circuit_persisted_keys.add(key)
                 return False
+        async with self._http_bridge_retry_circuit_lock:
+            # Re-stamp past the durable delete: the pop-time watermark above
+            # predates the commit, so a load that started between them passes
+            # the stale-load guard while its snapshot still shows the deleted
+            # row. Strikes hold this key's lock for the whole settle, so any
+            # state present here was resurrected by exactly such a load —
+            # drop it with the same fence.
+            self._http_bridge_retry_circuit_reconcile_watermarks[key] = time.monotonic()
+            resurrected = self._http_bridge_retry_circuits.get(key)
+            if resurrected is not None and resurrected is not state:
+                self._http_bridge_retry_circuits.pop(key, None)
+                self._http_bridge_retry_circuit_loaded_keys.discard(key)
+                self._http_bridge_retry_circuit_persisted_keys.discard(key)
         if state is None:
             return True
         if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:

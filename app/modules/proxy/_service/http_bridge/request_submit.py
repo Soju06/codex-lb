@@ -2822,6 +2822,11 @@ class _HTTPBridgeRequestSubmitMixin:
         # even when the session itself survives with other active requests.
         _record_http_bridge_quarantine_wedged_pending(self, session, stale_requests)
         partial_strike_detail = detail
+        # ``_fail_pending_websocket_requests`` empties the deque it is handed
+        # when it claims the states, so the settle predicate below must read
+        # a frozen copy or a removed safe-replay holder silently vanishes
+        # from the settlement decision.
+        removed_request_states = list(stale_requests)
 
         async def _finalize_and_settle_partial_cleanup() -> None:
             # The strike lands before the failure frames are published, so a
@@ -2875,7 +2880,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     session,
                     detail=poison_detail,
                     settle_circuit=_http_bridge_abandonment_may_settle_circuit(
-                        [*stale_requests, *surviving_request_states]
+                        [*removed_request_states, *surviving_request_states]
                     ),
                     expected_continuity=poison_expected_anchor,
                 )
@@ -2888,7 +2893,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         session.key,
                         account_id=session.account.id,
                         model=session.request_model,
-                        pending_count=len(stale_requests),
+                        pending_count=len(removed_request_states),
                         detail=poison_detail,
                         cache_key_family=session.key.affinity_kind,
                         model_class=_extract_model_class(session.request_model) if session.request_model else None,
@@ -3001,9 +3006,11 @@ class _HTTPBridgeRequestSubmitMixin:
         response_events_seen: int | None = None,
         retired_request_count: int | None = None,
         retry_circuit_attempt_selection: _HTTPBridgeRetryCircuitAttemptSelection | None = None,
+        retired_request_states: list[_WebSocketRequestState] | None = None,
     ) -> None:
         async with session.pending_lock:
-            retired_request_states = list(session.pending_requests)
+            if retired_request_states is None:
+                retired_request_states = list(session.pending_requests)
             if retired_request_count is None:
                 retired_request_count = sum(
                     1
@@ -3058,8 +3065,11 @@ class _HTTPBridgeRequestSubmitMixin:
         # and will claim the circuit generation, so it must not strike the
         # circuit or trigger the poison clear. Only the safe-replay half of
         # the settlement predicate applies here — an unanchored eventless
-        # owner has no replay to protect and keeps striking, and so does the
-        # pre-drain handoff whose state list is already empty.
+        # owner has no replay to protect and keeps striking. A pre-drain
+        # handoff supplies the drained states through
+        # ``retired_request_states``, so a safe-replay holder that was
+        # already claimed by finalization still counts; only a handoff with
+        # genuinely no request states keeps striking.
         retired_states_present = [state for state in retired_request_states if state is not None]
         retirement_strike_eligible = not retired_states_present or any(
             not _http_bridge_request_state_holds_safe_replay(state) for state in retired_states_present

@@ -1376,6 +1376,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         retry_circuit_detail="clean_close",
                         response_events_seen=observed_response_events,
                         retired_request_count=failed_pending_count,
+                        retired_request_states=pending_request_states,
                         **retry_circuit_attempt_kwargs,
                     )
                 else:
@@ -1385,11 +1386,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                         response_events_seen=observed_response_events,
                         # ``_fail_pending_websocket_requests`` has already
                         # claimed and drained these states. Carry the count
-                        # sampled under ``pending_lock`` across that ownership
-                        # transfer so normal reader failures still consume one
-                        # strike. The deferred/poison branch records its own
-                        # strike above and intentionally does not pass it.
+                        # and the pre-drain state snapshot sampled under
+                        # ``pending_lock`` across that ownership transfer, so
+                        # normal reader failures still consume one strike and
+                        # a drained safe-replay holder still blocks the
+                        # settlement. The deferred/poison branch records its
+                        # own strike above and intentionally does not pass it.
                         retired_request_count=failed_pending_count,
+                        retired_request_states=pending_request_states,
                         **retry_circuit_attempt_kwargs,
                     )
                 # The failed requests are already drained and finalized, so a

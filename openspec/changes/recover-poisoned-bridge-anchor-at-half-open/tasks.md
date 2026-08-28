@@ -505,6 +505,30 @@
       before detaching and retiring, keeping the durable owner epoch alive
       for the abandonment's continuity fence
 
+- [x] 2.105 Persist and settlement watermarks are stamped after their
+      durable writes land, and a settlement sweeps any state a pre-delete
+      load snapshot resurrected while its delete was in flight
+
+- [x] 2.106 The settle fence carries the observed admission generation, and
+      a moved row whose version held while its admission generation
+      advanced leaves the settlement owed to the claimed replay
+
+- [x] 2.107 The partial cleanup freezes its removed-holder snapshot before
+      finalization empties the deque, so a removed safe-replay holder still
+      blocks the settle
+
+- [x] 2.108 The waiterless retirement receives the reader's pre-drain state
+      snapshot, so a drained safe-replay holder still blocks the settle and
+      an all-safe drain does not strike
+
+- [x] 2.109 The verified replay captures its source quarantine fence with
+      the clear's own provenance rule (covered at the clear seam; the
+      capture call is one-line glue on the recovery path)
+
+- [x] 2.110 The once-per-key planning load is recorded as an accepted
+      residual in design.md: a remote poison opening reaches the worker at
+      the next submit-time refresh, costing at most one self-healing probe
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

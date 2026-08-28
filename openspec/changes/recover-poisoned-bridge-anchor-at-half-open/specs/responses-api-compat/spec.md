@@ -118,9 +118,15 @@ request states at all, and nothing is holding the generation there.
 
 A settle only removes rows it holds evidence for: the version fence protects a
 row another writer created, and a worker that observed no durable row deletes
-nothing. A fenced settle that matches no row MUST reload the moved row and
+nothing. The settle fence MUST also carry the admission generation observed
+with its version: a replica's replay claim advances only that generation, so
+a reset fenced on the version alone would clear the circuit beneath the
+claimed replay. A fenced settle that matches no row MUST reload the moved row and
 retry its fence once against the current version before giving up; only a
-second miss leaves the episode owed to the next opportunity. A circuit opened and remediated in the same instant cannot defeat
+second miss leaves the episode owed to the next opportunity. A moved row
+whose version is unchanged while its admission generation advanced is a
+claim, not a concurrent strike, and the settlement MUST stay owed rather
+than chase the claimed generation. A circuit opened and remediated in the same instant cannot defeat
 this, because strike writes and settles for one key are serialized: the
 settle waits for the in-flight write to land and then deletes the row it
 produced under its version fence, and a writer that finds its episode settled
@@ -178,7 +184,12 @@ write; a durable miss from such a lookup MUST NOT pop the local episode the
 completed write just opened, and the watermark this guard reads MUST survive
 the settlement popping the state object, so a lookup racing a settlement
 cannot adopt the pre-settlement row into a fresh state and resurrect the
-settled cooldown. Adopting a replacement episode MUST invalidate the local half-open
+settled cooldown. The fences this guard compares against MUST be stamped
+after the durable write lands, not at the writer's entry — a load can start
+during the write's await and still carry a later start stamp than the entry
+time while its snapshot predates the write — and a settlement MUST sweep
+any state that a pre-delete snapshot re-created while its delete was in
+flight. Adopting a replacement episode MUST invalidate the local half-open
 lease even when the adopted cooldown has already elapsed, and a poison row at
 the effective configured abandonment threshold adopted from a durable load
 MUST arm this worker's process-local poison quarantine, since the replica
@@ -228,7 +239,11 @@ MUST fence the same way, on the generation captured before its settlement
 and registration awaits: a strike arming a new quarantine during those
 awaits is evidence the completion does not disprove, and that quarantine
 MUST survive the clear, or the next half-open probe is planned with the
-newly poisoned anchor on a key already marked loaded. That re-evaluation MUST turn on the merged opening itself and not on
+newly poisoned anchor on a key already marked loaded. Every fence captured
+for a later clear MUST be captured under the same provenance rule the clear
+applies — a poison entry's poison provenance rather than its raw generation
+— or a weaker fence arming before the capture blocks the very clear the
+capture was meant to authorize. That re-evaluation MUST turn on the merged opening itself and not on
 the cooldown it leaves: a merge can adopt a cooldown that has already elapsed,
 and such a key is at its threshold with no cooldown left, so the next request
 is the half-open probe the quarantine exists to protect. A `clean_close` opening MUST NOT quarantine the key.
@@ -473,7 +488,7 @@ Quarantine state MUST be bounded and self-recovering: it is in-memory and sessio
 
 A quarantine armed for reason `retry_circuit_poisoned_anchor` MUST NOT have that reason replaced by a weaker session-scoped fence while it is still active: the registry holds one entry per key, and the wedged-reattach and repeated-eventless fences carry no evidence about the anchor, so letting either overwrite the reason erases the only record that the anchor was proven dead.
 
-The durable anchor abandonment MUST use the same capped threshold as the rest of this capability, in every funnel that can reach it. One poisoned anchor MUST be abandoned once per episode; a fenced or failed abandonment leaves it owed so the next strike retries, and every funnel whose abandonment confirms MUST record the episode marker even while its circuit settlement remains outstanding, because the next strike finds empty continuity and cannot retry a settlement-only debt. The marker MUST reset whenever a durable load adopts a write this worker did not produce, so a replacement episode arriving at an equal or higher failure count is still allowed its one abandonment. Every funnel MUST derive its settlement from the failed request and the pending survivors snapshotted at decision time; none may settle unconditionally. An abandonment is owed only while its failure episode is still the registered one: a circuit settled by a concurrent success ends the episode, and a stale strike's captured count MUST NOT clear the fresh anchor that success persisted. An abandonment is also owed only while continuity actually remains: a durable session whose continuity columns are all empty owes nothing, because a clear there removes no failure cause, and the settle it authorized would reset a circuit cooling on genuinely unanchored failures. The continuity clear itself MUST be fenced on both continuity columns — the response anchor and the turn state — captured together when the episode was validated, and a completion MUST settle the circuit before it registers its fresh anchor, so a clear authorized against the poisoned anchor matches nothing once fresh continuity exists. When that settlement fails and the old episode is restored, the completion MUST NOT clear the quarantine, and the restored episode's owed abandonment MUST be suppressed only after the fresh anchor's registration succeeds: suppressing before a registration that then fails would leave the old poisoned anchor stored with no funnel willing to clear it; the cooldown stands until the next settle opportunity. A retired request that still holds a safe replay MUST NOT strike the circuit or trigger the abandonment on any funnel, matching the terminal and grouped paths; a pre-drain retirement handoff with no request states keeps striking. A completed verified stale-anchor replay MUST keep the source key's circuit and its durable row, and the one-clear marker on that surviving episode is process-local (see this change's `design.md` for the accepted tradeoff).
+The durable anchor abandonment MUST use the same capped threshold as the rest of this capability, in every funnel that can reach it. One poisoned anchor MUST be abandoned once per episode; a fenced or failed abandonment leaves it owed so the next strike retries, and every funnel whose abandonment confirms MUST record the episode marker even while its circuit settlement remains outstanding, because the next strike finds empty continuity and cannot retry a settlement-only debt. The marker MUST reset whenever a durable load adopts a write this worker did not produce, so a replacement episode arriving at an equal or higher failure count is still allowed its one abandonment. Every funnel MUST derive its settlement from the failed request and the pending survivors snapshotted at decision time; none may settle unconditionally. An abandonment is owed only while its failure episode is still the registered one: a circuit settled by a concurrent success ends the episode, and a stale strike's captured count MUST NOT clear the fresh anchor that success persisted. An abandonment is also owed only while continuity actually remains: a durable session whose continuity columns are all empty owes nothing, because a clear there removes no failure cause, and the settle it authorized would reset a circuit cooling on genuinely unanchored failures. The continuity clear itself MUST be fenced on both continuity columns — the response anchor and the turn state — captured together when the episode was validated, and a completion MUST settle the circuit before it registers its fresh anchor, so a clear authorized against the poisoned anchor matches nothing once fresh continuity exists. When that settlement fails and the old episode is restored, the completion MUST NOT clear the quarantine, and the restored episode's owed abandonment MUST be suppressed only after the fresh anchor's registration succeeds: suppressing before a registration that then fails would leave the old poisoned anchor stored with no funnel willing to clear it; the cooldown stands until the next settle opportunity. A retired request that still holds a safe replay MUST NOT strike the circuit or trigger the abandonment on any funnel, matching the terminal and grouped paths. A funnel that drains or finalizes its requests before its settlement decision MUST carry the drained states into that decision — as a frozen snapshot when finalization empties the container it was handed — so a drained safe-replay holder still blocks the settle; only a handoff with genuinely no request states keeps striking. A completed verified stale-anchor replay MUST keep the source key's circuit and its durable row, and the one-clear marker on that surviving episode is process-local (see this change's `design.md` for the accepted tradeoff).
 
 A quarantine armed for reason `retry_circuit_poisoned_anchor` MUST remain in force for at least the remaining cooldown of the circuit that armed it plus that circuit's half-open lease, because the probe it exists to protect is only admitted once that cooldown expires and may then be admitted anywhere inside the lease that follows. A suppression that assumes a remote half-open lease MUST be driven only by a confirmed dispatch-claim loss — a durable CAS that answered and matched nothing — never by a claim that timed out or errored, which is infrastructure trouble no probe owns. The quarantine registry's size cap MUST NOT evict such an entry before that deadline: the cap evicts only expired or weaker-fence entries and holds as a correctness bound rather than an unconditional one during an incident that quarantines more keys than the cap at once. The default TTL alone MUST NOT be relied on for this: it equals the circuit's maximum cooldown, so at that cooldown the quarantine would otherwise lapse in the same instant the cooldown does and hand the poisoned anchor back to the very request the cooldown was holding.
 

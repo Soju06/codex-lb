@@ -33831,6 +33831,16 @@ async def test_merged_cooldown_extends_an_already_armed_poison_quarantine() -> N
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-merge-extends-quarantine")
     now_wall = time.time()
+    remote_row = DurableBridgeRetryCircuitSnapshot(
+        session_key_kind="session_header",
+        session_key_hash="hash-merge-extend",
+        api_key_scope="none",
+        consecutive_failures=1,
+        cooldown_until_epoch=0.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=now_wall - 1.0,
+        admission_generation=0,
+    )
     merged = DurableBridgeRetryCircuitSnapshot(
         session_key_kind="session_header",
         session_key_hash="hash-merge-extend",
@@ -33841,12 +33851,13 @@ async def test_merged_cooldown_extends_an_already_armed_poison_quarantine() -> N
         updated_at_epoch=now_wall,
         admission_generation=0,
     )
-    # No merge on the first strike, so the second one opens the circuit locally
-    # and arms the floor from its own 60s backoff. Only then does the merge
-    # arrive with the far longer deadline.
+    # No returned row on the first strike, so the second one opens the
+    # circuit locally with its own 60s backoff; its blind write drops
+    # against the remote replica's row, the re-strike merges onto that
+    # lineage, and the adopted merge carries the far longer deadline.
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(side_effect=[None, merged]),
+        persist_retry_circuit=AsyncMock(side_effect=[None, remote_row, merged]),
     )
 
     now = time.monotonic()
@@ -35656,6 +35667,181 @@ def test_the_clear_fence_capture_survives_a_pre_replay_weaker_bump() -> None:
     assert entry is not None
     assert entry.reason == http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_REPEATED_EVENTLESS_REASON, (
         "the weaker fence stands on its own evidence after the poison classification clears"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_anchor_advance_suppression_is_persisted_as_superseded() -> None:
+    # The suppression's local marker protects only this worker: another
+    # replica loading the surviving at-threshold poison row would arm
+    # quarantine against the fresh anchor and authorize an abandonment for
+    # failures recorded against the superseded one. The suppression must
+    # therefore rewrite the row's detail to the non-poison sentinel under
+    # the row's version fence.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-supersede-detail")
+    now = time.monotonic()
+    row_epoch = time.time() - 30.0
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=now)
+    state.consecutive_failures = 2
+    state.last_detail = "stream_incomplete"
+    state.persisted_updated_at_epoch = row_epoch
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    supersede = AsyncMock(return_value=True)
+    service._durable_bridge = SimpleNamespace(supersede_retry_circuit_detail=supersede)
+
+    await service._http_bridge_suppress_poison_clear_after_anchor_advance(session)
+
+    assert state.poison_anchor_cleared is True
+    supersede.assert_awaited_once_with(
+        session_key_kind=session.key.affinity_kind,
+        session_key_value=session.key.affinity_key,
+        api_key_id=session.key.api_key_id,
+        expected_updated_at_epoch=row_epoch,
+        last_detail="anchor_superseded",
+    )
+    assert state.last_detail == "anchor_superseded"
+
+    # A fenced rewrite that misses (the row moved under a concurrent
+    # strike) keeps the local view matching the durable row: the concurrent
+    # strike's poison class is new evidence and outranks the supersession.
+    missed_state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=now)
+    missed_state.consecutive_failures = 2
+    missed_state.last_detail = "stream_incomplete"
+    missed_state.persisted_updated_at_epoch = row_epoch
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = missed_state
+    supersede.reset_mock()
+    supersede.return_value = False
+
+    await service._http_bridge_suppress_poison_clear_after_anchor_advance(session)
+
+    assert missed_state.poison_anchor_cleared is True, "the suppression stays process-local on a fence miss"
+    assert missed_state.last_detail == "stream_incomplete", "a missed rewrite must not fake the durable detail"
+
+
+@pytest.mark.asyncio
+async def test_a_blind_base_strike_re_persists_onto_the_observed_row() -> None:
+    # A fresh worker whose pre-strike durable lookup failed records a strike
+    # with no valid base; the strict CAS drops it against the row that
+    # already existed, and wholesale adoption then erased the failure
+    # locally too — a transient read error could keep the second poison
+    # failure from ever opening the circuit. The blind drop re-strikes once
+    # on top of the observed lineage.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-blind-base-strike")
+    now_monotonic = time.monotonic()
+    now_wall = time.time()
+    foreign_epoch = now_wall - 30.0
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=now_monotonic)
+    state.consecutive_failures = 1
+    state.last_detail = "stream_incomplete"
+    state.persisted_updated_at_epoch = 0.0
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    persist = AsyncMock(
+        side_effect=[
+            SimpleNamespace(
+                consecutive_failures=1,
+                cooldown_until_epoch=0.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=foreign_epoch,
+            ),
+            SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=now_wall + 60.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=now_wall,
+            ),
+        ]
+    )
+    service._durable_bridge = SimpleNamespace(persist_retry_circuit=persist)
+
+    await service._persist_http_bridge_retry_circuit_serialized(
+        session,
+        state,
+        now_monotonic=now_monotonic,
+        now_wall=now_wall,
+        threshold=2,
+    )
+
+    assert persist.await_count == 2, "a blind-base drop must re-strike once onto the observed lineage"
+    retry_kwargs = persist.await_args_list[1].kwargs
+    assert retry_kwargs["base_updated_at_epoch"] == foreign_epoch
+    assert retry_kwargs["consecutive_failures"] == 2
+    assert state.consecutive_failures == 2, "the re-struck row opens the circuit at the real failure count"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("row_kind", "expect_revoked"),
+    [
+        pytest.param("zero_reset", True, id="zero-failure-reset-revokes"),
+        pytest.param("superseded", True, id="anchor-superseded-revokes"),
+        pytest.param("replaced_below_threshold", True, id="non-poison-replacement-revokes"),
+        pytest.param("still_poison", False, id="poison-row-keeps-the-fence"),
+        pytest.param("miss", True, id="durable-miss-revokes"),
+    ],
+)
+async def test_a_load_adopting_a_disproved_episode_revokes_the_stale_quarantine(
+    row_kind: str,
+    expect_revoked: bool,
+) -> None:
+    # A durable load that adopts a reset, a deliberate anchor supersession,
+    # or a below-threshold non-poison replacement — or observes the row gone
+    # — proves the episode the local poison quarantine fenced has ended. The
+    # stale entry must be revoked under its provenance fence, or a remotely
+    # recovered key stays excluded from reuse and anchor injection for the
+    # old 600–1200s deadline.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value=f"bridge-stale-quarantine-{row_kind}")
+    base_epoch = time.time() - 45.0
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=time.monotonic())
+    state.consecutive_failures = 2
+    state.last_detail = "stream_incomplete"
+    state.persisted_updated_at_epoch = base_epoch
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(session.key)
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+        minimum_seconds=700.0,
+    )
+    rows: dict[str, Any] = {
+        "zero_reset": SimpleNamespace(
+            consecutive_failures=0,
+            cooldown_until_epoch=0.0,
+            last_detail=None,
+            updated_at_epoch=time.time(),
+        ),
+        "superseded": SimpleNamespace(
+            consecutive_failures=2,
+            cooldown_until_epoch=time.time() + 60.0,
+            last_detail="anchor_superseded",
+            updated_at_epoch=base_epoch,
+        ),
+        "replaced_below_threshold": SimpleNamespace(
+            consecutive_failures=1,
+            cooldown_until_epoch=0.0,
+            last_detail="clean_close",
+            updated_at_epoch=time.time(),
+        ),
+        "still_poison": SimpleNamespace(
+            consecutive_failures=2,
+            cooldown_until_epoch=time.time() + 60.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=base_epoch,
+        ),
+        "miss": None,
+    }
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=rows[row_kind]),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    assert await service._load_http_bridge_retry_circuit(session) is True
+
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is (
+        not expect_revoked
     )
 
 

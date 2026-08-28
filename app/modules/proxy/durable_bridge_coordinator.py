@@ -279,6 +279,24 @@ class DurableBridgeSessionCoordinator:
                 expected_admission_generation=expected_admission_generation,
             )
 
+    async def supersede_retry_circuit_detail(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_id: str | None,
+        expected_updated_at_epoch: float,
+        last_detail: str,
+    ) -> bool:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).supersede_retry_circuit_detail(
+                session_key_kind=session_key_kind,
+                session_key_value=session_key_value,
+                api_key_scope=durable_bridge_api_key_scope(api_key_id),
+                expected_updated_at_epoch=expected_updated_at_epoch,
+                last_detail=last_detail,
+            )
+
     async def claim_retry_circuit_generation(
         self,
         *,

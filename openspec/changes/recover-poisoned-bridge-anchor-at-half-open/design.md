@@ -74,6 +74,15 @@ anchor one strike earlier than a fresh episode would, against a key whose
 requests are already failing eventlessly — an accepted, bounded trade until
 an episode marker is persisted with the row.
 
+The residual has narrowed since it was recorded: the anchor-advance
+suppression — the one marker path whose surviving row coexists with fresh
+durable continuity — is now persisted by rewriting the row's failure detail
+to the non-poison ``anchor_superseded`` class, so other replicas neither
+arm quarantine against the fresh anchor nor authorize its abandonment. The
+remaining process-local markers cover confirmed abandonments, which are
+cross-replica safe already: their continuity columns are empty, and the
+empty-continuity consult refuses another clear.
+
 ## Accepted residual: probe admission is process-local
 
 The exactly-one-probe guarantee holds per worker process. In a multi-replica

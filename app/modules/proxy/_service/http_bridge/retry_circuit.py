@@ -12,6 +12,7 @@ import anyio
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_circuit_total
 from app.modules.proxy._service.http_bridge.quarantine import (
     _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+    _http_bridge_quarantine_clear_fence,
     _http_bridge_quarantine_generation,
     _http_bridge_quarantine_registry,
     _http_bridge_session_key_poison_quarantined,
@@ -57,6 +58,12 @@ _HTTP_BRIDGE_ANCHOR_POISON_DETAILS = {
     "stream_idle_timeout": "repeated_zero_event_idle_timeout",
     "stream_incomplete": "repeated_zero_event_stream_incomplete",
 }
+# Written over a surviving at-threshold row when a completion registered a
+# fresh anchor but its settlement failed. Deliberately outside the poison
+# detail map: a replica loading the row keeps the cooldown but neither arms
+# quarantine against the fresh anchor nor authorizes an abandonment for
+# failures recorded against the superseded one.
+_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL = "anchor_superseded"
 
 
 def _http_bridge_anchor_poison_detail(detail: str | None) -> str | None:
@@ -529,6 +536,16 @@ class _HTTPBridgeRetryCircuitMixin:
                     self._http_bridge_retry_circuits.pop(key, None)
                     self._http_bridge_retry_circuit_loaded_keys.discard(key)
                     self._http_bridge_retry_circuit_persisted_keys.discard(key)
+                    if _http_bridge_session_key_poison_quarantined(self, key):
+                        # The durable episode this quarantine fenced is gone
+                        # — settled or purged by another replica — and a
+                        # remotely recovered key must not stay suppressed
+                        # for the stale deadline.
+                        _revoke_http_bridge_poison_quarantine(
+                            self,
+                            key,
+                            generation=_http_bridge_quarantine_clear_fence(self, key),
+                        )
             return True
 
         now_epoch = time.time()
@@ -565,6 +582,14 @@ class _HTTPBridgeRetryCircuitMixin:
                     self._http_bridge_retry_circuits.pop(key, None)
                     self._http_bridge_retry_circuit_loaded_keys.discard(key)
                     self._http_bridge_retry_circuit_persisted_keys.discard(key)
+                    if _http_bridge_session_key_poison_quarantined(self, key):
+                        # The expired row just purged is the episode this
+                        # quarantine fenced; it ended long ago.
+                        _revoke_http_bridge_poison_quarantine(
+                            self,
+                            key,
+                            generation=_http_bridge_quarantine_clear_fence(self, key),
+                        )
             return True
 
         cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
@@ -654,6 +679,13 @@ class _HTTPBridgeRetryCircuitMixin:
             # process-local: without re-arming here, this worker's probe is
             # planned with the anchor the row's failures were recorded
             # against.
+            effective_poison_threshold = _http_bridge_effective_anchor_poison_threshold(
+                getattr(
+                    _service_get_settings(),
+                    "http_responses_session_bridge_anchor_poison_failure_threshold",
+                    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
+                )
+            )
             arm_poison_quarantine = (
                 not local_failure_is_newer
                 # An episode whose one-clear marker is set already abandoned
@@ -662,15 +694,24 @@ class _HTTPBridgeRetryCircuitMixin:
                 # unchanged row would re-fence the recovered key for another
                 # full deadline.
                 and not state.poison_anchor_cleared
-                and state.consecutive_failures
-                >= _http_bridge_effective_anchor_poison_threshold(
-                    getattr(
-                        _service_get_settings(),
-                        "http_responses_session_bridge_anchor_poison_failure_threshold",
-                        _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
-                    )
-                )
+                and state.consecutive_failures >= effective_poison_threshold
                 and _http_bridge_anchor_poison_detail(state.last_detail) is not None
+            )
+            # The adopted row can also disprove the episode a local poison
+            # quarantine fenced: a zero-failure reset, a deliberate anchor
+            # supersession, or a replaced lineage that has not proven poison
+            # ends it, and a remotely recovered key must not stay suppressed
+            # for the stale deadline. A replaced lineage at or past the
+            # threshold with a non-poison last strike is left fenced — its
+            # earlier strikes may still be the poison evidence.
+            revoke_stale_poison_quarantine = not local_failure_is_newer and (
+                persisted.consecutive_failures == 0
+                or persisted.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL
+                or (
+                    episode_replaced
+                    and _http_bridge_anchor_poison_detail(persisted.last_detail) is None
+                    and persisted.consecutive_failures < effective_poison_threshold
+                )
             )
             poison_cooldown_remaining = max(0.0, state.cooldown_until - now_monotonic)
         if arm_poison_quarantine and not _http_bridge_session_key_poison_quarantined(self, key):
@@ -681,6 +722,12 @@ class _HTTPBridgeRetryCircuitMixin:
                 session,
                 reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
                 minimum_seconds=_http_bridge_poison_quarantine_minimum_seconds(poison_cooldown_remaining),
+            )
+        elif revoke_stale_poison_quarantine and _http_bridge_session_key_poison_quarantined(self, key):
+            _revoke_http_bridge_poison_quarantine(
+                self,
+                key,
+                generation=_http_bridge_quarantine_clear_fence(self, key),
             )
         return True
 
@@ -750,6 +797,37 @@ class _HTTPBridgeRetryCircuitMixin:
                     _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS,
                 ),
             )
+            if persisted is not None and persisted_updated_at_epoch <= 0 and persisted.updated_at_epoch != now_wall:
+                # Blind base: the pre-strike load failed, so this write
+                # carried no valid base and dropped against a row that
+                # already existed. A stale-episode drop loses at most its
+                # own already-counted strike; a blind drop loses the only
+                # record of a genuinely new failure, both durably and — via
+                # the wholesale adoption below — locally. Re-strike exactly
+                # this one failure on top of the observed lineage: strikes
+                # are serialized per key, so this write carries one new
+                # strike, and earlier local strikes either already landed
+                # unobserved or were lost to their own failed writes. A
+                # second drop means the row moved again and the ordinary
+                # undercount trade applies.
+                persisted = await self._durable_bridge.persist_retry_circuit(
+                    session_key_kind=session.key.affinity_kind,
+                    session_key_value=session.key.affinity_key,
+                    api_key_id=session.key.api_key_id,
+                    consecutive_failures=max(0, persisted.consecutive_failures) + 1,
+                    cooldown_until_epoch=now_wall + max(0.0, cooldown_until - now_monotonic),
+                    last_detail=last_detail,
+                    updated_at_epoch=now_wall,
+                    base_updated_at_epoch=persisted.updated_at_epoch,
+                    failure_threshold=threshold,
+                    conflict_cooldown_until_epoch=now_wall + base_backoff,
+                    base_backoff_seconds=max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS),
+                    max_backoff_seconds=max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS),
+                    clean_close_max_backoff_seconds=max(
+                        0.001,
+                        _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS,
+                    ),
+                )
             if persisted is not None:
                 persisted_cooldown_until = now_monotonic + max(0.0, persisted.cooldown_until_epoch - now_wall)
                 async with self._http_bridge_retry_circuit_lock:
@@ -1465,11 +1543,65 @@ class _HTTPBridgeRetryCircuitMixin:
         at-threshold count straight into clearing continuity the episode
         never proved dead. The cooldown itself is left standing and settles
         at the next opportunity.
+
+        The suppression is also persisted by rewriting the surviving row's
+        failure detail to the non-poison ``anchor_superseded`` class under
+        the row's version fence: the local marker protects only this
+        worker, and another replica loading the surviving at-threshold
+        poison row would otherwise arm quarantine against the fresh anchor
+        and authorize an abandonment for failures recorded against the
+        superseded one. A concurrent strike outracing the rewrite keeps its
+        poison class — it is new evidence — and a failed rewrite leaves the
+        suppression process-local, no worse than before.
         """
-        async with self._http_bridge_retry_circuit_lock:
-            state = self._http_bridge_retry_circuits.get(session.key)
-            if state is not None:
+        key_lock = await self._acquire_http_bridge_retry_circuit_key_lock(session.key)
+        try:
+            async with self._http_bridge_retry_circuit_lock:
+                state = self._http_bridge_retry_circuits.get(session.key)
+                if state is None:
+                    return
                 state.poison_anchor_cleared = True
+                if (
+                    state.persisted_updated_at_epoch <= 0
+                    or _http_bridge_anchor_poison_detail(state.last_detail) is None
+                ):
+                    return
+                prior_detail = state.last_detail
+                supersede_base_epoch = state.persisted_updated_at_epoch
+                state.last_detail = _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL
+            superseded = False
+            try:
+                # A detail-only fenced update, not a strike write: the strike
+                # upsert increments the merged count by design, and a phantom
+                # strike here would extend the cooldown. The row's version is
+                # left unchanged so a concurrent strike still merges onto it
+                # and its poison class overwrites this sentinel — new
+                # evidence outranks the supersession in either order.
+                superseded = await self._durable_bridge.supersede_retry_circuit_detail(
+                    session_key_kind=session.key.affinity_kind,
+                    session_key_value=session.key.affinity_key,
+                    api_key_id=session.key.api_key_id,
+                    expected_updated_at_epoch=supersede_base_epoch,
+                    last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to persist HTTP bridge anchor supersession bridge_kind=%s bridge_key=%s",
+                    session.key.affinity_kind,
+                    _hash_identifier(session.key.affinity_key),
+                    exc_info=True,
+                )
+            if not superseded:
+                async with self._http_bridge_retry_circuit_lock:
+                    current = self._http_bridge_retry_circuits.get(session.key)
+                    if current is state and state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL:
+                        # The fenced rewrite missed (the row moved) or the
+                        # write failed: keep the local view matching the
+                        # durable row; the suppression stays process-local,
+                        # no worse than before.
+                        state.last_detail = prior_detail
+        finally:
+            key_lock.release()
 
     async def _clear_http_bridge_retry_circuit(
         self: Any,

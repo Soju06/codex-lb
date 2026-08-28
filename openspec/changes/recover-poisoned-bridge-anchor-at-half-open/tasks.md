@@ -529,6 +529,20 @@
       residual in design.md: a remote poison opening reaches the worker at
       the next submit-time refresh, costing at most one self-healing probe
 
+- [x] 2.111 The anchor-advance suppression persists as a fenced
+      detail-only rewrite to the non-poison anchor-superseded class, never
+      charging a failure or advancing the row's version, so replicas stop
+      arming against the fresh anchor while concurrent strikes outrank it
+
+- [x] 2.112 A strike whose pre-load failed re-persists once onto the
+      observed row's lineage instead of losing its failure to the blind
+      drop and the wholesale adoption
+
+- [x] 2.113 A load that disproves the fenced episode — reset, supersession,
+      below-threshold non-poison replacement, or missing/expired row —
+      revokes the stale process-local poison quarantine under its
+      provenance fence
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

@@ -687,6 +687,37 @@ class DurableBridgeRepository:
             api_key_scope=api_key_scope,
         )
 
+    async def supersede_retry_circuit_detail(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_scope: str,
+        expected_updated_at_epoch: float,
+        last_detail: str,
+    ) -> bool:
+        """Rewrite a surviving row's failure detail under its version fence.
+
+        Detail-only by design: the strike upsert increments the merged count,
+        so persisting an anchor supersession through it would charge a
+        phantom failure. The version is deliberately left unchanged so a
+        concurrent strike still merges onto the row and its failure class
+        overwrites this one.
+        """
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(HttpBridgeRetryCircuit)
+                .where(
+                    HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
+                    HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
+                    HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+                    HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch,
+                )
+                .values(last_detail=last_detail)
+            )
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
+
     async def delete_retry_circuit(
         self,
         *,

@@ -12,6 +12,7 @@ from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_
 from app.modules.proxy._service.http_bridge.quarantine import (
     _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
     _http_bridge_quarantine_generation,
+    _http_bridge_session_key_poison_quarantined,
     _quarantine_http_bridge_session,
     _revoke_http_bridge_poison_quarantine,
 )
@@ -494,13 +495,26 @@ class _HTTPBridgeRetryCircuitMixin:
 
         cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
         persisted_cooldown_until = now_monotonic + cooldown_remaining
+        arm_poison_quarantine = False
+        poison_cooldown_remaining = 0.0
         async with self._http_bridge_retry_circuit_lock:
             self._http_bridge_retry_circuit_persisted_keys.add(key)
             state = self._http_bridge_retry_circuits.get(key)
             if state is None:
                 state = _HTTPBridgeRetryCircuitState(last_touched_monotonic=now_monotonic)
                 self._http_bridge_retry_circuits[key] = state
+            if now_monotonic < state.last_durable_load_monotonic:
+                # This load's lookup began before a same-key strike or
+                # settlement completed its durable write, so its row snapshot
+                # may predate that write: adopting it would erase a
+                # just-opened cooldown or resurrect a just-settled episode.
+                # The completed operation already reconciled the state from
+                # its own returned row; an older snapshot has nothing newer
+                # to add.
+                self._http_bridge_retry_circuit_loaded_keys.add(key)
+                return True
             local_failure_is_newer = state.last_failure_monotonic > state.last_durable_load_monotonic
+            episode_replaced = persisted.updated_at_epoch != state.persisted_updated_at_epoch
             if not local_failure_is_newer:
                 # No local strike is waiting on its durable write, so the row
                 # is strictly newer knowledge and is adopted wholesale.
@@ -536,10 +550,37 @@ class _HTTPBridgeRetryCircuitMixin:
                 # reads that stale lease as an in-flight probe and keeps
                 # suppressing the key for the rest of the lease.
                 state.half_open_until = 0.0
+            elif episode_replaced and not local_failure_is_newer:
+                # The adopted row belongs to a replacement episode whose
+                # cooldown has already elapsed. A lease left over from the
+                # ended episode would read as this worker's in-flight probe
+                # for the new one and suppress the key for the rest of a
+                # window it never opened.
+                state.half_open_until = 0.0
             state.persisted_updated_at_epoch = persisted.updated_at_epoch
             state.last_touched_monotonic = now_monotonic
             state.last_durable_load_monotonic = now_monotonic
             self._http_bridge_retry_circuit_loaded_keys.add(key)
+            # A poison opening recorded by another replica reaches this
+            # worker only through this load, and its quarantine is
+            # process-local: without re-arming here, this worker's probe is
+            # planned with the anchor the row's failures were recorded
+            # against.
+            arm_poison_quarantine = (
+                not local_failure_is_newer
+                and state.consecutive_failures >= _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD
+                and _http_bridge_anchor_poison_detail(state.last_detail) is not None
+            )
+            poison_cooldown_remaining = max(0.0, state.cooldown_until - now_monotonic)
+        if arm_poison_quarantine and not _http_bridge_session_key_poison_quarantined(self, key):
+            # Fenced on the active-quarantine check so ordinary loads do not
+            # bump the quarantine generation that recovery fences observe.
+            _quarantine_http_bridge_session(
+                self,
+                session,
+                reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+                minimum_seconds=_http_bridge_poison_quarantine_minimum_seconds(poison_cooldown_remaining),
+            )
         return True
 
     async def _persist_http_bridge_retry_circuit(

@@ -34409,6 +34409,145 @@ async def test_terminal_abandonment_completes_under_reader_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_a_failed_settle_after_abandonment_is_retried_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The abandonment succeeded, so the marker must record it either way;
+    # the settle it owes gets one immediate retry before the cooldown is
+    # left to expire, because the clear reloads fresh state on every call.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-settle-retry-once")
+    session.durable_session_id = "durable-settle-retry-once"
+    session.durable_owner_epoch = 3
+    row = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+    clear_mock = AsyncMock(side_effect=[Exception("db contention"), None])
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=row),
+        clear_retry_circuit=clear_mock,
+        rebind_session_account=AsyncMock(return_value=True),
+    )
+
+    cleared = await http_bridge_upstream_events_module._abandon_durable_http_bridge_continuity(
+        service,
+        session,
+        detail="repeated_zero_event_stream_incomplete",
+        settle_circuit=True,
+    )
+
+    assert cleared is True
+    assert clear_mock.await_count == 2, "a failed settlement after a confirmed abandonment gets one retry"
+    assert session.key not in cast(Any, service)._http_bridge_retry_circuits
+
+
+@pytest.mark.asyncio
+async def test_a_load_that_began_before_a_write_completed_is_discarded() -> None:
+    # A lookup that started before a same-key strike or settlement finished
+    # its durable write can return a pre-write row. Adopting it would erase
+    # a just-opened cooldown or resurrect a just-settled episode; the
+    # completed operation already reconciled the state from its own
+    # returned row.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-stale-load-token")
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=now)
+    state.consecutive_failures = 2
+    state.cooldown_until = now + 120.0
+    state.last_detail = "stream_incomplete"
+    state.persisted_updated_at_epoch = time.time()
+    state.last_durable_load_monotonic = now + 30.0
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=0,
+                cooldown_until_epoch=0.0,
+                last_detail=None,
+                updated_at_epoch=time.time() - 60.0,
+            )
+        ),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    loaded = await service._load_http_bridge_retry_circuit(session)
+
+    assert loaded is True
+    assert state.consecutive_failures == 2, (
+        "a snapshot older than the latest completed durable write must not replace the local episode"
+    )
+    assert state.cooldown_until == now + 120.0
+
+
+@pytest.mark.asyncio
+async def test_adopting_an_expired_replacement_episode_drops_the_stale_lease() -> None:
+    # Episode A's local half-open lease must not survive adopting episode B
+    # whose cooldown already elapsed: the admission gate would read the
+    # leftover lease as B's in-flight probe and suppress the key for the
+    # rest of a window this worker never opened.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-replacement-lease")
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=now)
+    state.consecutive_failures = 2
+    state.half_open_until = now + 480.0
+    state.persisted_updated_at_epoch = time.time() - 120.0
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=time.time() - 5.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=time.time(),
+            )
+        ),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    loaded = await service._load_http_bridge_retry_circuit(session)
+
+    assert loaded is True
+    assert state.half_open_until == 0.0, (
+        "a lease from the ended episode must not pose as the replacement episode's in-flight probe"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row_detail", ["stream_incomplete", "clean_close"])
+async def test_a_loaded_poison_row_arms_the_local_quarantine(row_detail: str) -> None:
+    # A poison opening recorded by another replica reaches this worker only
+    # through a durable load, and quarantine is process-local: without
+    # arming here, this worker's probe is planned with the anchor those
+    # failures were recorded against. A clean-close row arms nothing.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value=f"bridge-load-arm-{row_detail}")
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=time.time() + 90.0,
+                last_detail=row_detail,
+                updated_at_epoch=time.time(),
+            )
+        ),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    loaded = await service._load_http_bridge_retry_circuit(session)
+
+    assert loaded is True
+    expected = row_detail == "stream_incomplete"
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is expected
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("survivor_holds_safe_replay", [False, True])
 async def test_partial_stale_cleanup_clears_the_poisoned_anchor(
     monkeypatch: pytest.MonkeyPatch,

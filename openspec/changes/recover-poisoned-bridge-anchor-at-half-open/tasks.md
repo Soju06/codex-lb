@@ -406,6 +406,23 @@
       and suppresses the restored episode's owed abandonment, reporting the
       settlement result from the clear instead of swallowing it
 
+- [x] 2.78 The streaming idle-recovery exhaustion routes its opening
+      through the fenced consult and abandonment under deferred
+      cancellation before the terminal event completes the stream
+
+- [x] 2.79 A settlement that fails after a confirmed abandonment is retried
+      once immediately and reported in telemetry when still owed
+
+- [x] 2.80 A durable load whose lookup began before a same-key write
+      completed is discarded instead of replacing the reconciled state
+
+- [x] 2.81 Adopting a replacement episode invalidates the local half-open
+      lease even when the adopted cooldown has already elapsed
+
+- [x] 2.82 An at-threshold poison row adopted from a durable load arms this
+      worker's process-local poison quarantine, fenced so ordinary loads do
+      not churn the quarantine generation
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

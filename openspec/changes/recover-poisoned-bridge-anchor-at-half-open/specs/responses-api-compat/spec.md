@@ -64,11 +64,14 @@ resend arriving in that window is already covered by the quarantine. Because
 the frame has already been published, a cancellation escaping the clear MUST
 NOT skip finalization of the settled request. Every funnel that runs after
 its failed requests are drained and finalized — the reader settlement, the
-waiterless direct retirement, the partial stale-holder cleanup, and the
-terminal settlement alike — MUST complete its strike, episode consult,
-abandonment, and retirement under a deferred cancellation and re-raise the
-cancellation afterwards, because no request lifecycle remains to retry the
-abandonment it would otherwise skip.
+waiterless direct retirement, the partial stale-holder cleanup, the terminal
+settlement, and the streaming idle-recovery exhaustion alike — MUST complete
+its strike, episode consult, abandonment, and retirement under a deferred
+cancellation and re-raise the cancellation afterwards, because no request
+lifecycle remains to retry the abandonment it would otherwise skip. An
+opening recorded by the streaming idle-recovery exhaustion MUST route
+through the same fenced consult and abandonment as the other funnels before
+its terminal event completes the stream.
 
 A quarantine armed from a local opening MUST be re-armed against the merged
 cooldown when durable persistence returns a longer deadline, so its floor
@@ -76,7 +79,9 @@ covers the cooldown actually in force rather than the local backoff it was
 first computed from.
 
 A confirmed durable anchor abandonment MUST settle the retry circuit for that
-key. The circuit was opened by failures against the anchor the abandonment
+key; a settlement that fails after the abandonment confirmed MUST be retried
+once immediately, and a settlement still owed after that retry MUST be
+reported in telemetry rather than silently reported as settled. The circuit was opened by failures against the anchor the abandonment
 removed, so its cooldown would otherwise back off a cause that no longer
 exists and refuse requests that carry no anchor at all. The abandonment is the
 same proof of recovery a completed response carries. An abandonment that was
@@ -141,7 +146,14 @@ clock still replaces the local episode and the next strike carries a base
 that actually exists on the row. A durable load MUST adopt the row the same
 clock-free way whenever no local strike is waiting on its own durable write;
 only a strike between its record and its write keeps its local count
-dominant, and that write's own merge then reconciles it.
+dominant, and that write's own merge then reconciles it. A load whose lookup
+began before a same-key strike or settlement completed its durable write
+MUST be discarded rather than adopted, because its snapshot can predate that
+write. Adopting a replacement episode MUST invalidate the local half-open
+lease even when the adopted cooldown has already elapsed, and an
+at-threshold poison row adopted from a durable load MUST arm this worker's
+process-local poison quarantine, since the replica that opened the circuit
+cannot arm it here.
 
 When the cooldown expires, each worker process MUST admit exactly one probe
 request and MUST keep suppressing its other non-bypassed requests for that

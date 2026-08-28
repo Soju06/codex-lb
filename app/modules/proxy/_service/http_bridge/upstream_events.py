@@ -1082,7 +1082,25 @@ async def _abandon_durable_http_bridge_continuity(
     # cannot repeat that failure, which is the same evidence a completed
     # response carries, so settle the circuit the same way. A genuinely new
     # failure re-opens it at the usual threshold.
-    await service._clear_http_bridge_retry_circuit(session)
+    circuit_settled = await service._clear_http_bridge_retry_circuit(session)
+    if not circuit_settled:
+        # The clear reloads fresh state on every call, so one immediate
+        # retry covers a transient durable failure or a double CAS miss
+        # before the surviving cooldown is left to expire on its own. The
+        # abandonment itself still reports success: the anchor is gone, the
+        # marker must record that so the episode cannot clear now-empty
+        # continuity again, and only the settlement is owed.
+        circuit_settled = await service._clear_http_bridge_retry_circuit(session)
+    if not circuit_settled:
+        _log_http_bridge_event(
+            "durable_circuit_settle_failed",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            detail=detail,
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
     return True
 
 

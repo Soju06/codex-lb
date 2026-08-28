@@ -72,7 +72,9 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _await_task_deferring_cancellation,
     _effective_http_bridge_idle_ttl_seconds,
+    _http_bridge_abandonment_may_settle_circuit,
     _http_bridge_continuity_bound_without_safe_replay,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
@@ -116,6 +118,8 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _http_bridge_session_key_quarantined,
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
+    _http_bridge_anchor_poison_detail,
     _http_bridge_retry_circuit_suppression_message,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -4466,11 +4470,70 @@ class _HTTPBridgeStreamingMixin:
                                             if keepalive_event is not None:
                                                 yield keepalive_event
                                             continue
-                                        await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
-                                            session,
-                                            detail="stream_idle_timeout",
-                                            selection=timed_out_retry_circuit_attempt_selection,
+                                        idle_selection = timed_out_retry_circuit_attempt_selection
+
+                                        async def _idle_strike_and_clear() -> None:
+                                            from app.modules.proxy._service.http_bridge.upstream_events import (
+                                                _abandon_durable_http_bridge_continuity,
+                                            )
+
+                                            record_failure = (
+                                                self._record_http_bridge_retry_circuit_failure_for_attempt_selection
+                                            )
+                                            consecutive_failures = await record_failure(
+                                                session,
+                                                detail="stream_idle_timeout",
+                                                selection=idle_selection,
+                                            )
+                                            poison_detail = _http_bridge_anchor_poison_detail("stream_idle_timeout")
+                                            if poison_detail is None:
+                                                return
+                                            (
+                                                poison_episode,
+                                                poison_expected_anchor,
+                                            ) = await self._http_bridge_poison_anchor_clear_owed(
+                                                session,
+                                                consecutive_failures=consecutive_failures,
+                                                configured_threshold=getattr(
+                                                    _service_get_settings(),
+                                                    "http_responses_session_bridge_anchor_poison_failure_threshold",
+                                                    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
+                                                ),
+                                            )
+                                            if poison_episode is None:
+                                                return
+                                            async with session.pending_lock:
+                                                idle_pending_states = list(session.pending_requests)
+                                            durable_cleared = await _abandon_durable_http_bridge_continuity(
+                                                self,
+                                                session,
+                                                detail=poison_detail,
+                                                settle_circuit=_http_bridge_abandonment_may_settle_circuit(
+                                                    [request_state, *idle_pending_states]
+                                                ),
+                                                expected_continuity=poison_expected_anchor,
+                                            )
+                                            if durable_cleared:
+                                                await self._http_bridge_mark_poison_anchor_cleared(
+                                                    session, episode=poison_episode
+                                                )
+
+                                        # The terminal frame below ends this stream and the
+                                        # request detaches: a client disconnect cancelling the
+                                        # generator mid-consult would otherwise abort the only
+                                        # abandonment this opening gets, leaving the dead
+                                        # anchor stored past the process-local quarantine.
+                                        # Defer cancellation like the other funnels, then
+                                        # re-raise it.
+                                        idle_settlement_task = asyncio.create_task(
+                                            _idle_strike_and_clear(),
+                                            name=f"http-bridge-idle-poison-settlement-{session.durable_session_id}",
                                         )
+                                        _idle_result, idle_cancellation = await _await_task_deferring_cancellation(
+                                            idle_settlement_task
+                                        )
+                                        if idle_cancellation is not None:
+                                            raise idle_cancellation
                                         if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
                                             stream_idle_timeout_total.labels(surface="http_bridge").inc()
                                         logger.info(

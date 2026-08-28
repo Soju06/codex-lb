@@ -212,3 +212,113 @@ async def test_post_import_validation_failure_is_fixed_safe_warning(monkeypatch)
     assert BUNDLE_VALIDATION_AGGREGATE_WARNING == "Some imported accounts could not be validated."
     assert "upstream detail" not in warnings["failed-account"]
     assert unavailable == ["failed-account"]
+
+
+@pytest.mark.asyncio
+async def test_post_import_validation_persists_proxy_required_pause(monkeypatch) -> None:
+    account = SimpleNamespace(
+        id="proxy-required",
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+        reset_at=None,
+        blocked_at=None,
+    )
+    repo = SimpleNamespace(
+        get_by_id=AsyncMock(return_value=account),
+        update_status_if_current=AsyncMock(return_value=True),
+    )
+    service = AccountsService(repo=cast(AccountsRepository, repo))
+    service._import_usage_refresh_allowed = AsyncMock(return_value=False)
+    unavailable: list[str] = []
+    monkeypatch.setattr("app.modules.accounts.service.mark_account_routing_unavailable", unavailable.append)
+
+    warnings = await service._validate_imported_bundle_accounts(
+        [BundlePersistenceResult(account_id=account.id, outcome="imported")]
+    )
+
+    assert warnings == {account.id: BUNDLE_VALIDATION_WARNING}
+    repo.update_status_if_current.assert_awaited_once_with(
+        account.id,
+        AccountStatus.PAUSED,
+        accounts_service_module.IMPORT_PROXY_REQUIRED_PAUSE_REASON,
+        None,
+        blocked_at=None,
+        expected_status=AccountStatus.ACTIVE,
+        expected_deactivation_reason=None,
+        expected_reset_at=None,
+        expected_blocked_at=None,
+    )
+    assert unavailable == [account.id]
+
+
+@pytest.mark.asyncio
+async def test_post_import_validation_does_not_cancel_proxy_pause_at_deadline(monkeypatch) -> None:
+    account = SimpleNamespace(
+        id="proxy-required-slow-pause",
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+        reset_at=None,
+        blocked_at=None,
+    )
+
+    async def persist_pause(*_args, **_kwargs) -> bool:
+        await asyncio.sleep(0.02)
+        account.status = AccountStatus.PAUSED
+        return True
+
+    repo = SimpleNamespace(
+        get_by_id=AsyncMock(return_value=account),
+        update_status_if_current=AsyncMock(side_effect=persist_pause),
+    )
+    service = AccountsService(repo=cast(AccountsRepository, repo))
+    service._import_usage_refresh_allowed = AsyncMock(return_value=False)
+    routing_mark_statuses: list[AccountStatus] = []
+    monkeypatch.setattr(accounts_service_module, "BUNDLE_VALIDATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        accounts_service_module,
+        "mark_account_routing_unavailable",
+        lambda _account_id: routing_mark_statuses.append(account.status),
+    )
+
+    warnings = await service._validate_imported_bundle_accounts(
+        [BundlePersistenceResult(account_id=account.id, outcome="imported")]
+    )
+
+    assert warnings == {account.id: BUNDLE_VALIDATION_WARNING}
+    assert account.status == AccountStatus.PAUSED
+    assert routing_mark_statuses == [AccountStatus.PAUSED]
+    repo.update_status_if_current.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_post_import_validation_uses_one_deadline_for_the_batch(monkeypatch) -> None:
+    accounts = {
+        account_id: SimpleNamespace(id=account_id, status=AccountStatus.ACTIVE)
+        for account_id in ("slow-account", "remaining-account")
+    }
+    repo = SimpleNamespace(get_by_id=AsyncMock(side_effect=lambda account_id: accounts[account_id]))
+    service = AccountsService(repo=cast(AccountsRepository, repo))
+    service._import_usage_refresh_allowed = AsyncMock(return_value=True)
+
+    async def never_finishes(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    refresh = AsyncMock(side_effect=never_finishes)
+    service._usage_updater = cast(UsageUpdater, SimpleNamespace(force_refresh_result=refresh))
+    unavailable: list[str] = []
+    monkeypatch.setattr(accounts_service_module, "BUNDLE_VALIDATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(accounts_service_module, "mark_account_routing_unavailable", unavailable.append)
+
+    warnings = await service._validate_imported_bundle_accounts(
+        [
+            BundlePersistenceResult(account_id="slow-account", outcome="imported"),
+            BundlePersistenceResult(account_id="remaining-account", outcome="imported"),
+        ]
+    )
+
+    assert warnings == {
+        "slow-account": BUNDLE_VALIDATION_WARNING,
+        "remaining-account": BUNDLE_VALIDATION_WARNING,
+    }
+    assert unavailable == ["slow-account", "remaining-account"]
+    assert refresh.await_count == 1

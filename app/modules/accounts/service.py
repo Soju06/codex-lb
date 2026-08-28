@@ -640,24 +640,39 @@ class AccountsService:
         persisted: list[BundlePersistenceResult],
     ) -> dict[str, str]:
         warnings: dict[str, str] = {}
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + BUNDLE_VALIDATION_TIMEOUT_SECONDS
         for result in persisted:
             if result.outcome == "skipped":
                 continue
-            account = await self._repo.get_by_id(result.account_id)
+            account: Account | None = None
             validation_succeeded = False
-            try:
-                if account is not None and await self._import_usage_refresh_allowed(account):
-                    if self._usage_updater is not None:
-                        refresh_result = await asyncio.wait_for(
-                            self._usage_updater.force_refresh_result(
-                                account,
-                                ignore_refresh_disabled=True,
-                            ),
-                            timeout=BUNDLE_VALIDATION_TIMEOUT_SECONDS,
-                        )
-                        validation_succeeded = refresh_result.fetch_succeeded
-            except Exception:
-                validation_succeeded = False
+            proxy_pause_required = False
+            remaining = deadline - loop.time()
+            if remaining > 0:
+                try:
+                    account, validation_succeeded, proxy_pause_required = await asyncio.wait_for(
+                        self._validate_imported_bundle_account(result),
+                        timeout=remaining,
+                    )
+                except Exception:
+                    validation_succeeded = False
+
+            if proxy_pause_required and account is not None:
+                try:
+                    await self._repo.update_status_if_current(
+                        account.id,
+                        AccountStatus.PAUSED,
+                        IMPORT_PROXY_REQUIRED_PAUSE_REASON,
+                        None,
+                        blocked_at=None,
+                        expected_status=account.status,
+                        expected_deactivation_reason=account.deactivation_reason,
+                        expected_reset_at=account.reset_at,
+                        expected_blocked_at=account.blocked_at,
+                    )
+                except Exception:
+                    validation_succeeded = False
 
             if validation_succeeded:
                 if account is not None and account.status == AccountStatus.ACTIVE:
@@ -667,6 +682,23 @@ class AccountsService:
                 warnings[result.account_id] = BUNDLE_VALIDATION_WARNING
         return warnings
 
+    async def _validate_imported_bundle_account(
+        self,
+        result: BundlePersistenceResult,
+    ) -> tuple[Account | None, bool, bool]:
+        account = await self._repo.get_by_id(result.account_id)
+        if account is None:
+            return None, False, False
+        refresh_allowed = await self._import_usage_refresh_allowed(account)
+        if not refresh_allowed:
+            return account, False, account.status == AccountStatus.ACTIVE
+        if self._usage_updater is None:
+            return account, False, False
+        refresh_result = await self._usage_updater.force_refresh_result(
+            account,
+            ignore_refresh_disabled=True,
+        )
+        return account, refresh_result.fetch_succeeded, False
     def _bundle_accounts_for_destination(self, payload: AccountBundlePayload) -> list[Account]:
         accounts: list[Account] = []
         for record in payload.accounts:

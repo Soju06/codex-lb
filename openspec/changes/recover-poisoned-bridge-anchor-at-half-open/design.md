@@ -104,14 +104,16 @@ retry-after upper bound rather than the remote probe's actual remaining
 lease; persisting the lease deadline would require a schema change and a
 durable write on the admission path, out of scope for this change.
 
-## Accepted residual: planning-time circuit load is once per key per process
+## Planning-time circuit staleness is bounded by the minimum cooldown
 
 The pre-planning durable load runs on a worker's first touch of a hard key
-(and again when continuity resolution replaces it with a different canonical
-key). A poison circuit opened by another replica after that load reaches
-this worker at its next submit-time refresh, which runs on every dispatch —
-so at most one probe per process per key can be planned with a remotely
-poisoned anchor before the quarantine arms, and that probe's failure feeds
-the same strike, consult, and abandonment recovery as any other. The
-alternative, a durable read on every planning pass, doubles hot-path durable
-reads to remove a self-healing single-probe race, and is not taken.
+(and again when continuity resolution replaces it with a different
+canonical key), and its cached view is honored only while it is younger
+than the minimum cooldown (60s). This bound is exactly sufficient rather
+than per-request: a circuit another replica opens after this worker's last
+load cannot have an expired cooldown until at least the minimum cooldown
+has passed, by which time any planning pass has refreshed — so the
+poisoned-anchor probe race is closed while keys with circuit history pay
+at most one durable read per minimum-cooldown window instead of one per
+request. (Keys with no circuit row never enter the cache and already
+refresh per planning pass.)

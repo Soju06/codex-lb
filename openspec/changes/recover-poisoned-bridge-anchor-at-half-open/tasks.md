@@ -543,6 +543,23 @@
       revokes the stale process-local poison quarantine under its
       provenance fence
 
+- [x] 2.114 The planning cache honors a cached circuit view only while it
+      is younger than the minimum cooldown, so a remote opening is either
+      still cooling or refreshed before its expired cooldown admits a probe
+      (supersedes the 2.110 residual, which is removed from design.md)
+
+- [x] 2.115 The settle stamps a reconcile watermark only for keys that
+      carried an episode or an unverified durable view, keeping healthy
+      high-cardinality traffic out of the map and its prune scan
+
+- [x] 2.116 A twice-missed settle reconciles its owed episode onto the
+      surviving row — or concludes settled when the row is gone — instead
+      of restoring the pre-chase snapshot with an obsolete fence
+
+- [x] 2.117 The anchor-supersession fence carries the observed failure
+      count alongside the version, so a lagging-clock strike that merged
+      without moving the version outranks a supersession that follows it
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

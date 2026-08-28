@@ -352,19 +352,29 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         request_model: str | None,
     ) -> None:
-        """First-touch durable load so a poison row arms quarantine pre-planning.
+        """Planning-time durable load so a poison row arms quarantine pre-planning.
 
         The submit-time load runs after the payload is already planned and
-        serialized, so on this worker's very first touch of an expired
-        at-threshold poison key the probe would carry the poisoned anchor.
-        Loading once per key before anchor planning closes that window; every
-        later request hits the loaded-keys check and pays nothing.
+        serialized, so on an expired at-threshold poison key the probe would
+        carry the poisoned anchor. The cached view is honored only while it
+        is younger than the minimum cooldown: a circuit another replica
+        opens after this worker's last load is then either still cooling
+        (the submit-time gate suppresses the request before dispatch) or
+        refreshed here before its expired cooldown can admit a probe, so a
+        cached below-threshold or reset row cannot hide a remote opening
+        from the anchor decision.
         """
         if key.strength != "hard":
             return
         async with self._http_bridge_retry_circuit_lock:
             if key in self._http_bridge_retry_circuit_loaded_keys:
-                return
+                state = self._http_bridge_retry_circuits.get(key)
+                if (
+                    state is not None
+                    and time.monotonic() - state.last_durable_load_monotonic
+                    <= _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS
+                ):
+                    return
         probe: Any = _HTTPBridgeRetryCircuitKeyProbe(key=key, request_model=request_model)
         await self._load_http_bridge_retry_circuit(probe)
 
@@ -1568,6 +1578,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     return
                 prior_detail = state.last_detail
                 supersede_base_epoch = state.persisted_updated_at_epoch
+                supersede_base_count = state.consecutive_failures
                 state.last_detail = _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL
             superseded = False
             try:
@@ -1576,12 +1587,17 @@ class _HTTPBridgeRetryCircuitMixin:
                 # strike here would extend the cooldown. The row's version is
                 # left unchanged so a concurrent strike still merges onto it
                 # and its poison class overwrites this sentinel — new
-                # evidence outranks the supersession in either order.
+                # evidence outranks the supersession in either order. The
+                # fence carries the observed count as well: a lagging-clock
+                # strike can merge without moving the version, and every
+                # landed merge increments the count, so the count is what
+                # makes such a strike outrank a supersession that follows it.
                 superseded = await self._durable_bridge.supersede_retry_circuit_detail(
                     session_key_kind=session.key.affinity_kind,
                     session_key_value=session.key.affinity_key,
                     api_key_id=session.key.api_key_id,
                     expected_updated_at_epoch=supersede_base_epoch,
+                    expected_consecutive_failures=supersede_base_count,
                     last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL,
                 )
             except Exception:
@@ -1636,11 +1652,16 @@ class _HTTPBridgeRetryCircuitMixin:
             state = self._http_bridge_retry_circuits.pop(key, None)
             self._http_bridge_retry_circuit_loaded_keys.discard(key)
             self._http_bridge_retry_circuit_persisted_keys.discard(key)
-            # The pop takes the state's stale-load watermark with it; keep a
-            # per-key watermark so a lookup that began before this
-            # settlement cannot adopt the pre-settlement row into a fresh
-            # state and resurrect the settled cooldown.
-            self._http_bridge_retry_circuit_reconcile_watermarks[key] = time.monotonic()
+            if state is not None or not durable_load_succeeded:
+                # The pop takes the state's stale-load watermark with it;
+                # keep a per-key watermark so a lookup that began before
+                # this settlement cannot adopt the pre-settlement row into a
+                # fresh state and resurrect the settled cooldown. A healthy
+                # key with no state and a confirmed durable miss has nothing
+                # to resurrect, and stamping every completed conversation
+                # would grow this map — and its global-lock prune scan —
+                # with every key the process ever serves.
+                self._http_bridge_retry_circuit_reconcile_watermarks[key] = time.monotonic()
             expected_updated_at_epoch = (
                 state.persisted_updated_at_epoch if state is not None and state.persisted_updated_at_epoch > 0 else None
             )
@@ -1703,14 +1724,60 @@ class _HTTPBridgeRetryCircuitMixin:
                 # moving faster than this settlement can chase it, so
                 # dropping the local state would report settlement while the
                 # durable episode survives to be reloaded. Keep the episode
-                # and let the next clear opportunity retry with a freshly
-                # loaded fence.
-                async with self._http_bridge_retry_circuit_lock:
-                    if state is not None and self._http_bridge_retry_circuits.get(key) is None:
-                        self._http_bridge_retry_circuits[key] = state
-                        self._http_bridge_retry_circuit_loaded_keys.add(key)
-                        self._http_bridge_retry_circuit_persisted_keys.add(key)
-                return False
+                # for the next clear opportunity — but reconcile it onto the
+                # row that actually survived first: restoring the original
+                # snapshot would hand the anchor-supersession rewrite an
+                # obsolete fence, and the next load would then read the
+                # surviving row as a foreign episode, reset the one-clear
+                # marker, and authorize abandoning the fresh anchor this
+                # completion just registered.
+                surviving = None
+                refresh_failed = False
+                try:
+                    surviving = await self._durable_bridge.lookup_retry_circuit(
+                        session_key_kind=key.affinity_kind,
+                        session_key_value=key.affinity_key,
+                        api_key_id=key.api_key_id,
+                    )
+                except Exception:
+                    refresh_failed = True
+                    logger.warning(
+                        "Failed to reload HTTP bridge retry circuit after settle misses bridge_kind=%s bridge_key=%s",
+                        key.affinity_kind,
+                        _hash_identifier(key.affinity_key),
+                        exc_info=True,
+                    )
+                if not refresh_failed and (surviving is None or surviving.consecutive_failures <= 0):
+                    # The chase ended settled after all: the row was purged
+                    # or reset by another writer while this settlement was
+                    # missing its fences.
+                    reset_matched = True
+                else:
+                    async with self._http_bridge_retry_circuit_lock:
+                        if state is not None and self._http_bridge_retry_circuits.get(key) is None:
+                            if surviving is not None and surviving.consecutive_failures > 0:
+                                if surviving.updated_at_epoch != state.persisted_updated_at_epoch:
+                                    # Adopting a lineage this worker did not
+                                    # produce: same marker rule as the load
+                                    # and persist merges.
+                                    state.poison_anchor_cleared = False
+                                state.consecutive_failures = max(0, surviving.consecutive_failures)
+                                state.cooldown_until = time.monotonic() + max(
+                                    0.0, surviving.cooldown_until_epoch - time.time()
+                                )
+                                state.last_detail = surviving.last_detail
+                                if state.cooldown_until > time.monotonic():
+                                    state.half_open_until = 0.0
+                                state.persisted_updated_at_epoch = surviving.updated_at_epoch
+                                state.persisted_admission_generation = getattr(surviving, "admission_generation", 0)
+                                state.last_durable_load_monotonic = max(
+                                    state.last_durable_load_monotonic,
+                                    time.monotonic(),
+                                )
+                            self._http_bridge_retry_circuits[key] = state
+                            self._http_bridge_retry_circuit_loaded_keys.add(key)
+                            self._http_bridge_retry_circuit_persisted_keys.add(key)
+                    return False
         except Exception:
             logger.warning(
                 "Failed to clear persisted HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",

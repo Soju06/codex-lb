@@ -35698,6 +35698,7 @@ async def test_the_anchor_advance_suppression_is_persisted_as_superseded() -> No
         session_key_value=session.key.affinity_key,
         api_key_id=session.key.api_key_id,
         expected_updated_at_epoch=row_epoch,
+        expected_consecutive_failures=2,
         last_detail="anchor_superseded",
     )
     assert state.last_detail == "anchor_superseded"
@@ -35843,6 +35844,127 @@ async def test_a_load_adopting_a_disproved_episode_revokes_the_stale_quarantine(
     assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is (
         not expect_revoked
     )
+
+
+@pytest.mark.asyncio
+async def test_a_stale_cached_key_reloads_before_anchor_planning() -> None:
+    # A below-threshold row cached at first touch could hide a poison
+    # episode another replica opened afterwards: once that episode's
+    # cooldown expired, planning injected the poisoned anchor and the
+    # submit-time load armed quarantine only after serialization. The
+    # planning cache honors a view only while it is younger than the
+    # minimum cooldown, so a remote opening is either still cooling or
+    # refreshed before its expired cooldown can admit a probe.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-stale-planning-cache", None)
+    below_threshold = SimpleNamespace(
+        consecutive_failures=1,
+        cooldown_until_epoch=0.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time() - 120.0,
+    )
+    remote_opening = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() - 5.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+    lookup = AsyncMock(side_effect=[below_threshold, remote_opening])
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=lookup,
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    await service._ensure_http_bridge_retry_circuit_loaded_for_key(key, request_model="gpt-5.4")
+    assert lookup.await_count == 1
+    state = cast(Any, service)._http_bridge_retry_circuits[key]
+    state.last_durable_load_monotonic = (
+        time.monotonic() - http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS - 1.0
+    )
+
+    await service._ensure_http_bridge_retry_circuit_loaded_for_key(key, request_model="gpt-5.4")
+
+    assert lookup.await_count == 2, "a view older than the minimum cooldown must refresh before anchor planning"
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, key) is True, (
+        "the refreshed remote opening must arm the quarantine before the anchor is planned"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_key_settle_leaves_no_reconcile_watermark() -> None:
+    # Every successful hard-key response settles the circuit; a healthy key
+    # with no local state and a confirmed durable miss has nothing a racing
+    # load could resurrect, and stamping a watermark for every conversation
+    # key ever served grows the map — and its global-lock prune scan —
+    # without bound.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-healthy-no-watermark")
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=AsyncMock(return_value=True),
+    )
+
+    assert await service._clear_http_bridge_retry_circuit(session) is True
+
+    assert session.key not in cast(Any, service)._http_bridge_retry_circuit_reconcile_watermarks, (
+        "a healthy key's settle must not retain a per-key watermark"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("survivor_present", [True, False], ids=["survivor-row", "row-gone"])
+async def test_a_twice_missed_settle_reconciles_the_surviving_row(survivor_present: bool) -> None:
+    # A settle whose two fenced resets both miss used to restore the stale
+    # pre-chase snapshot: the anchor supersession then rewrote against an
+    # obsolete epoch and missed, and the next load read the surviving row as
+    # a foreign episode, reset the marker, and could authorize abandoning
+    # the fresh anchor the completion just registered. The owed settlement
+    # must reconcile onto the row that actually survived — and a chase that
+    # finds the row gone is settled after all.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-twice-missed-settle")
+    now = time.monotonic()
+    epoch_a = time.time() - 90.0
+    epoch_b = time.time() - 60.0
+    epoch_c = time.time() - 30.0
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=now)
+    state.consecutive_failures = 2
+    state.last_detail = "stream_incomplete"
+    state.persisted_updated_at_epoch = epoch_a
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(session.key)
+
+    def row(epoch: float, count: int) -> Any:
+        return SimpleNamespace(
+            consecutive_failures=count,
+            cooldown_until_epoch=time.time() + 45.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=epoch,
+            admission_generation=7,
+        )
+
+    survivor = row(epoch_c, 3) if survivor_present else None
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(side_effect=[row(epoch_a, 2), row(epoch_b, 2), survivor]),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=AsyncMock(side_effect=[False, False]),
+    )
+
+    settled = await service._clear_http_bridge_retry_circuit(session)
+
+    if survivor_present:
+        assert settled is False
+        restored = cast(Any, service)._http_bridge_retry_circuits.get(session.key)
+        assert restored is state
+        assert restored.persisted_updated_at_epoch == epoch_c, (
+            "the owed settlement must carry the surviving row's fence, not the stale pre-chase epoch"
+        )
+        assert restored.consecutive_failures == 3
+        assert restored.persisted_admission_generation == 7
+    else:
+        assert settled is True, "a chase that finds the row gone is settled after all"
+        assert cast(Any, service)._http_bridge_retry_circuits.get(session.key) is None
 
 
 @pytest.mark.asyncio

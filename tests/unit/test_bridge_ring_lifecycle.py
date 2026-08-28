@@ -542,6 +542,77 @@ async def test_retry_circuit_merges_lagging_wall_clock_failure_from_loaded_base(
 
 
 @pytest.mark.asyncio
+async def test_supersession_is_fenced_against_lagging_clock_strikes(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    # A lagging-clock strike merges onto the row without moving its version
+    # (greatest keeps the unchanged epoch) while incrementing the count and
+    # writing its poison detail. A supersession fenced on the epoch alone
+    # would then overwrite that fresh evidence with ``anchor_superseded``;
+    # the count in the fence is what makes the strike outrank it.
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-supersede-fence",
+            api_key_scope="key-1",
+            consecutive_failures=1,
+            cooldown_until_epoch=0.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=2000.0,
+            base_updated_at_epoch=0.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=2060.0,
+        )
+        # The lagging-clock strike: count 1 -> 2, epoch stays 2000.
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-supersede-fence",
+            api_key_scope="key-1",
+            consecutive_failures=1,
+            cooldown_until_epoch=0.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=1500.0,
+            base_updated_at_epoch=2000.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=1560.0,
+        )
+
+        stale_supersession = await repository.supersede_retry_circuit_detail(
+            session_key_kind="session_header",
+            session_key_value="sid-supersede-fence",
+            api_key_scope="key-1",
+            expected_updated_at_epoch=2000.0,
+            expected_consecutive_failures=1,
+            last_detail="anchor_superseded",
+        )
+        assert stale_supersession is False, "a supersession behind a lagging-clock strike must miss its fence"
+        row = await session.get(
+            HttpBridgeRetryCircuit,
+            ("session_header", durable_bridge_hash("sid-supersede-fence"), "key-1"),
+        )
+        assert row is not None
+        assert row.last_detail == "stream_incomplete", "the concurrent strike's poison class must survive"
+
+        current_supersession = await repository.supersede_retry_circuit_detail(
+            session_key_kind="session_header",
+            session_key_value="sid-supersede-fence",
+            api_key_scope="key-1",
+            expected_updated_at_epoch=2000.0,
+            expected_consecutive_failures=2,
+            last_detail="anchor_superseded",
+        )
+        assert current_supersession is True
+        await session.refresh(row)
+        assert row.last_detail == "anchor_superseded"
+        assert row.consecutive_failures == 2, "the supersession never charges a failure"
+        assert row.updated_at_epoch == 2000.0, "the supersession never moves the version"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_a_stale_strike_after_the_reset_row_is_restruck_is_dropped(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

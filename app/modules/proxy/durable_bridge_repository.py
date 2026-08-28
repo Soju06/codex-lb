@@ -694,6 +694,7 @@ class DurableBridgeRepository:
         session_key_value: str,
         api_key_scope: str,
         expected_updated_at_epoch: float,
+        expected_consecutive_failures: int,
         last_detail: str,
     ) -> bool:
         """Rewrite a surviving row's failure detail under its version fence.
@@ -702,7 +703,10 @@ class DurableBridgeRepository:
         so persisting an anchor supersession through it would charge a
         phantom failure. The version is deliberately left unchanged so a
         concurrent strike still merges onto the row and its failure class
-        overwrites this one.
+        overwrites this one. The count is part of the fence because a
+        lagging-clock strike can merge without moving the version — every
+        landed merge increments the count, so a strike that slipped in
+        ahead of this rewrite makes it miss instead of being overwritten.
         """
         async with sqlite_writer_section():
             result = await self._session.execute(
@@ -712,6 +716,7 @@ class DurableBridgeRepository:
                     HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
                     HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
                     HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch,
+                    HttpBridgeRetryCircuit.consecutive_failures == expected_consecutive_failures,
                 )
                 .values(last_detail=last_detail)
             )

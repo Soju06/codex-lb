@@ -153,11 +153,14 @@ dominant, and that write's own merge then reconciles it. A load whose lookup
 began before a same-key strike or settlement completed its durable write
 MUST be discarded rather than adopted, because its snapshot can predate that
 write; a durable miss from such a lookup MUST NOT pop the local episode the
-completed write just opened. Adopting a replacement episode MUST invalidate the local half-open
-lease even when the adopted cooldown has already elapsed, and an
-at-threshold poison row adopted from a durable load MUST arm this worker's
-process-local poison quarantine, since the replica that opened the circuit
-cannot arm it here.
+completed write just opened, and the watermark this guard reads MUST survive
+the settlement popping the state object, so a lookup racing a settlement
+cannot adopt the pre-settlement row into a fresh state and resurrect the
+settled cooldown. Adopting a replacement episode MUST invalidate the local half-open
+lease even when the adopted cooldown has already elapsed, and a poison row at
+the effective configured abandonment threshold adopted from a durable load
+MUST arm this worker's process-local poison quarantine, since the replica
+that recorded the strikes cannot arm it here.
 
 When the cooldown expires, each worker process MUST admit exactly one probe
 request and MUST keep suppressing its other non-bypassed requests for that
@@ -177,7 +180,10 @@ verdict MUST derive from the adopted row's detail and count, not the local
 strike's class: a `clean_close` losing to a poison opening still quarantines
 the key, and a poison quarantine armed speculatively by a strike whose
 opening did not survive persistence MUST be revoked, fenced on the exact arm
-so any concurrent re-arm is preserved. That re-evaluation MUST turn on the merged opening itself and not on
+so any concurrent re-arm is preserved; when that arm upgraded a weaker
+quarantine that was active on its own evidence, revocation MUST restore the
+prior reason and deadline rather than evicting the weaker fence with the
+upgrade. That re-evaluation MUST turn on the merged opening itself and not on
 the cooldown it leaves: a merge can adopt a cooldown that has already elapsed,
 and such a key is at its threshold with no cooldown left, so the next request
 is the half-open probe the quarantine exists to protect. A `clean_close` opening MUST NOT quarantine the key.

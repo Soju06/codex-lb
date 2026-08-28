@@ -434,6 +434,17 @@
       conversation, with the durable circuit row serving as the
       replica-visible evidence
 
+- [x] 2.86 The stale-load watermark survives the settlement popping the
+      state object via a per-key record, so a racing lookup cannot
+      resurrect the settled row into a fresh state
+
+- [x] 2.87 The load-armed poison quarantine compares against the effective
+      configured abandonment threshold, honoring a one-strike policy on
+      rows another replica recorded
+
+- [x] 2.88 Revoking a speculative poison arm restores a weaker quarantine
+      the arm upgraded, preserving the independently justified fence
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

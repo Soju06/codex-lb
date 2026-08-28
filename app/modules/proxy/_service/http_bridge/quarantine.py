@@ -91,6 +91,8 @@ def _revoke_http_bridge_poison_quarantine(
     key: _HTTPBridgeSessionKey,
     *,
     generation: int | None,
+    restore_reason: str | None = None,
+    restore_until: float = 0.0,
 ) -> bool:
     """Remove a poison quarantine whose opening did not survive persistence.
 
@@ -99,6 +101,12 @@ def _revoke_http_bridge_poison_quarantine(
     speculative quarantine would suppress a valid anchor for its full
     deadline. The generation fence removes exactly the entry this strike
     armed: any concurrent re-arm bumps the generation and is preserved.
+
+    When the speculative arm upgraded a weaker quarantine that was active in
+    its own right — a wedged reattach or repeated eventless fence — revoking
+    the poison evidence must not evict that fence with it: the prior reason
+    and deadline are restored instead, since only the poison upgrade is what
+    the lost race disproved.
     """
     if generation is None:
         return False
@@ -109,6 +117,11 @@ def _revoke_http_bridge_poison_quarantine(
         and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
         and entry.generation == generation
     ):
+        if restore_reason is not None and restore_until > time.monotonic():
+            entry.reason = restore_reason
+            entry.quarantined_until = restore_until
+            entry.generation += 1
+            return True
         registry.pop(key, None)
         return True
     return False

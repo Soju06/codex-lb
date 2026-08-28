@@ -12,6 +12,7 @@ from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_
 from app.modules.proxy._service.http_bridge.quarantine import (
     _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
     _http_bridge_quarantine_generation,
+    _http_bridge_quarantine_registry,
     _http_bridge_session_key_poison_quarantined,
     _quarantine_http_bridge_session,
     _revoke_http_bridge_poison_quarantine,
@@ -142,6 +143,11 @@ def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: A
     service._http_bridge_retry_circuit_persisted_keys = set()
     service._http_bridge_retry_circuit_lock = anyio.Lock()
     service._http_bridge_retry_circuit_key_locks = {}
+    # A settlement pops the state object, taking its stale-load watermark
+    # with it; this per-key watermark survives the pop so a lookup that
+    # began before the settlement cannot adopt the pre-settlement row into
+    # a fresh state and resurrect the settled cooldown.
+    service._http_bridge_retry_circuit_reconcile_watermarks = {}
 
 
 def _record_http_bridge_retry_circuit_duplicate_suppressed(
@@ -376,6 +382,9 @@ class _HTTPBridgeRetryCircuitMixin:
             self._http_bridge_retry_circuits.pop(key, None)
             self._http_bridge_retry_circuit_loaded_keys.discard(key)
             self._http_bridge_retry_circuit_persisted_keys.discard(key)
+        for key, watermark in list(self._http_bridge_retry_circuit_reconcile_watermarks.items()):
+            if watermark <= expiry:
+                self._http_bridge_retry_circuit_reconcile_watermarks.pop(key, None)
         for key, key_lock in list(self._http_bridge_retry_circuit_key_locks.items()):
             if key not in self._http_bridge_retry_circuits and not key_lock.locked():
                 self._http_bridge_retry_circuit_key_locks.pop(key, None)
@@ -447,7 +456,10 @@ class _HTTPBridgeRetryCircuitMixin:
             # immediately replaying the same failing upstream request.
             async with self._http_bridge_retry_circuit_lock:
                 local_state = self._http_bridge_retry_circuits.get(key)
-                if local_state is not None and now_monotonic < local_state.last_durable_load_monotonic:
+                key_watermark = self._http_bridge_retry_circuit_reconcile_watermarks.get(key, 0.0)
+                if now_monotonic < key_watermark or (
+                    local_state is not None and now_monotonic < local_state.last_durable_load_monotonic
+                ):
                     # This lookup began before a same-key write completed:
                     # its miss predates the row that write created, and
                     # popping the episode here would let the admission
@@ -510,14 +522,16 @@ class _HTTPBridgeRetryCircuitMixin:
             if state is None:
                 state = _HTTPBridgeRetryCircuitState(last_touched_monotonic=now_monotonic)
                 self._http_bridge_retry_circuits[key] = state
-            if now_monotonic < state.last_durable_load_monotonic:
+            key_watermark = self._http_bridge_retry_circuit_reconcile_watermarks.get(key, 0.0)
+            if now_monotonic < state.last_durable_load_monotonic or now_monotonic < key_watermark:
                 # This load's lookup began before a same-key strike or
                 # settlement completed its durable write, so its row snapshot
                 # may predate that write: adopting it would erase a
                 # just-opened cooldown or resurrect a just-settled episode.
                 # The completed operation already reconciled the state from
-                # its own returned row; an older snapshot has nothing newer
-                # to add.
+                # its own returned row (or popped it at settlement, which
+                # the per-key watermark records past the pop); an older
+                # snapshot has nothing newer to add.
                 self._http_bridge_retry_circuit_loaded_keys.add(key)
                 return True
             local_failure_is_newer = state.last_failure_monotonic > state.last_durable_load_monotonic
@@ -575,7 +589,14 @@ class _HTTPBridgeRetryCircuitMixin:
             # against.
             arm_poison_quarantine = (
                 not local_failure_is_newer
-                and state.consecutive_failures >= _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD
+                and state.consecutive_failures
+                >= _http_bridge_effective_anchor_poison_threshold(
+                    getattr(
+                        _service_get_settings(),
+                        "http_responses_session_bridge_anchor_poison_failure_threshold",
+                        _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
+                    )
+                )
                 and _http_bridge_anchor_poison_detail(state.last_detail) is not None
             )
             poison_cooldown_remaining = max(0.0, state.cooldown_until - now_monotonic)
@@ -1179,7 +1200,20 @@ class _HTTPBridgeRetryCircuitMixin:
             if duplicate_attempt is None:
                 assert state is not None
                 armed_quarantine_generation: int | None = None
+                pre_arm_quarantine_reason: str | None = None
+                pre_arm_quarantine_until = 0.0
                 if quarantine_poisoned_anchor:
+                    # A revocation after a lost cross-replica race must not
+                    # evict a weaker fence this arm merely upgraded, so the
+                    # prior active entry is captured for restoration.
+                    prior_entry = _http_bridge_quarantine_registry(self).get(session.key)
+                    if (
+                        prior_entry is not None
+                        and prior_entry.quarantined_until > time.monotonic()
+                        and prior_entry.reason != _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+                    ):
+                        pre_arm_quarantine_reason = prior_entry.reason
+                        pre_arm_quarantine_until = prior_entry.quarantined_until
                     _quarantine_http_bridge_session(
                         self,
                         session,
@@ -1197,6 +1231,8 @@ class _HTTPBridgeRetryCircuitMixin:
                     quarantine_poisoned_anchor=quarantine_poisoned_anchor,
                     quarantine_cooldown_remaining=quarantine_cooldown_remaining,
                     armed_quarantine_generation=armed_quarantine_generation,
+                    pre_arm_quarantine_reason=pre_arm_quarantine_reason,
+                    pre_arm_quarantine_until=pre_arm_quarantine_until,
                 )
         finally:
             key_lock.release()
@@ -1218,6 +1254,8 @@ class _HTTPBridgeRetryCircuitMixin:
         quarantine_poisoned_anchor: bool,
         quarantine_cooldown_remaining: float,
         armed_quarantine_generation: int | None = None,
+        pre_arm_quarantine_reason: str | None = None,
+        pre_arm_quarantine_until: float = 0.0,
     ) -> int | None:
         try:
             await self._persist_http_bridge_retry_circuit_serialized(
@@ -1311,6 +1349,8 @@ class _HTTPBridgeRetryCircuitMixin:
                     self,
                     session.key,
                     generation=armed_quarantine_generation,
+                    restore_reason=pre_arm_quarantine_reason,
+                    restore_until=pre_arm_quarantine_until,
                 )
             return consecutive_failures
         finally:
@@ -1370,6 +1410,11 @@ class _HTTPBridgeRetryCircuitMixin:
             state = self._http_bridge_retry_circuits.pop(key, None)
             self._http_bridge_retry_circuit_loaded_keys.discard(key)
             self._http_bridge_retry_circuit_persisted_keys.discard(key)
+            # The pop takes the state's stale-load watermark with it; keep a
+            # per-key watermark so a lookup that began before this
+            # settlement cannot adopt the pre-settlement row into a fresh
+            # state and resurrect the settled cooldown.
+            self._http_bridge_retry_circuit_reconcile_watermarks[key] = time.monotonic()
             expected_updated_at_epoch = (
                 state.persisted_updated_at_epoch if state is not None and state.persisted_updated_at_epoch > 0 else None
             )

@@ -34548,6 +34548,125 @@ async def test_a_loaded_poison_row_arms_the_local_quarantine(row_detail: str) ->
 
 
 @pytest.mark.asyncio
+async def test_a_stale_load_after_settlement_does_not_resurrect_the_row() -> None:
+    # A settlement pops the state object, taking its stale-load watermark
+    # with it. A lookup that began before the settlement and returns after
+    # would otherwise adopt the pre-settlement at-threshold row into a fresh
+    # state, resurrecting the settled cooldown and re-arming quarantine
+    # against a conversation whose completion just proved healthy.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-post-settle-stale-load")
+    cast(Any, service)._http_bridge_retry_circuit_reconcile_watermarks[session.key] = time.monotonic() + 30.0
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=time.time() + 90.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=time.time() - 5.0,
+            )
+        ),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    loaded = await service._load_http_bridge_retry_circuit(session)
+
+    assert loaded is True
+    state = cast(Any, service)._http_bridge_retry_circuits.get(session.key)
+    assert state is None or state.consecutive_failures == 0, (
+        "a lookup older than the settlement watermark must not resurrect the settled episode"
+    )
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is False
+
+
+@pytest.mark.asyncio
+async def test_a_loaded_one_strike_poison_row_arms_at_threshold_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With the abandonment threshold configured to 1, another replica's first
+    # poison strike already owes its clear; a worker loading that one-failure
+    # row must arm its local quarantine at the effective configured
+    # threshold, not the circuit-opening threshold of 2, or it can re-inject
+    # the poisoned anchor while the clear is slow or failed.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-load-arm-threshold-one")
+    monkeypatch.setattr(
+        http_bridge_retry_circuit_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_anchor_poison_failure_threshold=1),
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=1,
+                cooldown_until_epoch=0.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=time.time(),
+            )
+        ),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    loaded = await service._load_http_bridge_retry_circuit(session)
+
+    assert loaded is True
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is True, (
+        "a one-failure poison row satisfies the configured one-strike policy and must arm locally"
+    )
+
+
+@pytest.mark.asyncio
+async def test_revoking_a_speculative_arm_restores_the_weaker_fence() -> None:
+    # A poison strike can upgrade an already-active wedged-reattach
+    # quarantine. When the strike then loses its cross-replica race and the
+    # speculative poison arm is revoked, the weaker fence was justified on
+    # its own evidence and must come back rather than being popped with the
+    # upgrade.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-revoke-restore")
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
+    )
+    seeded_epoch = time.time() - 10.0
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=now)
+    state.consecutive_failures = 1
+    state.last_detail = "stream_incomplete"
+    state.persisted_updated_at_epoch = seeded_epoch
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_loaded_keys.add(session.key)
+    loaded_row = SimpleNamespace(
+        consecutive_failures=1,
+        cooldown_until_epoch=0.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=seeded_epoch,
+    )
+    reset_row = SimpleNamespace(
+        consecutive_failures=0,
+        cooldown_until_epoch=0.0,
+        last_detail=None,
+        updated_at_epoch=time.time(),
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=loaded_row),
+        persist_retry_circuit=AsyncMock(return_value=reset_row),
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+
+    registry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)
+    entry = registry.get(session.key)
+    assert entry is not None, "revoking the speculative poison upgrade must not evict the weaker fence"
+    assert entry.reason == http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON
+    assert entry.quarantined_until > time.monotonic()
+
+
+@pytest.mark.asyncio
 async def test_a_stale_miss_does_not_pop_a_just_opened_episode() -> None:
     # A lookup that began before the key's first durable write completed can
     # return a miss after two strikes have persisted and opened the circuit.

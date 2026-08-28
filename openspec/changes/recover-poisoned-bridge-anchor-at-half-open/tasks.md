@@ -361,6 +361,18 @@
       visible timer reports the configured half-open lease duration as its
       retry-after upper bound instead of a fabricated ~1s
 
+- [x] 2.67 The waiterless direct retirement completes its strike, consult,
+      abandonment, and detach/close work under a deferred relay cancellation
+      and re-raises it afterwards, matching the reader settlement path
+
+- [x] 2.68 A durable session whose continuity columns are all empty owes no
+      abandonment: the consult refuses, so the settle-on-abandon path cannot
+      reset a circuit cooling on genuinely unanchored upstream failures
+
+- [x] 2.69 The quarantine registry's size cap evicts only expired or
+      weaker-fence entries; an active poison quarantine survives overflow
+      until its required cooldown-plus-lease deadline
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

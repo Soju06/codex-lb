@@ -1351,7 +1351,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     )
             else:
                 if close_classification == "clean" and failed_pending_count > 0:
-                    await self._retire_stale_pending_http_bridge_session(
+                    waiterless_retirement = self._retire_stale_pending_http_bridge_session(
                         session,
                         detail=error_code,
                         retry_circuit_detail="clean_close",
@@ -1360,7 +1360,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         **retry_circuit_attempt_kwargs,
                     )
                 else:
-                    await self._retire_stale_pending_http_bridge_session(
+                    waiterless_retirement = self._retire_stale_pending_http_bridge_session(
                         session,
                         detail=retire_detail or error_code,
                         response_events_seen=observed_response_events,
@@ -1373,6 +1373,22 @@ class _HTTPBridgeUpstreamEventsMixin:
                         retired_request_count=failed_pending_count,
                         **retry_circuit_attempt_kwargs,
                     )
+                # The failed requests are already drained and finalized, so a
+                # relay cancellation escaping this direct retirement would
+                # skip the waiterless strike, the episode consult, the
+                # poisoned-anchor abandonment, and the detach/close work with
+                # no remaining request lifecycle to retry them. Defer
+                # cancellation across the whole retirement like the
+                # admission-waiter branch above, then re-raise it.
+                waiterless_retirement_task = asyncio.create_task(
+                    waiterless_retirement,
+                    name=f"http-bridge-waiterless-retirement-{session.durable_session_id}",
+                )
+                _waiterless_result, waiterless_cancellation = await _await_task_deferring_cancellation(
+                    waiterless_retirement_task
+                )
+                if waiterless_cancellation is not None:
+                    raise waiterless_cancellation
         return force_retire or session.admission_waiter_count == 0
 
     async def _relay_http_bridge_upstream_messages(

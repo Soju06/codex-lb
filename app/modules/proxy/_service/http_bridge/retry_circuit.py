@@ -823,6 +823,14 @@ class _HTTPBridgeRetryCircuitMixin:
             # The durable session row itself is gone; there is no continuity
             # to clear and no columns for a fence to protect.
             return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
+        if expected_anchor == (None, None):
+            # Both continuity columns are already empty: there is no anchor
+            # left to abandon, so a clear here removes no failure cause.
+            # Authorizing it anyway would let the settle-on-abandon path
+            # reset a circuit that is cooling on genuinely unanchored
+            # upstream failures, and that cooldown is the only protection
+            # those failures have.
+            return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
         # The one-clear marker lives in process memory, so a restart or
         # another replica cannot see it. The durable circuit row is the
         # episode's replica-visible record instead: a completed response

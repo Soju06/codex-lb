@@ -70,7 +70,19 @@ def _prune_http_bridge_quarantine_registry(
             registry.pop(key, None)
     overflow = len(registry) - _HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES
     if overflow > 0:
-        for stale_key in sorted(registry, key=lambda candidate: registry[candidate].last_touched_monotonic)[:overflow]:
+        # An active poison quarantine is the only record that a key's anchor
+        # was proven dead, and its deadline is a required minimum: evicting
+        # it early hands the poisoned anchor back to the very probe it
+        # exists to protect. The cap therefore evicts only expired or
+        # weaker-fence entries and holds as a correctness bound, not an
+        # unconditional one, when an incident quarantines more keys than the
+        # cap at once.
+        evictable = [
+            key
+            for key, entry in registry.items()
+            if not (entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON and entry.quarantined_until > now)
+        ]
+        for stale_key in sorted(evictable, key=lambda candidate: registry[candidate].last_touched_monotonic)[:overflow]:
             registry.pop(stale_key, None)
 
 

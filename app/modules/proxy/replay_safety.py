@@ -699,11 +699,11 @@ def _apply_patch_operation_is_self_contained(operation: JsonValue | None) -> boo
 def _tool_output_is_self_contained(item_type: str, item: Mapping[str, JsonValue]) -> bool:
     if item.get("status") not in (None, "completed", "failed"):
         return False
+    if item_type == "tool_search_output":
+        return item.get("execution") in (None, "client") and isinstance(item.get("tools"), list)
     output = item.get("output")
     if isinstance(output, str):
         return True
-    if item_type == "tool_search_output":
-        return isinstance(item.get("tools"), list)
     if item_type == "apply_patch_call_output":
         return output is None and item.get("status") in {"completed", "failed"}
     return (

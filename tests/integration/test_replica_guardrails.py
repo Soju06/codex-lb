@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from app.core.auth.guardian import _count_live_bridge_ring_members
 from app.core.config.key_fingerprint import (
@@ -81,6 +82,32 @@ async def test_fingerprint_matching_replica_passes(db_setup):
     # Second replica with the same key material re-runs the startup check.
     await verify_encryption_key_fingerprint()
 
+    assert await _stored_sentinel_values() == [compute_encryption_key_fingerprint()]
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_retries_transient_sqlite_lock(db_setup, monkeypatch):
+    import app.core.config.key_fingerprint as key_fingerprint_module
+
+    real_stamp_if_absent = key_fingerprint_module._stamp_if_absent
+    attempts = 0
+
+    async def fail_once_then_stamp(session, fingerprint: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OperationalError("INSERT runtime_sentinels", {}, Exception("database is locked"))
+        await real_stamp_if_absent(session, fingerprint)
+
+    async def no_sleep(_delay_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(key_fingerprint_module, "_stamp_if_absent", fail_once_then_stamp)
+    monkeypatch.setattr(key_fingerprint_module.asyncio, "sleep", no_sleep)
+
+    await verify_encryption_key_fingerprint()
+
+    assert attempts == 2
     assert await _stored_sentinel_values() == [compute_encryption_key_fingerprint()]
 
 

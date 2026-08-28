@@ -236,6 +236,7 @@ from app.modules.proxy._service.support import (
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
+from app.modules.proxy.capability_routing import required_capability_metadata_values
 from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.images_observability import (
@@ -1086,7 +1087,7 @@ async def responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
     explicit_openai_sdk_marker = _has_explicit_openai_sdk_marker(request)
@@ -1212,6 +1213,16 @@ async def responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
+    # Capability routing resolves only on this transport, so a 426 would send
+    # the session to an HTTP path that rejects the same capability with 400 —
+    # and codex-rs treats the downgrade as session-scoped, so the client never
+    # comes back. Keep capability handshakes on the websocket and let the
+    # ordinary capability path surface real upstream failures.
+    if not capability_header_values:
+        transport_denial = await _websocket_upstream_transport_denial()
+        if transport_denial is not None:
+            await websocket.send_denial_response(transport_denial)
+            return
     client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
     await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
@@ -1255,7 +1266,7 @@ async def v1_responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
     raw_trigger_error = _raw_compaction_trigger_error(request)
@@ -1383,7 +1394,7 @@ async def internal_bridge_responses(
     api_key, auth_error = await _validate_internal_bridge_api_key(request)
     if auth_error is not None:
         return auth_error
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
     if forwarded_request_context.context.signature_version is None:
@@ -1558,6 +1569,16 @@ async def v1_responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
+    # Capability routing resolves only on this transport, so a 426 would send
+    # the session to an HTTP path that rejects the same capability with 400 —
+    # and codex-rs treats the downgrade as session-scoped, so the client never
+    # comes back. Keep capability handshakes on the websocket and let the
+    # ordinary capability path surface real upstream failures.
+    if not capability_header_values:
+        transport_denial = await _websocket_upstream_transport_denial()
+        if transport_denial is not None:
+            await websocket.send_denial_response(transport_denial)
+            return
     client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
     await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
@@ -4642,6 +4663,22 @@ async def _source_audio_transcription_response(
             content_type=multipart.content_type,
             fields=list(multipart.ordered_text_fields),
         )
+    except asyncio.CancelledError:
+        release_exc: BaseException | None = None
+        if reservation is not None:
+            try:
+                await _release_reservation_deferring_cancellation(reservation)
+            except BaseException as exc:
+                release_exc = exc
+        if release_exc is not None:
+            logger.warning(
+                "Failed to release source audio transcription reservation after request cancellation "
+                "source_id=%s model=%s",
+                source.id,
+                model,
+                exc_info=release_exc,
+            )
+        raise
     except ModelSourceForwardingError as exc:
         await _release_reservation(reservation)
         await _log_source_chat_completion(
@@ -6431,7 +6468,7 @@ async def responses_compact(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
     raw_trigger_error = _raw_compaction_trigger_error(request)
@@ -6458,7 +6495,7 @@ async def v1_responses_compact(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
     try:
@@ -7914,13 +7951,42 @@ async def _validate_proxy_websocket_request(
     return api_key, None
 
 
+def _required_capability_metadata_values(
+    payload: Mapping[str, JsonValue] | BaseModel | None,
+) -> tuple[JsonValue, ...]:
+    """Capability values carried in a request body's ``client_metadata``.
+
+    The Responses-shaped payload models allow extra fields, so a typed
+    payload carries ``client_metadata`` as a Pydantic extra attribute rather
+    than a mapping key.
+    """
+
+    if payload is None:
+        return ()
+    if isinstance(payload, Mapping):
+        client_metadata = payload.get("client_metadata")
+    else:
+        client_metadata = getattr(payload, "client_metadata", None)
+    return required_capability_metadata_values(client_metadata)
+
+
 async def _required_capability_http_transport_denial(
     request: Request,
     api_key: ApiKeyData | None,
+    *,
+    payload: Mapping[str, JsonValue] | BaseModel | None = None,
 ) -> JSONResponse | None:
-    """Authenticate capability intent and reject unsupported HTTP routing."""
+    """Authenticate capability intent and reject unsupported HTTP routing.
 
-    if not _required_capability_values(request.headers):
+    ``client_metadata`` is inspected as well as the header. The websocket path
+    resolves a capability from either and fails closed to
+    security-work-authorized accounts; nothing on the HTTP path applies that
+    constraint, so a metadata-only signal arriving here — in particular on a
+    turn that a transport downgrade moved off the websocket — would otherwise
+    enter ordinary account selection with no authorization requirement.
+    """
+
+    if not _required_capability_values(request.headers) and not _required_capability_metadata_values(payload):
         return None
     if api_key is None:
         await validate_required_proxy_api_key_authorization(request.headers.get("authorization"))
@@ -7960,6 +8026,33 @@ async def _validate_internal_bridge_api_key(
             content=openai_error(exc.code, exc.message, error_type=exc.error_type),
         )
     return api_key, None
+
+
+async def _websocket_upstream_transport_denial() -> JSONResponse | None:
+    # Codex clients only activate their HTTP transport fallback when the
+    # websocket handshake itself is rejected with HTTP 426 (UPGRADE_REQUIRED),
+    # so a recent upstream websocket connect transport failure — or an
+    # operator pin of the upstream transport to "http" — must deny the
+    # handshake instead of accepting and erroring in-band.
+    from app.modules.proxy._service.support import (
+        upstream_websocket_transport_recently_failed,
+    )
+
+    if not upstream_websocket_transport_recently_failed():
+        dashboard_settings = await get_settings_cache().get()
+        configured_transport = getattr(dashboard_settings, "upstream_stream_transport", "default")
+        if configured_transport == "default":
+            configured_transport = getattr(get_settings(), "upstream_stream_transport", "auto")
+        if configured_transport != "http":
+            return None
+    return JSONResponse(
+        status_code=426,
+        content=openai_error(
+            "websocket_upstream_transport_unavailable",
+            "Upstream websocket transport is unavailable; retry over HTTP.",
+            error_type="server_error",
+        ),
+    )
 
 
 async def _websocket_firewall_denial_response(websocket: WebSocket) -> JSONResponse | None:

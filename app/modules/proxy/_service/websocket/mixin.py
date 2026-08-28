@@ -343,6 +343,9 @@ from app.modules.proxy._service.support import (
     _WebSocketRequestState,
     _WebSocketTransientRefreshFailover,
     _WebSocketUpstreamControl,
+    clear_upstream_websocket_transport_failure,
+    mark_upstream_websocket_transport_failure,
+    websocket_connect_transport_failure_code,
 )
 from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward as _HTTPBridgeOwnerForward,
@@ -514,6 +517,23 @@ _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security-work-authorized. codex-lb did not fall back to an ordinary account."
 )
 _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_ACTION = "fail_closed_capability_routing"
+
+
+@dataclass(slots=True)
+class _WebSocketConnectProgress:
+    """Whether an upstream websocket open reached the direct network connector.
+
+    Local websocket-connect admission and the account's route resolution run
+    inside the same request budget scope as the connector, so a budget
+    timeout that fires before this flag is set is local-contention evidence,
+    not upstream websocket transport evidence. The flag is confined to the
+    direct connector for the same reason a routed handshake failure carries
+    no transport provenance: a stalled routed open proves only that one
+    account's proxy endpoint is unhealthy, and a cancelled open raises no
+    ``ProxyResponseError`` for the routed exclusion to act on.
+    """
+
+    direct_upstream_connect_started: bool = False
 
 
 class _WebSocketReplaySequenceRegression(Exception):
@@ -3665,7 +3685,19 @@ class _WebSocketMixin:
                 if selected_account_model_replacement:
                     # The account/model retry budget selected this replacement;
                     # its connection failure must be surfaced rather than
-                    # consuming another account through generic failover.
+                    # consuming another account through generic failover. A
+                    # connect-phase transport failure on the replacement open
+                    # is still websocket-transport evidence, so arm the
+                    # handshake-denial marker even though the failover
+                    # decision is skipped.
+                    if (
+                        websocket_connect_transport_failure_code(
+                            exc,
+                            confirmed_pre_dispatch=confirmed_pre_dispatch,
+                        )
+                        is not None
+                    ):
+                        mark_upstream_websocket_transport_failure()
                     action = "surface"
                 else:
                     action = await proxy._decide_websocket_failover_action(
@@ -4421,6 +4453,30 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         confirmed_pre_dispatch = is_confirmed_pre_dispatch_transport_error(exc)
+        transport_failure_code = websocket_connect_transport_failure_code(
+            exc,
+            confirmed_pre_dispatch=confirmed_pre_dispatch,
+        )
+        if transport_failure_code is not None:
+            # A server-level failure of the websocket open itself is transport
+            # evidence, not account evidence. Codex clients only activate
+            # their HTTP transport fallback on a handshake-level HTTP 426, so
+            # surface the failure immediately (the routes deny the next
+            # handshake with 426 while the transport-failure marker is armed)
+            # and skip the account error penalty: penalizing here drives the
+            # owner account into transient backoff and fails the HTTP retry
+            # closed on hard session affinity even though the HTTP upstream
+            # path is healthy.
+            mark_upstream_websocket_transport_failure()
+            _facade().logger.info(
+                "Websocket connect transient transport failure surfaced for HTTP fallback "
+                "request_id=%s account_id=%s status=%s code=%s",
+                request_state.request_log_id or request_state.request_id,
+                account.id,
+                exc.status_code,
+                transport_failure_code,
+            )
+            return "surface"
         if confirmed_pre_dispatch:
             # A proven pre-dispatch proxy connect failure is account-local
             # transient evidence. The caller applies the bounded transient
@@ -4494,9 +4550,15 @@ class _WebSocketMixin:
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:
                 _raise_proxy_budget_exhausted()
+            connect_progress = _WebSocketConnectProgress()
             try:
                 with anyio.fail_after(remaining_seconds):
-                    upstream = await proxy._open_upstream_websocket(account, headers, request_state=request_state)
+                    upstream = await proxy._open_upstream_websocket(
+                        account,
+                        headers,
+                        request_state=request_state,
+                        connect_progress=connect_progress,
+                    )
                 recovery.log_recovered()
                 return upstream
             except ProxyResponseError as exc:
@@ -4508,11 +4570,39 @@ class _WebSocketMixin:
                 if decision == "retry":
                     continue
                 if decision == "exhausted":
+                    # The budget-exhausted emit bypasses the failover
+                    # decision, so arm the handshake-denial marker here for
+                    # failures the decision path would have armed for. The
+                    # provenance gate matters: this loop also runs route
+                    # resolution, whose ``upstream_proxy_unavailable``
+                    # failures are pre-dispatch route evidence and must not
+                    # deny handshakes with 426.
+                    if (
+                        websocket_connect_transport_failure_code(
+                            exc,
+                            confirmed_pre_dispatch=is_confirmed_pre_dispatch_transport_error(exc),
+                        )
+                        is not None
+                    ):
+                        mark_upstream_websocket_transport_failure()
                     _raise_proxy_budget_exhausted()
                 raise
             except TimeoutError:
                 if time.monotonic() - started_at < timeout_seconds:
                     raise
+                # The websocket open itself consumed the connect budget, which
+                # is the same transport evidence as a classified connect
+                # timeout: the budget-exhausted emit below bypasses the
+                # failover decision, so arm the handshake-denial marker here
+                # or short-budget deployments never steer clients to HTTP.
+                # A budget shorter than the local admission wait expires
+                # before the connector ever runs; denying handshakes then
+                # would answer local contention by pushing every client onto
+                # HTTP, amplifying the overload it came from. A stalled
+                # routed open is route-scoped for the same reason its
+                # handshake failures are, so it stays out of this too.
+                if connect_progress.direct_upstream_connect_started:
+                    mark_upstream_websocket_transport_failure()
                 _raise_proxy_budget_exhausted()
 
     async def _open_upstream_websocket(
@@ -4521,6 +4611,7 @@ class _WebSocketMixin:
         headers: dict[str, str],
         *,
         request_state: "_WebSocketRequestState | None" = None,
+        connect_progress: _WebSocketConnectProgress | None = None,
     ) -> UpstreamWebSocket:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -4542,6 +4633,8 @@ class _WebSocketMixin:
                         error_type="server_error",
                     ),
                 ) from exc
+            if connect_progress is not None and route is None:
+                connect_progress.direct_upstream_connect_started = True
             upstream = await _facade()._call_with_supported_optional_kwargs(
                 _facade().connect_responses_websocket,
                 headers,
@@ -4554,6 +4647,14 @@ class _WebSocketMixin:
             )
             if request_state is not None:
                 _record_websocket_route_metadata(request_state, upstream=upstream, route=route)
+            if route is None:
+                # Symmetric with arming: a routed success proves only that one
+                # account's proxy endpoint is healthy, so it must not clear a
+                # denial state that direct-upstream evidence armed. Because a
+                # routed open can neither arm nor clear, an all-routed
+                # deployment simply never uses the marker, and a mixed one
+                # still falls back to the bounded TTL.
+                clear_upstream_websocket_transport_failure()
             return upstream
         finally:
             connect_lease.release()

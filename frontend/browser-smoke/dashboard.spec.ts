@@ -2,6 +2,17 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { AuthSessionSchema } from "../src/features/auth/schemas";
 import { DashboardProjectionsSchema } from "../src/features/dashboard/schemas";
+import {
+  createAccountSummary,
+  createDashboardAuthSession,
+  createDashboardOverview,
+  createDashboardProjections,
+  createDashboardSettings,
+  createRequestLogEntry,
+  createRequestLogFilterOptions,
+  createRequestLogsResponse,
+  createTelemetryConsent,
+} from "../src/test/mocks/factories";
 
 const REQUIRED_API_PATHS = [
   "/api/dashboard-auth/session",
@@ -11,6 +22,46 @@ const REQUIRED_API_PATHS = [
   "/api/request-logs",
   "/api/settings/telemetry",
 ] as const;
+
+async function installMobileContainmentFixtures(page: Page): Promise<void> {
+  const accounts = [
+    createAccountSummary({
+      accountId: "acc_primary",
+      email: "primary-operator@northstar",
+      displayName: "primary-operator@northstar",
+      usage: { primaryRemainingPercent: 82, secondaryRemainingPercent: 67 },
+    }),
+    createAccountSummary({
+      accountId: "acc_secondary",
+      email: "secondary-operator@northstar",
+      displayName: "secondary-operator@northstar",
+      usage: { primaryRemainingPercent: 45, secondaryRemainingPercent: 12 },
+    }),
+  ];
+  const fixtures: Record<string, unknown> = {
+    "/api/dashboard-auth/session": createDashboardAuthSession({ authenticated: true, passwordRequired: true }),
+    "/api/dashboard/overview": createDashboardOverview({ accounts }),
+    "/api/dashboard/projections": createDashboardProjections(),
+    "/api/request-logs/options": createRequestLogFilterOptions({ accountIds: accounts.map((account) => account.accountId) }),
+    "/api/request-logs": createRequestLogsResponse([createRequestLogEntry({ accountId: "acc_primary", requestId: "req_mobile_containment" })], 1, false),
+    "/api/settings/telemetry": createTelemetryConsent({ state: "enabled", source: "persisted", active: true }),
+    "/api/settings": createDashboardSettings(),
+    "/api/accounts": { accounts },
+  };
+
+  await page.route("**/api/**", async (route) => {
+    const payload = fixtures[new URL(route.request().url()).pathname];
+    if (payload === undefined) {
+      await route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "not_found", message: "Not found" } }),
+      });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify(payload) });
+  });
+}
 
 async function acceptTelemetryConsent(page: Page, consentDialog: Locator): Promise<void> {
   const consentDecision = page.waitForResponse(
@@ -114,6 +165,86 @@ test("the built dashboard accepts real backend responses", async ({ page }) => {
   expect(apiFailures).toEqual([]);
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);
+});
+
+test("dashboard usage donuts stay within supported viewports", async ({ page }) => {
+  const viewportCases = [
+    { size: { width: 320, height: 568 }, donutColumns: 1 },
+    { size: { width: 390, height: 844 }, donutColumns: 1 },
+    { size: { width: 1440, height: 900 }, donutColumns: 2 },
+  ] as const;
+
+  await installMobileContainmentFixtures(page);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.setViewportSize(viewportCases[0].size);
+  await page.goto("/dashboard", { waitUntil: "networkidle" });
+
+  const usageHeadings = page.getByRole("heading", { level: 3 }).filter({ hasText: "Credits" });
+  await expect(usageHeadings).toHaveCount(2);
+  const requestTable = page.getByRole("table").first();
+  await expect(requestTable).toBeVisible();
+
+  for (const viewportCase of viewportCases) {
+    await page.setViewportSize(viewportCase.size);
+
+    const usageMetrics = await usageHeadings.evaluateAll((headings) =>
+      headings.map((heading) => {
+        const card = heading.parentElement?.parentElement;
+        const row = heading.parentElement?.nextElementSibling;
+        const chart = row?.querySelector("svg")?.parentElement;
+        const legend = row?.querySelector('[data-testid="donut-legend-list"]');
+        if (!card || !row || !chart || !legend) {
+          throw new Error("Expected the rendered donut card structure");
+        }
+        const bounds = (element: Element) => {
+          const box = element.getBoundingClientRect();
+          return { left: box.left, right: box.right, width: box.width };
+        };
+        return {
+          card: bounds(card),
+          row: bounds(row),
+          chart: bounds(chart),
+          legend: bounds(legend),
+          gridColumns: getComputedStyle(card.parentElement!).gridTemplateColumns.split(" ").filter(Boolean).length,
+        };
+      }),
+    );
+    const documentMetrics = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    }));
+    const summaryRight = await page
+      .getByTestId("dashboard-account-summary-line")
+      .evaluate((element) => element.getBoundingClientRect().right);
+    const tableMetrics = await requestTable.evaluate((table) => {
+      const scroller = table.closest('[data-slot="table-container"]');
+      if (!scroller) {
+        throw new Error("Expected the request table's local scroller");
+      }
+      const box = scroller.getBoundingClientRect();
+      return {
+        tableScrollWidth: table.scrollWidth,
+        scrollerClientWidth: scroller.clientWidth,
+        scrollerLeft: box.left,
+        scrollerRight: box.right,
+        overflowX: getComputedStyle(scroller).overflowX,
+      };
+    });
+
+    expect(documentMetrics.scrollWidth).toBeLessThanOrEqual(documentMetrics.clientWidth);
+    expect(summaryRight).toBeLessThanOrEqual(documentMetrics.clientWidth);
+    for (const metrics of usageMetrics) {
+      expect(metrics.gridColumns).toBe(viewportCase.donutColumns);
+      for (const bounds of [metrics.card, metrics.row, metrics.chart, metrics.legend]) {
+        expect(bounds.left).toBeGreaterThanOrEqual(0);
+        expect(bounds.right).toBeLessThanOrEqual(documentMetrics.clientWidth);
+      }
+    }
+    expect(tableMetrics.overflowX).toBe("auto");
+    expect(tableMetrics.tableScrollWidth).toBeGreaterThan(tableMetrics.scrollerClientWidth);
+    expect(tableMetrics.scrollerLeft).toBeGreaterThanOrEqual(0);
+    expect(tableMetrics.scrollerRight).toBeLessThanOrEqual(documentMetrics.clientWidth);
+  }
 });
 
 test("desktop route navigation resets new pages without overriding query, history, or hash scrolling", async ({ page }) => {

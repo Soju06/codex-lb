@@ -251,6 +251,77 @@ async def test_source_audio_transcription_routes_multipart_and_settles_usage(
 
 
 @pytest.mark.asyncio
+async def test_source_audio_transcription_cancellation_releases_reservation(
+    async_client,
+    source_upstream,
+) -> None:
+    await _enable_api_key_auth(async_client)
+    forward_started = asyncio.Event()
+    allow_upstream_finish = asyncio.Event()
+
+    async def transcribe(_request: web.Request) -> web.Response:
+        forward_started.set()
+        await allow_upstream_finish.wait()
+        return web.json_response(
+            {
+                "text": "cancelled transcription",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+            }
+        )
+
+    base_url = await source_upstream(transcribe)
+    model = "cancelled-audio-source"
+    source_id = await _create_model_source(
+        async_client,
+        name="cancelled-audio-source",
+        model=model,
+        base_url=base_url,
+        supports_audio_transcriptions=True,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "cancelled-audio-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 100_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+    request_task = asyncio.create_task(
+        async_client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {key}"},
+            data={"model": model},
+            files={"file": ("sample.wav", b"\x01\x02", "audio/wav")},
+        )
+    )
+    await asyncio.wait_for(forward_started.wait(), timeout=1)
+
+    request_task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+    finally:
+        allow_upstream_finish.set()
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ApiKeyUsageReservation).where(
+                ApiKeyUsageReservation.api_key_id == key_id,
+                ApiKeyUsageReservation.model == model,
+            )
+        )
+        reservation = result.scalar_one()
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert (reservation.status, limits[0].current_value) == ("released", 0)
+
+
+@pytest.mark.asyncio
 async def test_source_audio_transcription_bills_by_duration(async_client, source_upstream):
     await _enable_api_key_auth(async_client)
 

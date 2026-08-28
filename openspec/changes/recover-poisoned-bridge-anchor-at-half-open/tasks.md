@@ -386,6 +386,26 @@
       under deferred cancellation, with a surviving safe-replay holder
       blocking the settle
 
+- [x] 2.73 Durable loads adopt the row clock-free whenever no local strike
+      is waiting on its own durable write, so a lagging-clock reset settles
+      the local episode on the load path too
+
+- [x] 2.74 The partial-cleanup settle predicate snapshots the pending owners
+      under the lock when the decision is made, so a safe-replay holder that
+      joined during finalization still blocks the settle
+
+- [x] 2.75 The post-write quarantine verdict derives from the adopted row's
+      detail and count; a speculative poison arm whose opening did not
+      survive persistence is revoked under its own generation fence
+
+- [x] 2.76 The terminal consult and abandonment run as a cancellation-
+      deferred owned task that finalizes the request regardless and
+      re-raises the cancellation afterwards
+
+- [x] 2.77 A completion whose circuit settlement fails keeps the quarantine
+      and suppresses the restored episode's owed abandonment, reporting the
+      settlement result from the clear instead of swallowing it
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

@@ -2759,7 +2759,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 if _http_bridge_request_counts_against_queue(request_state):
                     session.queued_request_count = max(0, session.queued_request_count - 1)
                 stale_requests.append(request_state)
-            surviving_request_states = list(session.pending_requests)
         if not stale_requests:
             return
         # A stale gate holder that streamed response events without ever
@@ -2800,14 +2799,18 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
                 if poison_episode is None:
                     return
+                # A surviving safe-replay holder is about to re-dispatch
+                # and claim the circuit generation; settling under it would
+                # strip that fence, so survivors count alongside the removed
+                # holders. Snapshotted here, not before finalization: a
+                # request that joined the still-live session while the
+                # removed holders were being failed must count too.
+                async with session.pending_lock:
+                    surviving_request_states = list(session.pending_requests)
                 durable_cleared = await _abandon_durable_http_bridge_continuity(
                     self,
                     session,
                     detail=poison_detail,
-                    # A surviving safe-replay holder is about to re-dispatch
-                    # and claim the circuit generation; settling under it
-                    # would strip that fence, so survivors count alongside
-                    # the removed holders.
                     settle_circuit=_http_bridge_abandonment_may_settle_circuit(
                         [*stale_requests, *surviving_request_states]
                     ),

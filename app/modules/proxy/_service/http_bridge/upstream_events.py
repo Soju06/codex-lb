@@ -2891,6 +2891,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         # consult that runs after this settle is vetoed by the reset row,
         # and any abandonment authorized before it fences on the old anchor
         # and cannot touch the one registered below.
+        completion_circuit_settlement_failed = False
         if (
             event_type == "response.completed"
             and terminal_request_state is not None
@@ -2899,7 +2900,16 @@ class _HTTPBridgeUpstreamEventsMixin:
             and not terminal_request_state.skip_request_log
         ):
             if not terminal_request_state.verified_stale_anchor_replay:
-                await self._clear_http_bridge_retry_circuit(session)
+                circuit_settled = await self._clear_http_bridge_retry_circuit(session)
+                if not circuit_settled:
+                    # The old poison episode was restored, but this
+                    # completion is about to register a fresh anchor: the
+                    # restored episode's failures were all against the
+                    # superseded one, so its owed clear must not fire
+                    # against the anchor registered below. The cooldown
+                    # stands until the next settle opportunity.
+                    completion_circuit_settlement_failed = True
+                    await self._http_bridge_suppress_poison_clear_after_anchor_advance(session)
 
         if (
             response_id is not None
@@ -2952,6 +2962,11 @@ class _HTTPBridgeUpstreamEventsMixin:
             and not terminal_request_state.suppressed_duplicate_tool_call
             and terminal_request_state.request_kind != "prewarm"
             and not terminal_request_state.skip_request_log
+            # A failed circuit settlement leaves the at-threshold poison row
+            # standing; the quarantine keeps covering it so the surviving
+            # cooldown cannot hand the next attach a poisoned injection while
+            # the settle retries at the next opportunity.
+            and not completion_circuit_settlement_failed
         ):
             # The quarantine clears only after the fresh anchor persisted:
             # a failed alias write rewrites the event to response.failed
@@ -3427,7 +3442,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                     # awaited recovery work before it rechecks this scope.
                     completed_delivery_scope.terminal_enqueued = True
 
-        terminal_clear_episode = None
         if terminal_poison_detail is not None and terminal_strike_failures is not None:
             # The strike above opens the circuit, but the durable anchor that
             # failed is still stored. Only the retirement and close funnels ever
@@ -3464,23 +3478,45 @@ class _HTTPBridgeUpstreamEventsMixin:
             # sibling that completed during publication has settled the
             # circuit and persisted a fresh anchor, and this clear must not
             # delete it.
+            terminal_settlement_cancellation: asyncio.CancelledError | None = None
             try:
-                terminal_clear_episode, terminal_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
-                    session,
-                    consecutive_failures=terminal_strike_failures,
-                    configured_threshold=(
-                        _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-                    ),
-                )
-                if terminal_clear_episode is not None:
-                    await _abandon_durable_http_bridge_continuity(
-                        self,
+                terminal_settlement_detail = terminal_poison_detail
+
+                async def _terminal_consult_and_clear() -> None:
+                    consult_episode, consult_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
                         session,
-                        detail=terminal_poison_detail,
-                        settle_circuit=True,
-                        expected_continuity=terminal_expected_anchor,
+                        consecutive_failures=terminal_strike_failures,
+                        configured_threshold=(
+                            _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                        ),
                     )
+                    if consult_episode is not None:
+                        await _abandon_durable_http_bridge_continuity(
+                            self,
+                            session,
+                            detail=terminal_settlement_detail,
+                            settle_circuit=True,
+                            expected_continuity=consult_expected_anchor,
+                        )
+
+                # The terminal frame is already published and the request is
+                # about to be finalized and removed: a cancellation escaping
+                # the consult or the fenced rebind would leave the owed clear
+                # with no lifecycle left to retry it, and once the
+                # process-local quarantine expires the stored dead anchor is
+                # reusable. Defer cancellation across the settlement like the
+                # grouped and reader funnels, finalize regardless, then
+                # re-raise.
+                terminal_settlement_task = asyncio.create_task(
+                    _terminal_consult_and_clear(),
+                    name=f"http-bridge-terminal-poison-settlement-{session.durable_session_id}",
+                )
+                _terminal_result, terminal_settlement_cancellation = await _await_task_deferring_cancellation(
+                    terminal_settlement_task
+                )
             finally:
                 await _finalize_terminal_settlement(terminal_request_state)
+            if terminal_settlement_cancellation is not None:
+                raise terminal_settlement_cancellation
         else:
             await _finalize_terminal_settlement(terminal_request_state)

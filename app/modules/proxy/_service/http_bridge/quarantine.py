@@ -86,6 +86,34 @@ def _prune_http_bridge_quarantine_registry(
             registry.pop(stale_key, None)
 
 
+def _revoke_http_bridge_poison_quarantine(
+    service: Any,
+    key: _HTTPBridgeSessionKey,
+    *,
+    generation: int | None,
+) -> bool:
+    """Remove a poison quarantine whose opening did not survive persistence.
+
+    A strike arms the poison quarantine before its durable write; when the
+    returned row shows the lineage was actually reset or opened clean, that
+    speculative quarantine would suppress a valid anchor for its full
+    deadline. The generation fence removes exactly the entry this strike
+    armed: any concurrent re-arm bumps the generation and is preserved.
+    """
+    if generation is None:
+        return False
+    registry = _http_bridge_quarantine_registry(service)
+    entry = registry.get(key)
+    if (
+        entry is not None
+        and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+        and entry.generation == generation
+    ):
+        registry.pop(key, None)
+        return True
+    return False
+
+
 def _http_bridge_request_state_wedged_reattach(request_state: _WebSocketRequestState) -> bool:
     """Identify the #1534 wedge shape on a request that is being failed/retired.
 

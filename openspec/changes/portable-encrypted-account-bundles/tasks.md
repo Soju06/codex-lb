@@ -28,3 +28,4 @@
 - [x] 5.4 Perform bounded proxy-aware best-effort validation with fixed warnings after atomic commit.
 - [x] 5.5 Normalize duplicate workspace-slot/email identities across payload, preflight, and commit.
 - [x] 5.6 Reconcile asynchronous export selection and guard dialog close/reopen races.
+- [x] 5.7 Keep duplicate validation bounded at the maximum account count and index normalized destination-email lookups on both database backends.

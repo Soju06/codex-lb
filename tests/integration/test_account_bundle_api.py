@@ -6,6 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.auth import generate_unique_account_id
+from app.core.crypto import TokenEncryptor
+from app.db.models import Account
+from app.db.session import SessionLocal
 from app.modules.accounts import api as accounts_api_module
 
 from .test_account_opencode_auth_export import _make_auth_json
@@ -142,6 +145,45 @@ async def test_account_bundle_supports_empty_export_and_rejects_changed_upload(a
     assert committed.status_code == 400
     assert committed.json()["error"]["code"] == "invalid_account_bundle"
     assert committed.headers["cache-control"].startswith("no-store")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_field", ["email", "refresh_token"])
+async def test_account_bundle_export_rejects_blank_stored_data_safely(async_client, invalid_field: str) -> None:
+    raw_account_id = f"bundle-blank-{invalid_field}"
+    email = f"bundle-blank-{invalid_field}@example.invalid"
+    account_id = generate_unique_account_id(raw_account_id, email)
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_make_auth_json(raw_account_id, email)),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        if invalid_field == "email":
+            account.email = "   "
+        else:
+            account.refresh_token_encrypted = TokenEncryptor().encrypt("   ")
+        await session.commit()
+
+    response = await async_client.post(
+        "/api/accounts/bundle/export",
+        json={"accountIds": [account_id], "passphrase": "test-passphrase"},
+    )
+
+    assert response.status_code == 400
+    assert response.headers["cache-control"].startswith("no-store")
+    assert response.json()["error"]["code"] == "invalid_account_bundle"
+    assert email not in response.text
+    assert "refresh-token" not in response.text
 
 
 @pytest.mark.asyncio

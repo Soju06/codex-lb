@@ -213,4 +213,42 @@ describe("account bundle dialogs", () => {
     await waitFor(() => expect(screen.getByLabelText("Passphrase")).toHaveValue(""));
     expect(screen.queryByRole("button", { name: "Import bundle" })).not.toBeInTheDocument();
   });
+
+  it("invalidates account queries after a commit completes following close and reopen", async () => {
+    const user = userEvent.setup();
+    const onCommitted = vi.fn().mockResolvedValue(undefined);
+    preflightBundle.mockResolvedValue({
+      integrityToken: "digest",
+      accountCount: 1,
+      newCount: 1,
+      matchingCount: 0,
+      accounts: [],
+    });
+    let resolveCommit!: (result: Awaited<ReturnType<typeof commitBundle>>) => void;
+    commitBundle.mockReturnValue(new Promise((resolve) => { resolveCommit = resolve; }));
+    const { rerender } = renderWithProviders(
+      <ImportAccountBundleDialog open onOpenChange={vi.fn()} onCommitted={onCommitted} />,
+    );
+    await user.upload(
+      screen.getByLabelText("Encrypted account bundle"),
+      new File(["opaque-bundle"], "accounts.clb-account-bundle"),
+    );
+    await user.type(screen.getByLabelText("Passphrase"), "bundle-passphrase");
+    await user.click(screen.getByRole("button", { name: "Review bundle" }));
+    await user.click(await screen.findByRole("button", { name: "Import bundle" }));
+
+    rerender(
+      <ImportAccountBundleDialog open={false} onOpenChange={vi.fn()} onCommitted={onCommitted} />,
+    );
+    rerender(<ImportAccountBundleDialog open onOpenChange={vi.fn()} onCommitted={onCommitted} />);
+    resolveCommit({
+      summary: { imported: 1, replaced: 0, skipped: 0, failed: 0 },
+      results: [{ index: 0, outcome: "imported", destinationAccountId: "account-1", warning: null }],
+      warnings: [],
+    });
+
+    await waitFor(() => expect(onCommitted).toHaveBeenCalledOnce());
+    expect(screen.getByLabelText("Passphrase")).toHaveValue("");
+    expect(screen.queryByText("Imported 1, replaced 0, skipped 0, failed 0.")).not.toBeInTheDocument();
+  });
 });

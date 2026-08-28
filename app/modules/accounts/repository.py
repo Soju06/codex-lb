@@ -14,6 +14,11 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import extract_id_token_claims, resolve_seat_identity
+from app.core.cache.invalidation import (
+    NAMESPACE_ACCOUNT_ROUTING,
+    NAMESPACE_ACCOUNT_SELECTION,
+    bump_cache_invalidation_in_transaction,
+)
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
@@ -57,6 +62,7 @@ _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
 # worker drains the account's rows. The authoritative pending marker is
 # accounts.delete_requested_at; the reason string is operator-facing only.
 ACCOUNT_PENDING_DELETION_REASON = "pending_deletion"
+BUNDLE_IMPORT_VALIDATION_PAUSE_REASON = "pending_bundle_import_validation"
 
 
 def credentials_replaced_since_wipe(
@@ -108,6 +114,7 @@ class AccountRequestUsageSummary:
 class BundlePersistenceResult:
     account_id: str
     outcome: Literal["imported", "replaced", "skipped"]
+    reactivate_on_success: bool = False
 
 
 # The account-listing request-usage summary dedupes and re-aggregates the
@@ -348,15 +355,40 @@ class AccountsRepository:
                     results.append(BundlePersistenceResult(account_id=existing.id, outcome="skipped"))
                     continue
                 if existing is not None:
+                    reactivate_on_success = existing.status == AccountStatus.ACTIVE
                     await self._apply_bundle_replacement(existing, source)
-                    results.append(BundlePersistenceResult(account_id=existing.id, outcome="replaced"))
+                    if reactivate_on_success:
+                        existing.status = AccountStatus.PAUSED
+                        existing.deactivation_reason = BUNDLE_IMPORT_VALIDATION_PAUSE_REASON
+                        existing.reset_at = None
+                        existing.blocked_at = None
+                    results.append(
+                        BundlePersistenceResult(
+                            account_id=existing.id,
+                            outcome="replaced",
+                            reactivate_on_success=reactivate_on_success,
+                        )
+                    )
                     continue
 
                 if await self._session.get(Account, source.id) is not None:
                     source.id = await self._next_available_account_id(source.id)
+                source.status = AccountStatus.PAUSED
+                source.deactivation_reason = BUNDLE_IMPORT_VALIDATION_PAUSE_REASON
+                source.reset_at = None
+                source.blocked_at = None
                 self._session.add(source)
-                results.append(BundlePersistenceResult(account_id=source.id, outcome="imported"))
+                results.append(
+                    BundlePersistenceResult(
+                        account_id=source.id,
+                        outcome="imported",
+                        reactivate_on_success=True,
+                    )
+                )
 
+            if any(result.outcome != "skipped" for result in results):
+                await bump_cache_invalidation_in_transaction(self._session, NAMESPACE_ACCOUNT_ROUTING)
+                await bump_cache_invalidation_in_transaction(self._session, NAMESPACE_ACCOUNT_SELECTION)
             await self._session.commit()
             return results
         except BaseException:
@@ -379,6 +411,41 @@ class AccountsRepository:
         target.last_refresh = source.last_refresh
         _apply_bundle_portable_metadata(target, source)
         await discard_plan_downgrade_observations(self._session, target.id)
+
+    async def reactivate_validated_bundle_account(
+        self,
+        account_id: str,
+        *,
+        expected_refresh_token_encrypted: bytes,
+    ) -> bool:
+        """Restore an ACTIVE bundle slot only from its exact quarantine version."""
+
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(Account)
+                .where(
+                    Account.id == account_id,
+                    Account.status == AccountStatus.PAUSED,
+                    Account.deactivation_reason == BUNDLE_IMPORT_VALIDATION_PAUSE_REASON,
+                    Account.reset_at.is_(None),
+                    Account.blocked_at.is_(None),
+                    Account.delete_requested_at.is_(None),
+                    Account.refresh_token_encrypted == expected_refresh_token_encrypted,
+                )
+                .values(
+                    status=AccountStatus.ACTIVE,
+                    deactivation_reason=None,
+                    reset_at=None,
+                    blocked_at=None,
+                )
+                .returning(Account.id)
+            )
+            updated = result.scalar_one_or_none() is not None
+            if updated:
+                await bump_cache_invalidation_in_transaction(self._session, NAMESPACE_ACCOUNT_ROUTING)
+                await bump_cache_invalidation_in_transaction(self._session, NAMESPACE_ACCOUNT_SELECTION)
+            await self._session.commit()
+            return updated
 
     async def list_request_usage_summary_by_account(
         self,
@@ -1825,21 +1892,39 @@ def _validate_bundle_source_identities(
     *,
     preserve_unknown_workspace_duplicates: bool,
 ) -> None:
-    for index, account in enumerate(accounts):
-        for other in accounts[:index]:
-            if _normalized_email(account.email) != _normalized_email(other.email):
-                continue
-            account_workspace = _workspace_slot_key(account)
-            other_workspace = _workspace_slot_key(other)
-            compatible_upstream_identity = (
-                not account.chatgpt_account_id
-                or not other.chatgpt_account_id
-                or account.chatgpt_account_id == other.chatgpt_account_id
+    identities_by_email_and_workspace: dict[str, dict[str | None, set[str | None]]] = {}
+    identities_by_email: dict[str, set[str | None]] = {}
+    for account in accounts:
+        normalized_email = _normalized_email(account.email)
+        workspace = _workspace_slot_key(account)
+        # Preserve the existing wildcard semantics for legacy rows that may
+        # contain an empty identity as well as canonical NULL values.
+        upstream_identity = account.chatgpt_account_id or None
+        workspace_identities = identities_by_email_and_workspace.setdefault(normalized_email, {})
+
+        if preserve_unknown_workspace_duplicates:
+            candidates = (workspace_identities.get(workspace),)
+        elif workspace is None:
+            candidates = (identities_by_email.get(normalized_email),)
+        else:
+            candidates = (
+                workspace_identities.get(workspace),
+                workspace_identities.get(None),
             )
-            if compatible_upstream_identity and (
-                account_workspace == other_workspace
-                or (
-                    not preserve_unknown_workspace_duplicates and (account_workspace is None or other_workspace is None)
-                )
-            ):
-                raise AccountBundleIdentityError
+        if any(
+            identities is not None and _bundle_identity_matches_any(identities, upstream_identity)
+            for identities in candidates
+        ):
+            raise AccountBundleIdentityError
+
+        workspace_identities.setdefault(workspace, set()).add(upstream_identity)
+        identities_by_email.setdefault(normalized_email, set()).add(upstream_identity)
+
+
+def _bundle_identity_matches_any(
+    existing_identities: set[str | None],
+    incoming_identity: str | None,
+) -> bool:
+    if incoming_identity is None:
+        return bool(existing_identities)
+    return None in existing_identities or incoming_identity in existing_identities

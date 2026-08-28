@@ -4,6 +4,7 @@ import uuid
 from typing import cast
 
 from sqlalchemy import Enum as SqlEnum
+from sqlalchemy import Table
 
 from app.db.models import Account, AccountStatus, ApiKeyLimit, LimitType, LimitWindow, new_codex_installation_id
 
@@ -28,3 +29,11 @@ def test_account_codex_installation_id_has_uuid_default() -> None:
     generated = new_codex_installation_id()
     assert isinstance(generated, str)
     assert str(uuid.UUID(generated)) == generated
+
+
+def test_account_email_lower_index_matches_case_insensitive_lookup_expression() -> None:
+    account_table = cast(Table, Account.__table__)
+    index = next(index for index in account_table.indexes if index.name == "idx_accounts_email_lower")
+
+    assert len(index.expressions) == 1
+    assert str(index.expressions[0]).lower() == "lower(accounts.email)"

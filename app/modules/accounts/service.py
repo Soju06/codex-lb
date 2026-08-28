@@ -10,6 +10,7 @@ from uuid import uuid4
 import aiohttp
 from pydantic import ValidationError
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import (
     DEFAULT_EMAIL,
@@ -50,9 +51,14 @@ from app.modules.accounts.account_bundle import (
     new_payload,
 )
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.accounts.deletion import request_account_deletion_run
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
-from app.modules.accounts.repository import AccountsRepository, BundlePersistenceResult
+from app.modules.accounts.repository import (
+    BUNDLE_IMPORT_VALIDATION_PAUSE_REASON,
+    AccountsRepository,
+    BundlePersistenceResult,
+)
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAdditionalWindow,
@@ -92,8 +98,9 @@ from app.modules.usage.additional_quota_keys import (
     get_additional_display_label_for_quota_key,
     get_additional_quota_routing_policy,
 )
+from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
-from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater
+from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater, build_background_usage_updater
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +154,18 @@ class AccountsService:
         self._additional_usage_repo = additional_usage_repo
         self._limit_warmup_repo = limit_warmup_repo
         self._usage_updater = UsageUpdater(usage_repo, repo, additional_usage_repo) if usage_repo else None
+        self._bundle_validation_repo = BackgroundAccountsRepository()
+        # Bundle validation may outlive its request waiter through the global
+        # usage-refresh singleflight. Every repository used here therefore owns
+        # a short-lived background session instead of capturing ``repo.session``.
+        self._bundle_validation_usage_updater = build_background_usage_updater()
+        # Existing non-active lifecycle state must survive replacement. This
+        # validator can write usage but cannot refresh tokens or mutate account
+        # lifecycle through an AuthManager.
+        self._bundle_nonreactivating_validation_usage_updater = UsageUpdater(
+            BackgroundUsageRepository(),
+            additional_usage_repo=BackgroundAdditionalUsageRepository(),
+        )
         self._encryptor = TokenEncryptor()
         self._auth_manager = auth_manager
 
@@ -556,7 +575,9 @@ class AccountsService:
                 id_token = self._encryptor.decrypt(account.id_token_encrypted)
             except Exception as exc:
                 raise InvalidAuthJsonError(f"Selected account has unreadable credentials: {account.id}") from exc
-            if not access_token or not refresh_token or not id_token:
+            if not account.email.strip():
+                raise InvalidAuthJsonError(f"Selected account has incomplete identity: {account.id}")
+            if any(not token.strip() for token in (access_token, refresh_token, id_token)):
                 raise InvalidAuthJsonError(f"Selected account has incomplete credentials: {account.id}")
             records.append(
                 BundleAccount(
@@ -636,6 +657,9 @@ class AccountsService:
         accounts = self._bundle_accounts_for_destination(payload)
         await self._repo.account_bundle_identity_matches(accounts)
         persisted = await self._repo.persist_account_bundle(accounts, conflict_mode=conflict_mode)
+        for result in persisted:
+            if result.reactivate_on_success:
+                mark_account_routing_unavailable(result.account_id)
         validation_warnings = await self._validate_imported_bundle_accounts(persisted)
         results = [
             AccountBundleImportResult(
@@ -678,26 +702,48 @@ class AccountsService:
                 except Exception:
                     validation_succeeded = False
 
-            if proxy_pause_required and account is not None:
-                try:
-                    await self._repo.update_status_if_current(
-                        account.id,
-                        AccountStatus.PAUSED,
-                        IMPORT_PROXY_REQUIRED_PAUSE_REASON,
-                        None,
-                        blocked_at=None,
-                        expected_status=account.status,
-                        expected_deactivation_reason=account.deactivation_reason,
-                        expected_reset_at=account.reset_at,
-                        expected_blocked_at=account.blocked_at,
-                    )
-                except Exception:
+            if proxy_pause_required and account is not None and result.reactivate_on_success:
+                remaining = deadline - loop.time()
+                if remaining > 0:
+                    try:
+                        await asyncio.wait_for(
+                            self._bundle_validation_repo.update_status_if_current(
+                                account.id,
+                                AccountStatus.PAUSED,
+                                IMPORT_PROXY_REQUIRED_PAUSE_REASON,
+                                None,
+                                blocked_at=None,
+                                expected_status=AccountStatus.PAUSED,
+                                expected_deactivation_reason=BUNDLE_IMPORT_VALIDATION_PAUSE_REASON,
+                                expected_reset_at=None,
+                                expected_blocked_at=None,
+                                expected_refresh_token_encrypted=account.refresh_token_encrypted,
+                            ),
+                            timeout=remaining,
+                        )
+                    except Exception:
+                        pass
+
+            if validation_succeeded and result.reactivate_on_success and account is not None:
+                remaining = deadline - loop.time()
+                reactivated = False
+                if remaining > 0:
+                    try:
+                        reactivated = await asyncio.wait_for(
+                            self._bundle_validation_repo.reactivate_validated_bundle_account(
+                                account.id,
+                                expected_refresh_token_encrypted=account.refresh_token_encrypted,
+                            ),
+                            timeout=remaining,
+                        )
+                    except Exception:
+                        reactivated = False
+                if reactivated:
+                    clear_account_routing_unavailable(result.account_id)
+                else:
                     validation_succeeded = False
 
-            if validation_succeeded:
-                if account is not None and account.status == AccountStatus.ACTIVE:
-                    clear_account_routing_unavailable(result.account_id)
-            else:
+            if not validation_succeeded:
                 mark_account_routing_unavailable(result.account_id)
                 warnings[result.account_id] = BUNDLE_VALIDATION_WARNING
         return warnings
@@ -706,15 +752,18 @@ class AccountsService:
         self,
         result: BundlePersistenceResult,
     ) -> tuple[Account | None, bool, bool]:
-        account = await self._repo.get_by_id(result.account_id)
+        account = await self._bundle_validation_repo.get_by_id(result.account_id)
         if account is None:
             return None, False, False
-        refresh_allowed = await self._import_usage_refresh_allowed(account)
+        refresh_allowed = await self._background_import_usage_refresh_allowed(account)
         if not refresh_allowed:
-            return account, False, account.status == AccountStatus.ACTIVE
-        if self._usage_updater is None:
-            return account, False, False
-        refresh_result = await self._usage_updater.force_refresh_result(
+            return account, False, True
+        updater = (
+            self._bundle_validation_usage_updater
+            if result.reactivate_on_success
+            else self._bundle_nonreactivating_validation_usage_updater
+        )
+        refresh_result = await updater.force_refresh_result(
             account,
             ignore_refresh_disabled=True,
         )
@@ -811,9 +860,16 @@ class AccountsService:
         )
 
     async def _import_usage_refresh_allowed(self, account: Account) -> bool:
+        return await self._import_usage_refresh_allowed_with_session(account, self._repo.session)
+
+    async def _background_import_usage_refresh_allowed(self, account: Account) -> bool:
+        async with get_background_session() as session:
+            return await self._import_usage_refresh_allowed_with_session(account, session)
+
+    async def _import_usage_refresh_allowed_with_session(self, account: Account, session: AsyncSession) -> bool:
         try:
             route = await resolve_upstream_route(
-                self._repo.session,
+                session,
                 account_id=account.id,
                 operation="usage_refresh",
                 scope="account",
@@ -830,7 +886,7 @@ class AccountsService:
             return True
 
         try:
-            settings = await self._repo.session.get(DashboardSettings, 1)
+            settings = await session.get(DashboardSettings, 1)
         except OperationalError as exc:
             if not _is_missing_upstream_proxy_schema(exc):
                 raise

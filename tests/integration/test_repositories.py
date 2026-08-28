@@ -9,6 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache.invalidation import (
+    NAMESPACE_ACCOUNT_ROUTING,
+    NAMESPACE_ACCOUNT_SELECTION,
     NAMESPACE_UPSTREAM_ROUTE,
     CacheInvalidationPoller,
     set_cache_invalidation_poller,
@@ -36,11 +38,13 @@ from app.db.models import (
 from app.db.session import SessionLocal
 from app.modules.accounts import repository as accounts_repository_module
 from app.modules.accounts.repository import (
+    BUNDLE_IMPORT_VALIDATION_PAUSE_REASON,
     AccountBundleIdentityError,
     AccountIdentityConflictError,
     AccountsRepository,
     _slot_lock_key,
     _slot_lock_keys,
+    _validate_bundle_source_identities,
 )
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import durable_bridge_api_key_scope, durable_bridge_hash
@@ -240,6 +244,7 @@ async def test_bundle_replace_preserves_destination_local_state(db_setup):
         result = await repo.persist_account_bundle([incoming], conflict_mode="replace")
 
         assert result[0].outcome == "replaced"
+        assert result[0].reactivate_on_success is False
         stored = await session.get(Account, "bundle-preserve")
         assert stored is not None
         assert stored.alias == "portable-alias"
@@ -256,6 +261,60 @@ async def test_bundle_replace_preserves_destination_local_state(db_setup):
 
 
 @pytest.mark.asyncio
+async def test_bundle_persistence_atomically_quarantines_and_reactivates_active_credentials(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        incoming = _make_account("bundle-quarantine", "bundle-quarantine@example.invalid")
+
+        result = await repo.persist_account_bundle([incoming], conflict_mode="replace")
+
+        assert result == [
+            accounts_repository_module.BundlePersistenceResult(
+                account_id=incoming.id,
+                outcome="imported",
+                reactivate_on_success=True,
+            )
+        ]
+        stored = await session.get(Account, incoming.id)
+        assert stored is not None
+        assert stored.status == AccountStatus.PAUSED
+        assert stored.deactivation_reason == BUNDLE_IMPORT_VALIDATION_PAUSE_REASON
+        token_version = stored.refresh_token_encrypted
+        quarantine_versions = {
+            namespace: version
+            for namespace, version in (
+                await session.execute(
+                    select(CacheInvalidation.namespace, CacheInvalidation.version).where(
+                        CacheInvalidation.namespace.in_((NAMESPACE_ACCOUNT_ROUTING, NAMESPACE_ACCOUNT_SELECTION))
+                    )
+                )
+            ).all()
+        }
+        assert set(quarantine_versions) == {NAMESPACE_ACCOUNT_ROUTING, NAMESPACE_ACCOUNT_SELECTION}
+
+        reactivated = await repo.reactivate_validated_bundle_account(
+            incoming.id,
+            expected_refresh_token_encrypted=token_version,
+        )
+
+        assert reactivated is True
+        await session.refresh(stored)
+        assert stored.status == AccountStatus.ACTIVE
+        assert stored.deactivation_reason is None
+        reactivation_versions = {
+            namespace: version
+            for namespace, version in (
+                await session.execute(
+                    select(CacheInvalidation.namespace, CacheInvalidation.version).where(
+                        CacheInvalidation.namespace.in_((NAMESPACE_ACCOUNT_ROUTING, NAMESPACE_ACCOUNT_SELECTION))
+                    )
+                )
+            ).all()
+        }
+        assert reactivation_versions == {namespace: version + 1 for namespace, version in quarantine_versions.items()}
+
+
+@pytest.mark.asyncio
 async def test_bundle_rejects_workspace_id_label_equivalent_duplicates(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)
@@ -266,6 +325,92 @@ async def test_bundle_rejects_workspace_id_label_equivalent_duplicates(db_setup)
 
         with pytest.raises(AccountBundleIdentityError, match="duplicate account identities"):
             await repo.persist_account_bundle([first, second], conflict_mode="replace")
+
+
+@pytest.mark.parametrize(
+    (
+        "preserve_unknown_workspace_duplicates",
+        "first_identity",
+        "first_workspace",
+        "second_identity",
+        "second_workspace",
+        "conflicts",
+    ),
+    [
+        (True, "upstream-a", "workspace-a", "upstream-a", "workspace-a", True),
+        (True, None, "workspace-a", "upstream-b", "workspace-a", True),
+        (True, "", "workspace-a", "upstream-b", "workspace-a", True),
+        (True, "upstream-a", "workspace-a", "upstream-b", "workspace-a", False),
+        (True, "upstream-a", "workspace-a", "upstream-a", "workspace-b", False),
+        (False, "upstream-a", None, "upstream-a", "workspace-b", True),
+        (False, None, None, "upstream-b", "workspace-b", True),
+        (False, "upstream-a", None, "upstream-b", "workspace-b", False),
+        (False, "upstream-a", "workspace-a", "upstream-b", "workspace-a", False),
+    ],
+)
+def test_bundle_source_identity_validation_preserves_slot_wildcard_semantics(
+    preserve_unknown_workspace_duplicates: bool,
+    first_identity: str | None,
+    first_workspace: str | None,
+    second_identity: str | None,
+    second_workspace: str | None,
+    conflicts: bool,
+) -> None:
+    first = Account(
+        id="bundle-semantic-first",
+        email="Bundle.Semantics@Example.Invalid",
+        chatgpt_account_id=first_identity,
+        workspace_id=first_workspace,
+    )
+    second = Account(
+        id="bundle-semantic-second",
+        email="bundle.semantics@example.invalid",
+        chatgpt_account_id=second_identity,
+        workspace_id=second_workspace,
+    )
+
+    if conflicts:
+        with pytest.raises(AccountBundleIdentityError):
+            _validate_bundle_source_identities(
+                [first, second],
+                preserve_unknown_workspace_duplicates=preserve_unknown_workspace_duplicates,
+            )
+    else:
+        _validate_bundle_source_identities(
+            [first, second],
+            preserve_unknown_workspace_duplicates=preserve_unknown_workspace_duplicates,
+        )
+
+
+def test_bundle_source_identity_validation_scales_linearly_at_max_account_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_count = 10_000
+    accounts = [
+        Account(
+            id=f"bundle-max-{index}",
+            email=f"bundle-max-{index}@example.invalid",
+            chatgpt_account_id=f"upstream-{index}",
+            workspace_id=f"workspace-{index}",
+        )
+        for index in range(account_count)
+    ]
+    normalize_calls = 0
+    original_normalize = accounts_repository_module._normalized_email
+
+    def counted_normalize(email: str) -> str:
+        nonlocal normalize_calls
+        normalize_calls += 1
+        return original_normalize(email)
+
+    monkeypatch.setattr(accounts_repository_module, "_normalized_email", counted_normalize)
+
+    _validate_bundle_source_identities(
+        accounts,
+        preserve_unknown_workspace_duplicates=False,
+    )
+
+    assert normalize_calls == account_count
 
 
 @pytest.mark.asyncio

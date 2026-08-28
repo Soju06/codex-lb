@@ -1,4 +1,4 @@
-import { del, get, patch, post, put } from "@/lib/api-client";
+import { del, get, handleUnauthorizedResponse, patch, post, put } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
@@ -59,6 +59,7 @@ export async function exportAccountBundle(accountIds: string[] | null, passphras
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ accountIds, passphrase }),
   });
+  handleUnauthorizedResponse(response);
   if (!response.ok) {
     throw new Error(await safeBundleError(response));
   }

@@ -26,12 +26,19 @@ from app.modules.accounts.account_bundle import (
     new_payload,
 )
 from app.modules.accounts.api import _bundle_error_outcome, _raise_bundle_error
-from app.modules.accounts.repository import AccountIdentityConflictError, AccountsRepository, BundlePersistenceResult
+from app.modules.accounts.background_repository import BackgroundAccountsRepository
+from app.modules.accounts.repository import (
+    BUNDLE_IMPORT_VALIDATION_PAUSE_REASON,
+    AccountIdentityConflictError,
+    AccountsRepository,
+    BundlePersistenceResult,
+)
 from app.modules.accounts.service import (
     BUNDLE_VALIDATION_AGGREGATE_WARNING,
     BUNDLE_VALIDATION_WARNING,
     AccountsService,
 )
+from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.updater import UsageUpdater
 
 MAX_BYTES = 256 * 1024
@@ -201,10 +208,20 @@ def test_identity_conflict_mapping_redacts_domain_exception_identity() -> None:
 
 @pytest.mark.asyncio
 async def test_post_import_validation_success_clears_imported_and_replaced_account_routing(monkeypatch) -> None:
-    repo = SimpleNamespace(get_by_id=AsyncMock(return_value=SimpleNamespace(status=AccountStatus.ACTIVE)))
-    service = AccountsService(repo=cast(AccountsRepository, repo))
-    service._import_usage_refresh_allowed = AsyncMock(return_value=True)
-    service._usage_updater = cast(
+    validation_repo = SimpleNamespace(
+        get_by_id=AsyncMock(
+            side_effect=lambda account_id: SimpleNamespace(
+                id=account_id,
+                status=AccountStatus.PAUSED,
+                refresh_token_encrypted=b"quarantined-token",
+            )
+        ),
+        reactivate_validated_bundle_account=AsyncMock(return_value=True),
+    )
+    service = AccountsService(repo=cast(AccountsRepository, SimpleNamespace()))
+    service._bundle_validation_repo = cast(BackgroundAccountsRepository, validation_repo)
+    service._background_import_usage_refresh_allowed = AsyncMock(return_value=True)
+    service._bundle_validation_usage_updater = cast(
         UsageUpdater,
         SimpleNamespace(force_refresh_result=AsyncMock(return_value=SimpleNamespace(fetch_succeeded=True))),
     )
@@ -213,21 +230,117 @@ async def test_post_import_validation_success_clears_imported_and_replaced_accou
 
     warnings = await service._validate_imported_bundle_accounts(
         [
-            BundlePersistenceResult(account_id="new-account", outcome="imported"),
-            BundlePersistenceResult(account_id="local-account", outcome="replaced"),
+            BundlePersistenceResult(account_id="new-account", outcome="imported", reactivate_on_success=True),
+            BundlePersistenceResult(account_id="local-account", outcome="replaced", reactivate_on_success=True),
         ]
     )
 
     assert warnings == {}
     assert cleared == ["new-account", "local-account"]
+    assert validation_repo.reactivate_validated_bundle_account.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_post_import_validation_success_preserves_non_active_replacement(monkeypatch) -> None:
+    account = SimpleNamespace(
+        status=AccountStatus.RATE_LIMITED,
+        refresh_token_encrypted=b"replacement-token",
+    )
+    validation_repo = SimpleNamespace(
+        get_by_id=AsyncMock(return_value=account),
+        reactivate_validated_bundle_account=AsyncMock(),
+    )
+    service = AccountsService(repo=cast(AccountsRepository, SimpleNamespace()))
+    service._bundle_validation_repo = cast(BackgroundAccountsRepository, validation_repo)
+    service._background_import_usage_refresh_allowed = AsyncMock(return_value=True)
+    service._bundle_nonreactivating_validation_usage_updater = cast(
+        UsageUpdater,
+        SimpleNamespace(force_refresh_result=AsyncMock(return_value=SimpleNamespace(fetch_succeeded=True))),
+    )
+    cleared: list[str] = []
+    unavailable: list[str] = []
+    monkeypatch.setattr(accounts_service_module, "clear_account_routing_unavailable", cleared.append)
+    monkeypatch.setattr(accounts_service_module, "mark_account_routing_unavailable", unavailable.append)
+
+    warnings = await service._validate_imported_bundle_accounts(
+        [BundlePersistenceResult(account_id="rate-limited", outcome="replaced")]
+    )
+
+    assert warnings == {}
+    assert account.status == AccountStatus.RATE_LIMITED
+    validation_repo.reactivate_validated_bundle_account.assert_not_awaited()
+    assert cleared == []
+    assert unavailable == []
+
+
+@pytest.mark.asyncio
+async def test_post_import_validation_reactivation_cas_miss_stays_unroutable(monkeypatch) -> None:
+    account = SimpleNamespace(
+        id="concurrently-replaced",
+        status=AccountStatus.PAUSED,
+        refresh_token_encrypted=b"stale-token-version",
+    )
+    validation_repo = SimpleNamespace(
+        get_by_id=AsyncMock(return_value=account),
+        reactivate_validated_bundle_account=AsyncMock(return_value=False),
+    )
+    service = AccountsService(repo=cast(AccountsRepository, SimpleNamespace()))
+    service._bundle_validation_repo = cast(BackgroundAccountsRepository, validation_repo)
+    service._background_import_usage_refresh_allowed = AsyncMock(return_value=True)
+    service._bundle_validation_usage_updater = cast(
+        UsageUpdater,
+        SimpleNamespace(force_refresh_result=AsyncMock(return_value=SimpleNamespace(fetch_succeeded=True))),
+    )
+    cleared: list[str] = []
+    unavailable: list[str] = []
+    monkeypatch.setattr(accounts_service_module, "clear_account_routing_unavailable", cleared.append)
+    monkeypatch.setattr(accounts_service_module, "mark_account_routing_unavailable", unavailable.append)
+
+    warnings = await service._validate_imported_bundle_accounts(
+        [
+            BundlePersistenceResult(
+                account_id=account.id,
+                outcome="replaced",
+                reactivate_on_success=True,
+            )
+        ]
+    )
+
+    assert warnings == {account.id: BUNDLE_VALIDATION_WARNING}
+    assert account.status == AccountStatus.PAUSED
+    assert cleared == []
+    assert unavailable == [account.id]
+
+
+def test_bundle_validation_uses_only_owned_background_repositories() -> None:
+    service = AccountsService(repo=cast(AccountsRepository, SimpleNamespace()))
+
+    assert isinstance(service._bundle_validation_repo, BackgroundAccountsRepository)
+    assert isinstance(service._bundle_validation_usage_updater._accounts_repo, BackgroundAccountsRepository)
+    assert service._bundle_validation_usage_updater._auth_manager is not None
+    assert isinstance(
+        service._bundle_validation_usage_updater._auth_manager._repo,
+        BackgroundAccountsRepository,
+    )
+    assert isinstance(
+        service._bundle_nonreactivating_validation_usage_updater._usage_repo,
+        BackgroundUsageRepository,
+    )
+    assert isinstance(
+        service._bundle_nonreactivating_validation_usage_updater._additional_usage_repo,
+        BackgroundAdditionalUsageRepository,
+    )
+    assert service._bundle_nonreactivating_validation_usage_updater._accounts_repo is None
 
 
 @pytest.mark.asyncio
 async def test_post_import_validation_failure_is_fixed_safe_warning(monkeypatch) -> None:
-    repo = SimpleNamespace(get_by_id=AsyncMock(return_value=SimpleNamespace(status=AccountStatus.ACTIVE)))
-    service = AccountsService(repo=cast(AccountsRepository, repo))
-    service._import_usage_refresh_allowed = AsyncMock(return_value=True)
-    service._usage_updater = cast(
+    account = SimpleNamespace(status=AccountStatus.PAUSED, refresh_token_encrypted=b"quarantined-token")
+    validation_repo = SimpleNamespace(get_by_id=AsyncMock(return_value=account))
+    service = AccountsService(repo=cast(AccountsRepository, SimpleNamespace()))
+    service._bundle_validation_repo = cast(BackgroundAccountsRepository, validation_repo)
+    service._background_import_usage_refresh_allowed = AsyncMock(return_value=True)
+    service._bundle_validation_usage_updater = cast(
         UsageUpdater,
         SimpleNamespace(force_refresh_result=AsyncMock(side_effect=RuntimeError("upstream detail"))),
     )
@@ -235,7 +348,13 @@ async def test_post_import_validation_failure_is_fixed_safe_warning(monkeypatch)
     monkeypatch.setattr("app.modules.accounts.service.mark_account_routing_unavailable", unavailable.append)
 
     warnings = await service._validate_imported_bundle_accounts(
-        [BundlePersistenceResult(account_id="failed-account", outcome="imported")]
+        [
+            BundlePersistenceResult(
+                account_id="failed-account",
+                outcome="imported",
+                reactivate_on_success=True,
+            )
+        ]
     )
 
     assert warnings == {"failed-account": BUNDLE_VALIDATION_WARNING}
@@ -245,63 +364,112 @@ async def test_post_import_validation_failure_is_fixed_safe_warning(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_post_import_validation_outer_cancellation_keeps_quarantine() -> None:
+    account = SimpleNamespace(
+        id="cancelled-import",
+        status=AccountStatus.PAUSED,
+        refresh_token_encrypted=b"quarantined-token",
+    )
+    refresh_started = asyncio.Event()
+    validation_repo = SimpleNamespace(
+        get_by_id=AsyncMock(return_value=account),
+        reactivate_validated_bundle_account=AsyncMock(),
+    )
+
+    async def blocked_refresh(*_args, **_kwargs):
+        refresh_started.set()
+        await asyncio.Event().wait()
+
+    service = AccountsService(repo=cast(AccountsRepository, SimpleNamespace()))
+    service._bundle_validation_repo = cast(BackgroundAccountsRepository, validation_repo)
+    service._background_import_usage_refresh_allowed = AsyncMock(return_value=True)
+    service._bundle_validation_usage_updater = cast(
+        UsageUpdater,
+        SimpleNamespace(force_refresh_result=blocked_refresh),
+    )
+    task = asyncio.create_task(
+        service._validate_imported_bundle_accounts(
+            [
+                BundlePersistenceResult(
+                    account_id=account.id,
+                    outcome="imported",
+                    reactivate_on_success=True,
+                )
+            ]
+        )
+    )
+    await refresh_started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert account.status == AccountStatus.PAUSED
+    validation_repo.reactivate_validated_bundle_account.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_post_import_validation_persists_proxy_required_pause(monkeypatch) -> None:
     account = SimpleNamespace(
         id="proxy-required",
-        status=AccountStatus.ACTIVE,
-        deactivation_reason=None,
+        status=AccountStatus.PAUSED,
+        deactivation_reason=BUNDLE_IMPORT_VALIDATION_PAUSE_REASON,
         reset_at=None,
         blocked_at=None,
+        refresh_token_encrypted=b"quarantined-token",
     )
-    repo = SimpleNamespace(
+    validation_repo = SimpleNamespace(
         get_by_id=AsyncMock(return_value=account),
         update_status_if_current=AsyncMock(return_value=True),
     )
-    service = AccountsService(repo=cast(AccountsRepository, repo))
-    service._import_usage_refresh_allowed = AsyncMock(return_value=False)
+    service = AccountsService(repo=cast(AccountsRepository, SimpleNamespace()))
+    service._bundle_validation_repo = cast(BackgroundAccountsRepository, validation_repo)
+    service._background_import_usage_refresh_allowed = AsyncMock(return_value=False)
     unavailable: list[str] = []
     monkeypatch.setattr("app.modules.accounts.service.mark_account_routing_unavailable", unavailable.append)
 
     warnings = await service._validate_imported_bundle_accounts(
-        [BundlePersistenceResult(account_id=account.id, outcome="imported")]
+        [BundlePersistenceResult(account_id=account.id, outcome="imported", reactivate_on_success=True)]
     )
 
     assert warnings == {account.id: BUNDLE_VALIDATION_WARNING}
-    repo.update_status_if_current.assert_awaited_once_with(
+    validation_repo.update_status_if_current.assert_awaited_once_with(
         account.id,
         AccountStatus.PAUSED,
         accounts_service_module.IMPORT_PROXY_REQUIRED_PAUSE_REASON,
         None,
         blocked_at=None,
-        expected_status=AccountStatus.ACTIVE,
-        expected_deactivation_reason=None,
+        expected_status=AccountStatus.PAUSED,
+        expected_deactivation_reason=BUNDLE_IMPORT_VALIDATION_PAUSE_REASON,
         expected_reset_at=None,
         expected_blocked_at=None,
+        expected_refresh_token_encrypted=b"quarantined-token",
     )
     assert unavailable == [account.id]
 
 
 @pytest.mark.asyncio
-async def test_post_import_validation_does_not_cancel_proxy_pause_at_deadline(monkeypatch) -> None:
+async def test_post_import_validation_timeout_keeps_proxy_account_quarantined(monkeypatch) -> None:
     account = SimpleNamespace(
         id="proxy-required-slow-pause",
-        status=AccountStatus.ACTIVE,
-        deactivation_reason=None,
+        status=AccountStatus.PAUSED,
+        deactivation_reason=BUNDLE_IMPORT_VALIDATION_PAUSE_REASON,
         reset_at=None,
         blocked_at=None,
+        refresh_token_encrypted=b"quarantined-token",
     )
 
     async def persist_pause(*_args, **_kwargs) -> bool:
         await asyncio.sleep(0.02)
-        account.status = AccountStatus.PAUSED
         return True
 
-    repo = SimpleNamespace(
+    validation_repo = SimpleNamespace(
         get_by_id=AsyncMock(return_value=account),
         update_status_if_current=AsyncMock(side_effect=persist_pause),
     )
-    service = AccountsService(repo=cast(AccountsRepository, repo))
-    service._import_usage_refresh_allowed = AsyncMock(return_value=False)
+    service = AccountsService(repo=cast(AccountsRepository, SimpleNamespace()))
+    service._bundle_validation_repo = cast(BackgroundAccountsRepository, validation_repo)
+    service._background_import_usage_refresh_allowed = AsyncMock(return_value=False)
     routing_mark_statuses: list[AccountStatus] = []
     monkeypatch.setattr(accounts_service_module, "BUNDLE_VALIDATION_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(
@@ -311,30 +479,38 @@ async def test_post_import_validation_does_not_cancel_proxy_pause_at_deadline(mo
     )
 
     warnings = await service._validate_imported_bundle_accounts(
-        [BundlePersistenceResult(account_id=account.id, outcome="imported")]
+        [BundlePersistenceResult(account_id=account.id, outcome="imported", reactivate_on_success=True)]
     )
 
     assert warnings == {account.id: BUNDLE_VALIDATION_WARNING}
     assert account.status == AccountStatus.PAUSED
     assert routing_mark_statuses == [AccountStatus.PAUSED]
-    repo.update_status_if_current.assert_awaited_once()
+    validation_repo.update_status_if_current.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_post_import_validation_uses_one_deadline_for_the_batch(monkeypatch) -> None:
     accounts = {
-        account_id: SimpleNamespace(id=account_id, status=AccountStatus.ACTIVE)
+        account_id: SimpleNamespace(
+            id=account_id,
+            status=AccountStatus.PAUSED,
+            refresh_token_encrypted=f"token-{account_id}".encode(),
+        )
         for account_id in ("slow-account", "remaining-account")
     }
-    repo = SimpleNamespace(get_by_id=AsyncMock(side_effect=lambda account_id: accounts[account_id]))
-    service = AccountsService(repo=cast(AccountsRepository, repo))
-    service._import_usage_refresh_allowed = AsyncMock(return_value=True)
+    validation_repo = SimpleNamespace(get_by_id=AsyncMock(side_effect=lambda account_id: accounts[account_id]))
+    service = AccountsService(repo=cast(AccountsRepository, SimpleNamespace()))
+    service._bundle_validation_repo = cast(BackgroundAccountsRepository, validation_repo)
+    service._background_import_usage_refresh_allowed = AsyncMock(return_value=True)
 
     async def never_finishes(*_args, **_kwargs):
         await asyncio.Event().wait()
 
     refresh = AsyncMock(side_effect=never_finishes)
-    service._usage_updater = cast(UsageUpdater, SimpleNamespace(force_refresh_result=refresh))
+    service._bundle_nonreactivating_validation_usage_updater = cast(
+        UsageUpdater,
+        SimpleNamespace(force_refresh_result=refresh),
+    )
     unavailable: list[str] = []
     monkeypatch.setattr(accounts_service_module, "BUNDLE_VALIDATION_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(accounts_service_module, "mark_account_routing_unavailable", unavailable.append)

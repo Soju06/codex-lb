@@ -71,7 +71,10 @@ cancellation and re-raise the cancellation afterwards, because no request
 lifecycle remains to retry the abandonment it would otherwise skip. An
 opening recorded by the streaming idle-recovery exhaustion MUST route
 through the same fenced consult and abandonment as the other funnels before
-its terminal event completes the stream.
+its terminal event completes the stream. The partial stale-holder cleanup's
+deferral MUST begin before its holders are finalized, covering finalization
+and settlement as one owned task, because a cancellation landing inside
+finalization otherwise re-raises before the settlement exists.
 
 A quarantine armed from a local opening MUST be re-armed against the merged
 cooldown when durable persistence returns a longer deadline, so its floor
@@ -149,7 +152,8 @@ only a strike between its record and its write keeps its local count
 dominant, and that write's own merge then reconciles it. A load whose lookup
 began before a same-key strike or settlement completed its durable write
 MUST be discarded rather than adopted, because its snapshot can predate that
-write. Adopting a replacement episode MUST invalidate the local half-open
+write; a durable miss from such a lookup MUST NOT pop the local episode the
+completed write just opened. Adopting a replacement episode MUST invalidate the local half-open
 lease even when the adopted cooldown has already elapsed, and an
 at-threshold poison row adopted from a durable load MUST arm this worker's
 process-local poison quarantine, since the replica that opened the circuit
@@ -412,7 +416,7 @@ circuit opens is planned without the dead anchor.
 
 When an HTTP bridge session proves silent/wedged, the proxy MUST quarantine its session key for a bounded window so later requests stop attaching to it. A session proves silent/wedged when either (a) a pending request being failed or retired carried a proxy-injected `previous_response_id`, had sent `response.create`, observed upstream response events, and never had `response.created` assigned, (b) the session key hits two consecutive eventless `missing_response_created_timeout` retires, or (c) the hard-affinity retry circuit for the key opens on an eventless poison-class failure (`stream_incomplete` or `stream_idle_timeout`), in which case the quarantine reason MUST be `retry_circuit_poisoned_anchor`. This holds for every path that fails or retires the request — partial stale-holder cleanup, the reader-failure funnel, and direct all-stale session retirement alike. The quarantine MUST be evaluated only when a request is already being failed or its session retired — never against a live owned turn — so a stream whose `response.created` was observed (including deferred-reasoning streams with long event gaps) MUST NOT be quarantined, and mere event silence during an owned live turn MUST NOT trigger quarantine by itself.
 
-While a session key is quarantined: an existing session under that key MUST NOT be selected for reuse (a new request detaches it and proceeds on a fresh session), and for durable-anchor selection a quarantined session that is still open MUST count as absent, exactly as if it were already gone. The quarantine registry verdict is authoritative for the key: any session under the key while the quarantine window is active — including a freshly created replacement whose own completion has not yet cleared the quarantine — is equally excluded from reuse and equally absent for anchor selection. A fresh reattach whose incoming payload already looks like a full conversation resend MUST NOT receive a proxy-injected durable anchor through any injection point — the fresh-reattach injection, session-state hydration of the durable anchor, or the session-level injection — so the dispatch goes upstream genuinely unanchored with the client's own untrimmed payload. A payload that does not look like a full resend (a genuine delta-only continuation) MUST still receive the durable anchor, because it has no other way to convey prior conversation state.
+While a session key is quarantined: an existing session under that key MUST NOT be selected for reuse (a new request detaches it and proceeds on a fresh session), and for durable-anchor selection a quarantined session that is still open MUST count as absent, exactly as if it were already gone. The quarantine registry verdict is authoritative for the key: any session under the key while the quarantine window is active — including a freshly created replacement whose own completion has not yet cleared the quarantine — is equally excluded from reuse and equally absent for anchor selection. A fresh reattach whose incoming payload already looks like a full conversation resend MUST NOT receive a proxy-injected durable anchor through any injection point — the fresh-reattach injection, session-state hydration of the durable anchor, or the session-level injection — so the dispatch goes upstream genuinely unanchored with the client's own untrimmed payload. A payload that does not look like a full resend (a genuine delta-only continuation) MUST still receive the durable anchor, because it has no other way to convey prior conversation state. When no anchor exists anywhere for such a payload — the client supplied none and durable continuity was abandoned — and the key carries poison evidence (an active poison quarantine, or a durable circuit row still recording the poison episode), planning MUST fail the request closed as `bridge_previous_response_not_found` instead of dispatching it unanchored as a new conversation.
 
 Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), is cleared when a response completes on the same session key, and MUST NOT write account health or alter account selection.
 

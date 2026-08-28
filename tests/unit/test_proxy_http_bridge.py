@@ -34548,6 +34548,221 @@ async def test_a_loaded_poison_row_arms_the_local_quarantine(row_detail: str) ->
 
 
 @pytest.mark.asyncio
+async def test_a_stale_miss_does_not_pop_a_just_opened_episode() -> None:
+    # A lookup that began before the key's first durable write completed can
+    # return a miss after two strikes have persisted and opened the circuit.
+    # Popping the episode on that stale miss lets the admission decision that
+    # follows bypass the active cooldown.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-stale-miss")
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=now)
+    state.consecutive_failures = 2
+    state.cooldown_until = now + 120.0
+    state.last_detail = "stream_incomplete"
+    state.last_durable_load_monotonic = now + 30.0
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(session.key)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    loaded = await service._load_http_bridge_retry_circuit(session)
+
+    assert loaded is True
+    assert session.key in cast(Any, service)._http_bridge_retry_circuits, (
+        "a miss older than the latest completed durable write must not pop the just-opened episode"
+    )
+    assert cast(Any, service)._http_bridge_retry_circuits[session.key].consecutive_failures == 2
+
+
+@pytest.mark.asyncio
+async def test_partial_cleanup_settles_when_cancelled_during_finalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A cancellation landing while the removed holders are being failed used
+    # to re-raise before the settlement task even existed, with the holders
+    # already out of pending and nothing left to retry the strike, consult,
+    # or abandonment. One owned task now covers finalization and settlement.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    durable_bridge = SimpleNamespace(
+        **_stateful_retry_circuit_persistence(),
+        rebind_session_account=AsyncMock(return_value=True),
+    )
+    service._durable_bridge = durable_bridge
+    session = _make_bridge_session(
+        key_value="bridge-partial-cancel-finalize",
+        pending_requests=deque(),
+        queued_request_count=0,
+    )
+    session.durable_session_id = "durable-partial-cancel-finalize"
+    session.durable_owner_epoch = 6
+    finalize_started = asyncio.Event()
+    release_finalize = asyncio.Event()
+    original_fail_pending = service._fail_pending_websocket_requests
+
+    async def _slow_fail_pending(*args: Any, **kwargs: Any) -> Any:
+        finalize_started.set()
+        await release_finalize.wait()
+        return await original_fail_pending(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", _slow_fail_pending)
+
+    stale_owner_first = _make_eventless_http_bridge_owner(request_id="req-partial-cancel-0")
+    async with session.pending_lock:
+        session.pending_requests.append(stale_owner_first)
+        session.queued_request_count += 1
+    release_finalize.set()
+    await service._fail_stale_http_bridge_pending_requests(
+        session,
+        [stale_owner_first],
+        detail="response_create_gate_timeout_stuck_pending",
+    )
+    finalize_started.clear()
+    release_finalize.clear()
+
+    stale_owner_second = _make_eventless_http_bridge_owner(request_id="req-partial-cancel-1")
+    async with session.pending_lock:
+        session.pending_requests.append(stale_owner_second)
+        session.queued_request_count += 1
+    second_call = asyncio.create_task(
+        service._fail_stale_http_bridge_pending_requests(
+            session,
+            [stale_owner_second],
+            detail="response_create_gate_timeout_stuck_pending",
+        )
+    )
+    await asyncio.wait_for(finalize_started.wait(), timeout=5.0)
+    second_call.cancel()
+    await asyncio.sleep(0)
+    release_finalize.set()
+    with pytest.raises(asyncio.CancelledError):
+        await second_call
+
+    (
+        durable_bridge.rebind_session_account.assert_awaited_once(),
+        ("cancellation during finalization must not skip the threshold strike's settlement"),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence", ["local_quarantine", "durable_row"])
+async def test_an_unanchored_delta_fails_closed_under_poison_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    evidence: str,
+) -> None:
+    # After the abandonment clears continuity, a delta-only payload with no
+    # anchor anywhere would be dispatched as a brand-new conversation and
+    # silently lose its prior context. With the poison quarantine active, or
+    # with the durable poison row still standing (what another replica or a
+    # restarted worker sees), planning must fail closed so the client resends
+    # its full history.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-delta-poison", None),
+        headers={"x-codex-session-id": "sid-delta-poison"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-delta-poison",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    poison_row = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=poison_row if evidence == "durable_row" else None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        lookup_request_targets=AsyncMock(
+            return_value=proxy_service.DurableBridgeLookup(
+                session_id="sess-delta-poison",
+                canonical_kind="session_header",
+                canonical_key="sid-delta-poison",
+                api_key_scope="__anonymous__",
+                account_id="acc-1",
+                owner_instance_id="instance-a",
+                owner_epoch=1,
+                lease_expires_at=datetime.now(timezone.utc),
+                state=HttpBridgeSessionState.ACTIVE,
+                latest_turn_state=None,
+                latest_response_id=None,
+            )
+        ),
+    )
+    if evidence == "local_quarantine":
+        await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+        await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+        assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is True
+
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=session))
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    with pytest.raises(ProxyResponseError) as excinfo:
+        async for _chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-session-id": "sid-delta-poison"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        ):
+            pass
+
+    assert excinfo.value.status_code == 404
+    assert "bridge_previous_response_not_found" in str(excinfo.value.payload), (
+        "an unanchored delta under poison evidence must fail closed, not start a new conversation"
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("survivor_holds_safe_replay", [False, True])
 async def test_partial_stale_cleanup_clears_the_poisoned_anchor(
     monkeypatch: pytest.MonkeyPatch,

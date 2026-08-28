@@ -2829,6 +2829,39 @@ class _HTTPBridgeStreamingMixin:
         has_previous_response_id = (
             proxy_injected_previous_response_id or effective_payload.previous_response_id is not None
         )
+        if not has_previous_response_id and not _http_bridge_payload_looks_like_full_resend(effective_payload):
+            # A delta-only payload with no anchor anywhere relies on server
+            # memory this proxy may have just abandoned. When the key's
+            # poison quarantine is active — or the durable circuit row still
+            # records the poison episode, which is what another replica or a
+            # restarted worker sees — dispatching it unanchored would start a
+            # new conversation and silently drop the prior context, which
+            # the delta-only contract forbids. Fail closed instead so the
+            # client resends its full history.
+            unanchored_delta_poisoned = _http_bridge_session_key_poison_quarantined(self, bridge_session_key)
+            if not unanchored_delta_poisoned:
+                await self._load_http_bridge_retry_circuit(session)
+                unanchored_delta_poisoned = _http_bridge_session_key_poison_quarantined(self, bridge_session_key)
+            if unanchored_delta_poisoned:
+                _log_http_bridge_event(
+                    "previous_response_poisoned_anchor_fail_fast",
+                    bridge_session_key,
+                    account_id=None,
+                    model=effective_payload.model,
+                    detail="outcome=unanchored_delta_fail_closed",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                    owner_check_applied=True,
+                )
+                raise ProxyResponseError(
+                    404,
+                    openai_error(
+                        "bridge_previous_response_not_found",
+                        "The conversation state this request relies on was abandoned "
+                        "after repeated upstream failures; resend the full "
+                        "conversation history or start a new conversation.",
+                    ),
+                )
         incoming_input = effective_payload.input
         stored_count = session.last_completed_input_count
         stored_fingerprint = session.last_completed_input_prefix_fingerprint

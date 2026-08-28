@@ -2819,21 +2819,21 @@ class _HTTPBridgeRequestSubmitMixin:
         # receiving ``response.created`` proves the reattach wedge (#1534)
         # even when the session itself survives with other active requests.
         _record_http_bridge_quarantine_wedged_pending(self, session, stale_requests)
-        await self._fail_pending_websocket_requests(
-            account=session.account,
-            account_id_value=session.account.id,
-            pending_requests=stale_requests,
-            pending_lock=session.pending_lock,
-            error_code="upstream_request_timeout",
-            error_message="HTTP bridge response-create gate holder timed out",
-            api_key=None,
-            response_create_gate=session.response_create_gate,
-            penalize_account=False,
-        )
-        if response_events_seen == 0:
-            partial_strike_detail = detail
+        partial_strike_detail = detail
 
-            async def _partial_cleanup_strike_and_clear() -> None:
+        async def _finalize_and_settle_partial_cleanup() -> None:
+            await self._fail_pending_websocket_requests(
+                account=session.account,
+                account_id_value=session.account.id,
+                pending_requests=stale_requests,
+                pending_lock=session.pending_lock,
+                error_code="upstream_request_timeout",
+                error_message="HTTP bridge response-create gate holder timed out",
+                api_key=None,
+                response_create_gate=session.response_create_gate,
+                penalize_account=False,
+            )
+            if response_events_seen == 0:
                 consecutive_failures = await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
                     session,
                     detail=partial_strike_detail,
@@ -2885,20 +2885,20 @@ class _HTTPBridgeRequestSubmitMixin:
                         model_class=_extract_model_class(session.request_model) if session.request_model else None,
                     )
 
-            # The removed holders are already finalized above, so a
-            # cancellation escaping the strike or the consult would leave an
-            # at-threshold poisoned anchor stored with the surviving request
-            # as the only lifecycle left — and if it never completes, the
-            # quarantine expires and the dead anchor is re-injected. Defer
-            # cancellation across the settlement like the other funnels,
-            # then re-raise it.
-            partial_cleanup_task = asyncio.create_task(
-                _partial_cleanup_strike_and_clear(),
-                name=f"http-bridge-partial-cleanup-poison-settlement-{session.durable_session_id}",
-            )
-            _partial_result, partial_cancellation = await _await_task_deferring_cancellation(partial_cleanup_task)
-            if partial_cancellation is not None:
-                raise partial_cancellation
+        # One owned task covers finalization and settlement together: a
+        # cancellation landing while the holders are being failed would
+        # otherwise re-raise out of finalization before the settlement task
+        # even exists, with the holders already removed from pending and no
+        # lifecycle left to retry the strike, the consult, or the
+        # poisoned-anchor abandonment. Defer cancellation across the whole
+        # sequence like the other funnels, then re-raise it.
+        partial_cleanup_task = asyncio.create_task(
+            _finalize_and_settle_partial_cleanup(),
+            name=f"http-bridge-partial-cleanup-poison-settlement-{session.durable_session_id}",
+        )
+        _partial_result, partial_cancellation = await _await_task_deferring_cancellation(partial_cleanup_task)
+        if partial_cancellation is not None:
+            raise partial_cancellation
 
     def _classify_http_bridge_stale_gate_holders(
         self: Any,

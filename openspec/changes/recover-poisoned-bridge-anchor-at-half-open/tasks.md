@@ -423,6 +423,17 @@
       worker's process-local poison quarantine, fenced so ordinary loads do
       not churn the quarantine generation
 
+- [x] 2.83 A durable miss from a lookup that began before a same-key write
+      completed does not pop the episode that write just opened
+
+- [x] 2.84 The partial-cleanup deferral begins before finalization, covering
+      finalization and settlement as one owned task
+
+- [x] 2.85 An unanchored delta-only payload on a key carrying poison
+      evidence fails closed at planning instead of dispatching as a new
+      conversation, with the durable circuit row serving as the
+      replica-visible evidence
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

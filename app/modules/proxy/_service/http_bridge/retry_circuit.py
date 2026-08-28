@@ -447,6 +447,13 @@ class _HTTPBridgeRetryCircuitMixin:
             # immediately replaying the same failing upstream request.
             async with self._http_bridge_retry_circuit_lock:
                 local_state = self._http_bridge_retry_circuits.get(key)
+                if local_state is not None and now_monotonic < local_state.last_durable_load_monotonic:
+                    # This lookup began before a same-key write completed:
+                    # its miss predates the row that write created, and
+                    # popping the episode here would let the admission
+                    # decision that follows bypass the active cooldown the
+                    # completed write just opened.
+                    return True
                 locally_updated = bool(
                     local_state is not None
                     and local_state.last_failure_monotonic > local_state.last_durable_load_monotonic

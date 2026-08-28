@@ -36,6 +36,7 @@ from app.db.models import (
 from app.db.session import SessionLocal
 from app.modules.accounts import repository as accounts_repository_module
 from app.modules.accounts.repository import (
+    AccountBundleIdentityError,
     AccountIdentityConflictError,
     AccountsRepository,
     _slot_lock_key,
@@ -215,6 +216,56 @@ async def test_accounts_upsert_with_merge_enabled_raises_conflict_on_ambiguous_e
         incoming = _make_account("acc_new", "dup@example.com")
         with pytest.raises(AccountIdentityConflictError):
             await repo.upsert(incoming, merge_by_email=True)
+
+
+@pytest.mark.asyncio
+async def test_bundle_replace_preserves_destination_local_state(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        existing = _make_account("bundle-preserve", "bundle-preserve@example.invalid")
+        existing.status = AccountStatus.PAUSED
+        existing.deactivation_reason = "destination-local-reason"
+        existing.reset_at = 101
+        existing.blocked_at = 202
+        existing.delete_requested_at = utcnow()
+        existing.delete_history_requested = True
+        await repo.upsert(existing, merge_by_email=False)
+
+        incoming = _make_account("bundle-preserve", "bundle-preserve@example.invalid")
+        incoming.alias = "portable-alias"
+        incoming.plan_type = "team"
+        incoming.routing_policy = "preserve"
+        incoming.limit_warmup_enabled = True
+        incoming.security_work_authorized = True
+        result = await repo.persist_account_bundle([incoming], conflict_mode="replace")
+
+        assert result[0].outcome == "replaced"
+        stored = await session.get(Account, "bundle-preserve")
+        assert stored is not None
+        assert stored.alias == "portable-alias"
+        assert stored.plan_type == "team"
+        assert stored.routing_policy == "preserve"
+        assert stored.limit_warmup_enabled is True
+        assert stored.security_work_authorized is True
+        assert stored.status == AccountStatus.PAUSED
+        assert stored.deactivation_reason == "destination-local-reason"
+        assert stored.reset_at == 101
+        assert stored.blocked_at == 202
+        assert stored.delete_requested_at is not None
+        assert stored.delete_history_requested is True
+
+
+@pytest.mark.asyncio
+async def test_bundle_rejects_workspace_id_label_equivalent_duplicates(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        first = _make_account("bundle-duplicate-a", "duplicate@example.invalid")
+        first.workspace_id = "equivalent-slot"
+        second = _make_account("bundle-duplicate-b", "DUPLICATE@example.invalid")
+        second.workspace_label = "equivalent-slot"
+
+        with pytest.raises(AccountBundleIdentityError, match="duplicate account identities"):
+            await repo.persist_account_bundle([first, second], conflict_mode="replace")
 
 
 @pytest.mark.asyncio

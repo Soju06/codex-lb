@@ -69,7 +69,9 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # operator-selectable because startup invariant failures need two supported
 # modes: report-only by default for mixed/self-hosted environments, and
 # fail-fast when CI or strict operators want config drift to abort startup.
-MAX_SETTINGS_FIELDS = 131
+# portable-encrypted-account-bundles adds the operator-controlled upload and
+# plaintext bound justified in that change's proposal/design.
+MAX_SETTINGS_FIELDS = 132
 
 
 def test_generated_settings_reference_matches_code() -> None:

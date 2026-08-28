@@ -5,7 +5,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -104,6 +104,12 @@ class AccountRequestUsageSummary:
     total_cost_usd: float
 
 
+@dataclass(frozen=True, slots=True)
+class BundlePersistenceResult:
+    account_id: str
+    outcome: Literal["imported", "replaced", "skipped"]
+
+
 # The account-listing request-usage summary dedupes and re-aggregates the
 # un-folded raw tail on every dashboard accounts load, and the displayed
 # lifetime totals tolerate short staleness. Cache the merged summaries per
@@ -173,6 +179,15 @@ class AccountIdentityRelockError(RuntimeError):
     """Raised after identity membership changes across both bounded lock attempts."""
 
 
+class AccountBundleIdentityError(ValueError):
+    """Safe bundle identity error whose text never contains account identity."""
+
+    code = "duplicate_account_bundle_identity"
+
+    def __init__(self) -> None:
+        super().__init__("Account bundle contains duplicate account identities")
+
+
 class AccountsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -221,6 +236,149 @@ class AccountsRepository:
             stmt = stmt.execution_options(populate_existing=True)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def account_bundle_identity_matches(self, accounts: list[Account]) -> list[Account | None]:
+        """Resolve bundle records with the same slot and fallback semantics as upsert."""
+        matches: list[Account | None] = []
+        preserve_unknown_workspace_duplicates = not await self._merge_by_email_enabled()
+        _validate_bundle_source_identities(
+            accounts,
+            preserve_unknown_workspace_duplicates=preserve_unknown_workspace_duplicates,
+        )
+        for account in accounts:
+            existing = await self._account_by_slot_identity(account)
+            if existing is None:
+                existing_by_id = await self._session.get(Account, account.id)
+                if existing_by_id is not None and (
+                    _same_unknown_workspace_identity(existing_by_id, account)
+                    or (
+                        existing_by_id.email == account.email
+                        and _workspace_slot_key(existing_by_id) == _workspace_slot_key(account)
+                        and _can_reuse_email_fallback(existing_by_id, account)
+                    )
+                ):
+                    existing = existing_by_id
+            if existing is None and not preserve_unknown_workspace_duplicates:
+                if _workspace_slot_key(account):
+                    existing_by_email = await self._single_unknown_workspace_account_by_email(account.email)
+                else:
+                    existing_by_email = await self._single_account_by_email(account.email)
+                if existing_by_email is not None and _can_reuse_email_fallback(existing_by_email, account):
+                    existing = existing_by_email
+            matches.append(existing)
+        destination_ids = [match.id for match in matches if match is not None]
+        if len(destination_ids) != len(set(destination_ids)):
+            raise AccountBundleIdentityError
+        return matches
+
+    async def persist_account_bundle(
+        self,
+        accounts: list[Account],
+        *,
+        conflict_mode: Literal["skip", "replace"],
+    ) -> list[BundlePersistenceResult]:
+        """Persist a fully validated bundle in one transaction."""
+        async with sqlite_writer_section():
+            return await self._persist_account_bundle_unlocked(accounts, conflict_mode=conflict_mode)
+
+    async def _persist_account_bundle_unlocked(
+        self,
+        accounts: list[Account],
+        *,
+        conflict_mode: Literal["skip", "replace"],
+        _identity_lock_attempt: int = 0,
+    ) -> list[BundlePersistenceResult]:
+        preserve_unknown_workspace_duplicates = not await self._merge_by_email_enabled()
+        _validate_bundle_source_identities(
+            accounts,
+            preserve_unknown_workspace_duplicates=preserve_unknown_workspace_duplicates,
+        )
+        try:
+            dialect_name = self._dialect_name()
+            locked_candidates: list[tuple[Account, frozenset[str]]] = []
+            if dialect_name == "sqlite":
+                await self._acquire_sqlite_merge_lock()
+            elif dialect_name == "postgresql":
+                ordered_accounts = sorted(accounts, key=lambda item: (item.email.casefold(), item.id))
+                for account in ordered_accounts:
+                    locked_candidates.append(
+                        (
+                            account,
+                            await self._lock_postgresql_upsert_identity_candidates(account, include_email=True),
+                        )
+                    )
+                if not preserve_unknown_workspace_duplicates:
+                    for email in sorted({account.email for account in accounts}, key=str.casefold):
+                        await self._acquire_postgresql_merge_lock(email)
+                lock_keys = {
+                    lock_key
+                    for account in accounts
+                    for lock_key in _slot_lock_keys(
+                        account,
+                        preserve_unknown_workspace_duplicates=preserve_unknown_workspace_duplicates,
+                    )
+                }
+                for lock_key in sorted(lock_keys):
+                    await self._acquire_postgresql_identity_lock(lock_key)
+                candidates_stable = True
+                for account, locked_identities in locked_candidates:
+                    if not await self._postgresql_upsert_identity_candidates_are_locked(
+                        account,
+                        include_email=True,
+                        locked_identities=locked_identities,
+                    ):
+                        candidates_stable = False
+                        break
+                if not candidates_stable:
+                    await self._session.rollback()
+                    if _identity_lock_attempt >= 1:
+                        raise AccountIdentityRelockError(
+                            "Account identity candidates changed during PostgreSQL bundle locking"
+                        )
+                    return await self._persist_account_bundle_unlocked(
+                        accounts,
+                        conflict_mode=conflict_mode,
+                        _identity_lock_attempt=_identity_lock_attempt + 1,
+                    )
+
+            matches = await self.account_bundle_identity_matches(accounts)
+            results: list[BundlePersistenceResult] = []
+            for source, existing in zip(accounts, matches, strict=True):
+                if existing is not None and conflict_mode == "skip":
+                    results.append(BundlePersistenceResult(account_id=existing.id, outcome="skipped"))
+                    continue
+                if existing is not None:
+                    await self._apply_bundle_replacement(existing, source)
+                    results.append(BundlePersistenceResult(account_id=existing.id, outcome="replaced"))
+                    continue
+
+                if await self._session.get(Account, source.id) is not None:
+                    source.id = await self._next_available_account_id(source.id)
+                self._session.add(source)
+                results.append(BundlePersistenceResult(account_id=source.id, outcome="imported"))
+
+            await self._session.commit()
+            return results
+        except BaseException:
+            await self._session.rollback()
+            raise
+
+    async def _apply_bundle_replacement(self, target: Account, source: Account) -> None:
+        """Replace portable material without changing destination-local lifecycle state."""
+        if source.chatgpt_account_id is not None:
+            target.chatgpt_account_id = source.chatgpt_account_id
+        if source.chatgpt_user_id is not None:
+            target.chatgpt_user_id = source.chatgpt_user_id
+        target.email = source.email
+        target.workspace_id = source.workspace_id
+        target.workspace_label = source.workspace_label
+        target.seat_type = source.seat_type
+        target.access_token_encrypted = source.access_token_encrypted
+        target.refresh_token_encrypted = source.refresh_token_encrypted
+        target.id_token_encrypted = source.id_token_encrypted
+        target.last_refresh = source.last_refresh
+        _apply_bundle_portable_metadata(target, source)
+        await discard_plan_downgrade_observations(self._session, target.id)
 
     async def list_request_usage_summary_by_account(
         self,
@@ -1558,6 +1716,14 @@ def _apply_account_updates(target: Account, source: Account) -> None:
     target.delete_history_requested = False
 
 
+def _apply_bundle_portable_metadata(target: Account, source: Account) -> None:
+    target.alias = source.alias
+    target.plan_type = source.plan_type
+    target.routing_policy = source.routing_policy
+    target.limit_warmup_enabled = source.limit_warmup_enabled
+    target.security_work_authorized = source.security_work_authorized
+
+
 def _slot_lock_key(account: Account, *, preserve_unknown_workspace_duplicates: bool = True) -> str:
     return _slot_lock_keys(
         account,
@@ -1644,3 +1810,28 @@ def _can_reuse_email_fallback(existing: Account, incoming: Account) -> bool:
         or not existing.chatgpt_account_id
         or existing.chatgpt_account_id == incoming.chatgpt_account_id
     )
+
+
+def _validate_bundle_source_identities(
+    accounts: list[Account],
+    *,
+    preserve_unknown_workspace_duplicates: bool,
+) -> None:
+    for index, account in enumerate(accounts):
+        for other in accounts[:index]:
+            if account.email.casefold() != other.email.casefold():
+                continue
+            account_workspace = _workspace_slot_key(account)
+            other_workspace = _workspace_slot_key(other)
+            compatible_upstream_identity = (
+                not account.chatgpt_account_id
+                or not other.chatgpt_account_id
+                or account.chatgpt_account_id == other.chatgpt_account_id
+            )
+            if compatible_upstream_identity and (
+                account_workspace == other_workspace
+                or (
+                    not preserve_unknown_workspace_duplicates and (account_workspace is None or other_workspace is None)
+                )
+            ):
+                raise AccountBundleIdentityError

@@ -498,8 +498,17 @@ async def _update_http_bridge_operation_state(
                             response_replay_input_json = snapshot
                             response_replay_input_complete = True
                             recovered_turn_count = max(0, int(getattr(request_state, "recovery_replay_turn_count", 0)))
-                            response_replay_input_turn_count = recovered_turn_count or (
-                                sum(max(1, int(getattr(turn, "represented_turn_count", 1))) for turn in parent_turns)
+                            # A recovery replay contains the completed ancestor
+                            # turns; the operation being persisted is one more
+                            # represented turn. Root snapshots have no durable
+                            # ancestors and therefore use the ordinary parent
+                            # calculation below.
+                            response_replay_input_turn_count = (
+                                recovered_turn_count + 1
+                                if recovered_turn_count
+                                else sum(
+                                    max(1, int(getattr(turn, "represented_turn_count", 1))) for turn in parent_turns
+                                )
                                 + 1
                             )
                             _log_http_bridge_event(

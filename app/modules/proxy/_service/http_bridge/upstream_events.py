@@ -69,6 +69,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
+    _http_bridge_request_state_holds_safe_replay,
     _http_bridge_retry_circuit_attempt_selection_for_pending_requests,
     _log_http_bridge_event,
     _normalize_http_bridge_error_event,
@@ -1241,7 +1242,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                         ),
                         None,
                     )
-                if failed_pending_count > 0 and retry_circuit_detail is not None:
+                # Mirror the terminal, grouped, and direct-retirement paths:
+                # a failed request that still holds a verified safe replay is
+                # about to re-dispatch and claim the circuit generation, so it
+                # must not strike the circuit or reach the poison clear here
+                # either. A pre-drain handoff with no states keeps striking.
+                pending_states_present = [state for state in pending_request_states if state is not None]
+                reader_strike_eligible = not pending_states_present or any(
+                    not _http_bridge_request_state_holds_safe_replay(state) for state in pending_states_present
+                )
+                if failed_pending_count > 0 and retry_circuit_detail is not None and reader_strike_eligible:
                     consecutive_failures = await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
                         session,
                         detail=retry_circuit_detail,
@@ -2383,9 +2393,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                     ),
                     name=f"http-bridge-grouped-anchor-clear-{session.durable_session_id}",
                 )
-                _grouped_clear_error, grouped_clear_cancellation = await _await_task_deferring_cancellation(
+                grouped_clear_result, grouped_clear_cancellation = await _await_task_deferring_cancellation(
                     grouped_clear_task
                 )
+                if grouped_clear_result is True:
+                    # A mixed group's abandonment deliberately leaves the
+                    # circuit alive for its safe member, so the episode
+                    # survives and must remember its anchor was already
+                    # cleared — one poisoned anchor is abandoned once.
+                    await self._http_bridge_mark_poison_anchor_cleared(session)
                 if grouped_cancellation is None:
                     grouped_cancellation = grouped_clear_cancellation
             if grouped_cancellation is not None:
@@ -3315,21 +3331,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                     # awaited recovery work before it rechecks this scope.
                     completed_delivery_scope.terminal_enqueued = True
 
-        if (
-            terminal_poison_detail is not None
-            and terminal_strike_failures is not None
-            # The consult reads the currently registered episode, not the
-            # detached count captured with the strike: a multiplexed sibling
-            # that completed during publication has settled the circuit and
-            # persisted a fresh anchor, and this clear must not delete it.
-            and await self._http_bridge_poison_anchor_clear_owed(
-                session,
-                consecutive_failures=terminal_strike_failures,
-                configured_threshold=(
-                    _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-                ),
-            )
-        ):
+        terminal_clear_owed = False
+        if terminal_poison_detail is not None and terminal_strike_failures is not None:
             # The strike above opens the circuit, but the durable anchor that
             # failed is still stored. Only the retirement and close funnels ever
             # reached the poison clear, and a terminal frame settles through
@@ -3354,18 +3357,32 @@ class _HTTPBridgeUpstreamEventsMixin:
             # armed with the strike, so there is no reason to put a fenced
             # durable write in front of the client's own failure.
             #
-            # The terminal frame is already on its way to the client, so this
-            # await must not be the last thing that runs. If the reader is
-            # cancelled while the fenced write is in contention, the cancellation
-            # would otherwise escape before the finalization below is entered and
-            # the request would never be finalized despite having been answered.
+            # The terminal frame is already on its way to the client, so
+            # these awaits must not be the last thing that runs. If the
+            # reader is cancelled while the episode consult's durable lookup
+            # or the fenced write is in contention, the cancellation would
+            # otherwise escape before the finalization below is entered and
+            # the request would never be finalized despite having been
+            # answered. The consult reads the currently registered episode,
+            # not the detached count captured with the strike: a multiplexed
+            # sibling that completed during publication has settled the
+            # circuit and persisted a fresh anchor, and this clear must not
+            # delete it.
             try:
-                await _abandon_durable_http_bridge_continuity(
-                    self,
+                terminal_clear_owed = await self._http_bridge_poison_anchor_clear_owed(
                     session,
-                    detail=terminal_poison_detail,
-                    settle_circuit=True,
+                    consecutive_failures=terminal_strike_failures,
+                    configured_threshold=(
+                        _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                    ),
                 )
+                if terminal_clear_owed:
+                    await _abandon_durable_http_bridge_continuity(
+                        self,
+                        session,
+                        detail=terminal_poison_detail,
+                        settle_circuit=True,
+                    )
             finally:
                 await _finalize_terminal_settlement(terminal_request_state)
         else:

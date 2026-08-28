@@ -541,7 +541,7 @@ class DurableBridgeRepository:
         session_key_value: str,
         api_key_scope: str,
         expected_updated_at_epoch: float | None = None,
-    ) -> None:
+    ) -> bool:
         conditions = [
             HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
@@ -550,7 +550,7 @@ class DurableBridgeRepository:
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
         async with sqlite_writer_section():
-            await self._session.execute(
+            result = await self._session.execute(
                 update(HttpBridgeRetryCircuit)
                 .where(*conditions)
                 .values(
@@ -561,6 +561,9 @@ class DurableBridgeRepository:
                 )
             )
             await self._session.commit()
+        # A fenced reset that matched no row is a CAS miss, not a settlement:
+        # another writer moved the row after the caller's lookup.
+        return bool(getattr(result, "rowcount", 0))
 
     async def purge_retry_circuit(
         self,

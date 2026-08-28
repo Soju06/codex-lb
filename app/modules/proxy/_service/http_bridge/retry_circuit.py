@@ -740,8 +740,11 @@ class _HTTPBridgeRetryCircuitMixin:
         # episode's replica-visible record instead: a completed response
         # settles the circuit and deletes the row, and the fresh anchor that
         # completion persisted must not be deleted by a stale local episode
-        # that survived the reset. No durable row, nothing owed; a lookup
-        # failure proves nothing either, and the next strike retries.
+        # that survived the reset. The settle updates the row to zero rather
+        # than deleting it, so a reset row proves the episode ended exactly
+        # as an absent one does; only a row still at the effective threshold
+        # is a live episode. A lookup failure proves nothing either, and the
+        # next strike retries.
         try:
             persisted = await self._durable_bridge.lookup_retry_circuit(
                 session_key_kind=session.key.affinity_kind,
@@ -756,7 +759,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 exc_info=True,
             )
             return False
-        return persisted is not None
+        return persisted is not None and persisted.consecutive_failures >= effective_threshold
 
     async def _http_bridge_mark_poison_anchor_cleared(self: Any, session: _HTTPBridgeSession) -> None:
         """Record that this episode's poisoned anchor has been abandoned."""
@@ -1099,12 +1102,24 @@ class _HTTPBridgeRetryCircuitMixin:
             # Clearing is idempotent and must be attempted even when the
             # preceding lookup failed; a successful request should settle
             # a previously persisted circuit after a transient read error.
-            await self._durable_bridge.clear_retry_circuit(
+            reset_matched = await self._durable_bridge.clear_retry_circuit(
                 session_key_kind=key.affinity_kind,
                 session_key_value=key.affinity_key,
                 api_key_id=key.api_key_id,
                 expected_updated_at_epoch=expected_updated_at_epoch,
             )
+            if reset_matched is False and expected_updated_at_epoch is not None:
+                # The fenced reset matched no row: another writer moved it
+                # after this worker's lookup, so dropping the local state
+                # would report settlement while the durable episode
+                # survives to be reloaded. Keep the episode and let the
+                # next clear opportunity retry against the moved row.
+                async with self._http_bridge_retry_circuit_lock:
+                    if state is not None and self._http_bridge_retry_circuits.get(key) is None:
+                        self._http_bridge_retry_circuits[key] = state
+                        self._http_bridge_retry_circuit_loaded_keys.add(key)
+                        self._http_bridge_retry_circuit_persisted_keys.add(key)
+                return
         except Exception:
             logger.warning(
                 "Failed to clear persisted HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",

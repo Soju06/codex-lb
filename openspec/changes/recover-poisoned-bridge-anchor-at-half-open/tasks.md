@@ -224,6 +224,27 @@
       merging a finished episode's strike into the replacement row; the
       compensating post-write delete this replaces is removed
 
+- [x] 2.36 The clear decision requires the durable snapshot to still be an
+      at-threshold episode: the settle resets the row to zero rather than
+      deleting it, so a reset row proves the episode ended exactly as an
+      absent one does
+
+- [x] 2.37 The durable reset reports its CAS row count; a fenced reset that
+      matched no row keeps the local episode instead of reporting settlement
+      while the durable failures survive to be reloaded
+
+- [x] 2.38 A successful mixed-group abandonment marks the surviving episode,
+      so a later strike in the same episode does not issue a second
+      continuity clear against the safe member's fresh anchor
+
+- [x] 2.39 The admission-waiter reader-failure funnel applies the same
+      no-safe-replay test as every other funnel before recording strikes or
+      reaching the poison clear
+
+- [x] 2.40 The terminal gate's episode consult runs inside the same
+      cancellation-safe structure as the clear, so a cancellation escaping
+      its durable lookup still finalizes the answered request
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

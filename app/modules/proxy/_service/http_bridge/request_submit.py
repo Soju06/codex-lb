@@ -98,6 +98,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _release_http_bridge_unanchored_handoff,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
+    _http_bridge_session_key_poison_quarantined,
     _record_http_bridge_quarantine_wedged_pending,
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
@@ -1022,6 +1023,36 @@ class _HTTPBridgeRequestSubmitMixin:
                 setattr(cooldown_error, _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
                 setattr(cooldown_error, _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR, True)
             raise cooldown_error
+        if request_state.proxy_injected_previous_response_id and _http_bridge_session_key_poison_quarantined(
+            self, session.key
+        ):
+            # The submit-time load above can be the first to arm the poison
+            # quarantine: planning may have served a cached view while a
+            # replica's opening — stamped by an arbitrary wall clock —
+            # already looked expired here. The payload was serialized with
+            # the anchor that quarantine just proved dead, so dispatching it
+            # would spend the admitted probe on a known-poisoned attach.
+            # Fail fast with the same rejection the planning gate surfaces
+            # and let the client resend its full history; the planning
+            # caches stay a performance bound, never a correctness
+            # assumption. Client-supplied anchors are untouched — only the
+            # proxy's own injection is refused.
+            _log_http_bridge_event(
+                "previous_response_poisoned_anchor_fail_fast",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                detail="outcome=submit_time_quarantine_fail_closed",
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            )
+            raise ProxyResponseError(
+                404,
+                openai_error(
+                    "bridge_previous_response_not_found",
+                    "The reattached anchor for this session was proven dead; resend the full conversation.",
+                ),
+            )
         # Persist the recovery checkpoint only after the retry circuit has
         # admitted this request. A client reconnect suppressed by the
         # cooldown must not create or refresh a journal entry for a request

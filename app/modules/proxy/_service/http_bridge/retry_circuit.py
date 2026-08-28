@@ -36,6 +36,7 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS = 600.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS = 30.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS = 600.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS = 5.0
+_HTTP_BRIDGE_RETRY_CIRCUIT_PLANNING_MISS_CAP = 4096
 _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS = frozenset(
     {
         "stream_incomplete",
@@ -474,9 +475,20 @@ class _HTTPBridgeRetryCircuitMixin:
             if watermark <= expiry:
                 self._http_bridge_retry_circuit_reconcile_watermarks.pop(key, None)
         miss_expiry = now - _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS
-        for key, missed_at in list(self._http_bridge_retry_circuit_planning_misses.items()):
-            if missed_at <= miss_expiry:
-                self._http_bridge_retry_circuit_planning_misses.pop(key, None)
+        misses = self._http_bridge_retry_circuit_planning_misses
+        # Entries are kept in insertion order (a re-record pops first), so
+        # expiry only ever sweeps the front. A full-map scan here would run
+        # under the shared circuit lock on every load and cost R²·window
+        # entry checks per second at R new healthy keys per second.
+        while misses:
+            oldest_key = next(iter(misses))
+            if misses[oldest_key] > miss_expiry:
+                break
+            del misses[oldest_key]
+        while len(misses) > _HTTP_BRIDGE_RETRY_CIRCUIT_PLANNING_MISS_CAP:
+            # The cap sheds the oldest confirmed misses first; an evicted
+            # key merely pays one planning-time load again.
+            del misses[next(iter(misses))]
         for key, key_lock in list(self._http_bridge_retry_circuit_key_locks.items()):
             if key not in self._http_bridge_retry_circuits and not key_lock.locked():
                 self._http_bridge_retry_circuit_key_locks.pop(key, None)
@@ -564,7 +576,10 @@ class _HTTPBridgeRetryCircuitMixin:
                 )
                 # A confirmed miss past the stale-lookup guards is durable
                 # knowledge worth caching for the planning window; stamped
-                # with the load's start so it expires conservatively.
+                # with the load's start so it expires conservatively, and
+                # re-inserted so the map stays in insertion order for the
+                # front-only expiry sweep.
+                self._http_bridge_retry_circuit_planning_misses.pop(key, None)
                 self._http_bridge_retry_circuit_planning_misses[key] = now_monotonic
                 if key in self._http_bridge_retry_circuit_persisted_keys and not locally_updated:
                     self._http_bridge_retry_circuits.pop(key, None)
@@ -650,7 +665,18 @@ class _HTTPBridgeRetryCircuitMixin:
                 self._http_bridge_retry_circuit_loaded_keys.add(key)
                 return True
             local_failure_is_newer = state.last_failure_monotonic > state.last_durable_load_monotonic
-            episode_replaced = persisted.updated_at_epoch != state.persisted_updated_at_epoch
+            # A foreign write is identified by ANY observed column moving,
+            # not the timestamp alone: a lagging-clock strike merges through
+            # greatest() without moving the epoch while incrementing the
+            # count and rewriting the detail, and an anchor supersession
+            # rewrites the detail in place by design. Epoch-only detection
+            # let a marker survive a new failure against the advanced
+            # anchor and left an active quarantine unextended.
+            episode_replaced = (
+                persisted.updated_at_epoch != state.persisted_updated_at_epoch
+                or persisted.consecutive_failures != state.consecutive_failures
+                or persisted.last_detail != state.last_detail
+            )
             if not local_failure_is_newer:
                 # No local strike is waiting on its durable write, so the row
                 # is strictly newer knowledge and is adopted wholesale.
@@ -1705,6 +1731,14 @@ class _HTTPBridgeRetryCircuitMixin:
         # which is still useful for settling a row after a transient outage.
         if durable_load_succeeded and (state is None or expected_updated_at_epoch is None):
             return True
+        if state is None and not durable_load_succeeded:
+            # No local episode and no durable observation: this worker holds
+            # no fence at all, and an unfenced reset here could clear a
+            # poison episode or a claimed admission generation another
+            # replica created during the outage. The best-effort clear is
+            # reserved for a worker that at least carries a local episode;
+            # with nothing observed, the settlement stays owed.
+            return False
         try:
             # Clearing is idempotent and must be attempted even when the
             # preceding lookup failed; a successful request should settle

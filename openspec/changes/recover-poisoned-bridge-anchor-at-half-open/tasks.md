@@ -568,6 +568,21 @@
       sparing healthy hard keys the planning-time round trip while the
       submit-time load keeps enforcing any newly created cooldown
 
+- [x] 2.120 Foreign writes are identified by any observed column moving —
+      version, count, or detail — never the timestamp alone, so
+      lagging-clock strikes reset markers and re-arm quarantines
+
+- [x] 2.121 A proxy-injected anchor fails closed at submission when the
+      key's poison quarantine is active by dispatch time, making the
+      planning caches performance bounds rather than clock-dependent
+      correctness assumptions
+
+- [x] 2.122 The planning-miss cache is hard-capped and swept front-only in
+      insertion order, bounding its cost under high-cardinality traffic
+
+- [x] 2.123 A settle with neither a local episode nor a durable
+      observation is refused as owed instead of issuing an unfenced reset
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

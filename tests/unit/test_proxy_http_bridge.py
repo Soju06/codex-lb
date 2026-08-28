@@ -35963,6 +35963,139 @@ async def test_a_confirmed_planning_miss_is_cached_for_the_window() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_lagging_clock_strike_is_a_foreign_write() -> None:
+    # A lagging-clock strike merges through greatest() without moving the
+    # row's epoch while incrementing the count. Epoch-only foreign-write
+    # detection let a set one-clear marker survive that new failure against
+    # the advanced anchor, blocking both the quarantine and the owed
+    # abandonment.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-lagging-clock-foreign")
+    row_epoch = time.time() - 30.0
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=time.monotonic())
+    state.consecutive_failures = 2
+    state.last_detail = "stream_incomplete"
+    state.persisted_updated_at_epoch = row_epoch
+    state.poison_anchor_cleared = True
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(session.key)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=3,
+                cooldown_until_epoch=time.time() + 120.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=row_epoch,
+            )
+        ),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    assert await service._load_http_bridge_retry_circuit(session) is True
+
+    assert state.poison_anchor_cleared is False, (
+        "a same-epoch count advance is a foreign write and must reset the marker"
+    )
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is True, (
+        "the adopted foreign opening must arm the quarantine despite the unchanged epoch"
+    )
+
+
+@pytest.mark.asyncio
+async def test_submit_fails_closed_when_the_quarantine_arms_after_planning() -> None:
+    # The submit-time load can be the first to observe a poison episode
+    # whose cooldown — stamped by an arbitrary replica clock — already
+    # looks expired here, after planning served a cached view and the
+    # payload was serialized with the injected anchor. Dispatching would
+    # spend the admitted probe on a known-poisoned attach; the submit gate
+    # fails fast so the client resends its full history.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-submit-quarantine-gate")
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-quarantine-gate",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"continue"}',
+        transport="http",
+        previous_response_id="resp_poisoned_anchor",
+        proxy_injected_previous_response_id=True,
+        skip_request_log=True,
+    )
+
+    with pytest.raises(proxy_service.ProxyResponseError) as excinfo:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+
+    assert excinfo.value.status_code == 404
+    assert "bridge_previous_response_not_found" in str(excinfo.value.payload), (
+        "a proxy-injected anchor under an active poison quarantine must fail closed at submission"
+    )
+
+
+def test_the_planning_miss_cache_is_bounded() -> None:
+    # The negative cache is swept front-only in insertion order and hard
+    # capped, so high-cardinality healthy traffic cannot make every load
+    # scan an unbounded map under the shared circuit lock.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    misses = cast(Any, service)._http_bridge_retry_circuit_planning_misses
+    now = time.monotonic()
+    stale_window = http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS
+    for index in range(3):
+        misses[proxy_service._HTTPBridgeSessionKey("session_header", f"sid-miss-old-{index}", None)] = (
+            now - stale_window - 1.0
+        )
+    cap = http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_PLANNING_MISS_CAP
+    for index in range(cap + 8):
+        misses[proxy_service._HTTPBridgeSessionKey("session_header", f"sid-miss-fresh-{index}", None)] = now
+
+    service._prune_http_bridge_retry_circuit_state(now)
+
+    assert len(misses) == cap, "the miss cache must hold at the hard cap"
+    assert proxy_service._HTTPBridgeSessionKey("session_header", "sid-miss-old-0", None) not in misses, (
+        "expired front entries are swept before the cap applies"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unfenced_settle_is_refused_after_a_lookup_outage() -> None:
+    # A completion on a worker with no local state whose durable lookup
+    # raises holds no fence at all; the best-effort clear then reset
+    # whichever row existed — including a poison episode or claimed
+    # admission generation another replica created during the outage. With
+    # nothing observed, the settlement stays owed.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-unfenced-settle-outage")
+    clear_mock = AsyncMock(return_value=True)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(side_effect=RuntimeError("lookup outage")),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=clear_mock,
+    )
+
+    assert await service._clear_http_bridge_retry_circuit(session) is False
+
+    clear_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_a_healthy_key_settle_leaves_no_reconcile_watermark() -> None:
     # Every successful hard-key response settles the circuit; a healthy key
     # with no local state and a confirmed durable miss has nothing a racing

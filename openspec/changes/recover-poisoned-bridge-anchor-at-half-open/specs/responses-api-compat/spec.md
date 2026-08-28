@@ -125,7 +125,13 @@ request states at all, and nothing is holding the generation there.
 
 A settle only removes rows it holds evidence for: the version fence protects a
 row another writer created, and a worker that observed no durable row deletes
-nothing. The settle fence MUST also carry the admission generation observed
+nothing. A worker holding neither a local episode nor a durable
+observation — a completion whose lookup raised on a stateless worker —
+holds no fence at all and MUST leave the settlement owed rather than issue
+an unfenced reset that could clear a poison episode or claimed admission
+generation another replica created during the outage; the best-effort
+unfenced clear is reserved for a worker that at least carries a local
+episode. The settle fence MUST also carry the admission generation observed
 with its version: a replica's replay claim advances only that generation, so
 a reset fenced on the version alone would clear the circuit beneath the
 claimed replay. A fenced settle that matches no row MUST reload the moved row and
@@ -193,7 +199,12 @@ anywhere, so it re-strikes once on top of the returned row's lineage, and
 only a second drop accepts the ordinary undercount. A durable load MUST adopt the row the same
 clock-free way whenever no local strike is waiting on its own durable write;
 only a strike between its record and its write keeps its local count
-dominant, and that write's own merge then reconciles it. A load whose lookup
+dominant, and that write's own merge then reconciles it. A foreign write
+MUST be identified by any observed column moving — version, count, or
+detail — never by the timestamp alone, because a lagging-clock strike
+merges through the timestamp maximum without moving it while incrementing
+the count, and an anchor supersession rewrites the detail in place by
+design. A load whose lookup
 began before a same-key strike or settlement completed its durable write
 MUST be discarded rather than adopted, because its snapshot can predate that
 write; a durable miss from such a lookup MUST NOT pop the local episode the
@@ -235,8 +246,17 @@ a cached below-threshold or reset row cannot hide a remote opening from
 the anchor decision. A confirmed durable miss MUST be cached for the same
 planning window, so healthy hard keys do not pay a planning-time round
 trip on top of the submit-time load; a row another replica creates after a
-cached miss is still enforced at submission while its cooldown runs, which
-is what makes the window safe. When continuity resolution
+cached miss is still enforced at submission while its cooldown runs. The
+miss cache MUST be hard-capped and swept in insertion order rather than
+scanned in full under the shared lock, so high-cardinality healthy traffic
+cannot make every load pay for the map. Both planning caches are
+performance bounds, not correctness assumptions: a replica's cooldown is
+stamped by its own wall clock and can look already expired anywhere else,
+so a payload carrying a proxy-injected anchor MUST fail closed at
+submission — with the same `bridge_previous_response_not_found` rejection
+the planning gate surfaces — when the key's poison quarantine is active by
+dispatch time. That submission gate is what holds under arbitrary replica
+clock skew; client-supplied anchors are never refused by it. When continuity resolution
 replaces the incoming key with a different canonical key, the load MUST be
 repeated for that canonical key before the suppression checks consult it,
 so a request arriving through a turn-state, previous-response, or session

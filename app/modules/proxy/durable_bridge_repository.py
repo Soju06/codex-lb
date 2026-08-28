@@ -2451,9 +2451,10 @@ class DurableBridgeRepository:
                     replay_payload.pop("stream", None)
                     replay_payload["type"] = "response.create"
                     replay_payload["input"] = replay_input
-                    snapshot_bytes = len(snapshot.response_replay_input_json.encode("utf-8")) + len(
-                        (snapshot.response_output_items_json or "[]").encode("utf-8")
-                    )
+                    # The self-contained replay input already includes this
+                    # snapshot turn's terminal output; count it once against
+                    # the byte bound.
+                    snapshot_bytes = len(snapshot.response_replay_input_json.encode("utf-8"))
                     snapshot_turn_count = max(1, snapshot.response_replay_input_turn_count)
                     if represented_turns + snapshot_turn_count > max_turns or total_bytes + snapshot_bytes > max_bytes:
                         return None

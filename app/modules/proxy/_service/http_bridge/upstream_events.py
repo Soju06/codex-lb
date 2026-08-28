@@ -497,7 +497,8 @@ async def _update_http_bridge_operation_state(
                         if snapshot is not None:
                             response_replay_input_json = snapshot
                             response_replay_input_complete = True
-                            response_replay_input_turn_count = (
+                            recovered_turn_count = max(0, int(getattr(request_state, "recovery_replay_turn_count", 0)))
+                            response_replay_input_turn_count = recovered_turn_count or (
                                 sum(max(1, int(getattr(turn, "represented_turn_count", 1))) for turn in parent_turns)
                                 + 1
                             )
@@ -1347,6 +1348,7 @@ async def _try_complete_transcript_recovery(
     get_transcript = getattr(getattr(service, "_durable_bridge", None), "get_complete_transcript", None)
     if not callable(get_transcript):
         return False
+    replay_turn_count = 0
     try:
         turns = await get_transcript(
             response_id=recovery_anchor,
@@ -1363,6 +1365,7 @@ async def _try_complete_transcript_recovery(
             getattr(settings, "http_responses_session_bridge_complete_transcript_max_bytes", 8 * 1024 * 1024)
         )
         if turns:
+            replay_turn_count = sum(max(1, int(getattr(turn, "represented_turn_count", 1))) for turn in turns)
             replay_text = build_complete_replay_payload(
                 turns,
                 continuation_request_text=request_state.request_text,
@@ -1371,6 +1374,7 @@ async def _try_complete_transcript_recovery(
                 max_bytes=max_bytes,
             )
         elif root_recovery:
+            replay_turn_count = 1
             # Sessions created before durable transcript persistence may have
             # no completed operation chain at all.  If the client supplied a
             # complete unanchored history, it is still a valid explicit
@@ -1572,6 +1576,7 @@ async def _try_complete_transcript_recovery(
     # preserve the original state so the ordinary retry path cannot resend
     # ambiguous work without a durable recovery claim.
     request_state.request_text = replay_text
+    request_state.recovery_replay_turn_count = replay_turn_count or 1
     request_state.fresh_upstream_request_text = replay_text
     request_state.fresh_upstream_request_is_retry_safe = True
     request_state.complete_transcript_recovery_anchor = recovery_anchor
@@ -1729,6 +1734,7 @@ async def _try_unsafe_partial_transcript_recovery(
     max_bytes = int(getattr(settings, "http_responses_session_bridge_complete_transcript_max_bytes", 8 * 1024 * 1024))
     turns: list[Any] | None = None
     replay_text: str | None = None
+    replay_turn_count = 0
     try:
         if recovery_anchor and callable(get_transcript):
             turns = await get_transcript(
@@ -1738,6 +1744,7 @@ async def _try_unsafe_partial_transcript_recovery(
                 api_key_scope=durable_bridge_api_key_scope(session.key.api_key_id),
             )
             if turns:
+                replay_turn_count = sum(max(1, int(getattr(turn, "represented_turn_count", 1))) for turn in turns)
                 replay_text = build_complete_replay_payload(
                     turns,
                     continuation_request_text=request_text,
@@ -1749,6 +1756,7 @@ async def _try_unsafe_partial_transcript_recovery(
             # A root request can still be replayed if its body is already a
             # complete, account-neutral history. Never invent a parent for a
             # delta-only continuation with an unavailable anchor.
+            replay_turn_count = 1
             replay_text = build_unanchored_root_replay_payload(
                 request_text,
                 max_input_items=max_input_items,
@@ -1940,6 +1948,7 @@ async def _try_unsafe_partial_transcript_recovery(
         request_state.replay_downstream_sequence_offset = None
         request_state.suppress_next_created_downstream = True
     request_state.request_text = replay_text
+    request_state.recovery_replay_turn_count = replay_turn_count or 1
     request_state.fresh_upstream_request_text = replay_text
     request_state.fresh_upstream_request_is_retry_safe = True
     request_state.complete_transcript_recovery_anchor = recovery_anchor

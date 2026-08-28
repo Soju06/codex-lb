@@ -6887,7 +6887,7 @@ async def test_complete_transcript_recovery_rebinds_durable_operation(
     service._durable_bridge = cast(
         Any,
         SimpleNamespace(
-            get_complete_transcript=AsyncMock(return_value=[object()]),
+            get_complete_transcript=AsyncMock(return_value=[SimpleNamespace(represented_turn_count=7)]),
             rebind_operation_for_complete_transcript=rebind_operation,
         ),
     )
@@ -6926,6 +6926,7 @@ async def test_complete_transcript_recovery_rebinds_durable_operation(
     assert request_state.operation_registered is True
     assert request_state.operation_rebound is True
     assert request_state.operation_attempt_generation == 1
+    assert request_state.recovery_replay_turn_count == 7
     assert request_state.verified_stale_anchor_replay is True
     assert request_state.verified_stale_anchor_retry_circuit_generation_captured is True
     assert rebind_operation.await_args is not None

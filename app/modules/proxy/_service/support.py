@@ -1005,6 +1005,10 @@ class _WebSocketRequestState:
     complete_transcript_recovery_count: int = 0
     complete_transcript_recovery_anchor: str | None = None
     complete_transcript_recovery_retry_authorized: bool = False
+    # Number of turns represented by the unanchored replay body installed by
+    # a recovery attempt. This preserves snapshot bounds after the stale
+    # parent anchor is cleared.
+    recovery_replay_turn_count: int = 0
     # Explicitly opt-in partial-turn recovery may replace one interrupted
     # response with a fresh root built from completed durable turns. Keep its
     # one-shot fence separate from safe complete-transcript recovery.

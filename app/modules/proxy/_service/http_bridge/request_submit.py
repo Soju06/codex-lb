@@ -999,6 +999,14 @@ class _HTTPBridgeRequestSubmitMixin:
                 1,
                 math.ceil(await self._http_bridge_precreated_retry_cooldown_seconds(session)),
             )
+            # The session may have been created before this late admission
+            # check.  Do not leave an unsubmitted socket reusable during the
+            # cooldown: mark it for retirement before surfacing the 503 and
+            # let the normal bounded drain path handle registry detach,
+            # aliases, leases, and close ownership.
+            session.upstream_control.reconnect_requested = True
+            session.upstream_control.retire_after_drain = True
+            await self._retire_http_bridge_after_drain_if_ready(session)
             _log_http_bridge_event(
                 "submit_retry_circuit_suppressed",
                 session.key,

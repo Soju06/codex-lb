@@ -6494,6 +6494,7 @@ async def test_http_bridge_previous_response_anchor_bypasses_hard_turn_cooldown_
     cooldown = AsyncMock(return_value=30.0)
     submit = AsyncMock(side_effect=RuntimeError("submitted without cooldown wait"))
     sleep = AsyncMock()
+    retire = AsyncMock(return_value=False)
 
     monkeypatch.setattr(
         proxy_service,
@@ -6504,6 +6505,7 @@ async def test_http_bridge_previous_response_anchor_bypasses_hard_turn_cooldown_
     )
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", cooldown)
     monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire)
     monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", sleep)
 
     with pytest.raises(RuntimeError, match="submitted without cooldown wait"):
@@ -6520,6 +6522,9 @@ async def test_http_bridge_previous_response_anchor_bypasses_hard_turn_cooldown_
     cooldown.assert_not_awaited()
     sleep.assert_not_awaited()
     submit.assert_awaited_once()
+    retire.assert_not_awaited()
+    assert session.upstream_control.reconnect_requested is False
+    assert session.upstream_control.retire_after_drain is False
 
 
 @pytest.mark.asyncio
@@ -6542,6 +6547,7 @@ async def test_http_bridge_one_shot_hard_turn_without_durable_fence_fails_closed
     )
     submit = AsyncMock()
     sleep = AsyncMock()
+    retire = AsyncMock(return_value=False)
     monkeypatch.setattr(
         proxy_service,
         "get_settings",
@@ -6551,6 +6557,7 @@ async def test_http_bridge_one_shot_hard_turn_without_durable_fence_fails_closed
     )
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=30.0))
     monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire)
     monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", sleep)
 
     with pytest.raises(ProxyResponseError) as exc_info:
@@ -6568,6 +6575,18 @@ async def test_http_bridge_one_shot_hard_turn_without_durable_fence_fails_closed
     assert exc_info.value.payload["error"]["code"] == "upstream_request_timeout"
     submit.assert_not_awaited()
     sleep.assert_not_awaited()
+    assert session.upstream_control.reconnect_requested is True
+    assert session.upstream_control.retire_after_drain is True
+    retire.assert_awaited_once_with(session)
+    assert (
+        http_bridge_helpers_module._http_bridge_session_reusable_for_request(
+            session=session,
+            key=session.key,
+            incoming_turn_state=None,
+            previous_response_id=None,
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio
@@ -29016,6 +29035,60 @@ async def test_http_bridge_submit_suppresses_hard_key_during_retry_cooldown() ->
     assert exc_info.value.retry_after_seconds is not None
     assert exc_info.value.retry_after_seconds >= 60
     assert hard_session.queued_request_count == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_submit_cooldown_suppression_retires_session_before_send() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-submit-cooldown-retires")
+    now = time.monotonic()
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = (
+        http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+            consecutive_failures=2,
+            cooldown_until=now + 60.0,
+            last_detail="stream_idle_timeout",
+            last_touched_monotonic=now,
+        )
+    )
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
+    retire = AsyncMock(return_value=False)
+    service._retire_http_bridge_after_drain_if_ready = retire
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-cooldown-retires",
+        model="gpt-5.6-luna",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","input":"hello"}',
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            hard_session,
+            request_state=request_state,
+            text_data=request_state.request_text or "",
+            queue_limit=8,
+            request_scope_id="scope-submit-cooldown-retires",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.payload["error"]["code"] == "upstream_request_timeout"
+    assert hard_session.upstream_control.reconnect_requested is True
+    assert hard_session.upstream_control.retire_after_drain is True
+    retire.assert_awaited_once_with(hard_session)
+    assert (
+        http_bridge_helpers_module._http_bridge_session_reusable_for_request(
+            session=hard_session,
+            key=hard_session.key,
+            incoming_turn_state=None,
+            previous_response_id=None,
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio

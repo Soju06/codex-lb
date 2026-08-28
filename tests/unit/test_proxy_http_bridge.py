@@ -33345,7 +33345,7 @@ async def test_episode_consult_rechecks_after_the_durable_lookup() -> None:
 
     owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
 
-    assert owed is False, "the consult must re-check the live episode after its durable await"
+    assert owed is None, "the consult must re-check the live episode after its durable await"
 
 
 @pytest.mark.asyncio
@@ -34808,7 +34808,7 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
     service._durable_bridge = SimpleNamespace(lookup_retry_circuit=durable_lookup)
 
     owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
-    assert owed is False, "a settled episode owes nothing, whatever the stale strike captured"
+    assert owed is None, "a settled episode owes nothing, whatever the stale strike captured"
 
     # A fresh sub-threshold episode registered after the settle owes nothing
     # either; the stale captured count must not stand in for the live one.
@@ -34816,14 +34816,14 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
     state.consecutive_failures = 1
     cast(Any, service)._http_bridge_retry_circuits[session.key] = state
     owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
-    assert owed is False
+    assert owed is None
 
     # A live at-threshold episode without its durable row owes nothing
     # either: the row is the episode's replica-visible record, and the
     # completion that settled it elsewhere deleted the row with the reset.
     state.consecutive_failures = 2
     owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
-    assert owed is False, "no durable row means the episode already ended durably"
+    assert owed is None, "no durable row means the episode already ended durably"
 
     # A settle updates the row to zero rather than deleting it, so a reset
     # row is the same proof of a finished episode as an absent one.
@@ -34834,7 +34834,7 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
         updated_at_epoch=time.time(),
     )
     owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
-    assert owed is False, "a row reset to zero proves the episode already ended"
+    assert owed is None, "a row reset to zero proves the episode already ended"
 
     durable_lookup.return_value = SimpleNamespace(
         consecutive_failures=2,
@@ -34843,7 +34843,7 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
         updated_at_epoch=time.time(),
     )
     owed = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2, configured_threshold=7)
-    assert owed is True, "the live durably-backed episode at threshold owes exactly one clear"
+    assert owed is state, "the consult returns the exact live episode that owes the clear"
 
 
 @pytest.mark.asyncio

@@ -1227,7 +1227,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                     ),
                 )
         finally:
-            poison_detail: str | None = None
             if session.admission_waiter_count > 0 and not force_retire:
                 retry_circuit_detail = None
                 if close_classification == "clean":
@@ -1250,54 +1249,82 @@ class _HTTPBridgeUpstreamEventsMixin:
                 reader_strike_eligible = not pending_states_present or any(
                     not _http_bridge_request_state_holds_safe_replay(state) for state in pending_states_present
                 )
+                reader_retired = False
+                reader_cancellation: asyncio.CancelledError | None = None
                 if failed_pending_count > 0 and retry_circuit_detail is not None and reader_strike_eligible:
-                    consecutive_failures = await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
-                        session,
-                        detail=retry_circuit_detail,
-                        selection=retry_circuit_attempt_selection,
-                    )
-                    poison_candidate_detail = _http_bridge_anchor_poison_detail(retry_circuit_detail)
-                    if (
-                        poison_candidate_detail is not None
-                        and observed_response_events == 0
-                        and await self._http_bridge_poison_anchor_clear_owed(
-                            session,
-                            consecutive_failures=consecutive_failures,
-                            configured_threshold=(
-                                _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-                            ),
+                    reader_strike_detail = retry_circuit_detail
+
+                    async def _reader_strike_and_clear() -> bool:
+                        consecutive_failures = (
+                            await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
+                                session,
+                                detail=reader_strike_detail,
+                                selection=retry_circuit_attempt_selection,
+                            )
                         )
-                    ):
-                        poison_detail = poison_candidate_detail
-                if poison_detail is not None:
-                    poison_episode = await self._http_bridge_registered_poison_episode(session)
-                    durable_cleared = await _abandon_durable_http_bridge_continuity(
-                        self,
-                        session,
-                        detail=poison_detail,
-                        settle_circuit=_http_bridge_abandonment_may_settle_circuit(pending_request_states),
-                    )
-                    if durable_cleared:
+                        poison_candidate_detail = _http_bridge_anchor_poison_detail(reader_strike_detail)
+                        poison_episode = None
+                        if poison_candidate_detail is not None and observed_response_events == 0:
+                            # The consult returns the exact episode it
+                            # validated; the marker below scopes to it.
+                            poison_episode = await self._http_bridge_poison_anchor_clear_owed(
+                                session,
+                                consecutive_failures=consecutive_failures,
+                                configured_threshold=(
+                                    _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                                ),
+                            )
+                        if poison_candidate_detail is None or poison_episode is None:
+                            return False
+                        durable_cleared = await _abandon_durable_http_bridge_continuity(
+                            self,
+                            session,
+                            detail=poison_candidate_detail,
+                            settle_circuit=_http_bridge_abandonment_may_settle_circuit(pending_request_states),
+                        )
+                        if not durable_cleared:
+                            _log_http_bridge_event(
+                                "durable_anchor_poison_clear_failed",
+                                session.key,
+                                account_id=session.account.id,
+                                model=session.request_model,
+                                pending_count=session.admission_waiter_count,
+                                detail=poison_candidate_detail,
+                                cache_key_family=session.key.affinity_kind,
+                                model_class=(
+                                    _extract_model_class(session.request_model) if session.request_model else None
+                                ),
+                            )
+                            return False
                         await self._http_bridge_mark_poison_anchor_cleared(session, episode=poison_episode)
                         await self._retire_stale_pending_http_bridge_session(
                             session,
-                            detail=poison_detail,
+                            detail=poison_candidate_detail,
                             response_events_seen=observed_response_events,
                             **retry_circuit_attempt_kwargs,
                         )
-                        force_retire = True
-                    else:
-                        _log_http_bridge_event(
-                            "durable_anchor_poison_clear_failed",
-                            session.key,
-                            account_id=session.account.id,
-                            model=session.request_model,
-                            pending_count=session.admission_waiter_count,
-                            detail=poison_detail,
-                            cache_key_family=session.key.affinity_kind,
-                            model_class=_extract_model_class(session.request_model) if session.request_model else None,
-                        )
+                        return True
+
+                    # The failed requests are already drained and finalized,
+                    # so a cancellation escaping the strike, the episode
+                    # consult, or the rebind would leave an at-threshold
+                    # poisoned anchor stored with no retirement left to retry
+                    # the abandonment. Defer cancellation across the whole
+                    # settlement like the grouped path, then re-raise it.
+                    reader_settlement_task = asyncio.create_task(
+                        _reader_strike_and_clear(),
+                        name=f"http-bridge-reader-poison-settlement-{session.durable_session_id}",
+                    )
+                    reader_retired, reader_cancellation = await _await_task_deferring_cancellation(
+                        reader_settlement_task
+                    )
+                if reader_retired is True:
+                    force_retire = True
+                    if reader_cancellation is not None:
+                        raise reader_cancellation
                 else:
+                    if reader_cancellation is not None:
+                        raise reader_cancellation
                     _log_http_bridge_event(
                         "retire_deferred_for_admission_waiter",
                         session.key,
@@ -2368,9 +2395,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # below unchanged. The clear is internally exception-safe.
                 grouped_clear_detail = grouped_poison_detail
                 grouped_clear_strike_failures = grouped_poison_strike_failures
-                grouped_poison_episode = await self._http_bridge_registered_poison_episode(session)
 
-                async def _consult_and_clear_grouped_anchor() -> bool:
+                async def _consult_and_clear_grouped_anchor() -> Any:
                     # The episode consult is a durable await of its own: run
                     # it inside the same cancellation-deferred task as the
                     # clear, or a reader cancellation landing mid-consult
@@ -2379,15 +2405,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                     # consult reads the live registered episode, so a
                     # sibling settle during grouped publication vetoes the
                     # clear.
-                    if not await self._http_bridge_poison_anchor_clear_owed(
+                    grouped_poison_episode = await self._http_bridge_poison_anchor_clear_owed(
                         session,
                         consecutive_failures=grouped_clear_strike_failures,
                         configured_threshold=(
                             _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
                         ),
-                    ):
-                        return False
-                    return await _abandon_durable_http_bridge_continuity(
+                    )
+                    if grouped_poison_episode is None:
+                        return None
+                    durable_cleared = await _abandon_durable_http_bridge_continuity(
                         self,
                         session,
                         detail=grouped_clear_detail,
@@ -2399,6 +2426,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             grouped_previous_response_request_states
                         ),
                     )
+                    return grouped_poison_episode if durable_cleared else None
 
                 grouped_clear_task = asyncio.create_task(
                     _consult_and_clear_grouped_anchor(),
@@ -2407,12 +2435,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                 grouped_clear_result, grouped_clear_cancellation = await _await_task_deferring_cancellation(
                     grouped_clear_task
                 )
-                if grouped_clear_result is True:
+                if grouped_clear_result is not None:
                     # A mixed group's abandonment deliberately leaves the
                     # circuit alive for its safe member, so the episode
                     # survives and must remember its anchor was already
                     # cleared — one poisoned anchor is abandoned once.
-                    await self._http_bridge_mark_poison_anchor_cleared(session, episode=grouped_poison_episode)
+                    await self._http_bridge_mark_poison_anchor_cleared(session, episode=grouped_clear_result)
                 if grouped_cancellation is None:
                     grouped_cancellation = grouped_clear_cancellation
             if grouped_cancellation is not None:
@@ -3346,7 +3374,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     # awaited recovery work before it rechecks this scope.
                     completed_delivery_scope.terminal_enqueued = True
 
-        terminal_clear_owed = False
+        terminal_clear_episode = None
         if terminal_poison_detail is not None and terminal_strike_failures is not None:
             # The strike above opens the circuit, but the durable anchor that
             # failed is still stored. Only the retirement and close funnels ever
@@ -3384,14 +3412,14 @@ class _HTTPBridgeUpstreamEventsMixin:
             # circuit and persisted a fresh anchor, and this clear must not
             # delete it.
             try:
-                terminal_clear_owed = await self._http_bridge_poison_anchor_clear_owed(
+                terminal_clear_episode = await self._http_bridge_poison_anchor_clear_owed(
                     session,
                     consecutive_failures=terminal_strike_failures,
                     configured_threshold=(
                         _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
                     ),
                 )
-                if terminal_clear_owed:
+                if terminal_clear_episode is not None:
                     await _abandon_durable_http_bridge_continuity(
                         self,
                         session,

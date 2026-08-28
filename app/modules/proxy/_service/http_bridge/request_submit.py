@@ -963,8 +963,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 503,
                 openai_error(
                     "upstream_request_timeout",
-                    "HTTP responses session bridge is recovering from repeated upstream failures; "
-                    f"retry after {retry_after_seconds}s.",
+                    _http_bridge_retry_circuit_suppression_message(block_reason, retry_after_seconds),
                 ),
                 retry_after_seconds=retry_after_seconds,
             )
@@ -2939,13 +2938,19 @@ class _HTTPBridgeRequestSubmitMixin:
                 selection=retry_circuit_attempt_selection,
             )
             poison_detail = _http_bridge_anchor_poison_detail(retry_circuit_detail or detail)
-            if poison_detail is not None and await self._http_bridge_poison_anchor_clear_owed(
-                session,
-                consecutive_failures=consecutive_failures,
-                configured_threshold=(
-                    _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-                ),
-            ):
+            poison_episode = None
+            if poison_detail is not None:
+                # The consult returns the exact episode it validated; the
+                # marker below scopes to it, so a settle landing between the
+                # consult and the rebind cannot be marked onto a replacement.
+                poison_episode = await self._http_bridge_poison_anchor_clear_owed(
+                    session,
+                    consecutive_failures=consecutive_failures,
+                    configured_threshold=(
+                        _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                    ),
+                )
+            if poison_detail is not None and poison_episode is not None:
                 # Consecutive eventless failures on one bridge key are
                 # same-anchor failures (the anchor only advances on a
                 # completed response, which resets the circuit). Clear the
@@ -2954,7 +2959,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 # failure. Without this, only the admission-waiter reader
                 # path could ever poison an anchor, and an anchored session
                 # failing without waiters cooled down forever (issue #1830).
-                poison_episode = await self._http_bridge_registered_poison_episode(session)
                 durable_cleared = await _abandon_durable_http_bridge_continuity(
                     self,
                     session,

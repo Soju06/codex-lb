@@ -725,8 +725,14 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         consecutive_failures: int | None,
         configured_threshold: int,
-    ) -> bool:
-        """Whether this strike still owes the poisoned anchor an abandonment.
+    ) -> "_HTTPBridgeRetryCircuitState | None":
+        """Return the episode that still owes the poisoned anchor an abandonment.
+
+        Returns the validated registered episode, or ``None`` when nothing is
+        owed. The caller passes exactly this episode to the post-abandonment
+        marker: capturing it separately after the consult reopened the race
+        the consult exists to close, and a ``None`` capture turned the marker
+        into a wildcard on whatever episode was registered by then.
 
         Capping the poison threshold at the circuit threshold is what makes the
         clear reachable at all, but it also means every later strike in the
@@ -743,7 +749,7 @@ class _HTTPBridgeRetryCircuitMixin:
         absent or below-threshold registered episode therefore owes nothing.
         """
         if consecutive_failures is None:
-            return False
+            return None
         effective_threshold = _http_bridge_effective_anchor_poison_threshold(configured_threshold)
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
@@ -753,7 +759,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 and not state.poison_anchor_cleared
             )
         if not live_episode_owes:
-            return False
+            return None
         # The one-clear marker lives in process memory, so a restart or
         # another replica cannot see it. The durable circuit row is the
         # episode's replica-visible record instead: a completed response
@@ -777,34 +783,28 @@ class _HTTPBridgeRetryCircuitMixin:
                 _hash_identifier(session.key.affinity_key),
                 exc_info=True,
             )
-            return False
+            return None
         if persisted is None or persisted.consecutive_failures < effective_threshold:
-            return False
+            return None
         # Re-check the live episode after the durable await: a multiplexed
         # sibling can complete, settle the registry, and reset the row while
         # the lookup was in flight, and the stale snapshot must not authorize
         # a clear against the fresh anchor that completion persisted.
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
-            return (
+            if (
                 state is not None
                 and state.consecutive_failures >= effective_threshold
                 and not state.poison_anchor_cleared
-            )
-
-    async def _http_bridge_registered_poison_episode(
-        self: Any,
-        session: _HTTPBridgeSession,
-    ) -> _HTTPBridgeRetryCircuitState | None:
-        """Capture the episode an imminent abandonment is acting for."""
-        async with self._http_bridge_retry_circuit_lock:
-            return self._http_bridge_retry_circuits.get(session.key)
+            ):
+                return state
+            return None
 
     async def _http_bridge_mark_poison_anchor_cleared(
         self: Any,
         session: _HTTPBridgeSession,
         *,
-        episode: _HTTPBridgeRetryCircuitState | None = None,
+        episode: _HTTPBridgeRetryCircuitState,
     ) -> None:
         """Record that this episode's poisoned anchor has been abandoned.
 
@@ -816,7 +816,7 @@ class _HTTPBridgeRetryCircuitMixin:
         """
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
-            if state is not None and (episode is None or state is episode):
+            if state is not None and state is episode:
                 state.poison_anchor_cleared = True
 
     async def _http_bridge_precreated_retry_block(

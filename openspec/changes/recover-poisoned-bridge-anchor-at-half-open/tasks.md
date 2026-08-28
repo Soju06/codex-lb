@@ -279,6 +279,19 @@
       lands during its post-acquire validation, so a cancelled caller cannot
       wedge every later persist and settle for the key
 
+- [x] 2.49 The reader-failure funnel's strike, episode consult, and anchor
+      clear run as one cancellation-deferred task like the grouped path, so
+      a reader cancellation cannot strand an at-threshold poisoned anchor
+      after the failed requests were already drained and finalized
+
+- [x] 2.50 The episode consult returns the exact episode it validated and
+      the marker requires it; a separate post-consult capture reopened the
+      race the consult closes and a None capture made the marker a wildcard
+
+- [x] 2.51 The ordinary submit gate's suppression 503 uses the
+      timer-specific message helper, completing the half-open/cooldown
+      reporting requirement on the third and last hard-coded site
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

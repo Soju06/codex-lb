@@ -26374,6 +26374,34 @@ def test_websocket_client_previous_response_full_resend_retry_allows_self_contai
     )
 
 
+def test_websocket_client_previous_response_full_resend_retry_allows_tool_search_history() -> None:
+    self_contained_tool_search_history: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "search tools"}]},
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "mcp tools"},
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "tools": [{"name": "tool_search"}],
+            "status": "completed",
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_client_anchor",
+            input_value=self_contained_tool_search_history,
+            continuity_state=None,
+        )
+        is True
+    )
+
+
 @pytest.mark.asyncio
 async def test_prepare_websocket_response_create_request_fills_interrupted_pending_tool_outputs(monkeypatch):
     request_logs = _RequestLogsRecorder()
@@ -47311,6 +47339,48 @@ def test_trim_websocket_previous_response_input_items_handles_apply_patch_replay
     trimmed = proxy_service._trim_websocket_previous_response_input_items(input_items)
 
     assert trimmed == input_items[2:]
+
+
+def test_trim_http_bridge_previous_response_input_items_handles_tool_search_replay():
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "id": "tsc_replay",
+            "call_id": "call_search_1",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search_1",
+            "output": [{"title": "result"}],
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    trimmed = proxy_service._trim_http_bridge_previous_response_input_items(input_items)
+
+    assert trimmed == input_items[1:]
+
+
+def test_trim_websocket_previous_response_input_items_handles_tool_search_replay():
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "id": "tsc_replay",
+            "call_id": "call_search_1",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search_1",
+            "output": [{"title": "result"}],
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    trimmed = proxy_service._trim_websocket_previous_response_input_items(input_items)
+
+    assert trimmed == input_items[1:]
 
 
 def test_prepare_response_bridge_request_state_keeps_unconfirmed_missing_tool_output_history():

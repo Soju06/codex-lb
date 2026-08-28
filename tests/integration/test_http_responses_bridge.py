@@ -5870,6 +5870,121 @@ async def test_v1_responses_http_bridge_trims_replayed_apply_patch_previous_resp
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_trims_replayed_tool_search_previous_response_prefix(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_tool_search_trim",
+        "http-bridge-tool-search-trim@example.com",
+    )
+    account = await _get_account(account_id)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del preferred_account_id
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    first = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Search the tools.",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "find context"}]}],
+            "prompt_cache_key": "http-bridge-tool-search-trim-1",
+        },
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+    assert first_body["id"] == "resp_bridge_1"
+
+    replayed_tool_search_call = {
+        "id": "tsc_replay",
+        "type": "tool_search_call",
+        "status": "completed",
+        "call_id": "call_search_1",
+    }
+    replayed_tool_search_output = {
+        "type": "tool_search_output",
+        "call_id": "call_search_1",
+        "output": [{"title": "context result"}],
+    }
+    next_user_message = {"role": "user", "content": [{"type": "input_text", "text": "continue"}]}
+    second = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Search the tools.",
+            "previous_response_id": first_body["id"],
+            "input": [replayed_tool_search_call, replayed_tool_search_output, next_user_message],
+            "prompt_cache_key": "http-bridge-tool-search-trim-1",
+        },
+    )
+    assert second.status_code == 200
+    assert second.json()["id"] == "resp_bridge_2"
+
+    assert len(fake_upstream.sent_text) == 2
+    second_upstream_payload = json.loads(fake_upstream.sent_text[1])
+    assert second_upstream_payload["previous_response_id"] == "resp_bridge_1"
+    assert second_upstream_payload["input"] == [replayed_tool_search_output, next_user_message]
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_http_bridge_lite_request_omits_synthesized_tools(
     async_client,
     monkeypatch,

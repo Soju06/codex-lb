@@ -1096,7 +1096,7 @@ def _trim_http_bridge_previous_response_input_items(input_items: list[JsonValue]
             index
             for index, item in enumerate(input_items)
             if _http_bridge_input_item_type(item)
-            in {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
+            in {"function_call_output", "custom_tool_call_output", "apply_patch_call_output", "tool_search_output"}
         ),
         None,
     )
@@ -1110,7 +1110,7 @@ def _trim_http_bridge_previous_response_input_items(input_items: list[JsonValue]
 
 def _is_http_bridge_previous_response_output_item(item: JsonValue) -> bool:
     item_type = _http_bridge_input_item_type(item)
-    if item_type in {"reasoning", "function_call", "custom_tool_call", "apply_patch_call"}:
+    if item_type in {"reasoning", "function_call", "custom_tool_call", "apply_patch_call", "tool_search_call"}:
         return _has_http_bridge_response_output_marker(item)
     if item_type != "message" or not isinstance(item, dict):
         return False

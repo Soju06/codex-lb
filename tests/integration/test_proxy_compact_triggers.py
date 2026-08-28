@@ -124,9 +124,9 @@ async def test_proxy_compact_preserves_single_terminal_compaction_trigger(async_
 
 
 @pytest.mark.asyncio
-async def test_v1_proxy_compact_keeps_trigger_handling_unchanged(async_client, monkeypatch):
-    email = "v1-compact-trigger-unchanged@example.com"
-    raw_account_id = "acc_v1_compact_trigger_unchanged"
+async def test_v1_proxy_compact_preserves_single_terminal_trigger(async_client, monkeypatch):
+    email = "v1-compact-trigger-terminal@example.com"
+    raw_account_id = "acc_v1_compact_trigger_terminal"
     auth_json = _make_auth_json(raw_account_id, email)
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
@@ -147,7 +147,6 @@ async def test_v1_proxy_compact_keeps_trigger_handling_unchanged(async_client, m
             "model": "gpt-5.1",
             "input": [
                 {"role": "user", "content": "hello"},
-                {"type": "compaction_trigger"},
                 {"type": "compaction_trigger"},
             ],
         },

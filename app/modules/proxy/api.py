@@ -6791,6 +6791,11 @@ async def _compact_responses(
     )
     validate_model_access(api_key, payload.model)
     try:
+        strip_terminal_compaction_trigger_input(payload, strip_trigger=False)
+    except ClientPayloadError as exc:
+        error = openai_client_payload_error(exc)
+        return _logged_error_json_response(request, 400, error)
+    try:
         request_usage_budget = estimate_api_key_request_usage(payload)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)

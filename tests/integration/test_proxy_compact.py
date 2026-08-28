@@ -352,6 +352,79 @@ async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, mo
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_rejects_duplicate_compaction_trigger_before_upstream(async_client, monkeypatch):
+    email = "compact-duplicate-trigger@example.com"
+    raw_account_id = "acc_compact_duplicate_trigger"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_compact(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("compact should not be called when input contains duplicate compaction_trigger items")
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"role": "user", "content": "hello"},
+                {"type": "compaction_trigger"},
+                {"type": "compaction_trigger"},
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "invalid_request_error"
+    assert error["param"] == "input"
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_preserves_single_terminal_compaction_trigger(async_client, monkeypatch):
+    email = "compact-single-trigger@example.com"
+    raw_account_id = "acc_compact_single_trigger"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_payloads: list[dict[str, object]] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del headers, access_token, account_id
+        seen_payloads.append(cast(dict[str, object], payload.to_payload()))
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"role": "user", "content": "hello"},
+                {"type": "compaction_trigger"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 1
+    assert seen_payloads[0]["input"] == [
+        {"role": "user", "content": "hello"},
+        {"type": "compaction_trigger"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_preserves_historical_code_mode_side_effect_pair_before_ordinary_tail(
     async_client, monkeypatch
 ):

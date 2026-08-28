@@ -15,6 +15,7 @@ _TOOL_CALL_TYPE_BY_OUTPUT_TYPE = {
     "function_call_output": "function_call",
     "custom_tool_call_output": "custom_tool_call",
     "apply_patch_call_output": "apply_patch_call",
+    "tool_search_output": "tool_search_call",
 }
 _TOOL_CALL_TYPES = frozenset(_TOOL_CALL_TYPE_BY_OUTPUT_TYPE.values())
 _ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES = frozenset(
@@ -47,6 +48,8 @@ _ACCOUNT_NEUTRAL_INPUT_ITEM_TYPES = frozenset(
         "input_image",
         "input_text",
         "message",
+        "tool_search_call",
+        "tool_search_output",
     }
 )
 _ACCOUNT_NEUTRAL_MESSAGE_CONTENT_TYPES = frozenset(
@@ -92,6 +95,22 @@ _ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS = {
     ),
     "function_call_output": frozenset(
         {"call_id", "caller", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "output", "status", "type"}
+    ),
+    "tool_search_call": frozenset(
+        {"arguments", "call_id", "caller", "execution", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "status", "type"}
+    ),
+    "tool_search_output": frozenset(
+        {
+            "call_id",
+            "caller",
+            "execution",
+            "id",
+            _INTERNAL_CHAT_MESSAGE_METADATA_FIELD,
+            "output",
+            "status",
+            "tools",
+            "type",
+        }
     ),
 }
 _ACCOUNT_NEUTRAL_ITEM_STATUSES = frozenset({"completed", "failed"})
@@ -628,6 +647,9 @@ def _tool_call_is_self_contained(item_type: str, item: Mapping[str, JsonValue]) 
         return _is_nonblank_string(item.get("name")) and isinstance(item.get("arguments"), str)
     if item_type == "custom_tool_call":
         return _is_nonblank_string(item.get("name")) and isinstance(item.get("input"), str)
+    if item_type == "tool_search_call":
+        arguments = item.get("arguments")
+        return isinstance(arguments, dict) and item.get("execution") in (None, "client")
     operation = item.get("operation")
     patch = item.get("patch")
     input_value = item.get("input")
@@ -680,6 +702,8 @@ def _tool_output_is_self_contained(item_type: str, item: Mapping[str, JsonValue]
     output = item.get("output")
     if isinstance(output, str):
         return True
+    if item_type == "tool_search_output":
+        return isinstance(item.get("tools"), list)
     if item_type == "apply_patch_call_output":
         return output is None and item.get("status") in {"completed", "failed"}
     return (

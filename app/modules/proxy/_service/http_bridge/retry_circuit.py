@@ -180,6 +180,12 @@ def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: A
     # began before the settlement cannot adopt the pre-settlement row into
     # a fresh state and resurrect the settled cooldown.
     service._http_bridge_retry_circuit_reconcile_watermarks = {}
+    # Timestamped negative cache for confirmed durable misses: healthy hard
+    # keys have no circuit row, and without this every planning pass pays a
+    # durable read on top of the submit-time load. Entries live for the
+    # planning window only; a row another replica creates after a cached
+    # miss is still enforced at submission while its cooldown runs.
+    service._http_bridge_retry_circuit_planning_misses = {}
 
 
 def _record_http_bridge_retry_circuit_duplicate_suppressed(
@@ -375,6 +381,16 @@ class _HTTPBridgeRetryCircuitMixin:
                     <= _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS
                 ):
                     return
+            missed_at = self._http_bridge_retry_circuit_planning_misses.get(key)
+            if (
+                missed_at is not None
+                and time.monotonic() - missed_at <= _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS
+            ):
+                # A confirmed durable miss within the planning window: a row
+                # another replica created since is still enforced by the
+                # submit-time load while its cooldown runs, so planning does
+                # not need a second round trip per healthy request.
+                return
         probe: Any = _HTTPBridgeRetryCircuitKeyProbe(key=key, request_model=request_model)
         await self._load_http_bridge_retry_circuit(probe)
 
@@ -457,6 +473,10 @@ class _HTTPBridgeRetryCircuitMixin:
         for key, watermark in list(self._http_bridge_retry_circuit_reconcile_watermarks.items()):
             if watermark <= expiry:
                 self._http_bridge_retry_circuit_reconcile_watermarks.pop(key, None)
+        miss_expiry = now - _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS
+        for key, missed_at in list(self._http_bridge_retry_circuit_planning_misses.items()):
+            if missed_at <= miss_expiry:
+                self._http_bridge_retry_circuit_planning_misses.pop(key, None)
         for key, key_lock in list(self._http_bridge_retry_circuit_key_locks.items()):
             if key not in self._http_bridge_retry_circuits and not key_lock.locked():
                 self._http_bridge_retry_circuit_key_locks.pop(key, None)
@@ -542,6 +562,10 @@ class _HTTPBridgeRetryCircuitMixin:
                     local_state is not None
                     and local_state.last_failure_monotonic > local_state.last_durable_load_monotonic
                 )
+                # A confirmed miss past the stale-lookup guards is durable
+                # knowledge worth caching for the planning window; stamped
+                # with the load's start so it expires conservatively.
+                self._http_bridge_retry_circuit_planning_misses[key] = now_monotonic
                 if key in self._http_bridge_retry_circuit_persisted_keys and not locally_updated:
                     self._http_bridge_retry_circuits.pop(key, None)
                     self._http_bridge_retry_circuit_loaded_keys.discard(key)
@@ -608,6 +632,7 @@ class _HTTPBridgeRetryCircuitMixin:
         poison_cooldown_remaining = 0.0
         async with self._http_bridge_retry_circuit_lock:
             self._http_bridge_retry_circuit_persisted_keys.add(key)
+            self._http_bridge_retry_circuit_planning_misses.pop(key, None)
             state = self._http_bridge_retry_circuits.get(key)
             if state is None:
                 state = _HTTPBridgeRetryCircuitState(last_touched_monotonic=now_monotonic)
@@ -724,9 +749,17 @@ class _HTTPBridgeRetryCircuitMixin:
                 )
             )
             poison_cooldown_remaining = max(0.0, state.cooldown_until - now_monotonic)
-        if arm_poison_quarantine and not _http_bridge_session_key_poison_quarantined(self, key):
-            # Fenced on the active-quarantine check so ordinary loads do not
-            # bump the quarantine generation that recovery fences observe.
+        if arm_poison_quarantine and (episode_replaced or not _http_bridge_session_key_poison_quarantined(self, key)):
+            # Skipped only for a truly unchanged episode, so ordinary loads
+            # do not bump the quarantine generation that recovery fences
+            # observe. An adopted foreign write re-arms even while a
+            # quarantine is active: a later durable strike can extend the
+            # cooldown past the old deadline, and leaving that deadline in
+            # place would let the quarantine lapse mid-cooldown — with the
+            # planning cache still fresh — and hand the next half-open probe
+            # the poisoned anchor. The re-arm extends the deadline against
+            # the adopted cooldown and refreshes the poison provenance to
+            # the lineage that now owns the row.
             _quarantine_http_bridge_session(
                 self,
                 session,

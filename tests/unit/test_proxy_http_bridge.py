@@ -35891,6 +35891,78 @@ async def test_a_stale_cached_key_reloads_before_anchor_planning() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_later_durable_opening_re_arms_the_active_quarantine() -> None:
+    # A load adopting a foreign write that extended the cooldown used to
+    # skip the quarantine entirely because one was already active: the old
+    # deadline could then lapse mid-cooldown — with the planning cache still
+    # fresh — and hand the next half-open probe the poisoned anchor. An
+    # adopted foreign write re-arms, extending the deadline against the
+    # adopted cooldown and refreshing the poison provenance; only a truly
+    # unchanged episode skips, keeping recovery fences stable.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-rearm-extended-opening")
+    short_opening = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time() - 10.0,
+    )
+    extended_opening = SimpleNamespace(
+        consecutive_failures=3,
+        cooldown_until_epoch=time.time() + 600.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+    lookup = AsyncMock(side_effect=[short_opening, extended_opening])
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=lookup,
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    assert await service._load_http_bridge_retry_circuit(session) is True
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    first_deadline = entry.quarantined_until
+    first_provenance = entry.poison_generation
+
+    assert await service._load_http_bridge_retry_circuit(session) is True
+
+    assert entry.quarantined_until > first_deadline + 300.0, (
+        "the adopted longer cooldown must extend the active quarantine deadline"
+    )
+    assert entry.poison_generation > first_provenance, (
+        "the re-arm refreshes the poison provenance to the lineage that owns the row"
+    )
+    assert entry.reason == http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_planning_miss_is_cached_for_the_window() -> None:
+    # Healthy hard keys have no circuit row, so every planning pass paid a
+    # durable read on top of the submit-time load. A confirmed miss is
+    # cached for the planning window; a row another replica creates in that
+    # window is still enforced at submission while its cooldown runs.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-planning-miss-cache", None)
+    lookup = AsyncMock(return_value=None)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=lookup,
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    await service._ensure_http_bridge_retry_circuit_loaded_for_key(key, request_model="gpt-5.4")
+    await service._ensure_http_bridge_retry_circuit_loaded_for_key(key, request_model="gpt-5.4")
+
+    assert lookup.await_count == 1, "a confirmed miss within the planning window must not re-read the row"
+
+    cast(Any, service)._http_bridge_retry_circuit_planning_misses[key] = (
+        time.monotonic() - http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS - 1.0
+    )
+    await service._ensure_http_bridge_retry_circuit_loaded_for_key(key, request_model="gpt-5.4")
+
+    assert lookup.await_count == 2, "an expired miss entry must refresh at the next planning pass"
+
+
+@pytest.mark.asyncio
 async def test_a_healthy_key_settle_leaves_no_reconcile_watermark() -> None:
     # Every successful hard-key response settles the circuit; a healthy key
     # with no local state and a confirmed durable miss has nothing a racing

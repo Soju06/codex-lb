@@ -560,6 +560,14 @@
       count alongside the version, so a lagging-clock strike that merged
       without moving the version outranks a supersession that follows it
 
+- [x] 2.118 A load adopting a foreign write while the poison quarantine is
+      active re-arms it against the adopted cooldown and refreshes the
+      provenance; only a truly unchanged episode skips the re-arm
+
+- [x] 2.119 Confirmed durable misses are cached for the planning window,
+      sparing healthy hard keys the planning-time round trip while the
+      submit-time load keeps enforcing any newly created cooldown
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

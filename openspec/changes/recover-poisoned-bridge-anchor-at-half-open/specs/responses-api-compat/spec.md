@@ -96,7 +96,14 @@ finalization otherwise re-raises before the settlement exists.
 A quarantine armed from a local opening MUST be re-armed against the merged
 cooldown when durable persistence returns a longer deadline, so its floor
 covers the cooldown actually in force rather than the local backoff it was
-first computed from.
+first computed from. The load path MUST re-arm the same way: a load that
+adopts a foreign write while the poison quarantine is active extends the
+deadline against the adopted cooldown and refreshes the poison provenance
+to the lineage that now owns the row — otherwise a later durable strike
+could extend the cooldown past the old deadline and the quarantine would
+lapse mid-cooldown with the planning cache still fresh. Only a truly
+unchanged episode skips re-arming, which is what keeps ordinary loads from
+bumping the generation recovery fences observe.
 
 A confirmed durable anchor abandonment MUST settle the retry circuit for that
 key; a settlement that fails after the abandonment confirmed MUST be retried
@@ -225,7 +232,11 @@ another replica opens after this worker's last load is then either still
 cooling — and the submit-time gate suppresses the request before dispatch —
 or refreshed at planning before its expired cooldown can admit a probe, so
 a cached below-threshold or reset row cannot hide a remote opening from
-the anchor decision. When continuity resolution
+the anchor decision. A confirmed durable miss MUST be cached for the same
+planning window, so healthy hard keys do not pay a planning-time round
+trip on top of the submit-time load; a row another replica creates after a
+cached miss is still enforced at submission while its cooldown runs, which
+is what makes the window safe. When continuity resolution
 replaces the incoming key with a different canonical key, the load MUST be
 repeated for that canonical key before the suppression checks consult it,
 so a request arriving through a turn-state, previous-response, or session

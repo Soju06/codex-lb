@@ -484,6 +484,12 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.consecutive_failures = max(0, persisted.consecutive_failures)
                 state.cooldown_until = persisted_cooldown_until
                 state.last_detail = persisted.last_detail
+                if state.consecutive_failures == 0:
+                    # A newer zero-failure row is a durable reset: the episode
+                    # the marker belonged to is over, and the next poison
+                    # episode on this state object must be allowed its one
+                    # abandonment.
+                    state.poison_anchor_cleared = False
             else:
                 state.consecutive_failures = max(state.consecutive_failures, max(0, persisted.consecutive_failures))
                 state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
@@ -580,6 +586,10 @@ class _HTTPBridgeRetryCircuitMixin:
                             state.consecutive_failures = max(0, persisted.consecutive_failures)
                             state.cooldown_until = persisted_cooldown_until
                             state.last_detail = persisted.last_detail
+                            if state.consecutive_failures == 0:
+                                # A newer zero-failure row is a durable
+                                # reset ending the marker's episode.
+                                state.poison_anchor_cleared = False
                         else:
                             state.consecutive_failures = max(state.consecutive_failures, persisted.consecutive_failures)
                             state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
@@ -759,7 +769,19 @@ class _HTTPBridgeRetryCircuitMixin:
                 exc_info=True,
             )
             return False
-        return persisted is not None and persisted.consecutive_failures >= effective_threshold
+        if persisted is None or persisted.consecutive_failures < effective_threshold:
+            return False
+        # Re-check the live episode after the durable await: a multiplexed
+        # sibling can complete, settle the registry, and reset the row while
+        # the lookup was in flight, and the stale snapshot must not authorize
+        # a clear against the fresh anchor that completion persisted.
+        async with self._http_bridge_retry_circuit_lock:
+            state = self._http_bridge_retry_circuits.get(session.key)
+            return (
+                state is not None
+                and state.consecutive_failures >= effective_threshold
+                and not state.poison_anchor_cleared
+            )
 
     async def _http_bridge_mark_poison_anchor_cleared(self: Any, session: _HTTPBridgeSession) -> None:
         """Record that this episode's poisoned anchor has been abandoned."""

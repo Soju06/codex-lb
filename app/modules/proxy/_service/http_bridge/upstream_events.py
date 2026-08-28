@@ -64,7 +64,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
     _await_task_deferring_cancellation,
     _http_bridge_abandonment_may_settle_circuit,
-    _http_bridge_continuity_bound_without_safe_replay,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
@@ -2183,8 +2182,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # dispatch, so charging it here would let two safely
                 # replayable requests open the circuit between them and clear
                 # the anchor both of them could still have used.
-                if grouped_request_state.response_event_count != 0 or not (
-                    _http_bridge_continuity_bound_without_safe_replay(grouped_request_state)
+                if grouped_request_state.response_event_count != 0 or _http_bridge_request_state_holds_safe_replay(
+                    grouped_request_state
                 ):
                     continue
                 grouped_terminal_error = (
@@ -2353,19 +2352,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 name=f"http-bridge-grouped-terminal-settlement-{session.durable_session_id}",
             )
             grouped_error, grouped_cancellation = await _await_task_deferring_cancellation(grouped_settlement_task)
-            if (
-                grouped_poison_detail is not None
-                and grouped_poison_strike_failures > 0
-                # Same live-episode consult as the single terminal path: a
-                # sibling settle during grouped publication vetoes the clear.
-                and await self._http_bridge_poison_anchor_clear_owed(
-                    session,
-                    consecutive_failures=grouped_poison_strike_failures,
-                    configured_threshold=(
-                        _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-                    ),
-                )
-            ):
+            if grouped_poison_detail is not None and grouped_poison_strike_failures > 0:
                 # The grouped frames have been published by here, so this mirrors
                 # the single-request ordering: the strikes precede delivery, the
                 # durable clear follows it.
@@ -2378,11 +2365,30 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # for reuse once the local quarantine expired. Defer the
                 # cancellation across the write the same way, then re-raise it
                 # below unchanged. The clear is internally exception-safe.
-                grouped_clear_task = asyncio.create_task(
-                    _abandon_durable_http_bridge_continuity(
+                grouped_clear_detail = grouped_poison_detail
+                grouped_clear_strike_failures = grouped_poison_strike_failures
+
+                async def _consult_and_clear_grouped_anchor() -> bool:
+                    # The episode consult is a durable await of its own: run
+                    # it inside the same cancellation-deferred task as the
+                    # clear, or a reader cancellation landing mid-consult
+                    # escapes with the grouped requests already finalized and
+                    # no retirement left to retry the abandonment. The
+                    # consult reads the live registered episode, so a
+                    # sibling settle during grouped publication vetoes the
+                    # clear.
+                    if not await self._http_bridge_poison_anchor_clear_owed(
+                        session,
+                        consecutive_failures=grouped_clear_strike_failures,
+                        configured_threshold=(
+                            _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                        ),
+                    ):
+                        return False
+                    return await _abandon_durable_http_bridge_continuity(
                         self,
                         session,
-                        detail=grouped_poison_detail,
+                        detail=grouped_clear_detail,
                         # A mixed group can hold a member with a verified safe
                         # replay whose dispatch claims the circuit generation;
                         # settling under it would remove the fence it depends
@@ -2390,7 +2396,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                         settle_circuit=_http_bridge_abandonment_may_settle_circuit(
                             grouped_previous_response_request_states
                         ),
-                    ),
+                    )
+
+                grouped_clear_task = asyncio.create_task(
+                    _consult_and_clear_grouped_anchor(),
                     name=f"http-bridge-grouped-anchor-clear-{session.durable_session_id}",
                 )
                 grouped_clear_result, grouped_clear_cancellation = await _await_task_deferring_cancellation(
@@ -3209,7 +3218,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 error_code is not None
                 and terminal_request_state is not None
                 and terminal_request_state.response_event_count == 0
-                and _http_bridge_continuity_bound_without_safe_replay(terminal_request_state)
+                # Only a held safe replay excludes the strike: an unanchored
+                # request with no replay is stranded like any other, and the
+                # delta spec's no-response/no-safe-replay rule applies to it
+                # the same way the retirement funnels apply it.
+                and not _http_bridge_request_state_holds_safe_replay(terminal_request_state)
             ):
                 # An upstream terminal frame that fails the request before any
                 # response event is the same pre-response failure the circuit

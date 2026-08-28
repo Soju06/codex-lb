@@ -245,6 +245,23 @@
       cancellation-safe structure as the clear, so a cancellation escaping
       its durable lookup still finalizes the answered request
 
+- [x] 2.41 The episode consult re-checks the live registered episode after
+      its durable lookup, so a sibling settle landing mid-lookup vetoes the
+      clear the stale snapshot would have authorized
+
+- [x] 2.42 A merge that adopts a newer zero-failure durable reset also
+      clears the one-clear marker: the marker belonged to the episode the
+      reset ended, and the next poison episode owes its own abandonment
+
+- [x] 2.43 The terminal and grouped strike gates exclude only a held safe
+      replay, so an unanchored no-replay terminal failure consumes its
+      pre-response strike like the retirement funnels already count it
+
+- [x] 2.44 The grouped episode consult runs inside the same
+      cancellation-deferred task as the grouped clear, so a reader
+      cancellation landing mid-consult cannot strand the poisoned anchor
+      after the grouped requests were already finalized
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

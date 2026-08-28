@@ -279,6 +279,37 @@ def test_build_complete_replay_payload_rejects_divergent_unanchored_history() ->
     )
 
 
+def test_build_complete_replay_payload_allows_anchored_delta_with_unanchored_mode() -> None:
+    turn = _turn(
+        1,
+        parent_response_id=None,
+        response_id="resp_1",
+        request_input=[{"type": "message", "role": "user", "content": "durable history"}],
+        output=[
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "answer"}],
+            }
+        ],
+    )
+
+    payload = build_complete_replay_payload(
+        [turn],
+        continuation_request_text=json.dumps(
+            {
+                "type": "response.create",
+                "previous_response_id": "resp_1",
+                "input": [{"type": "message", "role": "user", "content": "follow up"}],
+            }
+        ),
+        allow_unanchored_continuation=True,
+    )
+
+    assert payload is not None
+
+
 def test_build_complete_replay_payload_rejects_account_scoped_top_level_fields() -> None:
     turns = [
         _turn(

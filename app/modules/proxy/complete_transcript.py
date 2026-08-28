@@ -251,7 +251,7 @@ def build_complete_replay_payload(
             continuation_input = continuation_input[len(client_input_history) :]
         elif client_input_history and _items_prefix_matches(client_input_history, continuation_input):
             return None
-        elif allow_unanchored_continuation:
+        elif allow_unanchored_continuation and continuation_previous_response_id in (None, ""):
             # An unanchored continuation must prove how its input relates to
             # the durable prefix. If the client compacted or otherwise
             # diverged from that prefix, concatenating both histories would

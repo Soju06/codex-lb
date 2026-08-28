@@ -33325,40 +33325,47 @@ async def test_failed_anchor_abandonment_leaves_the_circuit_cooling() -> None:
 
 
 @pytest.mark.asyncio
-async def test_in_flight_strike_persist_cannot_resurrect_a_settled_circuit() -> None:
+async def test_settle_waits_for_the_in_flight_strike_write() -> None:
     # Production shape: the circuit opens and the anchor is abandoned in the
-    # same instant, while the strike's durable write is still in flight. The
-    # clear correctly refuses an unfenced delete (it observed no row), so the
-    # write lands after the settle and resurrects the row — observed live as
-    # recurring `consecutive_failures=2` cooldowns surviving a completed
-    # clear. The in-flight writer must undo itself: after its write lands it
-    # re-checks the registry and, finding the key settled, deletes exactly
-    # the row it created, fenced on that write's own updated_at_epoch.
+    # same instant, while the strike's durable write is still in flight.
+    # Persist and settle for one key are serialized now, so the settle waits
+    # for the write to land and then deletes the row it produced under its
+    # version fence — observed live before this as recurring
+    # `consecutive_failures=2` cooldowns surviving a completed clear.
     service, session, _first = _make_terminal_error_bridge_fixture(
-        request_id="req-inflight-resurrect",
-        key_value="sid-inflight-resurrect",
+        request_id="req-inflight-serialized",
+        key_value="sid-inflight-serialized",
         response_event_count=0,
     )
-    session.durable_session_id = "durable-inflight-resurrect"
+    session.durable_session_id = "durable-inflight-serialized"
     session.durable_owner_epoch = 1
     persist_entered = asyncio.Event()
     release_persist = asyncio.Event()
-    persisted_row = SimpleNamespace(
-        consecutive_failures=2,
-        cooldown_until_epoch=time.time() + 60.0,
-        last_detail="stream_incomplete",
-        updated_at_epoch=time.time(),
-    )
+    holder: dict[str, Any] = {"row": None}
 
     async def blocking_persist(**kwargs: Any) -> Any:
-        del kwargs
         persist_entered.set()
         await release_persist.wait()
-        return persisted_row
+        holder["row"] = SimpleNamespace(
+            consecutive_failures=kwargs["consecutive_failures"],
+            cooldown_until_epoch=kwargs["cooldown_until_epoch"],
+            last_detail=kwargs["last_detail"],
+            updated_at_epoch=kwargs["updated_at_epoch"],
+        )
+        return holder["row"]
 
-    clear_retry_circuit = AsyncMock(return_value=None)
+    async def lookup(**kwargs: Any) -> Any:
+        del kwargs
+        return holder["row"]
+
+    async def clear_row(**kwargs: Any) -> None:
+        del kwargs
+        holder["row"] = None
+        return None
+
+    clear_retry_circuit = AsyncMock(side_effect=clear_row)
     service._durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
+        lookup_retry_circuit=AsyncMock(side_effect=lookup),
         persist_retry_circuit=blocking_persist,
         clear_retry_circuit=clear_retry_circuit,
         rebind_session_account=AsyncMock(return_value=True),
@@ -33367,101 +33374,55 @@ async def test_in_flight_strike_persist_cannot_resurrect_a_settled_circuit() -> 
     strike = asyncio.create_task(service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete"))
     await asyncio.wait_for(persist_entered.wait(), timeout=2.0)
 
-    await service._clear_http_bridge_retry_circuit(session)
-    assert session.key not in cast(Any, service)._http_bridge_retry_circuits
+    settle = asyncio.create_task(service._clear_http_bridge_retry_circuit(session))
+    await asyncio.sleep(0.05)
+    assert settle.done() is False, "the settle must wait for the in-flight strike write, not race it"
     clear_retry_circuit.assert_not_awaited()
 
     release_persist.set()
     await asyncio.wait_for(strike, timeout=2.0)
+    await asyncio.wait_for(settle, timeout=2.0)
 
     clear_retry_circuit.assert_awaited_once()
     assert clear_retry_circuit.await_args is not None
-    assert clear_retry_circuit.await_args.kwargs["expected_updated_at_epoch"] == persisted_row.updated_at_epoch, (
-        "the compensating delete must fence on exactly the row this write created"
-    )
+    written_row_epoch = clear_retry_circuit.await_args.kwargs["expected_updated_at_epoch"]
+    assert written_row_epoch is not None, "the settle deletes the landed write under its version fence"
+    assert holder["row"] is None
     assert session.key not in cast(Any, service)._http_bridge_retry_circuits
 
 
 @pytest.mark.asyncio
-async def test_compensating_delete_leaves_a_new_failure_episodes_row_alone() -> None:
-    # A genuinely new failure episode that registers under the key while the
-    # settled episode's write is still in flight owns the durable row from
-    # then on: the old writer must skip its compensating delete and let the
-    # new episode's own persist supersede the row.
+async def test_a_superseded_strike_write_is_not_written() -> None:
+    # A strike whose episode was settled (or replaced) before its writer got
+    # the key lock belongs to a finished episode. Writing it would merge that
+    # stale failure into whatever episode owns the durable row now, so the
+    # writer re-checks registration under the key lock and drops the write.
     service, session, _first = _make_terminal_error_bridge_fixture(
-        request_id="req-new-episode",
-        key_value="sid-new-episode",
+        request_id="req-superseded-write",
+        key_value="sid-superseded-write",
         response_event_count=0,
     )
-    session.durable_session_id = "durable-new-episode"
-    session.durable_owner_epoch = 1
-    persist_calls = 0
-    persist_entered = asyncio.Event()
-    release_persist = asyncio.Event()
-    persisted_row = SimpleNamespace(
-        consecutive_failures=1,
-        cooldown_until_epoch=time.time(),
-        last_detail="stream_incomplete",
-        updated_at_epoch=time.time(),
-    )
-
-    async def first_call_blocking_persist(**kwargs: Any) -> Any:
-        del kwargs
-        nonlocal persist_calls
-        persist_calls += 1
-        if persist_calls == 1:
-            persist_entered.set()
-            await release_persist.wait()
-        return persisted_row
-
-    clear_retry_circuit = AsyncMock(return_value=None)
+    persist_retry_circuit = AsyncMock(return_value=None)
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=first_call_blocking_persist,
-        clear_retry_circuit=clear_retry_circuit,
-        rebind_session_account=AsyncMock(return_value=True),
+        persist_retry_circuit=persist_retry_circuit,
+        clear_retry_circuit=AsyncMock(return_value=None),
     )
+    detached = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=time.monotonic())
+    detached.consecutive_failures = 2
 
-    strike = asyncio.create_task(service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete"))
-    await asyncio.wait_for(persist_entered.wait(), timeout=2.0)
+    await service._persist_http_bridge_retry_circuit(session, detached)
+    persist_retry_circuit.assert_not_awaited()
 
-    await service._clear_http_bridge_retry_circuit(session)
-    assert session.key not in cast(Any, service)._http_bridge_retry_circuits
+    replacement = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=time.monotonic())
+    replacement.consecutive_failures = 1
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = replacement
 
-    # The new episode registers before the old episode's write lands.
-    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
-    assert session.key in cast(Any, service)._http_bridge_retry_circuits
+    await service._persist_http_bridge_retry_circuit(session, detached)
+    persist_retry_circuit.assert_not_awaited()
 
-    release_persist.set()
-    await asyncio.wait_for(strike, timeout=2.0)
-
-    clear_retry_circuit.assert_not_awaited()
-    assert session.key in cast(Any, service)._http_bridge_retry_circuits, (
-        "the new episode's circuit must survive the old writer's landing"
-    )
-
-
-@pytest.mark.asyncio
-async def test_ordinary_circuit_clear_still_respects_the_version_fence() -> None:
-    # The fence still protects a worker that observed nothing from clobbering a
-    # row another replica just wrote. Only a caller that removed the cause may
-    # bypass it.
-    service, session, _first = _make_terminal_error_bridge_fixture(
-        request_id="req-fence-kept",
-        key_value="sid-fence-kept",
-        response_event_count=0,
-    )
-    clear_retry_circuit = AsyncMock(return_value=None)
-    service._durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(return_value=None),
-        clear_retry_circuit=clear_retry_circuit,
-    )
-
-    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
-    await service._clear_http_bridge_retry_circuit(session)
-
-    clear_retry_circuit.assert_not_awaited()
+    await service._persist_http_bridge_retry_circuit(session, replacement)
+    persist_retry_circuit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -33695,6 +33656,13 @@ def test_abandonment_settles_the_circuit_unless_a_safe_replay_holds_it() -> None
     )
     assert may_settle([unanchored]) is True
     assert may_settle([unanchored, _state(safe_replay=True)]) is False
+
+    # A consumed replay is no replay: the retry functions refuse a second
+    # one, so a request whose permitted replay already failed is stranded
+    # and must not keep the circuit from settling.
+    consumed = _state(safe_replay=True)
+    consumed.replay_count = 1
+    assert may_settle([consumed]) is True
 
 
 @pytest.mark.asyncio

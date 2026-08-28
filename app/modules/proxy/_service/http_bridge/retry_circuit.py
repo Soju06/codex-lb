@@ -135,6 +135,7 @@ def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: A
     service._http_bridge_retry_circuit_loaded_keys = set()
     service._http_bridge_retry_circuit_persisted_keys = set()
     service._http_bridge_retry_circuit_lock = anyio.Lock()
+    service._http_bridge_retry_circuit_key_locks = {}
 
 
 def _record_http_bridge_retry_circuit_duplicate_suppressed(
@@ -362,30 +363,57 @@ class _HTTPBridgeRetryCircuitMixin:
             self._http_bridge_retry_circuits.pop(key, None)
             self._http_bridge_retry_circuit_loaded_keys.discard(key)
             self._http_bridge_retry_circuit_persisted_keys.discard(key)
+        for key, key_lock in list(self._http_bridge_retry_circuit_key_locks.items()):
+            if key not in self._http_bridge_retry_circuits and not key_lock.locked():
+                self._http_bridge_retry_circuit_key_locks.pop(key, None)
+
+    async def _acquire_http_bridge_retry_circuit_key_lock(
+        self: Any,
+        key: _HTTPBridgeSessionKey,
+    ) -> asyncio.Lock:
+        """Serialize durable circuit writes and settles for one key.
+
+        A strike write and a settle for the same key must not interleave
+        across their durable awaits: a settle landing under an in-flight
+        write resurrected the row, and a stale write landing after a settle
+        merged a finished episode's strike into whatever episode owned the
+        row next. The lock is per key, so unrelated keys never wait on each
+        other's durable I/O. The acquire loop re-checks registration because
+        pruning may drop an idle lock between the fetch and the acquire.
+        """
+        while True:
+            async with self._http_bridge_retry_circuit_lock:
+                key_lock = self._http_bridge_retry_circuit_key_locks.setdefault(key, asyncio.Lock())
+            await key_lock.acquire()
+            async with self._http_bridge_retry_circuit_lock:
+                if self._http_bridge_retry_circuit_key_locks.get(key) is key_lock:
+                    return key_lock
+            key_lock.release()
 
     async def _load_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> bool:
-        if session.key.strength != "hard":
+        key = session.key
+        if key.strength != "hard":
             return True
 
         now_monotonic = time.monotonic()
         async with self._http_bridge_retry_circuit_lock:
             self._prune_http_bridge_retry_circuit_state(now_monotonic)
-            local_state = self._http_bridge_retry_circuits.get(session.key)
+            local_state = self._http_bridge_retry_circuits.get(key)
             if local_state is not None:
                 local_state.last_touched_monotonic = now_monotonic
         try:
             persisted = await self._durable_bridge.lookup_retry_circuit(
-                session_key_kind=session.key.affinity_kind,
-                session_key_value=session.key.affinity_key,
-                api_key_id=session.key.api_key_id,
+                session_key_kind=key.affinity_kind,
+                session_key_value=key.affinity_key,
+                api_key_id=key.api_key_id,
             )
         except Exception:
             if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
                 http_bridge_retry_circuit_total.labels(outcome="lookup_failed").inc()
             logger.warning(
                 "Failed to load persisted HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
-                session.key.affinity_kind,
-                _hash_identifier(session.key.affinity_key),
+                key.affinity_kind,
+                _hash_identifier(key.affinity_key),
                 exc_info=True,
             )
             return False
@@ -396,33 +424,33 @@ class _HTTPBridgeRetryCircuitMixin:
             # durable read. That local circuit is the only protection against
             # immediately replaying the same failing upstream request.
             async with self._http_bridge_retry_circuit_lock:
-                local_state = self._http_bridge_retry_circuits.get(session.key)
+                local_state = self._http_bridge_retry_circuits.get(key)
                 locally_updated = bool(
                     local_state is not None
                     and local_state.last_failure_monotonic > local_state.last_durable_load_monotonic
                 )
-                if session.key in self._http_bridge_retry_circuit_persisted_keys and not locally_updated:
-                    self._http_bridge_retry_circuits.pop(session.key, None)
-                    self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
-                    self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
+                if key in self._http_bridge_retry_circuit_persisted_keys and not locally_updated:
+                    self._http_bridge_retry_circuits.pop(key, None)
+                    self._http_bridge_retry_circuit_loaded_keys.discard(key)
+                    self._http_bridge_retry_circuit_persisted_keys.discard(key)
             return True
 
         now_epoch = time.time()
         if now_epoch - persisted.updated_at_epoch > DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS:
             async with self._http_bridge_retry_circuit_lock:
-                stale_local_state = self._http_bridge_retry_circuits.get(session.key)
+                stale_local_state = self._http_bridge_retry_circuits.get(key)
             try:
                 await self._durable_bridge.purge_retry_circuit(
-                    session_key_kind=session.key.affinity_kind,
-                    session_key_value=session.key.affinity_key,
-                    api_key_id=session.key.api_key_id,
+                    session_key_kind=key.affinity_kind,
+                    session_key_value=key.affinity_key,
+                    api_key_id=key.api_key_id,
                     expected_updated_at_epoch=persisted.updated_at_epoch,
                 )
             except Exception:
                 logger.warning(
                     "Failed to remove stale HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
-                    session.key.affinity_kind,
-                    _hash_identifier(session.key.affinity_key),
+                    key.affinity_kind,
+                    _hash_identifier(key.affinity_key),
                     exc_info=True,
                 )
                 # Keep a newer process-local circuit when persistence is
@@ -430,7 +458,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 # circuit even though the expired durable row remains.
                 return False
             async with self._http_bridge_retry_circuit_lock:
-                current_local_state = self._http_bridge_retry_circuits.get(session.key)
+                current_local_state = self._http_bridge_retry_circuits.get(key)
                 local_state_is_newer = bool(
                     current_local_state is not None
                     and current_local_state.last_failure_monotonic > current_local_state.last_durable_load_monotonic
@@ -438,19 +466,19 @@ class _HTTPBridgeRetryCircuitMixin:
                 if current_local_state is None or (
                     current_local_state is stale_local_state and not local_state_is_newer
                 ):
-                    self._http_bridge_retry_circuits.pop(session.key, None)
-                    self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
-                    self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
+                    self._http_bridge_retry_circuits.pop(key, None)
+                    self._http_bridge_retry_circuit_loaded_keys.discard(key)
+                    self._http_bridge_retry_circuit_persisted_keys.discard(key)
             return True
 
         cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
         persisted_cooldown_until = now_monotonic + cooldown_remaining
         async with self._http_bridge_retry_circuit_lock:
-            self._http_bridge_retry_circuit_persisted_keys.add(session.key)
-            state = self._http_bridge_retry_circuits.get(session.key)
+            self._http_bridge_retry_circuit_persisted_keys.add(key)
+            state = self._http_bridge_retry_circuits.get(key)
             if state is None:
                 state = _HTTPBridgeRetryCircuitState(last_touched_monotonic=now_monotonic)
-                self._http_bridge_retry_circuits[session.key] = state
+                self._http_bridge_retry_circuits[key] = state
             local_failure_is_newer = state.last_failure_monotonic > state.last_durable_load_monotonic
             if persisted.updated_at_epoch > state.persisted_updated_at_epoch and not local_failure_is_newer:
                 state.consecutive_failures = max(0, persisted.consecutive_failures)
@@ -473,7 +501,7 @@ class _HTTPBridgeRetryCircuitMixin:
             state.persisted_updated_at_epoch = max(state.persisted_updated_at_epoch, persisted.updated_at_epoch)
             state.last_touched_monotonic = now_monotonic
             state.last_durable_load_monotonic = now_monotonic
-            self._http_bridge_retry_circuit_loaded_keys.add(session.key)
+            self._http_bridge_retry_circuit_loaded_keys.add(key)
         return True
 
     async def _persist_http_bridge_retry_circuit(
@@ -484,7 +512,33 @@ class _HTTPBridgeRetryCircuitMixin:
         now_monotonic = time.monotonic()
         now_wall = time.time()
         threshold = max(1, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD)
+        key_lock = await self._acquire_http_bridge_retry_circuit_key_lock(session.key)
+        try:
+            await self._persist_http_bridge_retry_circuit_serialized(
+                session,
+                state,
+                now_monotonic=now_monotonic,
+                now_wall=now_wall,
+                threshold=threshold,
+            )
+        finally:
+            key_lock.release()
+
+    async def _persist_http_bridge_retry_circuit_serialized(
+        self: Any,
+        session: _HTTPBridgeSession,
+        state: _HTTPBridgeRetryCircuitState,
+        *,
+        now_monotonic: float,
+        now_wall: float,
+        threshold: int,
+    ) -> None:
         async with self._http_bridge_retry_circuit_lock:
+            # Re-checked under the key lock: a settle or a replacement
+            # episode that took the key while this writer waited means this
+            # strike belongs to a finished episode, and writing it would
+            # merge that stale failure into whatever episode owns the row
+            # now.
             if self._http_bridge_retry_circuits.get(session.key) is not state:
                 return
             consecutive_failures = state.consecutive_failures
@@ -518,7 +572,6 @@ class _HTTPBridgeRetryCircuitMixin:
             )
             if persisted is not None:
                 persisted_cooldown_until = now_monotonic + max(0.0, persisted.cooldown_until_epoch - now_wall)
-                cleared_while_write_in_flight = False
                 async with self._http_bridge_retry_circuit_lock:
                     current = self._http_bridge_retry_circuits.get(session.key)
                     if current is state:
@@ -551,30 +604,6 @@ class _HTTPBridgeRetryCircuitMixin:
                         state.last_durable_load_monotonic = max(
                             state.last_durable_load_monotonic,
                             now_monotonic,
-                        )
-                    elif current is None:
-                        cleared_while_write_in_flight = True
-                if cleared_while_write_in_flight:
-                    # The key was settled while this write was in flight, so
-                    # the row this write just (re)created is a resurrected
-                    # circuit for a cause the clear already removed. Undo
-                    # exactly our own write: the fence on this write's epoch
-                    # cannot touch a newer episode's row. A different state
-                    # object under the key is such a new episode — its own
-                    # persist supersedes this row, so it is left alone above.
-                    try:
-                        await self._durable_bridge.clear_retry_circuit(
-                            session_key_kind=session.key.affinity_kind,
-                            session_key_value=session.key.affinity_key,
-                            api_key_id=session.key.api_key_id,
-                            expected_updated_at_epoch=persisted.updated_at_epoch,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "Failed to undo resurrected HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
-                            session.key.affinity_kind,
-                            _hash_identifier(session.key.affinity_key),
-                            exc_info=True,
                         )
             async with self._http_bridge_retry_circuit_lock:
                 if self._http_bridge_retry_circuits.get(session.key) is state:
@@ -1038,14 +1067,25 @@ class _HTTPBridgeRetryCircuitMixin:
         ``_persist_http_bridge_retry_circuit`` re-checks the registry after
         its durable write lands and deletes exactly the row it created.
         """
-        if session.key.strength != "hard":
+        key = session.key
+        if key.strength != "hard":
             return
+        key_lock = await self._acquire_http_bridge_retry_circuit_key_lock(key)
+        try:
+            await self._clear_http_bridge_retry_circuit_serialized(session)
+        finally:
+            key_lock.release()
 
+    async def _clear_http_bridge_retry_circuit_serialized(
+        self: Any,
+        session: _HTTPBridgeSession,
+    ) -> None:
+        key = session.key
         durable_load_succeeded = await self._load_http_bridge_retry_circuit(session)
         async with self._http_bridge_retry_circuit_lock:
-            state = self._http_bridge_retry_circuits.pop(session.key, None)
-            self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
-            self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
+            state = self._http_bridge_retry_circuits.pop(key, None)
+            self._http_bridge_retry_circuit_loaded_keys.discard(key)
+            self._http_bridge_retry_circuit_persisted_keys.discard(key)
             expected_updated_at_epoch = (
                 state.persisted_updated_at_epoch if state is not None and state.persisted_updated_at_epoch > 0 else None
             )
@@ -1060,16 +1100,16 @@ class _HTTPBridgeRetryCircuitMixin:
             # preceding lookup failed; a successful request should settle
             # a previously persisted circuit after a transient read error.
             await self._durable_bridge.clear_retry_circuit(
-                session_key_kind=session.key.affinity_kind,
-                session_key_value=session.key.affinity_key,
-                api_key_id=session.key.api_key_id,
+                session_key_kind=key.affinity_kind,
+                session_key_value=key.affinity_key,
+                api_key_id=key.api_key_id,
                 expected_updated_at_epoch=expected_updated_at_epoch,
             )
         except Exception:
             logger.warning(
                 "Failed to clear persisted HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
-                session.key.affinity_kind,
-                _hash_identifier(session.key.affinity_key),
+                key.affinity_kind,
+                _hash_identifier(key.affinity_key),
                 exc_info=True,
             )
             # A fenced delete failing means a durable row this worker wrote
@@ -1083,10 +1123,10 @@ class _HTTPBridgeRetryCircuitMixin:
             # any row and keeps its old settle-anyway semantics.
             if state is not None and expected_updated_at_epoch is not None:
                 async with self._http_bridge_retry_circuit_lock:
-                    if self._http_bridge_retry_circuits.get(session.key) is None:
-                        self._http_bridge_retry_circuits[session.key] = state
-                        self._http_bridge_retry_circuit_loaded_keys.add(session.key)
-                        self._http_bridge_retry_circuit_persisted_keys.add(session.key)
+                    if self._http_bridge_retry_circuits.get(key) is None:
+                        self._http_bridge_retry_circuits[key] = state
+                        self._http_bridge_retry_circuit_loaded_keys.add(key)
+                        self._http_bridge_retry_circuit_persisted_keys.add(key)
                 return
         if state is None:
             return
@@ -1094,7 +1134,7 @@ class _HTTPBridgeRetryCircuitMixin:
             http_bridge_retry_circuit_total.labels(outcome="reset").inc()
         logger.info(
             "http_bridge_retry_circuit event=reset bridge_kind=%s bridge_key=%s failures=%s",
-            session.key.affinity_kind,
-            _hash_identifier(session.key.affinity_key),
+            key.affinity_kind,
+            _hash_identifier(key.affinity_key),
             state.consecutive_failures,
         )

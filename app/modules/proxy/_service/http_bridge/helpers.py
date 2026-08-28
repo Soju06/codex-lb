@@ -866,17 +866,23 @@ def _http_bridge_retry_circuit_attempt_selection_for_pending_requests(
 def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketRequestState) -> bool:
     """Return whether retrying would require replaying an unsafe continuation."""
     if request_state.previous_response_id is not None:
-        return not (request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text)
-    return request_state.hard_continuity_anchor and not (
-        request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
-    )
+        return not _http_bridge_request_state_holds_safe_replay(request_state)
+    return request_state.hard_continuity_anchor and not _http_bridge_request_state_holds_safe_replay(request_state)
 
 
 def _http_bridge_request_state_holds_safe_replay(request_state: Any) -> bool:
-    """Whether the request still holds a verified safe replay to protect."""
+    """Whether the request still holds a verified safe replay to protect.
+
+    Holding one means the proof fields are set AND the one permitted replay is
+    still available. ``_retry_http_bridge_request_on_fresh_upstream`` leaves
+    the proof fields in place after consuming the replay, so a request whose
+    permitted replay already failed is stranded like any other: it must strike
+    the circuit and must not keep an abandonment from settling it.
+    """
     return bool(
         getattr(request_state, "fresh_upstream_request_is_retry_safe", False)
         and getattr(request_state, "fresh_upstream_request_text", None)
+        and getattr(request_state, "replay_count", 0) == 0
     )
 
 

@@ -209,6 +209,21 @@
       opportunity instead of a later load resurrecting the surviving row as
       a fresh cooldown
 
+- [x] 2.33 A completed verified stale-anchor replay deliberately keeps the
+      source circuit and its durable row (four stale-owner replay variants
+      pin this), so the one-clear marker stays process-local; the accepted
+      residual is an abandonment advanced by one strike on a process that
+      rehydrated the row, against a key already failing eventlessly
+
+- [x] 2.34 Holding a safe replay requires the replay to still be available:
+      a request whose one permitted replay already failed is stranded like
+      any other and strikes and settles normally
+
+- [x] 2.35 Strike writes and settles for one key are serialized across their
+      durable awaits, and a superseded writer drops its write instead of
+      merging a finished episode's strike into the replacement row; the
+      compensating post-write delete this replaces is removed
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

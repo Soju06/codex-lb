@@ -78,20 +78,21 @@ fenced or failed proves nothing and MUST leave the cooldown running, and so
 does one whose requests can still be replayed safely: such a request is about
 to be retried and claims the circuit's generation at dispatch, so the circuit
 must survive for it. A safely replayable request is the only thing that may
-hold the circuit open, so an abandonment covering no live request MUST settle:
+hold the circuit open, and a consumed replay is no replay: the one permitted
+replay's failure leaves the request stranded like any other, striking and
+settling normally. An abandonment covering no live request MUST settle:
 terminal notification drains the pending set before retirement, so the
 funnels routinely abandon a poisoned anchor with a pre-drain count and no
 request states at all, and nothing is holding the generation there.
 
 A settle only removes rows it holds evidence for: the version fence protects a
 row another writer created, and a worker that observed no durable row deletes
-nothing. The shape that used to defeat this — a circuit opened and remediated
-in the same instant, whose strike write is still in flight when the settle
-runs — is owned by the writer instead. After its durable write lands, the
-writer MUST re-check the local registry and, when the key was settled while
-the write was in flight, delete exactly the row that write created, fenced on
-that write's own update time. A write that lands under a key already
-re-opened by a newer failure episode MUST leave the new episode's row alone.
+nothing. A circuit opened and remediated in the same instant cannot defeat
+this, because strike writes and settles for one key are serialized: the
+settle waits for the in-flight write to land and then deletes the row it
+produced under its version fence, and a writer that finds its episode settled
+or replaced when its turn comes drops the write instead of merging a finished
+episode's strike into the row's current owner.
 
 Once the key is quarantined for a poisoned anchor, the local previous-response
 rebind MUST NOT re-attach to the rejected anchor. The quarantine registry is
@@ -117,7 +118,10 @@ using exponential backoff from sixty seconds up to ten minutes. Clean-close
 failures MUST cap their cooldown at thirty seconds. The proxy MUST persist
 failure count, cooldown deadline, last failure detail, and update time in the
 `http_bridge_retry_circuits` table and MUST merge conflict updates so concurrent
-replicas cannot shorten an existing cooldown.
+replicas cannot shorten an existing cooldown. Strike writes and settles for one
+key MUST be serialized across their durable awaits, and a write whose episode
+was settled or replaced while it waited MUST be dropped rather than merged
+into the episode that owns the row now.
 
 When the cooldown expires, the proxy MUST admit exactly one probe request and
 MUST keep suppressing other non-bypassed requests for that key while that
@@ -375,7 +379,7 @@ Quarantine state MUST be bounded and self-recovering: it is in-memory and sessio
 
 A quarantine armed for reason `retry_circuit_poisoned_anchor` MUST NOT have that reason replaced by a weaker session-scoped fence while it is still active: the registry holds one entry per key, and the wedged-reattach and repeated-eventless fences carry no evidence about the anchor, so letting either overwrite the reason erases the only record that the anchor was proven dead.
 
-The durable anchor abandonment MUST use the same capped threshold as the rest of this capability, in every funnel that can reach it. Comparing the raw configured setting in the retirement funnels leaves the poisoned anchor stored while the circuit is already cooling on it, which is the unreachability this change exists to remove. One poisoned anchor MUST be abandoned once per episode; a fenced or failed abandonment leaves it owed so the next strike retries. An abandonment is owed only while its failure episode is still the registered one: a circuit settled by a concurrent success ends the episode, and a stale strike's captured count MUST NOT clear the fresh anchor that success persisted. A retired request that still holds a safe replay MUST NOT strike the circuit or trigger the abandonment on any funnel, matching the terminal and grouped paths; a pre-drain retirement handoff with no request states keeps striking.
+The durable anchor abandonment MUST use the same capped threshold as the rest of this capability, in every funnel that can reach it. Comparing the raw configured setting in the retirement funnels leaves the poisoned anchor stored while the circuit is already cooling on it, which is the unreachability this change exists to remove. One poisoned anchor MUST be abandoned once per episode; a fenced or failed abandonment leaves it owed so the next strike retries. An abandonment is owed only while its failure episode is still the registered one: a circuit settled by a concurrent success ends the episode, and a stale strike's captured count MUST NOT clear the fresh anchor that success persisted. A retired request that still holds a safe replay MUST NOT strike the circuit or trigger the abandonment on any funnel, matching the terminal and grouped paths; a pre-drain retirement handoff with no request states keeps striking. A completed verified stale-anchor replay deliberately keeps the source key's circuit and its durable row (its generation fence suppresses further stale replays), so the one-clear marker on that surviving episode is process-local by design; a process that rehydrates the row without the marker abandons the anchor one strike earlier than a fresh episode would, against a key whose requests are already failing eventlessly — an accepted, bounded trade until an episode marker is persisted with the row.
 
 A quarantine armed for reason `retry_circuit_poisoned_anchor` MUST remain in force for at least the remaining cooldown of the circuit that armed it plus that circuit's half-open lease, because the probe it exists to protect is only admitted once that cooldown expires and may then be admitted anywhere inside the lease that follows. The default TTL alone MUST NOT be relied on for this: it equals the circuit's maximum cooldown, so at that cooldown the quarantine would otherwise lapse in the same instant the cooldown does and hand the poisoned anchor back to the very request the cooldown was holding.
 

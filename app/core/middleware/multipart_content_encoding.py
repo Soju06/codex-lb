@@ -4,23 +4,27 @@ import logging
 
 from fastapi import FastAPI
 from starlette._utils import get_route_path
-from starlette.datastructures import Headers
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.core.audit.service import AuditService
 from app.core.errors import dashboard_error, openai_error
 from app.core.runtime_logging import log_error_response
 
 _LIMITED_MULTIPART_PATHS = frozenset(
     {
         "/api/accounts/import",
+        "/api/accounts/bundle/import/preflight",
+        "/api/accounts/bundle/import/commit",
         "/backend-api/transcribe",
         "/v1/audio/transcriptions",
         "/v1/images/edits",
     }
 )
 _OPENAI_MULTIPART_PATH_PREFIXES = ("/backend-api", "/v1")
+_ACCOUNT_BUNDLE_PATH_PREFIX = "/api/accounts/bundle/"
 _CONTENT_ENCODING_GATE_HANDLED_STATE = "_codex_lb_multipart_content_encoding_gate_handled"
 _UNSUPPORTED_CONTENT_ENCODING_STATE = "_codex_lb_unsupported_multipart_content_encoding"
 
@@ -103,6 +107,26 @@ class MultipartContentEncodingMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+
+        route_path = _canonical_route_path(scope)
+        if route_path.startswith(_ACCOUNT_BUNDLE_PATH_PREFIX):
+            original_send = send
+
+            async def send(message):
+                if message["type"] == "http.response.start":
+                    headers = MutableHeaders(scope=message)
+                    headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+                    headers["Pragma"] = "no-cache"
+                    headers["Expires"] = "0"
+                    status = int(message["status"])
+                    if status >= 400:
+                        client = scope.get("client")
+                        AuditService.log_async(
+                            "account_bundle_request_failed",
+                            actor_ip=client[0] if client else None,
+                            details={"operation": route_path.rsplit("/", 1)[-1], "outcome": f"http_{status}"},
+                        )
+                await original_send(message)
 
         headers = Headers(scope=scope)
         if not is_route_owned_multipart_operation(scope):

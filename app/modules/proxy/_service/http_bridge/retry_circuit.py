@@ -924,6 +924,8 @@ class _HTTPBridgeRetryCircuitMixin:
     async def _http_bridge_precreated_retry_block_for_key(
         self: Any,
         key: _HTTPBridgeSessionKey,
+        *,
+        assume_remote_half_open_lease: bool = False,
     ) -> tuple[float, str]:
         """Return ``(seconds_blocked, reason)`` for a suppressed replacement.
 
@@ -934,6 +936,15 @@ class _HTTPBridgeRetryCircuitMixin:
         session (which has no circuit) and the source key's cooldown
         advertises a ~1s retry-after while the caller is barred for the rest
         of the lease.
+
+        ``assume_remote_half_open_lease`` covers the timer this process
+        cannot see: a caller that just lost its dispatch claim was refused by
+        a probe admitted somewhere, and when neither a local cooldown nor a
+        local lease is visible that probe's lease lives in another process
+        (or died with a replaced local state). The lease deadline is not
+        persisted, so the block is reported at the configured lease duration
+        — the upper bound of the timer actually refusing the caller — rather
+        than a fabricated ~1s.
         """
         if key.strength != "hard":
             return 0.0, "none"
@@ -951,6 +962,8 @@ class _HTTPBridgeRetryCircuitMixin:
             await self._http_bridge_retry_circuit_cooldown_seconds_for_key(key),
         )
         if cooldown_remaining <= 0.0 and half_open_remaining <= 0.0:
+            if assume_remote_half_open_lease:
+                return _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS, "hard_key_half_open"
             return 0.0, "none"
         if half_open_remaining > cooldown_remaining:
             return half_open_remaining, "hard_key_half_open"

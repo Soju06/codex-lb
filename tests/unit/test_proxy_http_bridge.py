@@ -35211,6 +35211,33 @@ async def test_precreated_retry_block_for_key_reports_the_source_half_open_lease
     assert 200.0 < seconds <= 240.0
 
 
+@pytest.mark.asyncio
+async def test_a_lost_claim_with_no_local_lease_reports_the_remote_lease_bound() -> None:
+    # A dispatch claim can be lost to a probe admitted by another replica (or
+    # by a local state that has since been replaced). The lease deadline is
+    # not persisted, so with no local cooldown and no local lease the block
+    # helper used to report (0, "none") and the suppression advertised a ~1s
+    # retry-after while the winning probe's lease can bar the caller for its
+    # full duration. A caller that knows its claim was just lost reports the
+    # configured lease duration as the honest upper bound instead.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-remote-half-open")
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
+
+    seconds, reason = await service._http_bridge_precreated_retry_block_for_key(
+        session.key,
+        assume_remote_half_open_lease=True,
+    )
+
+    assert reason == "hard_key_half_open"
+    assert seconds == http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS
+
+    seconds, reason = await service._http_bridge_precreated_retry_block_for_key(session.key)
+
+    assert reason == "none", "without the lost-claim context an absent block still reports none"
+    assert seconds == 0.0
+
+
 def test_weaker_quarantine_reason_cannot_downgrade_active_poison_evidence() -> None:
     # One registry entry per key: a wedged-reattach quarantine arriving while
     # the poison quarantine is still active used to overwrite the only record

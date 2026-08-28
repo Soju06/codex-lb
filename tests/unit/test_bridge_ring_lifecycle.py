@@ -316,9 +316,14 @@ async def test_get_sessions_by_ids_chunks_large_id_sets(
 
 
 @pytest.mark.asyncio
-async def test_retry_circuit_upsert_counts_concurrent_failure_conflicts(
+async def test_retry_circuit_drops_a_base_mismatched_concurrent_write(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:
+    # Two replicas race their first strike. The loser's write carries a base
+    # that no longer matches the row, so it drops without touching the row:
+    # count, cooldown, detail, and epoch all stay the winner's, keeping every
+    # in-flight fence on that epoch valid. The loser reconciles from the
+    # returned row and its next strike, carrying the current base, lands.
     session = async_session_factory()
     try:
         repository = DurableBridgeRepository(session)
@@ -345,22 +350,46 @@ async def test_retry_circuit_upsert_counts_concurrent_failure_conflicts(
             ),
         )
         assert row is not None
+        assert row.consecutive_failures == 1
+        assert row.cooldown_until_epoch == 0.0
+        assert row.updated_at_epoch == 1000.0, "a dropped write must not disturb the row's version"
+
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-conflict",
+            api_key_scope="key-1",
+            consecutive_failures=2,
+            cooldown_until_epoch=0.0,
+            last_detail="clean_close",
+            updated_at_epoch=1002.0,
+            base_updated_at_epoch=1000.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=2000.0,
+        )
+        await session.refresh(row)
         assert row.consecutive_failures == 2
-        assert row.cooldown_until_epoch == 2000.0
+        assert row.cooldown_until_epoch >= 2000.0
         assert row.last_detail == "clean_close"
-        assert row.updated_at_epoch == 1001.0
+        assert row.updated_at_epoch == 1002.0
     finally:
         await session.close()
 
 
 @pytest.mark.asyncio
-async def test_retry_circuit_conflict_cooldown_scales_with_merged_failures(
+async def test_retry_circuit_cooldown_scales_with_failure_count(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:
+    # Each write carries the exact base it loaded, so the chain lands as a
+    # sequence of CAS matches and the server-side backoff schedule scales
+    # with the accumulated count.
     session = async_session_factory()
     try:
         repository = DurableBridgeRepository(session)
-        for failures, updated_at in ((1, 1000.0), (1, 1001.0), (2, 1002.0)):
+        for failures, updated_at, base_updated_at in (
+            (1, 1000.0, 0.0),
+            (2, 1001.0, 1000.0),
+            (3, 1002.0, 1001.0),
+        ):
             await repository.upsert_retry_circuit(
                 session_key_kind="session_header",
                 session_key_value="sid-retry-backoff-conflict",
@@ -369,6 +398,7 @@ async def test_retry_circuit_conflict_cooldown_scales_with_merged_failures(
                 cooldown_until_epoch=0.0,
                 last_detail="stream_incomplete",
                 updated_at_epoch=updated_at,
+                base_updated_at_epoch=base_updated_at,
                 failure_threshold=2,
                 conflict_cooldown_until_epoch=updated_at + 60.0,
             )
@@ -476,6 +506,98 @@ async def test_retry_circuit_merges_lagging_wall_clock_failure_from_loaded_base(
         assert row.consecutive_failures == 2
         assert row.cooldown_until_epoch >= 2060.0
         assert row.updated_at_epoch == 2000.0
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_strike_after_the_reset_row_is_restruck_is_dropped(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    # Worker A loads an old episode, worker B resets it, worker C records the
+    # new lineage's first failure, and only then does A's delayed write
+    # arrive. A's base matches neither the reset row nor C's re-struck row,
+    # so it must drop entirely; merging it would open a false cooldown on a
+    # lineage that has seen one real failure and could abandon the fresh
+    # anchor that ended A's episode.
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-restruck-stale",
+            api_key_scope="key-1",
+            consecutive_failures=1,
+            cooldown_until_epoch=0.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=1000.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=1060.0,
+        )
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-restruck-stale",
+            api_key_scope="key-1",
+            consecutive_failures=2,
+            cooldown_until_epoch=1061.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=1001.0,
+            base_updated_at_epoch=1000.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=1061.0,
+        )
+        await repository.delete_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-restruck-stale",
+            api_key_scope="key-1",
+        )
+        reset_row = await session.get(
+            HttpBridgeRetryCircuit,
+            (
+                "session_header",
+                durable_bridge_hash("sid-retry-restruck-stale"),
+                "key-1",
+            ),
+        )
+        assert reset_row is not None
+        assert reset_row.consecutive_failures == 0
+        reset_epoch = reset_row.updated_at_epoch
+
+        restrike_epoch = reset_epoch + 1.0
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-restruck-stale",
+            api_key_scope="key-1",
+            consecutive_failures=1,
+            cooldown_until_epoch=0.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=restrike_epoch,
+            base_updated_at_epoch=reset_epoch,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=restrike_epoch + 60.0,
+        )
+        # A's delayed write: base predates the reset, count carries the ended
+        # episode plus one more strike.
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-restruck-stale",
+            api_key_scope="key-1",
+            consecutive_failures=3,
+            cooldown_until_epoch=restrike_epoch + 240.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=restrike_epoch + 2.0,
+            base_updated_at_epoch=1001.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=restrike_epoch + 240.0,
+        )
+
+        await session.refresh(reset_row)
+        assert reset_row.consecutive_failures == 1, (
+            "a stale write must stay rejectable after the reset row is re-struck;"
+            " merging it opens a false cooldown on the fresh lineage"
+        )
+        assert reset_row.cooldown_until_epoch == 0.0
+        assert reset_row.updated_at_epoch == restrike_epoch, "a dropped write must not disturb the row's version fence"
     finally:
         await session.close()
 

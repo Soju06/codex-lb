@@ -311,34 +311,32 @@ class DurableBridgeRepository:
         if dialect == "postgresql":
             insert_statement = pg_insert(HttpBridgeRetryCircuit).values(**values)
             excluded = insert_statement.excluded
-            reset_lineage = and_(
-                HttpBridgeRetryCircuit.consecutive_failures == 0,
-                HttpBridgeRetryCircuit.cooldown_until_epoch <= 0,
-                HttpBridgeRetryCircuit.last_detail.is_(None),
-                HttpBridgeRetryCircuit.updated_at_epoch > base_updated_at_epoch,
-            )
             # ``updated_at_epoch`` is an observation timestamp, not a
-            # concurrency version. Treat an unchanged loaded row as a CAS
-            # match, even when a replica's wall clock lags it. The failure
-            # count guard still rejects an older snapshot that was loaded from
-            # the same row after a newer failure had already been merged.
-            failure_from_loaded_row = and_(
+            # concurrency version. Equality with the loaded base is the CAS
+            # match, even when a replica's wall clock lags it; the failure
+            # count guard still rejects an older snapshot that was loaded
+            # from the same row after a newer failure had already been
+            # merged. Every base-mismatched write is stale — its episode was
+            # settled, replaced, or outrun while the write waited — and
+            # drops, leaving the row byte-identical so in-flight fences and
+            # bases stay valid; the writer reconciles from the returned row.
+            # Wall-clock recency cannot stand in for lineage: a delayed
+            # write always carries a newer timestamp than the base it
+            # loaded, so admitting "newer than base" writes would merge a
+            # finished episode's count into whatever lineage owns the row
+            # now, including a reset row another replica has already
+            # re-struck. A concurrent same-lineage strike that loses this
+            # race undercounts by exactly its own strike, which is the
+            # accepted direction: the circuit opens at most one failure
+            # later, and a stale count can never reopen a settled episode's
+            # cooldown against a fresh lineage.
+            failure_from_current_row = and_(
                 HttpBridgeRetryCircuit.updated_at_epoch == base_updated_at_epoch,
                 excluded.consecutive_failures >= HttpBridgeRetryCircuit.consecutive_failures,
             )
-            failure_is_newer_than_base = or_(
-                excluded.updated_at_epoch > base_updated_at_epoch,
-                failure_from_loaded_row,
-            )
             conflict_failures = case(
-                # A write whose base predates a reset row belongs to the
-                # settled lineage: drop it (keep the reset row) rather
-                # than rebasing a finished episode's strike as the first
-                # failure of the new one. Fresh strikes load the reset
-                # row first and carry a matching base.
-                (reset_lineage, HttpBridgeRetryCircuit.consecutive_failures),
                 (
-                    failure_is_newer_than_base,
+                    failure_from_current_row,
                     func.greatest(
                         HttpBridgeRetryCircuit.consecutive_failures + 1,
                         excluded.consecutive_failures,
@@ -351,7 +349,6 @@ class DurableBridgeRepository:
                 excluded.updated_at_epoch,
             )
             merged_cooldown = case(
-                (reset_lineage, HttpBridgeRetryCircuit.cooldown_until_epoch),
                 (
                     conflict_failures >= threshold,
                     func.greatest(
@@ -370,56 +367,55 @@ class DurableBridgeRepository:
                 set_={
                     "consecutive_failures": conflict_failures,
                     "cooldown_until_epoch": case(
-                        (reset_lineage, HttpBridgeRetryCircuit.cooldown_until_epoch),
-                        else_=func.greatest(
-                            HttpBridgeRetryCircuit.cooldown_until_epoch,
-                            excluded.cooldown_until_epoch,
-                            merged_cooldown,
+                        (
+                            failure_from_current_row,
+                            func.greatest(
+                                HttpBridgeRetryCircuit.cooldown_until_epoch,
+                                excluded.cooldown_until_epoch,
+                                merged_cooldown,
+                            ),
                         ),
+                        else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
                     ),
                     "last_detail": case(
-                        (reset_lineage, HttpBridgeRetryCircuit.last_detail),
-                        (
-                            excluded.updated_at_epoch >= HttpBridgeRetryCircuit.updated_at_epoch,
-                            excluded.last_detail,
-                        ),
+                        (failure_from_current_row, excluded.last_detail),
                         else_=HttpBridgeRetryCircuit.last_detail,
                     ),
                     "updated_at_epoch": case(
-                        (reset_lineage, HttpBridgeRetryCircuit.updated_at_epoch),
-                        else_=func.greatest(
-                            HttpBridgeRetryCircuit.updated_at_epoch,
-                            excluded.updated_at_epoch,
-                        ),
+                        (failure_from_current_row, merged_updated_at),
+                        else_=HttpBridgeRetryCircuit.updated_at_epoch,
                     ),
                 },
             )
         elif dialect == "sqlite":
             insert_statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values)
             excluded = insert_statement.excluded
-            reset_lineage = and_(
-                HttpBridgeRetryCircuit.consecutive_failures == 0,
-                HttpBridgeRetryCircuit.cooldown_until_epoch <= 0,
-                HttpBridgeRetryCircuit.last_detail.is_(None),
-                HttpBridgeRetryCircuit.updated_at_epoch > base_updated_at_epoch,
-            )
-            failure_from_loaded_row = and_(
+            # ``updated_at_epoch`` is an observation timestamp, not a
+            # concurrency version. Equality with the loaded base is the CAS
+            # match, even when a replica's wall clock lags it; the failure
+            # count guard still rejects an older snapshot that was loaded
+            # from the same row after a newer failure had already been
+            # merged. Every base-mismatched write is stale — its episode was
+            # settled, replaced, or outrun while the write waited — and
+            # drops, leaving the row byte-identical so in-flight fences and
+            # bases stay valid; the writer reconciles from the returned row.
+            # Wall-clock recency cannot stand in for lineage: a delayed
+            # write always carries a newer timestamp than the base it
+            # loaded, so admitting "newer than base" writes would merge a
+            # finished episode's count into whatever lineage owns the row
+            # now, including a reset row another replica has already
+            # re-struck. A concurrent same-lineage strike that loses this
+            # race undercounts by exactly its own strike, which is the
+            # accepted direction: the circuit opens at most one failure
+            # later, and a stale count can never reopen a settled episode's
+            # cooldown against a fresh lineage.
+            failure_from_current_row = and_(
                 HttpBridgeRetryCircuit.updated_at_epoch == base_updated_at_epoch,
                 excluded.consecutive_failures >= HttpBridgeRetryCircuit.consecutive_failures,
             )
-            failure_is_newer_than_base = or_(
-                excluded.updated_at_epoch > base_updated_at_epoch,
-                failure_from_loaded_row,
-            )
             conflict_failures = case(
-                # A write whose base predates a reset row belongs to the
-                # settled lineage: drop it (keep the reset row) rather
-                # than rebasing a finished episode's strike as the first
-                # failure of the new one. Fresh strikes load the reset
-                # row first and carry a matching base.
-                (reset_lineage, HttpBridgeRetryCircuit.consecutive_failures),
                 (
-                    failure_is_newer_than_base,
+                    failure_from_current_row,
                     func.max(
                         HttpBridgeRetryCircuit.consecutive_failures + 1,
                         excluded.consecutive_failures,
@@ -432,7 +428,6 @@ class DurableBridgeRepository:
                 excluded.updated_at_epoch,
             )
             merged_cooldown = case(
-                (reset_lineage, HttpBridgeRetryCircuit.cooldown_until_epoch),
                 (
                     conflict_failures >= threshold,
                     func.max(
@@ -451,27 +446,23 @@ class DurableBridgeRepository:
                 set_={
                     "consecutive_failures": conflict_failures,
                     "cooldown_until_epoch": case(
-                        (reset_lineage, HttpBridgeRetryCircuit.cooldown_until_epoch),
-                        else_=func.max(
-                            HttpBridgeRetryCircuit.cooldown_until_epoch,
-                            excluded.cooldown_until_epoch,
-                            merged_cooldown,
+                        (
+                            failure_from_current_row,
+                            func.max(
+                                HttpBridgeRetryCircuit.cooldown_until_epoch,
+                                excluded.cooldown_until_epoch,
+                                merged_cooldown,
+                            ),
                         ),
+                        else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
                     ),
                     "last_detail": case(
-                        (reset_lineage, HttpBridgeRetryCircuit.last_detail),
-                        (
-                            excluded.updated_at_epoch >= HttpBridgeRetryCircuit.updated_at_epoch,
-                            excluded.last_detail,
-                        ),
+                        (failure_from_current_row, excluded.last_detail),
                         else_=HttpBridgeRetryCircuit.last_detail,
                     ),
                     "updated_at_epoch": case(
-                        (reset_lineage, HttpBridgeRetryCircuit.updated_at_epoch),
-                        else_=func.max(
-                            HttpBridgeRetryCircuit.updated_at_epoch,
-                            excluded.updated_at_epoch,
-                        ),
+                        (failure_from_current_row, merged_updated_at),
+                        else_=HttpBridgeRetryCircuit.updated_at_epoch,
                     ),
                 },
             )

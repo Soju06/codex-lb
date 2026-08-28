@@ -1919,7 +1919,13 @@ class _HTTPBridgeRequestSubmitMixin:
                             (
                                 suppressed_block_seconds,
                                 suppressed_block_reason,
-                            ) = await self._http_bridge_precreated_retry_block_for_key(circuit_key or session.key)
+                            ) = await self._http_bridge_precreated_retry_block_for_key(
+                                circuit_key or session.key,
+                                # The claim that beat this dispatch holds the
+                                # half-open lease, possibly in another process
+                                # whose deadline is not persisted.
+                                assume_remote_half_open_lease=True,
+                            )
                             suppressed_retry_after_seconds = max(1, math.ceil(suppressed_block_seconds))
                             _log_http_bridge_event(
                                 "stale_anchor_replay_generation_suppressed",

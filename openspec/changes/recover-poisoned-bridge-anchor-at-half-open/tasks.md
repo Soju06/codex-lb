@@ -347,6 +347,20 @@
       worker's local episode too: the merge adopts the returned reset lineage
       instead of retaining the ended episode's count against the reset epoch
 
+- [x] 2.64 A strike write lands only against the exact row version it
+      loaded: every base-mismatched write drops whole, leaving the row's
+      count, cooldown, detail, and version untouched, so a stale write can
+      neither merge a finished episode's count into a re-struck lineage nor
+      disturb the fences other writers hold on that row
+
+- [x] 2.65 Design history, rationale, and accepted-residual dispositions
+      moved from the spec deltas into the change-level design.md, leaving
+      only MUST-level contract and scenarios in spec.md
+
+- [x] 2.66 A suppressed dispatch whose claim was lost with no locally
+      visible timer reports the configured half-open lease duration as its
+      retry-after upper bound instead of a fabricated ~1s
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

@@ -1383,7 +1383,11 @@ async def _try_complete_transcript_recovery(
                 max_bytes=max_bytes,
             )
         elif root_recovery:
-            replay_turn_count = 1
+            # The client supplied a complete root snapshot; it has no
+            # durable ancestor turns to carry forward. The replacement
+            # operation itself is counted when its terminal snapshot is
+            # persisted.
+            replay_turn_count = 0
             # Sessions created before durable transcript persistence may have
             # no completed operation chain at all.  If the client supplied a
             # complete unanchored history, it is still a valid explicit
@@ -1585,7 +1589,7 @@ async def _try_complete_transcript_recovery(
     # preserve the original state so the ordinary retry path cannot resend
     # ambiguous work without a durable recovery claim.
     request_state.request_text = replay_text
-    request_state.recovery_replay_turn_count = replay_turn_count or 1
+    request_state.recovery_replay_turn_count = max(0, replay_turn_count)
     request_state.fresh_upstream_request_text = replay_text
     request_state.fresh_upstream_request_is_retry_safe = True
     request_state.complete_transcript_recovery_anchor = recovery_anchor
@@ -1765,7 +1769,9 @@ async def _try_unsafe_partial_transcript_recovery(
             # A root request can still be replayed if its body is already a
             # complete, account-neutral history. Never invent a parent for a
             # delta-only continuation with an unavailable anchor.
-            replay_turn_count = 1
+            # There are no durable ancestor turns in this path; the
+            # replacement operation is counted during terminal persistence.
+            replay_turn_count = 0
             replay_text = build_unanchored_root_replay_payload(
                 request_text,
                 max_input_items=max_input_items,
@@ -1957,7 +1963,7 @@ async def _try_unsafe_partial_transcript_recovery(
         request_state.replay_downstream_sequence_offset = None
         request_state.suppress_next_created_downstream = True
     request_state.request_text = replay_text
-    request_state.recovery_replay_turn_count = replay_turn_count or 1
+    request_state.recovery_replay_turn_count = max(0, replay_turn_count)
     request_state.fresh_upstream_request_text = replay_text
     request_state.fresh_upstream_request_is_retry_safe = True
     request_state.complete_transcript_recovery_anchor = recovery_anchor

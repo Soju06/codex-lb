@@ -6942,6 +6942,94 @@ async def test_complete_transcript_recovery_rebinds_durable_operation(
 
 
 @pytest.mark.asyncio
+async def test_complete_transcript_root_recovery_keeps_zero_ancestor_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-root-count")
+    session.durable_session_id = "durable-recovery-root-count"
+    session.durable_owner_epoch = 1
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-recovery-root-count",
+            model="gpt-test",
+            request_text='{"type":"response.create","input":[{"type":"message"}]}',
+            previous_response_id=None,
+            complete_transcript_recovery_anchor="resp-root-anchor",
+            operation_id="op-root-count",
+            operation_fingerprint="fingerprint-root-count",
+            operation_parent_response_id=None,
+            operation_registered=True,
+            operation_created=True,
+            operation_recovery_claimed=False,
+            operation_dispatched=True,
+            operation_attempt_generation=0,
+            response_event_count=0,
+            replay_count=0,
+            upstream_model_output_seen=False,
+            downstream_visible=False,
+            last_downstream_sequence_number=None,
+            response_id=None,
+            fresh_upstream_request_text=None,
+            fresh_upstream_request_is_retry_safe=False,
+            proxy_injected_previous_response_id=False,
+            hard_continuity_anchor=False,
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+            draining_until_terminal=False,
+        ),
+    )
+    rebind_operation = AsyncMock(
+        return_value=SimpleNamespace(rebound=True, created=False, recovery_dispatch_count=1),
+    )
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_unanchored_root_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=1,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-recovery-root-count",
+        ),
+    )
+    retry = AsyncMock(return_value=True)
+    service._retry_http_bridge_request_on_fresh_upstream = retry
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_retry_circuit_generation",
+        AsyncMock(return_value=(True, None)),
+    )
+
+    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is True
+    assert request_state.recovery_replay_turn_count == 0
+    assert request_state.request_text.startswith('{"type":"response.create"')
+    retry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_complete_transcript_recovery_rolls_back_rebind_when_dispatch_not_started(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

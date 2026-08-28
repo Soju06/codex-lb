@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
@@ -346,7 +347,10 @@ async def test_operation_retention_noop_avoids_duplicate_log_with_prometheus(mon
     monkeypatch.setattr(
         cleanup_scheduler,
         "get_settings",
-        lambda: SimpleNamespace(http_responses_session_bridge_operation_spool_retention_seconds=604800.0),
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
+            metrics_enabled=True,
+        ),
     )
     monkeypatch.setattr(cleanup_scheduler, "PROMETHEUS_AVAILABLE", True)
     monkeypatch.setattr(cleanup_scheduler, "_record_operation_retention_cleanup", Mock())
@@ -357,6 +361,102 @@ async def test_operation_retention_noop_avoids_duplicate_log_with_prometheus(mon
 
     assert backlog_likely is False
     assert "HTTP bridge operation transcript retention" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_operation_retention_noop_logs_aggregate_when_metrics_disabled(monkeypatch, caplog) -> None:
+    bridge_repo = AsyncMock()
+    bridge_repo.purge_operation_spool_batch = AsyncMock(return_value=_purge_batch(0))
+    monkeypatch.setattr(
+        cleanup_scheduler,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
+            metrics_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(cleanup_scheduler, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(cleanup_scheduler, "_record_operation_retention_cleanup", Mock())
+    scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=False)
+
+    with caplog.at_level("INFO", logger=cleanup_scheduler.__name__):
+        backlog_likely = await scheduler._run_operation_retention(bridge_repo)
+
+    assert backlog_likely is False
+    assert "deleted_operations=0 batches=1 outcome=completed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_full_cleanup_cancellation_records_partial_result_and_preserves_backlog(monkeypatch) -> None:
+    partial_result = cleanup_scheduler.OperationRetentionCleanupResult(
+        deleted_operations=3,
+        batches=1,
+        backlog_likely=True,
+        outcome="failed",
+        duration_seconds=1.0,
+    )
+    recorded = Mock()
+    scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=False)
+
+    class LeaseLossLeader:
+        cancellation_seen = False
+
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object | None:
+            try:
+                return await fn()
+            except asyncio.CancelledError:
+                self.cancellation_seen = True
+                return None
+
+    leader = LeaseLossLeader()
+
+    async def cancelled_retention(self) -> bool | None:
+        return await self._run_operation_retention(AsyncMock())
+
+    monkeypatch.setattr(
+        cleanup_scheduler,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
+            metrics_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(
+        cleanup_scheduler,
+        "_purge_operation_spool_with_budget",
+        AsyncMock(side_effect=cleanup_scheduler.OperationRetentionCleanupCancelledError(partial_result)),
+    )
+    monkeypatch.setattr(cleanup_scheduler, "_record_operation_retention_cleanup", recorded)
+    monkeypatch.setattr(cleanup_scheduler, "_get_leader_election", lambda: leader)
+    monkeypatch.setattr(
+        cleanup_scheduler.StickySessionCleanupScheduler,
+        "_cleanup_as_leader",
+        cancelled_retention,
+    )
+
+    backlog_likely = await scheduler._cleanup_once()
+
+    assert leader.cancellation_seen is True
+    assert backlog_likely is True
+    assert scheduler._operation_retention_attempt_failed is True
+    recorded.assert_called_once_with(partial_result)
+
+
+@pytest.mark.asyncio
+async def test_operation_retention_cleanup_cancellation_keeps_partial_progress(monkeypatch) -> None:
+    bridge_repo = AsyncMock()
+    bridge_repo.purge_operation_spool_batch = AsyncMock(
+        side_effect=[_purge_batch(3), asyncio.CancelledError()]
+    )
+    monkeypatch.setattr(cleanup_scheduler, "_OPERATION_RETENTION_BATCH_SIZE", 3)
+
+    with pytest.raises(cleanup_scheduler.OperationRetentionCleanupCancelledError) as captured:
+        await cleanup_scheduler._purge_operation_spool_with_budget(bridge_repo, cutoff=utcnow())
+
+    assert captured.value.result.deleted_operations == 3
+    assert captured.value.result.batches == 1
+    assert captured.value.result.backlog_likely is True
+    assert captured.value.result.outcome == "failed"
 
 
 @pytest.mark.asyncio

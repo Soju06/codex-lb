@@ -82,6 +82,12 @@ class OperationRetentionCleanupError(RuntimeError):
         self.error_type = error_type
 
 
+class OperationRetentionCleanupCancelledError(asyncio.CancelledError):
+    def __init__(self, result: OperationRetentionCleanupResult) -> None:
+        super().__init__("durable operation retention batch cancelled")
+        self.result = result
+
+
 async def _purge_operation_spool_with_budget(
     bridge_repo: DurableBridgeRepository,
     *,
@@ -92,34 +98,44 @@ async def _purge_operation_spool_with_budget(
     batches = 0
     outcome: OperationRetentionOutcome = "completed"
 
-    while True:
-        try:
+    try:
+        while True:
             batch_result = await bridge_repo.purge_operation_spool_batch(
                 cutoff=cutoff,
                 batch_size=_OPERATION_RETENTION_BATCH_SIZE,
             )
-        except Exception as exc:
-            raise OperationRetentionCleanupError(
-                OperationRetentionCleanupResult(
-                    deleted_operations=deleted_operations,
-                    batches=batches,
-                    backlog_likely=True,
-                    outcome="failed",
-                    duration_seconds=max(time.monotonic() - started_at, 0.0),
-                ),
-                error_type=type(exc).__name__,
-            ) from None
-        deleted_operations += batch_result.deleted_operations
-        batches += 1
-        if batch_result.selected_operations < _OPERATION_RETENTION_BATCH_SIZE:
-            break
-        if time.monotonic() - started_at >= _OPERATION_RETENTION_TIME_BUDGET_SECONDS:
-            outcome = "time_budget_exhausted"
-            break
-        if batches >= _OPERATION_RETENTION_MAX_BATCHES:
-            outcome = "batch_budget_exhausted"
-            break
-        await asyncio.sleep(0)
+            deleted_operations += batch_result.deleted_operations
+            batches += 1
+            if batch_result.selected_operations < _OPERATION_RETENTION_BATCH_SIZE:
+                break
+            if time.monotonic() - started_at >= _OPERATION_RETENTION_TIME_BUDGET_SECONDS:
+                outcome = "time_budget_exhausted"
+                break
+            if batches >= _OPERATION_RETENTION_MAX_BATCHES:
+                outcome = "batch_budget_exhausted"
+                break
+            await asyncio.sleep(0)
+    except asyncio.CancelledError:
+        raise OperationRetentionCleanupCancelledError(
+            OperationRetentionCleanupResult(
+                deleted_operations=deleted_operations,
+                batches=batches,
+                backlog_likely=True,
+                outcome="failed",
+                duration_seconds=max(time.monotonic() - started_at, 0.0),
+            )
+        ) from None
+    except Exception as exc:
+        raise OperationRetentionCleanupError(
+            OperationRetentionCleanupResult(
+                deleted_operations=deleted_operations,
+                batches=batches,
+                backlog_likely=True,
+                outcome="failed",
+                duration_seconds=max(time.monotonic() - started_at, 0.0),
+            ),
+            error_type=type(exc).__name__,
+        ) from None
 
     return OperationRetentionCleanupResult(
         deleted_operations=deleted_operations,
@@ -141,6 +157,10 @@ def _record_operation_retention_cleanup(result: OperationRetentionCleanupResult)
     http_bridge_spool_cleanup_deleted_operations_total.inc(result.deleted_operations)
     http_bridge_spool_cleanup_duration_seconds.observe(result.duration_seconds)
     http_bridge_spool_cleanup_backlog_likely.set(1.0 if result.backlog_likely else 0.0)
+
+
+def operation_retention_metrics_enabled() -> bool:
+    return PROMETHEUS_AVAILABLE and bool(getattr(get_settings(), "metrics_enabled", False))
 
 
 def _next_cleanup_delay_seconds(
@@ -204,6 +224,7 @@ class StickySessionCleanupScheduler:
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _operation_retention_attempt_failed: bool = False
+    _operation_retention_cancelled_backlog_likely: bool | None = None
 
     async def start(self) -> None:
         if not self.enabled and not self.operation_retention_enabled:
@@ -256,10 +277,14 @@ class StickySessionCleanupScheduler:
                 continue
 
     async def _cleanup_once(self) -> bool | None:
-        return await _get_leader_election().run_if_leader(self._cleanup_as_leader)
+        self._operation_retention_cancelled_backlog_likely = None
+        result = await _get_leader_election().run_if_leader(self._cleanup_as_leader)
+        return result if result is not None else self._operation_retention_cancelled_backlog_likely
 
     async def _cleanup_operation_retention_once(self) -> bool | None:
-        return await _get_leader_election().run_if_leader(self._cleanup_operation_retention_as_leader)
+        self._operation_retention_cancelled_backlog_likely = None
+        result = await _get_leader_election().run_if_leader(self._cleanup_operation_retention_as_leader)
+        return result if result is not None else self._operation_retention_cancelled_backlog_likely
 
     async def _run_operation_retention(self, bridge_repo: DurableBridgeRepository) -> bool | None:
         operation_cutoff = utcnow() - timedelta(
@@ -267,8 +292,13 @@ class StickySessionCleanupScheduler:
         )
         retention_started_at = time.monotonic()
         error_type: str | None = None
+        cancellation: OperationRetentionCleanupCancelledError | None = None
         try:
             result = await _purge_operation_spool_with_budget(bridge_repo, cutoff=operation_cutoff)
+        except OperationRetentionCleanupCancelledError as exc:
+            result = exc.result
+            error_type = "CancelledError"
+            cancellation = exc
         except OperationRetentionCleanupError as exc:
             result = exc.result
             error_type = exc.error_type
@@ -282,7 +312,7 @@ class StickySessionCleanupScheduler:
             )
             error_type = type(exc).__name__
         _record_operation_retention_cleanup(result)
-        if not PROMETHEUS_AVAILABLE or result.deleted_operations > 0 or result.backlog_likely:
+        if not operation_retention_metrics_enabled() or result.deleted_operations > 0 or result.backlog_likely:
             logger.info(
                 "HTTP bridge operation transcript retention "
                 "deleted_operations=%s batches=%s outcome=%s "
@@ -295,6 +325,9 @@ class StickySessionCleanupScheduler:
                 error_type or "none",
             )
         self._operation_retention_attempt_failed = result.outcome == "failed"
+        if cancellation is not None:
+            self._operation_retention_cancelled_backlog_likely = result.backlog_likely
+            raise cancellation
         return result.backlog_likely
 
     async def _cleanup_operation_retention_as_leader(self) -> bool | None:

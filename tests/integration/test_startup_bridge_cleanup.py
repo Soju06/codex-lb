@@ -126,3 +126,21 @@ async def test_startup_operation_retention_success_logs_aggregate_without_promet
     assert result.outcome == "completed"
     assert "deleted_operations=0 batches=1 outcome=completed backlog_likely=False" in caplog.text
     assert "duration_seconds=" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_startup_operation_retention_success_logs_aggregate_when_metrics_disabled(monkeypatch, caplog) -> None:
+    recorded = Mock()
+    purge = AsyncMock(return_value=SimpleNamespace(deleted_operations=0, selected_operations=0))
+    coordinator = SimpleNamespace(purge_operation_spool_batch=purge)
+
+    monkeypatch.setattr(main_module, "DurableBridgeSessionCoordinator", lambda _session_factory: coordinator)
+    monkeypatch.setattr(main_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(main_module, "operation_retention_metrics_enabled", lambda: False)
+    monkeypatch.setattr(main_module, "_record_operation_retention_cleanup", recorded)
+
+    with caplog.at_level("INFO", logger=main_module.__name__):
+        assert await main_module._purge_operation_spool_on_startup(retention_seconds=60.0) == 0
+
+    recorded.assert_called_once()
+    assert "deleted_operations=0 batches=1 outcome=completed backlog_likely=False" in caplog.text

@@ -110,6 +110,7 @@ from app.modules.sticky_sessions.cleanup_scheduler import (
     _abandoned_bridge_retention_seconds,
     _record_operation_retention_cleanup,
     build_sticky_session_cleanup_scheduler,
+    operation_retention_metrics_enabled,
 )
 from app.modules.telemetry import api as telemetry_api
 from app.modules.telemetry.scheduler import build_telemetry_scheduler
@@ -355,7 +356,7 @@ async def _purge_operation_spool_on_startup(*, retention_seconds: float) -> int:
         duration_seconds=max(time.monotonic() - started_at, 0.0),
     )
     _record_operation_retention_cleanup(result)
-    if not PROMETHEUS_AVAILABLE:
+    if not operation_retention_metrics_enabled():
         logger.info(
             "HTTP bridge operation transcript startup retention "
             "deleted_operations=%s batches=%s outcome=%s "

@@ -2920,14 +2920,13 @@ class _HTTPBridgeUpstreamEventsMixin:
             if not terminal_request_state.verified_stale_anchor_replay:
                 circuit_settled = await self._clear_http_bridge_retry_circuit(session)
                 if not circuit_settled:
-                    # The old poison episode was restored, but this
-                    # completion is about to register a fresh anchor: the
-                    # restored episode's failures were all against the
-                    # superseded one, so its owed clear must not fire
-                    # against the anchor registered below. The cooldown
-                    # stands until the next settle opportunity.
+                    # The old poison episode was restored. Its owed clear is
+                    # suppressed only once the fresh anchor actually
+                    # persists below: suppressing here and then failing the
+                    # registration would leave the old poisoned anchor
+                    # stored with no funnel willing to clear it after the
+                    # process-local quarantine expires.
                     completion_circuit_settlement_failed = True
-                    await self._http_bridge_suppress_poison_clear_after_anchor_advance(session)
 
         if (
             response_id is not None
@@ -2946,6 +2945,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 ),
                 pending_tool_calls=_durable_pending_tool_call_manifest(matched_request_state, payload),
             )
+            if alias_registered and completion_circuit_settlement_failed:
+                # The fresh anchor persisted: the restored episode's
+                # failures were all against the superseded one, so its owed
+                # clear must not fire against the anchor just registered.
+                await self._http_bridge_suppress_poison_clear_after_anchor_advance(session)
             if not alias_registered and is_http_bridge_account_neutral_replay(
                 kind=session.key.affinity_kind,
                 key=session.key.affinity_key,
@@ -3509,13 +3513,30 @@ class _HTTPBridgeUpstreamEventsMixin:
                         ),
                     )
                     if consult_episode is not None:
-                        await _abandon_durable_http_bridge_continuity(
+                        # A multiplexed survivor holding a verified safe
+                        # replay claims the source circuit generation right
+                        # before dispatch; settling under it would strip
+                        # that fence, so survivors count alongside the
+                        # terminal request, snapshotted at decision time.
+                        async with session.pending_lock:
+                            terminal_surviving_states = list(session.pending_requests)
+                        durable_cleared = await _abandon_durable_http_bridge_continuity(
                             self,
                             session,
                             detail=terminal_settlement_detail,
-                            settle_circuit=True,
+                            settle_circuit=_http_bridge_abandonment_may_settle_circuit(
+                                [terminal_request_state, *terminal_surviving_states]
+                            ),
                             expected_continuity=consult_expected_anchor,
                         )
+                        if durable_cleared:
+                            # The abandonment succeeded even when its circuit
+                            # settlement remains outstanding: without the
+                            # marker, the next strike finds empty continuity,
+                            # refuses another abandonment, and the restored
+                            # cooldown backs off an anchor that is already
+                            # gone.
+                            await self._http_bridge_mark_poison_anchor_cleared(session, episode=consult_episode)
 
                 # The terminal frame is already published and the request is
                 # about to be finalized and removed: a cancellation escaping

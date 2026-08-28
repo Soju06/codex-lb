@@ -55,7 +55,10 @@ class _HTTPBridgeQuarantineEntry:
     # A weaker fence that arrived while the poison reason was active: the
     # no-downgrade guard keeps the poison reason, and a later revocation of
     # the poison evidence downgrades to this instead of evicting the entry.
+    # The deadline is the weaker arm's own expiry, so a downgrade does not
+    # keep serving the disproved poison arm's longer floor.
     suppressed_weaker_reason: str | None = None
+    suppressed_weaker_until: float = 0.0
 
 
 def _http_bridge_quarantine_registry(
@@ -129,9 +132,11 @@ def _revoke_http_bridge_poison_quarantine(
         # let disproved poison evidence outlive its revocation.
         and entry.poison_generation == generation
     ):
-        if entry.suppressed_weaker_reason is not None and entry.quarantined_until > time.monotonic():
+        if entry.suppressed_weaker_reason is not None and entry.suppressed_weaker_until > time.monotonic():
             entry.reason = entry.suppressed_weaker_reason
+            entry.quarantined_until = entry.suppressed_weaker_until
             entry.suppressed_weaker_reason = None
+            entry.suppressed_weaker_until = 0.0
             entry.generation += 1
             return True
         if restore_reason is not None and restore_until > time.monotonic():
@@ -251,10 +256,12 @@ def _quarantine_http_bridge_session(
         if reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
             entry.poison_generation = entry.generation
     else:
-        # The weaker fence stands on its own evidence; record it so a later
-        # revocation of the poison arm can downgrade to it instead of
-        # evicting the entry.
+        # The weaker fence stands on its own evidence; record it, with its
+        # own expiry, so a later revocation of the poison arm can downgrade
+        # to it instead of evicting the entry or serving the disproved
+        # arm's longer deadline.
         entry.suppressed_weaker_reason = reason
+        entry.suppressed_weaker_until = max(entry.suppressed_weaker_until, now + ttl_seconds)
     _prune_http_bridge_quarantine_registry(registry, now)
     session.quarantined = True
     if already_quarantined:
@@ -324,14 +331,37 @@ def _clear_http_bridge_quarantine(
     keys = (session.key,) if additional_key is None or additional_key == session.key else (session.key, additional_key)
     for key in keys:
         entry = registry.pop(key, None)
-        if (
-            key == additional_key
-            and key != session.key
-            and (additional_key_generation is None or entry is None or entry.generation != additional_key_generation)
-        ):
-            if entry is not None:
+        if key == additional_key and key != session.key:
+            # A poison entry fences on its own provenance: a weaker arm
+            # during the replay bumps the raw generation without disproving
+            # the recovery, and refusing the clear on that bump would leave
+            # a successfully replayed source classified as poisoned.
+            fence_generation = (
+                entry.poison_generation
+                if entry is not None and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+                else entry.generation
+                if entry is not None
+                else None
+            )
+            if additional_key_generation is None or entry is None or fence_generation != additional_key_generation:
+                if entry is not None:
+                    registry[key] = entry
+                continue
+            if (
+                entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+                and entry.suppressed_weaker_reason is not None
+                and entry.suppressed_weaker_until > time.monotonic()
+            ):
+                # The concurrent weaker fence stands on its own evidence:
+                # downgrade to it instead of evicting the entry with the
+                # disproved poison classification.
+                entry.reason = entry.suppressed_weaker_reason
+                entry.quarantined_until = entry.suppressed_weaker_until
+                entry.suppressed_weaker_reason = None
+                entry.suppressed_weaker_until = 0.0
+                entry.generation += 1
                 registry[key] = entry
-            continue
+                continue
         if entry is None or entry.quarantined_until <= time.monotonic():
             continue
         _log_http_bridge_event(

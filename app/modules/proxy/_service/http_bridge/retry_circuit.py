@@ -594,6 +594,17 @@ class _HTTPBridgeRetryCircuitMixin:
                 # lagging replica clock still replaces the local episode
                 # instead of leaving a settled key suppressed for the rest
                 # of its stale cooldown with a base that no longer exists.
+                if episode_replaced:
+                    # A write this worker did not produce: either the same
+                    # episode struck elsewhere (then a set marker means the
+                    # anchor is already cleared and the empty-continuity
+                    # consult refuses regardless), or the episode was
+                    # replaced — possibly at an equal or higher count — and
+                    # the replacement's newly poisoned anchor must be
+                    # allowed its one abandonment. Resetting on lineage
+                    # rather than count ordering covers the equal-count
+                    # replacement the count check below cannot see.
+                    state.poison_anchor_cleared = False
                 if persisted.consecutive_failures < state.consecutive_failures:
                     # The row does not carry this worker's failures: the
                     # lineage was reset, purged, or replaced, and the marker

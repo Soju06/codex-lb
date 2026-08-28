@@ -471,6 +471,20 @@
       registered task created before the terminal frame is yielded, so a
       consumer closing the generator at that yield cannot skip them
 
+- [x] 2.96 A confirmed terminal abandonment records the episode marker
+      even while its circuit settlement remains outstanding, and derives
+      its settlement from the terminal request plus pending survivors
+
+- [x] 2.97 The quarantine downgrade restores the weaker fence's own
+      deadline, and the completion's generation-fenced clear applies the
+      poison-provenance fence with the same downgrade
+
+- [x] 2.98 The one-clear marker resets whenever a durable load adopts a
+      foreign write, covering equal-count episode replacements
+
+- [x] 2.99 The anchor-advance suppression fires only after the fresh
+      anchor's registration succeeds
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

@@ -214,7 +214,11 @@ def build_complete_replay_payload(
         canonical_with_latest_output = (
             canonical_input if replay_input_includes_latest_output else canonical_input + latest_prior_output
         )
-        if allow_unanchored_continuation and _items_prefix_matches(continuation_input, canonical_input):
+        if (
+            allow_unanchored_continuation
+            and continuation_previous_response_id in (None, "")
+            and _items_prefix_matches(continuation_input, canonical_input)
+        ):
             # A full-history Codex request already contains the durable
             # transcript, including the latest response output. Keep only its
             # new suffix; appending ``latest_prior_output`` again would drop
@@ -247,9 +251,17 @@ def build_complete_replay_payload(
             # developer/user prefix rather than at index zero.
             continuation_input = matched_input
             include_prior_output = not replay_input_includes_latest_output
-        elif client_input_history and _items_prefix_matches(continuation_input, client_input_history):
+        elif (
+            continuation_previous_response_id in (None, "")
+            and client_input_history
+            and _items_prefix_matches(continuation_input, client_input_history)
+        ):
             continuation_input = continuation_input[len(client_input_history) :]
-        elif client_input_history and _items_prefix_matches(client_input_history, continuation_input):
+        elif (
+            continuation_previous_response_id in (None, "")
+            and client_input_history
+            and _items_prefix_matches(client_input_history, continuation_input)
+        ):
             return None
         elif allow_unanchored_continuation and continuation_previous_response_id in (None, ""):
             # An unanchored continuation must prove how its input relates to

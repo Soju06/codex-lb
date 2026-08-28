@@ -310,6 +310,40 @@ def test_build_complete_replay_payload_allows_anchored_delta_with_unanchored_mod
     assert payload is not None
 
 
+def test_build_complete_replay_payload_preserves_repeated_anchored_delta() -> None:
+    turn = _turn(
+        1,
+        parent_response_id=None,
+        response_id="resp_1",
+        request_input=[{"type": "message", "role": "user", "content": "first"}],
+        output=[
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "answer"}],
+            }
+        ],
+    )
+
+    payload = build_complete_replay_payload(
+        [turn],
+        continuation_request_text=json.dumps(
+            {
+                "type": "response.create",
+                "previous_response_id": "resp_1",
+                # This is a new anchored message that happens to equal the
+                # durable first message; it is not a full-history resend.
+                "input": [{"type": "message", "role": "user", "content": "first"}],
+            }
+        ),
+        allow_unanchored_continuation=True,
+    )
+
+    assert payload is not None
+    assert [item["role"] for item in json.loads(payload)["input"]] == ["user", "assistant", "user"]
+
+
 def test_build_complete_replay_payload_rejects_account_scoped_top_level_fields() -> None:
     turns = [
         _turn(

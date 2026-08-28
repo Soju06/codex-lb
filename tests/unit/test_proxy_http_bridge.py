@@ -1117,6 +1117,9 @@ def _stateful_retry_circuit_persistence() -> dict[str, AsyncMock]:
         "lookup_retry_circuit": AsyncMock(side_effect=_lookup),
         "persist_retry_circuit": AsyncMock(side_effect=_persist),
         "clear_retry_circuit": AsyncMock(side_effect=_clear),
+        # The poison-clear consult refuses to authorize an abandonment
+        # without a captured anchor fence.
+        "session_latest_response_id": AsyncMock(return_value=None),
     }
 
 
@@ -29401,6 +29404,7 @@ async def test_http_bridge_repeated_zero_event_idle_timeouts_poison_anchor_with_
         owner_epoch=3,
         account_id="acc-bridge",
         clear_continuity=True,
+        expected_latest_response_id=None,
     )
     retire.assert_awaited_once_with(
         session,
@@ -29454,6 +29458,7 @@ async def test_http_bridge_repeated_zero_event_stream_incompletes_poison_anchor_
         owner_epoch=3,
         account_id="acc-bridge",
         clear_continuity=True,
+        expected_latest_response_id=None,
     )
     retire.assert_awaited_once_with(
         session,
@@ -29583,6 +29588,7 @@ async def test_http_bridge_retire_stale_pending_poisons_anchor_after_repeated_ev
             "owner_epoch": 5,
             "account_id": "acc-bridge",
             "clear_continuity": True,
+            "expected_latest_response_id": None,
         }
 
 
@@ -29800,6 +29806,7 @@ async def test_http_bridge_anchor_poisoning_waits_when_durable_clear_fails(
         owner_epoch=4,
         account_id="acc-bridge",
         clear_continuity=True,
+        expected_latest_response_id=None,
     )
     retire.assert_not_awaited()
     assert "poisoned anchor" in caplog.text or "poisoned HTTP bridge continuity" in caplog.text
@@ -33153,6 +33160,7 @@ async def test_terminal_anchor_clear_runs_after_the_terminal_frame_is_published(
     monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", _record)
     service._durable_bridge = SimpleNamespace(
         rebind_session_account=_rebind,
+        session_latest_response_id=AsyncMock(return_value=None),
         # The stubbed recorder registers the episode locally; the durable row
         # backing it has to be visible to the clear gate's episode consult.
         lookup_retry_circuit=AsyncMock(
@@ -33255,6 +33263,7 @@ async def test_terminal_settlement_is_finalized_when_the_anchor_clear_is_cancell
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
     service._durable_bridge = SimpleNamespace(
         rebind_session_account=_rebind,
+        session_latest_response_id=AsyncMock(return_value=None),
         # The stubbed recorder registers the episode locally; the durable row
         # backing it has to be visible to the clear gate's episode consult.
         lookup_retry_circuit=AsyncMock(
@@ -33307,6 +33316,7 @@ async def test_terminal_settlement_is_finalized_when_the_episode_consult_is_canc
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
     service._durable_bridge = SimpleNamespace(
         rebind_session_account=AsyncMock(return_value=True),
+        session_latest_response_id=AsyncMock(return_value=None),
         lookup_retry_circuit=AsyncMock(side_effect=asyncio.CancelledError),
         clear_retry_circuit=AsyncMock(return_value=None),
     )
@@ -33341,7 +33351,10 @@ async def test_episode_consult_rechecks_after_the_durable_lookup() -> None:
             updated_at_epoch=time.time(),
         )
 
-    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(side_effect=lookup_while_sibling_settles))
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(side_effect=lookup_while_sibling_settles),
+        session_latest_response_id=AsyncMock(return_value=None),
+    )
 
     owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
         session, consecutive_failures=2, configured_threshold=7
@@ -34744,6 +34757,7 @@ async def test_poison_clear_settles_the_circuit_when_the_deque_was_already_drain
         persist_retry_circuit=persist_retry_circuit,
         rebind_session_account=AsyncMock(return_value=True),
         clear_retry_circuit=AsyncMock(return_value=None),
+        session_latest_response_id=AsyncMock(return_value=None),
     )
     service._durable_bridge = durable_bridge
     monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
@@ -34855,8 +34869,13 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
     # the sibling's anchor. The decision must read the live episode instead.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="bridge-stale-episode")
+    session.durable_session_id = "durable-stale-episode"
+    session.durable_owner_epoch = 2
     durable_lookup = AsyncMock(return_value=None)
-    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=durable_lookup)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=durable_lookup,
+        session_latest_response_id=AsyncMock(return_value=None),
+    )
 
     owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
         session, consecutive_failures=2, configured_threshold=7

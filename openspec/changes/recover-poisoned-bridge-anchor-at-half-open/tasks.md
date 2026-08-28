@@ -303,6 +303,20 @@
       persist an already-aged cooldown or make the fresh failure look older
       than the durable load for merge bookkeeping
 
+- [x] 2.54 The quarantine clears only after the fresh anchor persisted: a
+      failed alias write rewrites the completion and the clear guard skips,
+      so the quarantine keeps covering the old anchor the failure left
+      stored, protecting the window the settle-first ordering leaves
+
+- [x] 2.55 An abandonment without a captured anchor fence is refused
+      outright; a failed or unavailable capture returns nothing owed and a
+      later strike retries the consult with a working fence
+
+- [x] 2.56 A newer durable row with fewer failures than this worker holds
+      is a restarted lineage in both merge arms: the one-clear marker
+      belonged to the ended episode and resets with it, so a replacement
+      episode is never denied its required abandonment
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

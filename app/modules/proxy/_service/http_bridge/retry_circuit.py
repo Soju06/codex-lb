@@ -492,6 +492,13 @@ class _HTTPBridgeRetryCircuitMixin:
                 state = _HTTPBridgeRetryCircuitState(last_touched_monotonic=now_monotonic)
                 self._http_bridge_retry_circuits[key] = state
             local_failure_is_newer = state.last_failure_monotonic > state.last_durable_load_monotonic
+            if (
+                persisted.updated_at_epoch > state.persisted_updated_at_epoch
+                and persisted.consecutive_failures < state.consecutive_failures
+            ):
+                # A newer row with fewer failures is a restarted lineage;
+                # the marker belonged to the episode the restart ended.
+                state.poison_anchor_cleared = False
             if persisted.updated_at_epoch > state.persisted_updated_at_epoch and not local_failure_is_newer:
                 state.consecutive_failures = max(0, persisted.consecutive_failures)
                 state.cooldown_until = persisted_cooldown_until
@@ -594,6 +601,17 @@ class _HTTPBridgeRetryCircuitMixin:
                     current = self._http_bridge_retry_circuits.get(session.key)
                     if current is state:
                         local_failure_is_newer = state.last_failure_monotonic > state.last_durable_load_monotonic
+                        # A newer durable row with fewer failures than this
+                        # worker holds means the lineage restarted (a reset,
+                        # possibly already re-struck by another replica).
+                        # The marker belonged to the ended episode, in both
+                        # merge arms; a spurious trip only allows one extra
+                        # fenced abandonment.
+                        if (
+                            persisted.updated_at_epoch > state.persisted_updated_at_epoch
+                            and persisted.consecutive_failures < state.consecutive_failures
+                        ):
+                            state.poison_anchor_cleared = False
                         if persisted.updated_at_epoch > state.persisted_updated_at_epoch and not local_failure_is_newer:
                             state.consecutive_failures = max(0, persisted.consecutive_failures)
                             state.cooldown_until = persisted_cooldown_until
@@ -766,20 +784,24 @@ class _HTTPBridgeRetryCircuitMixin:
             )
         if not live_episode_owes:
             return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
-        expected_anchor: object = _POISON_ANCHOR_CAPTURE_UNAVAILABLE
+        # An abandonment without a captured fence is refused outright: an
+        # unfenced clear on this degraded path could delete a fresh anchor a
+        # sibling registered after the recheck below. A later strike retries
+        # the consult with a working capture.
         anchor_reader = getattr(self._durable_bridge, "session_latest_response_id", None)
         durable_session_id = getattr(session, "durable_session_id", None)
-        if anchor_reader is not None and durable_session_id is not None:
-            try:
-                expected_anchor = await anchor_reader(session_id=durable_session_id)
-            except Exception:
-                logger.warning(
-                    "Failed to capture durable anchor before poison clear bridge_kind=%s bridge_key=%s",
-                    session.key.affinity_kind,
-                    _hash_identifier(session.key.affinity_key),
-                    exc_info=True,
-                )
-                expected_anchor = _POISON_ANCHOR_CAPTURE_UNAVAILABLE
+        if anchor_reader is None or durable_session_id is None:
+            return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
+        try:
+            expected_anchor = await anchor_reader(session_id=durable_session_id)
+        except Exception:
+            logger.warning(
+                "Failed to capture durable anchor before poison clear bridge_kind=%s bridge_key=%s",
+                session.key.affinity_kind,
+                _hash_identifier(session.key.affinity_key),
+                exc_info=True,
+            )
+            return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
         # The one-clear marker lives in process memory, so a restart or
         # another replica cannot see it. The durable circuit row is the
         # episode's replica-visible record instead: a completed response

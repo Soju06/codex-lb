@@ -2881,12 +2881,6 @@ class _HTTPBridgeUpstreamEventsMixin:
         ):
             if not terminal_request_state.verified_stale_anchor_replay:
                 await self._clear_http_bridge_retry_circuit(session)
-            _clear_http_bridge_quarantine(
-                self,
-                session,
-                additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
-                additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
-            )
 
         if (
             response_id is not None
@@ -2932,6 +2926,27 @@ class _HTTPBridgeUpstreamEventsMixin:
                 continuity_persistence_failed_after_ack = True
                 completed_usage = None
                 completed_empty_prewarm = False
+
+        if (
+            event_type == "response.completed"
+            and terminal_request_state is not None
+            and not terminal_request_state.suppressed_duplicate_tool_call
+            and terminal_request_state.request_kind != "prewarm"
+            and not terminal_request_state.skip_request_log
+        ):
+            # The quarantine clears only after the fresh anchor persisted:
+            # a failed alias write rewrites the event to response.failed
+            # above, this guard then skips, and the quarantine keeps
+            # covering the old anchor that is still stored. The circuit
+            # settle deliberately ran before registration for the
+            # abandonment fence; the quarantine surviving here is what
+            # protects the partial-failure window that ordering leaves.
+            _clear_http_bridge_quarantine(
+                self,
+                session,
+                additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
+                additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
+            )
 
         operation_state = _http_bridge_operation_state_for_event(event_type)
         if operation_state is not None:

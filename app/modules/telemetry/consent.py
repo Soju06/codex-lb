@@ -46,7 +46,7 @@ def resolve_consent(telemetry_enabled: bool | None, persisted_state: str) -> Res
         raise ValueError(f"invalid telemetry consent state: {persisted_state}")
     state = cast("ConsentState", persisted_state)
     if state == "undecided":
-        return ResolvedConsent(state="undecided", source="default", active=True)
+        return ResolvedConsent(state="undecided", source="default", active=False)
     return ResolvedConsent(state=state, source="persisted", active=state == "enabled")
 
 

@@ -34,7 +34,7 @@ async def test_consent_api_get_preview_and_put_persists_without_restart(
     initial = response.json()
     assert initial["state"] == "undecided"
     assert initial["source"] == "default"
-    assert initial["active"] is True
+    assert initial["active"] is False
     assert set(initial["preview"]) == {"instance_id", "metrics", "timestamp"}
     assert initial["preview"]["metrics"]["schema_version"] == 1
     assert initial["preview"]["metrics"]["consent"] == "undecided"
@@ -48,7 +48,7 @@ async def test_consent_api_get_preview_and_put_persists_without_restart(
     assert disabled["active"] is False
     assert disabled["preview"] is None
     await asyncio.sleep(0)
-    opt_out_sender.send_opt_out.assert_awaited_once()
+    opt_out_sender.send_opt_out.assert_not_awaited()
 
     builder = Mock(side_effect=AssertionError("decided consent must not build a preview"))
     monkeypatch.setattr("app.modules.telemetry.api.TelemetrySnapshotBuilder", builder)
@@ -104,6 +104,9 @@ async def test_dashboard_active_to_inactive_transitions_each_send_exactly_once(
     monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
     get_settings.cache_clear()
 
+    enabled = await async_client.put("/api/settings/telemetry", json={"enabled": True})
+    assert enabled.status_code == 200
+
     first = await async_client.put("/api/settings/telemetry", json={"enabled": False})
     assert first.status_code == 200
     await asyncio.sleep(0)
@@ -114,8 +117,8 @@ async def test_dashboard_active_to_inactive_transitions_each_send_exactly_once(
     await asyncio.sleep(0)
     assert opt_out_sender.send_opt_out.await_count == 1
 
-    enabled = await async_client.put("/api/settings/telemetry", json={"enabled": True})
-    assert enabled.status_code == 200
+    reenabled = await async_client.put("/api/settings/telemetry", json={"enabled": True})
+    assert reenabled.status_code == 200
     await asyncio.sleep(0)
     assert opt_out_sender.send_opt_out.await_count == 1
 
@@ -164,6 +167,8 @@ async def test_opt_out_background_send_does_not_block_settings_response(
 ) -> None:
     monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
     get_settings.cache_clear()
+    enabled = await async_client.put("/api/settings/telemetry", json={"enabled": True})
+    assert enabled.status_code == 200
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -196,6 +201,8 @@ async def test_opt_out_identity_failure_is_debug_only_and_preserves_disabled_sta
 ) -> None:
     monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
     get_settings.cache_clear()
+    enabled = await async_client.put("/api/settings/telemetry", json={"enabled": True})
+    assert enabled.status_code == 200
 
     async def fail_identity(_store) -> None:
         raise RuntimeError("identity decryption failed")
@@ -227,6 +234,8 @@ async def test_unexpected_opt_out_task_failure_is_debug_only_and_does_not_change
 ) -> None:
     monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
     get_settings.cache_clear()
+    enabled = await async_client.put("/api/settings/telemetry", json={"enabled": True})
+    assert enabled.status_code == 200
     opt_out_sender.send_opt_out.side_effect = RuntimeError("unexpected sender failure")
 
     with caplog.at_level(logging.DEBUG, logger="app.modules.telemetry.api"):

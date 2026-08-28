@@ -4,11 +4,15 @@
 
 Give the project visibility into its install base (version distribution, deployment shapes,
 client ecosystem, feature usage) without collecting anything that identifies an operator,
-an account, or request content. Consent model is informed opt-out: active by default,
-one-time dialog with the exact payload, settings toggle, env kill switch.
+an account, or request content. This fork uses explicit opt-in consent: inactive by default,
+one-time dialog with the exact payload, settings toggle, and environment override.
 
 Decision record (2026-08-06, maintainer): default-on with first-run confirmation dialog for
 both new and existing users; settings toggle; expanded field set over the minimal version.
+
+Fork decision record (2026-08-28): unresolved consent is inactive. An operator must explicitly
+enable telemetry in the dashboard or set `CODEX_LB_TELEMETRY_ENABLED=true` before any
+registration, activation, or snapshot request is sent.
 
 ## Collection endpoint
 
@@ -157,7 +161,7 @@ Field notes:
 ## Consent resolution precedence
 
 `CODEX_LB_TELEMETRY_ENABLED` env (when set) > persisted decision > default
-(`undecided` ⇒ active). The dialog is only shown while persisted state is `undecided` and
+(`undecided` ⇒ inactive). The dialog is only shown while persisted state is `undecided` and
 no env override exists.
 
 ## Consent API and preview cost
@@ -172,8 +176,9 @@ persists the decision and returns `preview: null`.
 ## Cadence and replica ownership
 
 The startup and 24-hour ticks run through the shared scheduler leader-election gate. Only the
-leader constructs aggregates, transmits the snapshot, and logs the undecided-consent startup
-notice. Followers perform none of that work, avoiding duplicate snapshots and duplicate notices.
+leader resolves consent and logs the undecided-consent startup notice. When telemetry is
+explicitly enabled, only the leader constructs aggregates and transmits the snapshot. Followers
+perform none of that work, avoiding duplicate snapshots and duplicate notices.
 
 ## Retention
 
@@ -191,7 +196,7 @@ retention policy or explicit deletion.
   dashboard reports module; they run on the leader scheduler once per tick and only on an API
   request when the undecided dialog or an explicit settings preview needs them. On Postgres
   instances with very large `request_logs` this is the same load class as one dashboard load.
-- Clock skew / restart loops: the elected leader transmits the startup snapshot; SHM's
+- Clock skew / restart loops: when telemetry is explicitly enabled, the elected leader transmits the startup snapshot; SHM's
   `/v1/activate` is idempotent (active → active refreshes last-seen). Rapid restart loops are
   bounded by one snapshot per elected-leader process start; no local rate limiter in v1.
 

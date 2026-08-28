@@ -28,7 +28,7 @@ class _GateLeader:
         return await fn()
 
 
-def test_consent_precedence_and_default_activation() -> None:
+def test_consent_precedence_and_default_inactivity() -> None:
     assert resolve_consent(False, "enabled").state == "disabled"
     assert resolve_consent(False, "enabled").source == "env"
     assert resolve_consent(False, "enabled").active is False
@@ -43,10 +43,15 @@ def test_consent_precedence_and_default_activation() -> None:
     assert persisted_disabled.source == "persisted"
     assert persisted_disabled.active is False
 
+    persisted_enabled = resolve_consent(None, "enabled")
+    assert persisted_enabled.state == "enabled"
+    assert persisted_enabled.source == "persisted"
+    assert persisted_enabled.active is True
+
     undecided = resolve_consent(None, "undecided")
     assert undecided.state == "undecided"
     assert undecided.source == "default"
-    assert undecided.active is True
+    assert undecided.active is False
 
 
 @pytest.mark.asyncio
@@ -139,7 +144,7 @@ async def test_main_lifespan_constructs_starts_and_stops_telemetry_scheduler(app
 
 
 @pytest.mark.asyncio
-async def test_scheduler_sends_startup_and_interval_snapshots_with_one_undecided_notice(
+async def test_scheduler_default_sends_nothing_and_logs_one_opt_in_notice(
     db_setup,
     monkeypatch,
     caplog,
@@ -154,17 +159,18 @@ async def test_scheduler_sends_startup_and_interval_snapshots_with_one_undecided
     with caplog.at_level(logging.INFO, logger="app.modules.telemetry.scheduler"):
         await scheduler.start()
         for _ in range(50):
-            if sender.send_snapshot.await_count >= 2:
+            if any("disabled by default" in record.getMessage() for record in caplog.records):
                 break
             await asyncio.sleep(0.01)
         await scheduler.stop()
 
-    assert sender.send_snapshot.await_count >= 2
-    assert all(call.args[0].consent == "undecided" for call in sender.send_snapshot.await_args_list)
+    sender.send_snapshot.assert_not_awaited()
     notices = [
-        record.getMessage() for record in caplog.records if "Anonymous telemetry is active" in record.getMessage()
+        record.getMessage()
+        for record in caplog.records
+        if "Anonymous telemetry is disabled by default" in record.getMessage()
     ]
     assert len(notices) == 1
     assert "https://soju06.github.io/codex-lb/telemetry/" in notices[0]
-    assert "CODEX_LB_TELEMETRY_ENABLED=false" in notices[0]
+    assert "CODEX_LB_TELEMETRY_ENABLED=true" in notices[0]
     assert scheduler._task is None

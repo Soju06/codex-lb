@@ -1,8 +1,9 @@
 # Anonymous telemetry
 
-codex-lb sends an anonymous usage snapshot to the project-operated collector at
-`https://telemetry.tokmaxxing.com` when the service starts and every 24 hours. In a
-multi-replica deployment, only the elected leader builds and sends the snapshot.
+When explicitly enabled, codex-lb sends an anonymous usage snapshot to the project-operated
+collector at `https://telemetry.tokmaxxing.com` when the service starts and every 24 hours.
+Telemetry is disabled by default. In a multi-replica deployment, only the elected leader builds
+and sends the snapshot.
 
 ## What is sent
 
@@ -39,21 +40,28 @@ request or response content, raw user-agent strings, per-account records, custom
 free-text errors. Exact schemas and privacy constraints live in the
 [telemetry OpenSpec capability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/telemetry).
 
-## Consent and disabling
+## Consent and enabling
 
-Telemetry uses informed opt-out consent. With no override or saved decision, it is active and
-the dashboard presents a one-time dialog with the current payload. Enabling or disabling saves
+Telemetry uses explicit opt-in consent. With no override or saved decision, it is inactive and
+opens no connection to the collector. The dashboard presents a one-time dialog with the current
+payload preview; generating that local preview does not transmit it. Enabling or disabling saves
 the decision, and the Settings toggle can change it later.
 
-For a headless or deployment-level kill switch, set:
+For a headless or deployment-level opt-in, set:
+
+```bash
+CODEX_LB_TELEMETRY_ENABLED=true
+```
+
+To enforce the disabled state regardless of a saved dashboard decision, set:
 
 ```bash
 CODEX_LB_TELEMETRY_ENABLED=false
 ```
 
-An environment value overrides the saved dashboard setting. When telemetry resolves to
-disabled, codex-lb opens no connection to the telemetry endpoint. The environment kill switch
-is always completely silent.
+An environment value overrides the saved dashboard setting. `true` explicitly enables
+transmission; `false` is a completely silent kill switch. With neither value set, unresolved
+consent remains inactive, while a prior explicit dashboard decision is preserved.
 
 When a dashboard decision changes telemetry from active to inactive, codex-lb makes one final
 signed request to `POST /v1/optout` so aggregate opt-out counts remain accurate. If the instance

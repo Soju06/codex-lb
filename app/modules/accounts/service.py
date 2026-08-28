@@ -667,12 +667,29 @@ class AccountsService:
                 continue
             account: Account | None = None
             validation_succeeded = False
+            proxy_pause_required = False
             remaining = deadline - loop.time()
             if remaining > 0:
                 try:
-                    account, validation_succeeded = await asyncio.wait_for(
+                    account, validation_succeeded, proxy_pause_required = await asyncio.wait_for(
                         self._validate_imported_bundle_account(result),
                         timeout=remaining,
+                    )
+                except Exception:
+                    validation_succeeded = False
+
+            if proxy_pause_required and account is not None:
+                try:
+                    await self._repo.update_status_if_current(
+                        account.id,
+                        AccountStatus.PAUSED,
+                        IMPORT_PROXY_REQUIRED_PAUSE_REASON,
+                        None,
+                        blocked_at=None,
+                        expected_status=account.status,
+                        expected_deactivation_reason=account.deactivation_reason,
+                        expected_reset_at=account.reset_at,
+                        expected_blocked_at=account.blocked_at,
                     )
                 except Exception:
                     validation_succeeded = False
@@ -688,32 +705,20 @@ class AccountsService:
     async def _validate_imported_bundle_account(
         self,
         result: BundlePersistenceResult,
-    ) -> tuple[Account | None, bool]:
+    ) -> tuple[Account | None, bool, bool]:
         account = await self._repo.get_by_id(result.account_id)
         if account is None:
-            return None, False
+            return None, False, False
         refresh_allowed = await self._import_usage_refresh_allowed(account)
         if not refresh_allowed:
-            if account.status == AccountStatus.ACTIVE:
-                await self._repo.update_status_if_current(
-                    account.id,
-                    AccountStatus.PAUSED,
-                    IMPORT_PROXY_REQUIRED_PAUSE_REASON,
-                    None,
-                    blocked_at=None,
-                    expected_status=account.status,
-                    expected_deactivation_reason=account.deactivation_reason,
-                    expected_reset_at=account.reset_at,
-                    expected_blocked_at=account.blocked_at,
-                )
-            return account, False
+            return account, False, account.status == AccountStatus.ACTIVE
         if self._usage_updater is None:
-            return account, False
+            return account, False, False
         refresh_result = await self._usage_updater.force_refresh_result(
             account,
             ignore_refresh_disabled=True,
         )
-        return account, refresh_result.fetch_succeeded
+        return account, refresh_result.fetch_succeeded, False
 
     def _bundle_accounts_for_destination(self, payload: AccountBundlePayload) -> list[Account]:
         accounts: list[Account] = []

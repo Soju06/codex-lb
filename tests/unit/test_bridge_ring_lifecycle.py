@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.sql.dml import Update
+from sqlalchemy.sql.selectable import Select
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import Settings
@@ -1526,7 +1527,7 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
         await session.execute(
             update(HttpBridgeSessionRecord)
             .where(HttpBridgeSessionRecord.id == claim.id)
-            .values(owner_instance_id=None, lease_expires_at=utcnow())
+            .values(owner_instance_id=None, lease_expires_at=utcnow() - timedelta(minutes=5))
         )
         await session.commit()
 
@@ -1776,6 +1777,12 @@ async def test_stale_operation_sweep_protects_live_recently_expired_and_local_pe
             lease_ttl_seconds=1.0,
             session_key_value="sid-operation-recently-expired",
         )
+        recently_released = await _claim(
+            repository,
+            instance_id="inst-operation-recently-released",
+            lease_ttl_seconds=1.0,
+            session_key_value="sid-operation-recently-released",
+        )
         protected = await _claim(
             repository,
             instance_id="inst-operation-protected",
@@ -1787,6 +1794,7 @@ async def test_stale_operation_sweep_protects_live_recently_expired_and_local_pe
             ("live", live, "inst-operation-live"),
             ("expired", expired, "inst-operation-expired"),
             ("recently-expired", recently_expired, "inst-operation-recently-expired"),
+            ("recently-released", recently_released, "inst-operation-recently-released"),
             ("protected", protected, "inst-operation-protected"),
         ):
             fingerprint = durable_bridge_hash(f"operation-{label}")
@@ -1819,6 +1827,11 @@ async def test_stale_operation_sweep_protects_live_recently_expired_and_local_pe
             .where(HttpBridgeSessionRecord.id == recently_expired.id)
             .values(lease_expires_at=utcnow() - timedelta(seconds=10))
         )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == recently_released.id)
+            .values(owner_instance_id=None, lease_expires_at=utcnow() - timedelta(seconds=10))
+        )
         await session.commit()
 
         sweep = await repository.abandon_stale_operations(
@@ -1830,14 +1843,17 @@ async def test_stale_operation_sweep_protects_live_recently_expired_and_local_pe
         expired_operation = await repository.get_operation(operation_id=operation_ids["expired"])
         live_operation = await repository.get_operation(operation_id=operation_ids["live"])
         recently_expired_operation = await repository.get_operation(operation_id=operation_ids["recently-expired"])
+        recently_released_operation = await repository.get_operation(operation_id=operation_ids["recently-released"])
         protected_operation = await repository.get_operation(operation_id=operation_ids["protected"])
         assert expired_operation is not None
         assert live_operation is not None
         assert recently_expired_operation is not None
+        assert recently_released_operation is not None
         assert protected_operation is not None
         assert expired_operation.state == "abandoned"
         assert live_operation.state == "acknowledged"
         assert recently_expired_operation.state == "acknowledged"
+        assert recently_released_operation.state == "acknowledged"
         assert protected_operation.state == "acknowledged"
     finally:
         await session.close()
@@ -1846,6 +1862,7 @@ async def test_stale_operation_sweep_protects_live_recently_expired_and_local_pe
 @pytest.mark.asyncio
 async def test_stale_operation_sweep_bounds_oversized_protection_snapshot(
     async_session_factory: Callable[[], AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = async_session_factory()
     try:
@@ -1898,12 +1915,23 @@ async def test_stale_operation_sweep_bounds_oversized_protection_snapshot(
             *(f"synthetic-protected-{index}" for index in range(_PROTECTED_OPERATION_ID_SAFE_LIMIT)),
         }
         assert len(protected_ids) > _PROTECTED_OPERATION_ID_SAFE_LIMIT
+        original_execute = session.execute
+        locked_candidate_page = False
+
+        async def capture_candidate_lock(statement: Any, *args: Any, **kwargs: Any) -> Any:
+            nonlocal locked_candidate_page
+            if isinstance(statement, Select) and statement._for_update_arg is not None:
+                locked_candidate_page = True
+            return await original_execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(session, "execute", capture_candidate_lock)
         sweep = await repository.abandon_stale_operations(
             cutoff=utcnow() - timedelta(minutes=30),
             lease_expired_before=utcnow() - timedelta(seconds=30),
             protected_operation_ids=protected_ids,
         )
         assert len(sweep.abandonments) == 1
+        assert locked_candidate_page is True
         assert sweep.abandonments[0].source_state == "acknowledged"
         protected_operation = await repository.get_operation(operation_id=operation_id)
         unprotected_operation = await repository.get_operation(operation_id=unprotected_operation_id)

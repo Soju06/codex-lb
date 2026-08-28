@@ -14,7 +14,9 @@ Preflight and commit accept the bundle file and passphrase as bounded multipart 
 
 ## Identity and persistence
 
-Preflight and commit call the repository's existing account-slot identity matcher. Source-local ids are used only as non-authoritative id seeds for new rows and are never used to select a replacement. Commit validates every record and conflict decision first, then persists credentials and metadata together in one transaction and encrypts tokens with the destination `TokenEncryptor`. Post-persistence refresh is best effort and reports warnings without changing successful import results.
+Preflight and commit call the repository's existing account-slot identity matcher. Source-local ids are used only as non-authoritative id seeds for new rows and are never used to select a replacement. Commit validates every record and conflict decision first, then persists credentials and metadata together in one transaction and encrypts tokens with the destination `TokenEncryptor`. New rows and replacements whose destination lifecycle was `ACTIVE` enter a `PAUSED` pending-validation quarantine in that same transaction; the transaction also advances routing and selection invalidation versions. Existing non-active replacement lifecycle state is preserved.
+
+Post-persistence validation uses only background-owned database sessions, including any usage-refresh singleflight work that can outlive the request waiter. A successful validation may restore an active-before-import slot through a credential-version compare-and-set, with reactivation and cache invalidation committed atomically. Failure, timeout, cancellation, or a lost compare-and-set leaves the quarantine durable. Validation never reactivates a destination that was already non-active before replacement.
 
 ## Failure modes
 

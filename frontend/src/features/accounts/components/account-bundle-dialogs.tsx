@@ -245,10 +245,10 @@ export function ImportAccountBundleDialog({ open, onOpenChange, onCommitted }: I
         conflictMode,
         confirmReplace,
       });
+      await onCommitted();
       if (generation !== operationGeneration.current) return;
       setResult(committed);
       setPassphrase("");
-      await onCommitted();
     } catch (caught) {
       if (generation === operationGeneration.current) {
         setError(caught instanceof Error ? caught.message : t("accounts.bundle.error"));

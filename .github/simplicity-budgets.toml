@@ -57,6 +57,8 @@ allowed = [
   "docker-compose.prod.yml",
   "docker-compose.yml",
   "docs",
+  "flake.lock",
+  "flake.nix",
   "frontend",
   "mkdocs.yml",
   "openspec",

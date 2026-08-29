@@ -3,7 +3,7 @@
 - [x] 1.1 Add shared policy tests for explicit `priority`/`fast`, non-priority preservation, disabled policy, alias-derived priority, API-key enforced priority precedence, and strip logging; run them against the current implementation and record the expected failures.
 - [x] 1.2 Add native `/responses`, `/v1/responses`, native compact, `/v1` compact, and chat-conversion path tests proving explicit priority is absent from the effective upstream payload; run them red before implementation.
 - [x] 1.3 Add a WebSocket `response.create` regression test proving explicit priority is absent from the upstream payload and effective request state; run it red before implementation.
-- [x] 1.4 Add warmup and owner-forward preparation regression tests for the shared prohibition boundary; run each red before implementation.
+- [x] 1.4 Add warmup characterization and owner-forward preparation regression coverage for the shared prohibition boundary. The owner-forward case ran red; warmup remained green because its input surface only derives priority from a Fast alias, which the previous alias guard already handled.
 
 ## 2. Policy Implementation
 

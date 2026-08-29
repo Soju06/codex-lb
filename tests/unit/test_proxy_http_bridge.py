@@ -31856,6 +31856,179 @@ async def test_stream_http_bridge_quarantined_full_resend_stays_unanchored_when_
 
 
 @pytest.mark.asyncio
+async def test_stream_http_bridge_tombstoned_full_resend_stays_unanchored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transitional abandonment tombstone must fence anchor injection the
+    same way a quarantine does: a crash between a poison settle and its
+    registration leaves the old poisoned anchor stored behind a zero-count
+    tombstone that arms no quarantine, and a full resend planned on another
+    worker must dispatch unanchored instead of reattaching the dead anchor."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    historical_input = [
+        {"role": "user", "content": [{"type": "input_text", "text": "leading question"}]},
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        },
+        {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "canonical Lite instructions"}],
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_historical_shell",
+            "name": "shell",
+            "input": "printf historical",
+        },
+        {"role": "developer", "content": [{"type": "input_text", "text": "historical control"}]},
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_historical_shell",
+            "output": "historical",
+        },
+    ]
+    # Full resend with a trimmable durable prefix and a fresh suffix that does
+    # NOT retain the prior output (plain user turn).
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test",
+            "input": [
+                *historical_input,
+                {"role": "user", "content": [{"type": "input_text", "text": "follow-up without prior output"}]},
+            ],
+        }
+    )
+    bridge_key = proxy_service._HTTPBridgeSessionKey("session_header", "tombstone-injection-fence", None)
+    prefix_fingerprint = http_bridge_streaming_module._fingerprint_input_items(
+        cast(list[Any], payload.input)[: len(historical_input)]
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-tombstone-fence",
+        canonical_kind=bridge_key.affinity_kind,
+        canonical_key=bridge_key.affinity_key,
+        api_key_scope="__anonymous__",
+        account_id="acc-bridge",
+        owner_instance_id="instance-a",
+        owner_epoch=1,
+        lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state=None,
+        latest_response_id="resp_wedged_anchor",
+        model="gpt-5.6-sol",
+        latest_input_item_count=len(historical_input),
+        latest_input_full_fingerprint=prefix_fingerprint,
+    )
+    tombstone_state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        last_touched_monotonic=time.monotonic()
+    )
+    tombstone_state.consecutive_failures = 0
+    tombstone_state.last_detail = "anchor_abandoned"
+    tombstone_state.last_durable_load_monotonic = time.monotonic()
+    cast(Any, service)._http_bridge_retry_circuits[bridge_key] = tombstone_state
+    cast(Any, service)._http_bridge_retry_circuit_loaded_keys.add(bridge_key)
+    fresh_session = _make_bridge_session(key=bridge_key, key_value=bridge_key.affinity_key)
+    fresh_session.codex_session = True
+
+    prepared_payloads: list[proxy_service.ResponsesRequest] = []
+
+    def fake_prepare(
+        prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+        **prepare_kwargs: object,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip, prepare_kwargs
+        prepared_payloads.append(prepared_payload)
+        request_state = proxy_service._WebSocketRequestState(
+            request_id=f"req-tombstone-fence-{len(prepared_payloads)}",
+            model=prepared_payload.model,
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=time.monotonic(),
+            event_queue=asyncio.Queue(),
+            transport="http",
+        )
+        request_state.previous_response_id = prepared_payload.previous_response_id
+        return request_state, json.dumps(dict(prepared_payload.to_payload()), separators=(",", ":"))
+
+    async def fake_get_or_create(
+        key: proxy_service._HTTPBridgeSessionKey,
+        **kwargs: object,
+    ) -> proxy_service._HTTPBridgeSession:
+        del kwargs
+        assert key == bridge_key
+        return fresh_session
+
+    dispatched_text: list[str] = []
+
+    async def fake_stream_events(*args: object, **kwargs: object):
+        dispatched_text.append(cast(str, kwargs["text_data"]))
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    dashboard_settings = SimpleNamespace(
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=1800,
+    )
+    runtime_config = SimpleNamespace(
+        enabled=True,
+        idle_ttl_seconds=120.0,
+        codex_idle_ttl_seconds=1800.0,
+        max_sessions=8,
+        queue_limit=4,
+        prompt_cache_idle_ttl_seconds=120.0,
+        gateway_safe_mode=False,
+    )
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=dashboard_settings)),
+    )
+    monkeypatch.setattr(http_bridge_streaming_module, "_service_get_settings", _make_app_settings)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_runtime_config", lambda *args: runtime_config)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    # The bypass shape: a live (alias) session makes the fresh-reattach
+    # durable-anchor gate false before the quarantine is ever consulted.
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+
+    stream = service._stream_http_bridge_or_retry(
+        payload,
+        {"x-codex-session-id": bridge_key.affinity_key},
+        codex_session_affinity=True,
+        propagate_http_errors=True,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=None,
+        suppress_text_done_events=False,
+    )
+    chunks = [chunk async for chunk in stream]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert len(dispatched_text) == 1
+    dispatched_payload = json.loads(dispatched_text[0])
+    # Genuinely unanchored: the suppressed durable anchor did not come back
+    # through session hydration or session-level injection, and the client's
+    # payload was not prefix-trimmed against the durable stored context.
+    assert "previous_response_id" not in dispatched_payload
+    assert len(dispatched_payload["input"]) == len(historical_input) + 1
+    assert fresh_session.last_completed_response_id is None
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_has_live_local_session_treats_quarantined_as_absent() -> None:
     """A quarantined session is detached at lookup time, so anchor selection
     must treat it as absent: a delta-only fresh reattach then keeps the
@@ -35809,6 +35982,7 @@ async def test_a_blind_base_strike_re_persists_onto_the_observed_row() -> None:
         pytest.param("superseded", True, id="anchor-superseded-revokes"),
         pytest.param("replaced_below_threshold", True, id="non-poison-replacement-revokes"),
         pytest.param("still_poison", False, id="poison-row-keeps-the-fence"),
+        pytest.param("tombstone", False, id="transitional-tombstone-keeps-the-fence"),
         pytest.param("miss", True, id="durable-miss-revokes"),
     ],
 )
@@ -35861,6 +36035,12 @@ async def test_a_load_adopting_a_disproved_episode_revokes_the_stale_quarantine(
             cooldown_until_epoch=time.time() + 60.0,
             last_detail="stream_incomplete",
             updated_at_epoch=base_epoch,
+        ),
+        "tombstone": SimpleNamespace(
+            consecutive_failures=0,
+            cooldown_until_epoch=0.0,
+            last_detail="anchor_abandoned",
+            updated_at_epoch=time.time(),
         ),
         "miss": None,
     }
@@ -36100,6 +36280,55 @@ async def test_submit_fails_closed_when_the_quarantine_arms_after_planning() -> 
     )
     assert await service._http_bridge_precreated_retry_allowed(session) is False, (
         "a concurrent follow-up is suppressed behind the re-claimed lease"
+    )
+
+
+@pytest.mark.asyncio
+async def test_submit_fails_closed_on_an_adopted_abandonment_tombstone() -> None:
+    # A remotely written abandonment tombstone arms no quarantine by
+    # design; when planning served a cached view that predates it, the
+    # payload was serialized with the injected anchor the tombstone
+    # fences. The submit-time load adopts the tombstone and the gate must
+    # fail closed instead of dispatching the known-dead anchor once.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-submit-tombstone-gate")
+    tombstone_state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        last_touched_monotonic=time.monotonic()
+    )
+    tombstone_state.consecutive_failures = 0
+    tombstone_state.last_detail = "anchor_abandoned"
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = tombstone_state
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-tombstone-gate",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"continue"}',
+        transport="http",
+        previous_response_id="resp_abandoned_anchor",
+        proxy_injected_previous_response_id=True,
+        skip_request_log=True,
+    )
+
+    with pytest.raises(proxy_service.ProxyResponseError) as excinfo:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+
+    assert excinfo.value.status_code == 404
+    assert "bridge_previous_response_not_found" in str(excinfo.value.payload), (
+        "a proxy-injected anchor over an adopted tombstone must fail closed at submission"
     )
 
 
@@ -37077,6 +37306,38 @@ async def test_a_below_threshold_poison_strike_arms_no_owed_debt() -> None:
             assert state.owed_poison_detail == "stream_incomplete", (
                 "an at-threshold poison strike arms the debt as before"
             )
+
+
+@pytest.mark.asyncio
+async def test_a_threshold_one_poison_strike_arms_the_owed_debt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A configured anchor-poison threshold of one authorizes the abandonment
+    # at the first poison strike; if that clear fails, the debt must already
+    # be armed at count one. Gating the debt on the circuit threshold of two
+    # left no durable or local record to retry the clear from.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(
+        http_bridge_retry_circuit_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_anchor_poison_failure_threshold=1),
+    )
+    service._durable_bridge = SimpleNamespace(**_stateful_retry_circuit_persistence())
+    owner = _make_eventless_http_bridge_owner(request_id="req-threshold-one-owed")
+    session = _make_bridge_session(
+        key_value="bridge-threshold-one-owed",
+        pending_requests=deque([owner]),
+        queued_request_count=1,
+    )
+
+    await service._retire_stale_pending_http_bridge_session(session, detail="stream_incomplete")
+
+    state = cast(Any, service)._http_bridge_retry_circuits.get(session.key)
+    assert state is not None
+    assert state.consecutive_failures == 1
+    assert state.owed_poison_detail == "stream_incomplete", (
+        "the effective threshold of one arms the debt at the strike that authorizes the abandonment"
+    )
 
 
 @pytest.mark.asyncio

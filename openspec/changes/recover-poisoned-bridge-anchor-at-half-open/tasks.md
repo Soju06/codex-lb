@@ -745,6 +745,20 @@
       instead of writing a zero-count tombstone the next load reads as a
       disproved episode
 
+- [x] 2.167 A transitional tombstone fences the stored anchor: loads do
+      not revoke a surviving quarantine off a tombstone row, and
+      full-resend planning suppresses durable-anchor injection over one
+
+- [x] 2.168 The abandonment tombstone is sticky in the strike merge
+      against every failure-class overwrite, in both dialects, NULL-safe
+
+- [x] 2.169 The owed-debt arm and the durable sticky-detail fence use the
+      effective configured anchor-poison threshold, arming and preserving
+      a one-failure debt at a configured threshold of one
+
+- [x] 2.170 The submit-time gate fails a proxy-injected anchor closed
+      over an adopted abandonment tombstone, matching the quarantine gate
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

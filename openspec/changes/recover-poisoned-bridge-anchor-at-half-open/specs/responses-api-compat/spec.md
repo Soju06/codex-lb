@@ -416,7 +416,20 @@ preserved so a successful terminal response still clears circuit state
 during a transient outage. Fences captured blind stay conservative: a
 quarantine armed by the settle's own load survives its miss-fenced clear,
 and the lingering tombstone is healed by a later completion's fence-aware
-settle-and-erase.
+settle-and-erase. Until that happens the tombstone itself MUST keep
+fencing the stored anchor: a load adopting a tombstone row MUST NOT
+revoke a surviving poison quarantine as a disproved episode, full-resend
+planning MUST suppress durable-anchor injection over a tombstone exactly
+as it does under quarantine, the submit-time gate MUST fail a
+proxy-injected anchor closed over an adopted tombstone exactly as it does
+under quarantine — the tombstone arms no quarantine by design, and
+planning may have served a cached view that predates it — and the strike merge MUST keep the tombstone
+detail sticky against every failure-class overwrite — only the fenced
+settle and supersede paths, a completion establishing fresh continuity,
+may rewrite it. The owed-debt arm and the sticky-detail fence MUST both
+use the effective configured anchor-poison threshold, so a configured
+threshold of one arms and preserves the debt from the one-failure row
+whose first poison strike already authorized the abandonment.
 The claimed-probe token MUST be handed out by the admission's claim under
 its own lock, never inferred from before/after reads. Every fence captured
 for a later clear MUST be captured under the same provenance rule the clear

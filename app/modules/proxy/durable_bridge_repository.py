@@ -419,11 +419,13 @@ class DurableBridgeRepository:
         updated_at_epoch: float,
         base_updated_at_epoch: float = 0.0,
         failure_threshold: int = 1,
+        poison_sticky_threshold: int | None = None,
         conflict_cooldown_until_epoch: float | None = None,
         base_backoff_seconds: float = 60.0,
         max_backoff_seconds: float = 600.0,
         clean_close_max_backoff_seconds: float = 30.0,
     ) -> None:
+        sticky_threshold = poison_sticky_threshold if poison_sticky_threshold is not None else failure_threshold
         values = {
             "session_key_kind": session_key_kind,
             "session_key_hash": durable_bridge_hash(session_key_value),
@@ -494,8 +496,24 @@ class DurableBridgeRepository:
             # another poison-class strike may change it.
             sticky_poison_detail = and_(
                 HttpBridgeRetryCircuit.last_detail.in_(("stream_incomplete", "stream_idle_timeout")),
-                HttpBridgeRetryCircuit.consecutive_failures >= threshold,
+                # The effective anchor-poison threshold, not the circuit
+                # threshold: a configured threshold of one authorizes the
+                # abandonment at the first poison strike, and its failed
+                # clear leaves a one-failure debt this predicate must keep.
+                HttpBridgeRetryCircuit.consecutive_failures >= sticky_threshold,
                 excluded.last_detail.notin_(("stream_incomplete", "stream_idle_timeout")),
+            )
+            # An abandonment tombstone is sticky against every strike
+            # detail: continuity is already gone, the tombstone is what
+            # fails anchorless deltas closed on every replica, and only the
+            # fenced settle/supersede paths — a completion establishing
+            # fresh continuity — may rewrite it.
+            # NULL-safe: a NULL detail must make this term FALSE (so its
+            # negation stays TRUE), not NULL — three-valued logic would
+            # otherwise freeze the detail of every reset row.
+            sticky_tombstone = and_(
+                HttpBridgeRetryCircuit.last_detail.is_not(None),
+                HttpBridgeRetryCircuit.last_detail == _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL,
             )
             conflict_failures = case(
                 (
@@ -541,7 +559,10 @@ class DurableBridgeRepository:
                         else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
                     ),
                     "last_detail": case(
-                        (and_(failure_from_current_row, ~sticky_poison_detail), excluded.last_detail),
+                        (
+                            and_(failure_from_current_row, ~sticky_poison_detail, ~sticky_tombstone),
+                            excluded.last_detail,
+                        ),
                         else_=HttpBridgeRetryCircuit.last_detail,
                     ),
                     "updated_at_epoch": case(
@@ -584,8 +605,24 @@ class DurableBridgeRepository:
             # another poison-class strike may change it.
             sticky_poison_detail = and_(
                 HttpBridgeRetryCircuit.last_detail.in_(("stream_incomplete", "stream_idle_timeout")),
-                HttpBridgeRetryCircuit.consecutive_failures >= threshold,
+                # The effective anchor-poison threshold, not the circuit
+                # threshold: a configured threshold of one authorizes the
+                # abandonment at the first poison strike, and its failed
+                # clear leaves a one-failure debt this predicate must keep.
+                HttpBridgeRetryCircuit.consecutive_failures >= sticky_threshold,
                 excluded.last_detail.notin_(("stream_incomplete", "stream_idle_timeout")),
+            )
+            # An abandonment tombstone is sticky against every strike
+            # detail: continuity is already gone, the tombstone is what
+            # fails anchorless deltas closed on every replica, and only the
+            # fenced settle/supersede paths — a completion establishing
+            # fresh continuity — may rewrite it.
+            # NULL-safe: a NULL detail must make this term FALSE (so its
+            # negation stays TRUE), not NULL — three-valued logic would
+            # otherwise freeze the detail of every reset row.
+            sticky_tombstone = and_(
+                HttpBridgeRetryCircuit.last_detail.is_not(None),
+                HttpBridgeRetryCircuit.last_detail == _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL,
             )
             conflict_failures = case(
                 (
@@ -631,7 +668,10 @@ class DurableBridgeRepository:
                         else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
                     ),
                     "last_detail": case(
-                        (and_(failure_from_current_row, ~sticky_poison_detail), excluded.last_detail),
+                        (
+                            and_(failure_from_current_row, ~sticky_poison_detail, ~sticky_tombstone),
+                            excluded.last_detail,
+                        ),
                         else_=HttpBridgeRetryCircuit.last_detail,
                     ),
                     "updated_at_epoch": case(

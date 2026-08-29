@@ -1677,7 +1677,23 @@ class _HTTPBridgeStreamingMixin:
                 and durable_lookup.latest_response_id is not None
                 and (not payload_looks_like_full_resend or durable_anchor_trimmable)
             )
-            if payload_looks_like_full_resend and _http_bridge_session_key_quarantined(self, bridge_session_key):
+            fresh_reattach_anchor_tombstoned = False
+            if payload_looks_like_full_resend and not _http_bridge_session_key_quarantined(self, bridge_session_key):
+                # A transitional abandonment tombstone fences the stored
+                # anchor the same way a quarantine does: a crash between a
+                # poison settle and its registration leaves the old
+                # poisoned anchor stored behind a zero-count tombstone that
+                # arms no quarantine, and injecting it here would defeat
+                # the crash-safe settle-to-registration transition.
+                async with self._http_bridge_retry_circuit_lock:
+                    tombstone_state = self._http_bridge_retry_circuits.get(bridge_session_key)
+                fresh_reattach_anchor_tombstoned = bool(
+                    tombstone_state is not None
+                    and tombstone_state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                )
+            if payload_looks_like_full_resend and (
+                _http_bridge_session_key_quarantined(self, bridge_session_key) or fresh_reattach_anchor_tombstoned
+            ):
                 # The previous attach on this key proved silent/wedged
                 # (#1534). The client's own payload already carries the full
                 # conversation, so send it unanchored on the fresh path

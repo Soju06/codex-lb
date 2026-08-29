@@ -644,6 +644,113 @@ async def test_scheduled_purge_keeps_tombstones_until_bridge_retention(
 
 
 @pytest.mark.asyncio
+async def test_a_strike_cannot_overwrite_an_abandonment_tombstone(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    # The tombstone on a settled abandonment is what fails anchorless
+    # deltas closed on every replica; a subsequent unanchored failure
+    # merging onto the row must count its strike without erasing it, or a
+    # below-threshold clean failure would leave neither poison evidence
+    # nor the tombstone and a delta-only continuation would silently start
+    # a new conversation.
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-sticky-tombstone",
+            api_key_scope="key-1",
+            consecutive_failures=2,
+            cooldown_until_epoch=2600.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=2000.0,
+            base_updated_at_epoch=0.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=2060.0,
+        )
+        await session.execute(
+            update(HttpBridgeRetryCircuit)
+            .where(HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash("sid-sticky-tombstone"))
+            .values(consecutive_failures=0, last_detail="anchor_abandoned")
+        )
+        await session.commit()
+
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-sticky-tombstone",
+            api_key_scope="key-1",
+            consecutive_failures=1,
+            cooldown_until_epoch=0.0,
+            last_detail="clean_close",
+            updated_at_epoch=2100.0,
+            base_updated_at_epoch=2000.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=2160.0,
+        )
+        row = await session.get(
+            HttpBridgeRetryCircuit,
+            ("session_header", durable_bridge_hash("sid-sticky-tombstone"), "key-1"),
+        )
+        assert row is not None
+        assert row.consecutive_failures == 1, "the strike still counts"
+        assert row.last_detail == "anchor_abandoned", (
+            "the abandonment tombstone is sticky until fresh continuity is established"
+        )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_a_one_failure_poison_detail_is_sticky_at_a_threshold_of_one(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    # With the anchor-poison threshold configured to one, the first poison
+    # strike already authorizes the abandonment and its failed clear owes
+    # the debt from a one-failure row; the sticky predicate must fence at
+    # that effective threshold, not the circuit threshold of two.
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-sticky-threshold-one",
+            api_key_scope="key-1",
+            consecutive_failures=1,
+            cooldown_until_epoch=0.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=2000.0,
+            base_updated_at_epoch=0.0,
+            failure_threshold=2,
+            poison_sticky_threshold=1,
+            conflict_cooldown_until_epoch=2060.0,
+        )
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-sticky-threshold-one",
+            api_key_scope="key-1",
+            consecutive_failures=2,
+            cooldown_until_epoch=2600.0,
+            last_detail="clean_close",
+            updated_at_epoch=2100.0,
+            base_updated_at_epoch=2000.0,
+            failure_threshold=2,
+            poison_sticky_threshold=1,
+            conflict_cooldown_until_epoch=2160.0,
+        )
+        row = await session.get(
+            HttpBridgeRetryCircuit,
+            ("session_header", durable_bridge_hash("sid-sticky-threshold-one"), "key-1"),
+        )
+        assert row is not None
+        assert row.consecutive_failures == 2, "the clean strike still counts"
+        assert row.last_detail == "stream_incomplete", (
+            "a one-failure poison detail is sticky at the effective threshold of one"
+        )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_a_clean_strike_cannot_overwrite_an_at_threshold_poison_detail(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

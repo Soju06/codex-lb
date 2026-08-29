@@ -844,13 +844,22 @@ class _HTTPBridgeRetryCircuitMixin:
             # for the stale deadline. A replaced lineage at or past the
             # threshold with a non-poison last strike is left fenced — its
             # earlier strikes may still be the poison evidence.
-            revoke_stale_poison_quarantine = not local_failure_is_newer and (
-                persisted.consecutive_failures == 0
-                or persisted.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL
-                or (
-                    episode_replaced
-                    and _http_bridge_anchor_poison_detail(persisted.last_detail) is None
-                    and persisted.consecutive_failures < effective_poison_threshold
+            revoke_stale_poison_quarantine = (
+                not local_failure_is_newer
+                # A transitional abandonment tombstone is not disproof: the
+                # fresh anchor's registration has not been confirmed, the
+                # old poisoned anchor may still be the stored one, and the
+                # surviving quarantine is what keeps full-resend planning
+                # from injecting it.
+                and persisted.last_detail != _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                and (
+                    persisted.consecutive_failures == 0
+                    or persisted.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL
+                    or (
+                        episode_replaced
+                        and _http_bridge_anchor_poison_detail(persisted.last_detail) is None
+                        and persisted.consecutive_failures < effective_poison_threshold
+                    )
                 )
             )
             poison_cooldown_remaining = max(0.0, state.cooldown_until - now_monotonic)
@@ -920,6 +929,13 @@ class _HTTPBridgeRetryCircuitMixin:
             cooldown_until = state.cooldown_until
             last_detail = state.last_detail
             persisted_updated_at_epoch = state.persisted_updated_at_epoch
+        poison_sticky_threshold = _http_bridge_effective_anchor_poison_threshold(
+            getattr(
+                _service_get_settings(),
+                "http_responses_session_bridge_anchor_poison_failure_threshold",
+                threshold,
+            )
+        )
         base_backoff = max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS)
         if last_detail == "clean_close":
             base_backoff = min(
@@ -937,6 +953,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 updated_at_epoch=now_wall,
                 base_updated_at_epoch=persisted_updated_at_epoch,
                 failure_threshold=threshold,
+                poison_sticky_threshold=poison_sticky_threshold,
                 conflict_cooldown_until_epoch=now_wall + base_backoff,
                 base_backoff_seconds=max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS),
                 max_backoff_seconds=max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS),
@@ -968,6 +985,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     updated_at_epoch=now_wall,
                     base_updated_at_epoch=persisted.updated_at_epoch,
                     failure_threshold=threshold,
+                    poison_sticky_threshold=poison_sticky_threshold,
                     conflict_cooldown_until_epoch=now_wall + base_backoff,
                     base_backoff_seconds=max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS),
                     max_backoff_seconds=max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS),
@@ -1536,12 +1554,22 @@ class _HTTPBridgeRetryCircuitMixin:
                             # against the freshly registered anchor and
                             # starts a new abandonment story of its own.
                             state.poison_anchor_cleared = False
-                        if state.consecutive_failures >= threshold:
+                        if state.consecutive_failures >= _http_bridge_effective_anchor_poison_threshold(
+                            getattr(
+                                _service_get_settings(),
+                                "http_responses_session_bridge_anchor_poison_failure_threshold",
+                                threshold,
+                            )
+                        ):
                             # Debt exists only for an episode that reached the
-                            # threshold on poison evidence. Arming it below the
-                            # threshold let a clean_close opener resurrect an
-                            # earlier below-threshold poison detail and clear a
-                            # valid anchor with no quarantine covering the race.
+                            # effective poison threshold on poison evidence —
+                            # the same threshold that authorizes the
+                            # abandonment, so a configured threshold of one
+                            # arms the debt its failed clear leaves owed.
+                            # Arming below it let a clean_close opener
+                            # resurrect an earlier poison detail and clear a
+                            # valid anchor with no quarantine covering the
+                            # race.
                             state.owed_poison_detail = detail
                     if state.consecutive_failures >= threshold:
                         backoff = min(
@@ -1891,6 +1919,13 @@ class _HTTPBridgeRetryCircuitMixin:
                 updated_at_epoch=now_wall,
                 base_updated_at_epoch=row.updated_at_epoch if row is not None else 0.0,
                 failure_threshold=threshold,
+                poison_sticky_threshold=_http_bridge_effective_anchor_poison_threshold(
+                    getattr(
+                        _service_get_settings(),
+                        "http_responses_session_bridge_anchor_poison_failure_threshold",
+                        threshold,
+                    )
+                ),
                 conflict_cooldown_until_epoch=now_wall + base_backoff,
                 base_backoff_seconds=base_backoff,
                 max_backoff_seconds=max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS),

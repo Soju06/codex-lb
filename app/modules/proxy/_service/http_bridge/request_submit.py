@@ -103,6 +103,7 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _record_http_bridge_quarantine_wedged_pending,
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
     _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
     _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
     _http_bridge_retry_circuit_suppression_message,
@@ -1055,8 +1056,20 @@ class _HTTPBridgeRequestSubmitMixin:
                 setattr(cooldown_error, _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
                 setattr(cooldown_error, _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR, True)
             raise cooldown_error
-        if request_state.proxy_injected_previous_response_id and _http_bridge_session_key_poison_quarantined(
-            self, session.key
+        submit_time_anchor_quarantined = _http_bridge_session_key_poison_quarantined(self, session.key)
+        submit_time_anchor_tombstoned = False
+        if request_state.proxy_injected_previous_response_id and not submit_time_anchor_quarantined:
+            # A remotely written abandonment tombstone arms no quarantine by
+            # design; the submit-time load adopted it, and the injected
+            # anchor it fences is just as dead as a quarantined one.
+            async with self._http_bridge_retry_circuit_lock:
+                submit_tombstone_state = self._http_bridge_retry_circuits.get(session.key)
+            submit_time_anchor_tombstoned = bool(
+                submit_tombstone_state is not None
+                and submit_tombstone_state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+            )
+        if request_state.proxy_injected_previous_response_id and (
+            submit_time_anchor_quarantined or submit_time_anchor_tombstoned
         ):
             # The submit-time load above can be the first to arm the poison
             # quarantine: planning may have served a cached view while a
@@ -1074,7 +1087,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.key,
                 account_id=session.account.id,
                 model=session.request_model,
-                detail="outcome=submit_time_quarantine_fail_closed",
+                detail=(
+                    "outcome=submit_time_quarantine_fail_closed"
+                    if submit_time_anchor_quarantined
+                    else "outcome=submit_time_tombstone_fail_closed"
+                ),
                 cache_key_family=session.key.affinity_kind,
                 model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )

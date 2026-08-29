@@ -55,6 +55,9 @@ REQUIRED_DURABLE_BRIDGE_TABLES = (
     "http_bridge_operation_event_chunks",
 )
 DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
+# Mirrors the HTTP bridge retry circuit's abandonment tombstone detail; the
+# scheduled purge preserves such rows until the bridge-retention cutoff.
+_RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL = "anchor_abandoned"
 _PURGE_CLOSED_BATCH_SIZE = 500
 # Claim retry budget: insert races and epoch-CAS losses re-read and retry;
 # each round has a winner, so a small budget converges under any realistic
@@ -483,6 +486,17 @@ class DurableBridgeRepository:
                 HttpBridgeRetryCircuit.updated_at_epoch == base_updated_at_epoch,
                 excluded.consecutive_failures >= HttpBridgeRetryCircuit.consecutive_failures,
             )
+            # An at-threshold poison detail is sticky against non-poison
+            # strikes: the row is the cross-replica record that a poisoned
+            # anchor's clear is still owed, and letting a clean probe
+            # failure overwrite it would strand that debt for every worker.
+            # Only a reset/settle (which rewrites the row wholesale) or
+            # another poison-class strike may change it.
+            sticky_poison_detail = and_(
+                HttpBridgeRetryCircuit.last_detail.in_(("stream_incomplete", "stream_idle_timeout")),
+                HttpBridgeRetryCircuit.consecutive_failures >= threshold,
+                excluded.last_detail.notin_(("stream_incomplete", "stream_idle_timeout")),
+            )
             conflict_failures = case(
                 (
                     failure_from_current_row,
@@ -527,7 +541,7 @@ class DurableBridgeRepository:
                         else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
                     ),
                     "last_detail": case(
-                        (failure_from_current_row, excluded.last_detail),
+                        (and_(failure_from_current_row, ~sticky_poison_detail), excluded.last_detail),
                         else_=HttpBridgeRetryCircuit.last_detail,
                     ),
                     "updated_at_epoch": case(
@@ -561,6 +575,17 @@ class DurableBridgeRepository:
             failure_from_current_row = and_(
                 HttpBridgeRetryCircuit.updated_at_epoch == base_updated_at_epoch,
                 excluded.consecutive_failures >= HttpBridgeRetryCircuit.consecutive_failures,
+            )
+            # An at-threshold poison detail is sticky against non-poison
+            # strikes: the row is the cross-replica record that a poisoned
+            # anchor's clear is still owed, and letting a clean probe
+            # failure overwrite it would strand that debt for every worker.
+            # Only a reset/settle (which rewrites the row wholesale) or
+            # another poison-class strike may change it.
+            sticky_poison_detail = and_(
+                HttpBridgeRetryCircuit.last_detail.in_(("stream_incomplete", "stream_idle_timeout")),
+                HttpBridgeRetryCircuit.consecutive_failures >= threshold,
+                excluded.last_detail.notin_(("stream_incomplete", "stream_idle_timeout")),
             )
             conflict_failures = case(
                 (
@@ -606,7 +631,7 @@ class DurableBridgeRepository:
                         else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
                     ),
                     "last_detail": case(
-                        (failure_from_current_row, excluded.last_detail),
+                        (and_(failure_from_current_row, ~sticky_poison_detail), excluded.last_detail),
                         else_=HttpBridgeRetryCircuit.last_detail,
                     ),
                     "updated_at_epoch": case(
@@ -695,8 +720,8 @@ class DurableBridgeRepository:
         api_key_scope: str,
         expected_updated_at_epoch: float,
         expected_consecutive_failures: int,
-        expected_last_detail: str,
-        last_detail: str,
+        expected_last_detail: str | None,
+        last_detail: str | None,
     ) -> bool:
         """Rewrite a surviving row's failure detail under its version fence.
 
@@ -739,6 +764,7 @@ class DurableBridgeRepository:
         api_key_scope: str,
         expected_updated_at_epoch: float | None = None,
         expected_admission_generation: int | None = None,
+        reset_detail: str | None = None,
     ) -> bool:
         conditions = [
             HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
@@ -760,7 +786,11 @@ class DurableBridgeRepository:
                 .values(
                     consecutive_failures=0,
                     cooldown_until_epoch=0.0,
-                    last_detail=None,
+                    # An abandonment-driven settle leaves a durable tombstone
+                    # so restarted workers and other replicas fail
+                    # delta-only follow-ups closed; a completion's settle
+                    # writes None, erasing it on real recovery.
+                    last_detail=reset_detail,
                     updated_at_epoch=time.time(),
                 )
             )
@@ -776,7 +806,9 @@ class DurableBridgeRepository:
         session_key_value: str,
         api_key_scope: str,
         expected_updated_at_epoch: float | None = None,
-    ) -> None:
+        expected_admission_generation: int | None = None,
+        reset_detail: str | None = None,
+    ) -> bool:
         conditions = [
             HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
@@ -784,9 +816,20 @@ class DurableBridgeRepository:
         ]
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
+            if expected_admission_generation is not None:
+                # A replay claim advances only the admission generation and
+                # leaves the timestamp untouched; without this fence a
+                # stale-row purge racing the claim would delete the active
+                # claimed generation and a later recovery could dispatch a
+                # second replay beside the first.
+                conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
         async with sqlite_writer_section():
-            await self._session.execute(delete(HttpBridgeRetryCircuit).where(*conditions))
+            result = await self._session.execute(delete(HttpBridgeRetryCircuit).where(*conditions))
             await self._session.commit()
+        # A fenced purge that matched nothing is a CAS miss: another replica
+        # moved the row after this worker's lookup, and the caller must
+        # reconcile against the surviving row instead of assuming deletion.
+        return bool(getattr(result, "rowcount", 0)) or expected_updated_at_epoch is None
 
     async def get_session_by_id(self, session_id: str) -> DurableBridgeSessionSnapshot | None:
         row = await self._session.get(HttpBridgeSessionRecord, session_id)
@@ -3076,8 +3119,38 @@ class DurableBridgeRepository:
         self,
         cutoff_epoch: float,
         *,
+        tombstone_cutoff_epoch: float | None = None,
         batch_size: int = _PURGE_CLOSED_BATCH_SIZE,
     ) -> int:
+        # An anchor_abandoned tombstone guards continuity that outlives the
+        # circuit TTL: reaping it on the circuit schedule would let the
+        # unanchored-delta gate dispatch a context-free request. Tombstones
+        # are purged only past the caller's bridge-retention cutoff, and
+        # preserved entirely when no cutoff is given.
+        non_tombstone = HttpBridgeRetryCircuit.last_detail.is_(None) | (
+            HttpBridgeRetryCircuit.last_detail != _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL
+        )
+        # A replay claim advances only the admission generation and
+        # deliberately leaves the timestamp unchanged, so a claimed
+        # generation near the TTL could be reaped while its replay
+        # is still in flight. Ever-claimed rows get one extra TTL of
+        # grace before the scheduled purge takes them.
+        stale_predicate = (
+            non_tombstone
+            & (HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
+            & (
+                (HttpBridgeRetryCircuit.admission_generation == 0)
+                | (
+                    HttpBridgeRetryCircuit.updated_at_epoch
+                    < cutoff_epoch - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+                )
+            )
+        )
+        if tombstone_cutoff_epoch is not None:
+            stale_predicate = stale_predicate | (
+                (HttpBridgeRetryCircuit.last_detail == _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL)
+                & (HttpBridgeRetryCircuit.updated_at_epoch < tombstone_cutoff_epoch)
+            )
         deleted_count = 0
         while True:
             result = await self._session.execute(
@@ -3086,7 +3159,7 @@ class DurableBridgeRepository:
                     HttpBridgeRetryCircuit.session_key_hash,
                     HttpBridgeRetryCircuit.api_key_scope,
                 )
-                .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
+                .where(stale_predicate)
                 .limit(batch_size)
             )
             keys = [tuple(row) for row in result.fetchall()]
@@ -3100,7 +3173,7 @@ class DurableBridgeRepository:
                         .where(HttpBridgeRetryCircuit.session_key_kind == session_key_kind)
                         .where(HttpBridgeRetryCircuit.session_key_hash == session_key_hash)
                         .where(HttpBridgeRetryCircuit.api_key_scope == api_key_scope)
-                        .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
+                        .where(stale_predicate)
                         .returning(HttpBridgeRetryCircuit.session_key_hash)
                     )
                     batch_deleted_count += len(deleted.scalars().all())

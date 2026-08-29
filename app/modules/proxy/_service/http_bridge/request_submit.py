@@ -900,6 +900,28 @@ class _HTTPBridgeRequestSubmitMixin:
                 session,
                 request_scope_id=request_scope_id,
             )
+            if request_state.claimed_half_open_until > 0.0 and request_state.response_create_attempt_count == 0:
+                # This admission claimed the half-open probe but the request
+                # never ATTEMPTED the upstream send — a poisoned-anchor
+                # rejection, a recovery-journal or operation-ledger refusal,
+                # a reconnect failure, or a completed-operation spool return.
+                # The attempt marker, not the sent timestamp, decides this:
+                # an ambiguous send failure clears the timestamp while the
+                # frame may already be running upstream, and releasing that
+                # probe would let a second dispatch run beside it.
+                # Hand exactly that probe back and restore the transition
+                # marker (an expired but positive cooldown) so the next
+                # request re-claims the lease instead of the whole window
+                # suppressing traffic behind a probe that never flew.
+                async with self._http_bridge_retry_circuit_lock:
+                    unused_probe_state = self._http_bridge_retry_circuits.get(session.key)
+                    if (
+                        unused_probe_state is not None
+                        and unused_probe_state.half_open_until == request_state.claimed_half_open_until
+                    ):
+                        unused_probe_state.half_open_until = 0.0
+                        unused_probe_state.cooldown_until = time.monotonic() - 1.0
+                request_state.claimed_half_open_until = 0.0
             # Inner pre-submit cleanup may clear the reservation before control
             # returns here, so ownership must be captured before awaiting it.
             # Only that request can make detached-session retirement newly
@@ -1008,6 +1030,7 @@ class _HTTPBridgeRequestSubmitMixin:
         # probe and never a lease another submission installed under any
         # interleaving.
         claimed_half_open_until = admission_claimed_leases[-1] if admission_claimed_leases else 0.0
+        request_state.claimed_half_open_until = claimed_half_open_until
         if not retry_allowed:
             block_seconds, block_reason = await self._http_bridge_precreated_retry_block(session)
             retry_after_seconds = max(1, math.ceil(block_seconds))
@@ -1046,32 +1069,6 @@ class _HTTPBridgeRequestSubmitMixin:
             # caches stay a performance bound, never a correctness
             # assumption. Client-supplied anchors are untouched — only the
             # proxy's own injection is refused.
-            async with self._http_bridge_retry_circuit_lock:
-                gate_state = self._http_bridge_retry_circuits.get(session.key)
-                if (
-                    gate_state is not None
-                    and claimed_half_open_until > 0.0
-                    and gate_state.half_open_until == claimed_half_open_until
-                ):
-                    # The admission above claimed the half-open probe for
-                    # this request; failing closed without dispatching would
-                    # leave that phantom lease suppressing the client's
-                    # immediate full-history resend — the very request this
-                    # rejection asks for — for up to the whole lease. Hand
-                    # the probe back, identified by value: a lease unchanged
-                    # since before admission belongs to a request already in
-                    # flight (a proof-gated replay bypasses it), while a
-                    # changed deadline is the claim this admission made —
-                    # including one made after the load replaced a stale
-                    # lease through a fresh adoption.
-                    gate_state.half_open_until = 0.0
-                    # Restore the transition marker the admission consumed:
-                    # a lease is claimed only while an expired cooldown
-                    # transitions to half-open, and leaving both fields at
-                    # zero would admit every follow-up unleased. An expired
-                    # but positive cooldown makes the corrected resend
-                    # re-claim the probe, keeping exactly one in flight.
-                    gate_state.cooldown_until = time.monotonic() - 1.0
             _log_http_bridge_event(
                 "previous_response_poisoned_anchor_fail_fast",
                 session.key,

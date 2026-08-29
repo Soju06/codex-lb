@@ -269,6 +269,7 @@ class DurableBridgeSessionCoordinator:
         api_key_id: str | None,
         expected_updated_at_epoch: float | None = None,
         expected_admission_generation: int | None = None,
+        reset_detail: str | None = None,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).delete_retry_circuit(
@@ -277,6 +278,7 @@ class DurableBridgeSessionCoordinator:
                 api_key_scope=durable_bridge_api_key_scope(api_key_id),
                 expected_updated_at_epoch=expected_updated_at_epoch,
                 expected_admission_generation=expected_admission_generation,
+                reset_detail=reset_detail,
             )
 
     async def supersede_retry_circuit_detail(
@@ -287,8 +289,8 @@ class DurableBridgeSessionCoordinator:
         api_key_id: str | None,
         expected_updated_at_epoch: float,
         expected_consecutive_failures: int,
-        expected_last_detail: str,
-        last_detail: str,
+        expected_last_detail: str | None,
+        last_detail: str | None,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).supersede_retry_circuit_detail(
@@ -330,13 +332,15 @@ class DurableBridgeSessionCoordinator:
         session_key_value: str,
         api_key_id: str | None,
         expected_updated_at_epoch: float | None = None,
-    ) -> None:
+        expected_admission_generation: int | None = None,
+    ) -> bool:
         async with self._session() as session:
-            await DurableBridgeRepository(session).purge_retry_circuit(
+            return await DurableBridgeRepository(session).purge_retry_circuit(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,
                 api_key_scope=durable_bridge_api_key_scope(api_key_id),
                 expected_updated_at_epoch=expected_updated_at_epoch,
+                expected_admission_generation=expected_admission_generation,
             )
 
     async def claim_live_session(

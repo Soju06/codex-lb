@@ -122,6 +122,7 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _http_bridge_session_key_quarantined,
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
     _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
     _http_bridge_retry_circuit_suppression_message,
 )
@@ -2860,6 +2861,18 @@ class _HTTPBridgeStreamingMixin:
             if not unanchored_delta_poisoned:
                 await self._load_http_bridge_retry_circuit(session)
                 unanchored_delta_poisoned = _http_bridge_session_key_poison_quarantined(self, bridge_session_key)
+            if not unanchored_delta_poisoned:
+                # A settled abandonment leaves neither a quarantine nor a
+                # poison row; the tombstone detail on the zeroed circuit row
+                # is the durable record a restarted worker or another
+                # replica reads before dispatching a delta as a brand-new
+                # conversation.
+                async with self._http_bridge_retry_circuit_lock:
+                    tombstone_state = self._http_bridge_retry_circuits.get(bridge_session_key)
+                unanchored_delta_poisoned = bool(
+                    tombstone_state is not None
+                    and tombstone_state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                )
             if unanchored_delta_poisoned:
                 _log_http_bridge_event(
                     "previous_response_poisoned_anchor_fail_fast",

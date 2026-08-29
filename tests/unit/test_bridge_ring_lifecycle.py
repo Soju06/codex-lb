@@ -542,6 +542,172 @@ async def test_retry_circuit_merges_lagging_wall_clock_failure_from_loaded_base(
 
 
 @pytest.mark.asyncio
+async def test_scheduled_purge_spares_recently_claimed_generations(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    # A replay claim advances only the admission generation and leaves the
+    # timestamp untouched, so a claimed row near the TTL could be reaped
+    # while its replay was still in flight. Ever-claimed rows get one extra
+    # TTL of grace; unclaimed stale rows and long-dead claimed rows are
+    # still reaped.
+    from app.modules.proxy.durable_bridge_repository import DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        cutoff = 100000.0
+        for value, epoch, admission in (
+            ("sid-purge-unclaimed-stale", cutoff - 10.0, 0),
+            ("sid-purge-claimed-recent", cutoff - 10.0, 3),
+            ("sid-purge-claimed-ancient", cutoff - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS - 10.0, 3),
+        ):
+            await repository.upsert_retry_circuit(
+                session_key_kind="session_header",
+                session_key_value=value,
+                api_key_scope="key-1",
+                consecutive_failures=2,
+                cooldown_until_epoch=0.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=epoch,
+                base_updated_at_epoch=0.0,
+                failure_threshold=2,
+                conflict_cooldown_until_epoch=epoch + 60.0,
+            )
+            if admission:
+                await session.execute(
+                    update(HttpBridgeRetryCircuit)
+                    .where(HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(value))
+                    .values(admission_generation=admission)
+                )
+                await session.commit()
+
+        deleted = await repository.purge_retry_circuits_before(cutoff)
+
+        assert deleted == 2, "the unclaimed stale row and the ancient claimed row are reaped"
+        surviving = await session.get(
+            HttpBridgeRetryCircuit,
+            ("session_header", durable_bridge_hash("sid-purge-claimed-recent"), "key-1"),
+        )
+        assert surviving is not None, "a recently claimed generation survives one extra TTL"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_purge_keeps_tombstones_until_bridge_retention(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    # An anchor_abandoned tombstone guards continuity that outlives the
+    # circuit TTL; reaping it on the circuit schedule would let the
+    # unanchored-delta gate dispatch a context-free request. It falls only
+    # to the caller's bridge-retention cutoff.
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        cutoff = 100000.0
+        for value, epoch in (
+            ("sid-tombstone-recent", cutoff - 10.0),
+            ("sid-tombstone-ancient", cutoff - 90000.0),
+        ):
+            await repository.upsert_retry_circuit(
+                session_key_kind="session_header",
+                session_key_value=value,
+                api_key_scope="key-1",
+                consecutive_failures=2,
+                cooldown_until_epoch=0.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=epoch,
+                base_updated_at_epoch=0.0,
+                failure_threshold=2,
+                conflict_cooldown_until_epoch=epoch + 60.0,
+            )
+            await session.execute(
+                update(HttpBridgeRetryCircuit)
+                .where(HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(value))
+                .values(consecutive_failures=0, last_detail="anchor_abandoned")
+            )
+            await session.commit()
+
+        deleted = await repository.purge_retry_circuits_before(cutoff)
+        assert deleted == 0, "without a retention cutoff every tombstone survives the circuit TTL"
+
+        deleted = await repository.purge_retry_circuits_before(cutoff, tombstone_cutoff_epoch=cutoff - 80000.0)
+        assert deleted == 1, "only the tombstone past the bridge-retention cutoff is reaped"
+        surviving = await session.get(
+            HttpBridgeRetryCircuit,
+            ("session_header", durable_bridge_hash("sid-tombstone-recent"), "key-1"),
+        )
+        assert surviving is not None
+        assert surviving.last_detail == "anchor_abandoned"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_a_clean_strike_cannot_overwrite_an_at_threshold_poison_detail(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    # The at-threshold poison detail is the cross-replica record that the
+    # anchor's clear is still owed; a clean probe failure merging onto the
+    # row must count its strike without erasing that record. A poison-class
+    # strike may still update it, and a below-threshold row stays freely
+    # overwritable.
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-sticky-poison",
+            api_key_scope="key-1",
+            consecutive_failures=2,
+            cooldown_until_epoch=2600.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=2000.0,
+            base_updated_at_epoch=0.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=2060.0,
+        )
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-sticky-poison",
+            api_key_scope="key-1",
+            consecutive_failures=3,
+            cooldown_until_epoch=2600.0,
+            last_detail="clean_close",
+            updated_at_epoch=2100.0,
+            base_updated_at_epoch=2000.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=2160.0,
+        )
+        row = await session.get(
+            HttpBridgeRetryCircuit,
+            ("session_header", durable_bridge_hash("sid-sticky-poison"), "key-1"),
+        )
+        assert row is not None
+        assert row.consecutive_failures == 3, "the clean strike still counts"
+        assert row.last_detail == "stream_incomplete", (
+            "an at-threshold poison detail is sticky against non-poison strikes"
+        )
+
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-sticky-poison",
+            api_key_scope="key-1",
+            consecutive_failures=4,
+            cooldown_until_epoch=2700.0,
+            last_detail="stream_idle_timeout",
+            updated_at_epoch=2200.0,
+            base_updated_at_epoch=row.updated_at_epoch,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=2260.0,
+        )
+        await session.refresh(row)
+        assert row.last_detail == "stream_idle_timeout", "a poison-class strike may still update the detail"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_supersession_is_fenced_against_lagging_clock_strikes(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

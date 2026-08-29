@@ -663,6 +663,83 @@
 - [x] 2.144 The claimed-probe token is handed out by the admission's claim
       under its own lock, exact under any interleaving
 
+- [x] 2.145 The submission finalizer releases the claimed probe on every
+      pre-dispatch exit, not only the poisoned-anchor rejection
+
+- [x] 2.146 The owed poison debt survives foreign same-lineage strikes
+      (count growth) and dies with the reset/replacement signature
+
+- [x] 2.147 A missed fenced TTL purge reconciles the surviving fresh row
+      instead of popping the circuit and revoking the quarantine
+
+- [x] 2.148 The scheduled circuit purge spares ever-claimed generations
+      for one extra TTL so a claim near the boundary is not reaped
+      mid-replay
+
+- [x] 2.149 An at-threshold poison detail is sticky in the strike merge,
+      making the durable row the cross-replica debt record; the local owed
+      record dies with foreign writes and re-arms from the adopted row
+
+- [x] 2.150 The completion adopts durable-only circuit rows before
+      capturing its quarantine fence and pre-settle poison detail
+
+- [x] 2.151 The probe handback keys on the send-attempt marker, keeping a
+      possibly-live ambiguous dispatch's lease in force
+
+- [x] 2.152 The stale-row TTL purge is fenced on the admission generation
+      so an active replay claim survives a racing expiry
+
+- [x] 2.153 The transitional marker applies only to episodes carrying
+      poison evidence; clean episodes are never marked already abandoned
+
+- [x] 2.154 The on-demand TTL purge applies the ever-claimed grace, since
+      a claim observed in the row cannot be protected by any fence on
+      observed values
+
+- [x] 2.155 Abandonment-driven settles leave the anchor_abandoned durable
+      tombstone and the unanchored-delta gate fails closed on it, covering
+      restarts and other replicas after a settled abandonment
+
+- [x] 2.156 The refreshed row after a purge miss honors the ever-claimed
+      grace when its age is evaluated
+
+- [x] 2.157 A completion replacing a poison episode settles onto the
+      transitional anchor_abandoned tombstone and erases it only after the
+      fresh anchor's registration commits, so a crash or takeover inside
+      the settle-to-registration window fails deltas closed instead of
+      reading as a disproved episode
+
+- [x] 2.158 The failed-settlement suppression persists the transitional
+      tombstone durably and promotes it to anchor_superseded only after
+      the registration commits; the rollback fence follows the tombstone
+
+- [x] 2.159 Poison debt arms only when the strike is at or over the
+      threshold, so a clean_close opener cannot resurrect a
+      below-threshold poison detail and clear a valid anchor uncovered
+
+- [x] 2.160 A response.completed without a usable response id (or matched
+      request) confirms no registration and keeps the quarantine
+
+- [x] 2.161 The terminal-frame strike excludes internal warmup probes
+      (prewarm or skip-request-log states), matching the completion
+      settle's exclusions; the terminal-error fixtures model real client
+      requests so the strike path stays exercised
+
+- [x] 2.162 A completion whose pre-settle row already carries the
+      tombstone settles onto the tombstone and erases it only after the
+      registration commits
+
+- [x] 2.163 The load-path stale purge spares tombstone rows and adopts
+      them so the unanchored-delta gate can read them
+
+- [x] 2.164 The scheduled purge preserves tombstone rows until the
+      bridge-retention cutoff and reaps them past it
+
+- [x] 2.165 A completion whose pre-settle durable load fails still
+      settles locally, and the settle derives the fail-closed tombstone
+      from the poison episode it actually adopts instead of resetting it
+      plain off the blind capture
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

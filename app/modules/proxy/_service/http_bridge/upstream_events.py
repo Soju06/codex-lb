@@ -81,6 +81,7 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _record_http_bridge_quarantine_wedged_pending,
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
     _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
     _http_bridge_anchor_poison_detail,
 )
@@ -1083,7 +1084,9 @@ async def _abandon_durable_http_bridge_continuity(
     # cannot repeat that failure, which is the same evidence a completed
     # response carries, so settle the circuit the same way. A genuinely new
     # failure re-opens it at the usual threshold.
-    circuit_settled = await service._clear_http_bridge_retry_circuit(session)
+    circuit_settled = await service._clear_http_bridge_retry_circuit(
+        session, settled_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+    )
     if not circuit_settled:
         # The clear reloads fresh state on every call, so one immediate
         # retry covers a transient durable failure or a double CAS miss
@@ -1091,7 +1094,9 @@ async def _abandon_durable_http_bridge_continuity(
         # abandonment itself still reports success: the anchor is gone, the
         # marker must record that so the episode cannot clear now-empty
         # continuity again, and only the settlement is owed.
-        circuit_settled = await service._clear_http_bridge_retry_circuit(session)
+        circuit_settled = await service._clear_http_bridge_retry_circuit(
+            session, settled_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+        )
     if not circuit_settled:
         _log_http_bridge_event(
             "durable_circuit_settle_failed",
@@ -2927,6 +2932,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         completion_circuit_settlement_failed = False
         completion_quarantine_clear_fence: int | None = None
         completion_pre_settle_poison_detail: str | None = None
+        completion_settles_onto_tombstone = False
         if (
             event_type == "response.completed"
             and terminal_request_state is not None
@@ -2940,6 +2946,13 @@ class _HTTPBridgeUpstreamEventsMixin:
             # disprove, and the clear at the bottom must fence on what was
             # armed when this response proved the session healthy, not on
             # whatever owns the key by then.
+            # Adopt any durable-only poison row BEFORE the fences are
+            # captured: the settle's internal load would otherwise arm the
+            # quarantine after the fence read (leaving a healthy key
+            # suppressed for the TTL because the clear cannot match), and a
+            # failed registration would find no pre-settle poison detail to
+            # re-seed.
+            await self._load_http_bridge_retry_circuit(session)
             completion_quarantine_clear_fence = _http_bridge_quarantine_clear_fence(self, session.key)
             async with self._http_bridge_retry_circuit_lock:
                 pre_settle_state = self._http_bridge_retry_circuits.get(session.key)
@@ -2949,8 +2962,30 @@ class _HTTPBridgeUpstreamEventsMixin:
                         if _http_bridge_anchor_poison_detail(pre_settle_state.last_detail) is not None
                         else pre_settle_state.owed_poison_detail
                     )
+                    # An episode already carrying the fail-closed tombstone
+                    # keeps it through the settle: erasing it before the
+                    # fresh anchor commits would drop the only durable
+                    # marker while the registration can still fail or never
+                    # run at all.
+                    completion_settles_onto_tombstone = (
+                        completion_pre_settle_poison_detail is not None
+                        or pre_settle_state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                    )
             if not terminal_request_state.verified_stale_anchor_replay:
-                circuit_settled = await self._clear_http_bridge_retry_circuit(session)
+                # A completion replacing a poison episode settles with the
+                # transitional tombstone: a crash or takeover between this
+                # settle and the registration below would otherwise leave
+                # the old poisoned anchor stored while the reset row reads
+                # as disproved. The tombstone is erased once the fresh
+                # anchor commits.
+                circuit_settled = await self._clear_http_bridge_retry_circuit(
+                    session,
+                    settled_detail=(
+                        _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                        if completion_settles_onto_tombstone
+                        else None
+                    ),
+                )
                 if not circuit_settled:
                     # The old poison episode was restored. Its owed clear is
                     # suppressed only once the fresh anchor actually
@@ -2960,7 +2995,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                     # process-local quarantine expires.
                     completion_circuit_settlement_failed = True
 
-        completion_anchor_registration_confirmed = True
+        # False until a fresh durable anchor actually confirms: a completed
+        # event without a usable response id (or with no matched request)
+        # skips the registration block entirely, and clearing the quarantine
+        # then would leave the old poisoned anchor as the stored one for the
+        # next reattach.
+        completion_anchor_registration_confirmed = False
         if (
             response_id is not None
             and matched_request_state is not None
@@ -2995,6 +3035,36 @@ class _HTTPBridgeUpstreamEventsMixin:
                 await self._http_bridge_restore_poison_clear_after_failed_anchor_advance(
                     session, anchor_advance_supersession
                 )
+            if alias_registered and anchor_advance_supersession is not None:
+                await self._http_bridge_promote_transitional_supersession(session, anchor_advance_supersession)
+            if alias_registered and not completion_circuit_settlement_failed and completion_settles_onto_tombstone:
+                # The fresh anchor committed: erase the transitional
+                # tombstone the settle left, fenced on the exact reset row.
+                try:
+                    settled_row = await self._durable_bridge.lookup_retry_circuit(
+                        session_key_kind=session.key.affinity_kind,
+                        session_key_value=session.key.affinity_key,
+                        api_key_id=session.key.api_key_id,
+                    )
+                    if (
+                        settled_row is not None
+                        and settled_row.consecutive_failures == 0
+                        and settled_row.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                    ):
+                        await self._durable_bridge.supersede_retry_circuit_detail(
+                            session_key_kind=session.key.affinity_kind,
+                            session_key_value=session.key.affinity_key,
+                            api_key_id=session.key.api_key_id,
+                            expected_updated_at_epoch=settled_row.updated_at_epoch,
+                            expected_consecutive_failures=0,
+                            expected_last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
+                            last_detail=None,
+                        )
+                except Exception:
+                    logger.debug(
+                        "Failed to erase transitional circuit tombstone after registration",
+                        exc_info=True,
+                    )
             if (
                 not alias_registered
                 and not completion_circuit_settlement_failed
@@ -3404,6 +3474,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                 error_code is not None
                 and terminal_request_state is not None
                 and terminal_request_state.response_event_count == 0
+                # Internal warmup probes carry no anchor and prove nothing
+                # about the key's continuity; charging them would open and
+                # quarantine the hard key before any real turn, exactly the
+                # states the completion settle already excludes.
+                and terminal_request_state.request_kind != "prewarm"
+                and not terminal_request_state.skip_request_log
                 # Only a held safe replay excludes the strike: an unanchored
                 # request with no replay is stranded like any other, and the
                 # delta spec's no-response/no-safe-replay rule applies to it

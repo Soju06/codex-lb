@@ -292,7 +292,7 @@ export function ImportAccountBundleDialog({ open, onOpenChange, onCommitted }: I
             ) : null}
             {error ? <p role="alert" className="text-xs text-destructive">{error}</p> : null}
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => { setPreflight(null); setError(null); }}>{t("accounts.bundle.back")}</Button>
+              <Button type="button" variant="outline" onClick={() => { setFile(null); setPassphrase(""); setPreflight(null); setError(null); }}>{t("accounts.bundle.back")}</Button>
               <Button type="button" disabled={busy || (conflictMode === "replace" && !confirmReplace)} onClick={() => void runCommit()}>{busy ? t("accounts.bundle.importing") : t("accounts.bundle.importAction")}</Button>
             </DialogFooter>
           </div>

@@ -308,12 +308,12 @@ class AccountsRepository:
             elif dialect_name == "postgresql":
                 ordered_accounts = sorted(accounts, key=lambda item: (_normalized_email(item.email), item.id))
                 for account in ordered_accounts:
-                    locked_candidates.append(
-                        (
-                            account,
-                            await self._lock_postgresql_upsert_identity_candidates(account, include_email=True),
-                        )
-                    )
+                    candidates = await self._collect_postgresql_upsert_identity_candidates(account, include_email=True)
+                    locked_candidates.append((account, candidates))
+                await lock_postgresql_account_identities(
+                    self._session,
+                    tuple(identity for _account, candidates in locked_candidates for identity in candidates),
+                )
                 if not preserve_unknown_workspace_duplicates:
                     for email in sorted({_normalized_email(account.email) for account in accounts}):
                         await self._acquire_postgresql_merge_lock(email)
@@ -1701,13 +1701,21 @@ class AccountsRepository:
         *,
         include_email: bool,
     ) -> frozenset[str]:
+        identities = await self._collect_postgresql_upsert_identity_candidates(account, include_email=include_email)
+        await lock_postgresql_account_identities(self._session, identities)
+        return identities
+
+    async def _collect_postgresql_upsert_identity_candidates(
+        self,
+        account: Account,
+        *,
+        include_email: bool,
+    ) -> frozenset[str]:
         predicates = _upsert_identity_candidate_predicates(account, include_email=include_email)
         observed = (
             (await self._session.execute(select(Account.chatgpt_account_id).where(or_(*predicates)))).scalars().all()
         )
-        identities = frozenset(identity for identity in (*observed, account.chatgpt_account_id) if identity)
-        await lock_postgresql_account_identities(self._session, identities)
-        return identities
+        return frozenset(identity for identity in (*observed, account.chatgpt_account_id) if identity)
 
     async def _postgresql_upsert_identity_candidates_are_locked(
         self,

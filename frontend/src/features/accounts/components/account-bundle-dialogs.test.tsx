@@ -166,6 +166,33 @@ describe("account bundle dialogs", () => {
     expect(await screen.findByText("Imported 0, replaced 1, skipped 0, failed 0.")).toBeInTheDocument();
   });
 
+  it("clears retained upload state when returning from preflight", async () => {
+    const user = userEvent.setup();
+    preflightBundle.mockResolvedValue({
+      integrityToken: "digest",
+      accountCount: 1,
+      newCount: 1,
+      matchingCount: 0,
+      accounts: [],
+    });
+    renderWithProviders(
+      <ImportAccountBundleDialog open onOpenChange={vi.fn()} onCommitted={vi.fn()} />,
+    );
+
+    await user.upload(
+      screen.getByLabelText("Encrypted account bundle"),
+      new File(["opaque-bundle"], "accounts.clb-account-bundle"),
+    );
+    await user.type(screen.getByLabelText("Passphrase"), "bundle-passphrase");
+    await user.click(screen.getByRole("button", { name: "Review bundle" }));
+
+    await user.click(await screen.findByRole("button", { name: "Back" }));
+
+    expect(screen.getByLabelText("Passphrase")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Review bundle" })).toBeDisabled();
+    expect(preflightBundle).toHaveBeenCalledOnce();
+  });
+
   it("ignores an export completion after close and reopen", async () => {
     const user = userEvent.setup();
     let resolveExport!: (blob: Blob) => void;

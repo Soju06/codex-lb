@@ -426,7 +426,63 @@ under quarantine — the tombstone arms no quarantine by design, and
 planning may have served a cached view that predates it — and the strike merge MUST keep the tombstone
 detail sticky against every failure-class overwrite — only the fenced
 settle and supersede paths, a completion establishing fresh continuity,
-may rewrite it. The owed-debt arm and the sticky-detail fence MUST both
+may rewrite it. An episode whose restored state IS the tombstone — a
+sticky tombstone can carry later strikes onto a positive count — is
+itself transitional, never clean: the failed-settlement suppression MUST
+hand back a promotion token for it so a committed registration promotes
+the tombstone to the superseded sentinel, or every later submission
+carrying the freshly registered anchor is rejected against it. The
+on-demand stale purge MUST fence on the observed failure count and
+detail as well as the epoch and admission generation, because the
+detail-only tombstone supersede and lagging-clock merges move neither of
+the latter, and an unfenced purge would delete the crash-safety fence
+another replica just installed. A refreshed row read after such a purge
+miss MUST be adopted regardless of circuit age when it carries the
+tombstone — the detail-only rewrite preserved the old epoch, and
+rejecting it hands planning the dead anchor the tombstone guards. The
+failed-settlement suppression MUST treat outstanding owed poison debt as
+poison evidence even when a later non-poison strike overwrote the local
+detail, so the debt cannot survive a fresh registration and abandon the
+anchor just registered. The grouped multi-request settlement MUST apply
+the same internal-warmup exclusions as the single-request terminal
+branch. The abandonment-driven settle MUST yield to freshly registered
+continuity: a sibling completion can register a NEW anchor and erase its
+transitional tombstone between the abandonment's continuity clear and
+its settle, and re-writing the tombstone then would durably fail every
+valid follow-up riding the fresh anchor with no registration left to
+erase it — a post-clear continuity re-read showing fresh evidence in EITHER
+continuity column — a response anchor or a turn state present and
+different from the abandoned capture, since a delta can resolve through
+the turn state alone — downgrades the settle to a plain reset, while an
+unknown or unchanged re-read keeps the tombstone. The check-to-settle
+window itself MUST be reconciled after the write: when the settle wrote
+a tombstone, one more continuity re-read showing fresh evidence erases
+it through the fenced detail-only rewrite on the exact settled row —
+both sides reconciling after their own writes is what makes every
+interleaving converge, and the fence defers to any newer write. The
+abandonment settle MUST also be fenced to the episode that authorized it
+— the epoch, failure count, and admission generation captured BEFORE the
+continuity clear's await, the closest snapshot to the episode the poison
+consult validated — leaving a nonmatching newer row untouched, a claimed
+replay generation included: a replacement episode opened against the freshly registered
+anchor carries its own valid cooldown, and resetting it would let the
+newly poisoned anchor retry immediately. A continuity-informed plain
+reset is authoritative: the state-derived tombstone upgrade applies only
+to a blind caller, never to one that saw fresh continuity replace the
+poisoned anchor. The suppression's local marker MUST NOT flip a local
+tombstone to the superseded sentinel before the registration commits —
+the local cache is what a proof-gated resend that cannot reload consults,
+and an early sentinel would bypass the fail-closed gates while the
+poisoned anchor is still the stored one. The post-registration promotion
+and erase writes MUST retry once on a transient durable failure before
+deferring to the next completion's healing, since a skipped rewrite
+leaves every replica rejecting the newly valid anchor. Every admission
+that can claim the half-open probe MUST hand it back when its caller
+exits without advancing a send attempt past the captured baseline — the
+internal precreated-retry path included, whose requests already carry
+prior attempts and therefore key the release on advancement, not on a
+zero count. The owed-debt arm and the sticky-detail
+fence MUST both
 use the effective configured anchor-poison threshold, so a configured
 threshold of one arms and preserves the debt from the one-failure row
 whose first poison strike already authorized the abandonment.

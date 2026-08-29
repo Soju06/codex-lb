@@ -847,6 +847,9 @@ class DurableBridgeRepository:
         api_key_scope: str,
         expected_updated_at_epoch: float | None = None,
         expected_admission_generation: int | None = None,
+        expected_consecutive_failures: int | None = None,
+        fence_last_detail: bool = False,
+        expected_last_detail: str | None = None,
         reset_detail: str | None = None,
     ) -> bool:
         conditions = [
@@ -854,6 +857,18 @@ class DurableBridgeRepository:
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
             HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
         ]
+        if expected_consecutive_failures is not None:
+            conditions.append(HttpBridgeRetryCircuit.consecutive_failures == expected_consecutive_failures)
+        if fence_last_detail:
+            # A detail-only rewrite — the transitional tombstone supersede —
+            # deliberately moves neither the timestamp nor the admission
+            # generation, so the observed detail is the only fence that can
+            # see it. NULL-safe: an expected NULL matches only NULL.
+            conditions.append(
+                HttpBridgeRetryCircuit.last_detail.is_(None)
+                if expected_last_detail is None
+                else HttpBridgeRetryCircuit.last_detail == expected_last_detail
+            )
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
             if expected_admission_generation is not None:

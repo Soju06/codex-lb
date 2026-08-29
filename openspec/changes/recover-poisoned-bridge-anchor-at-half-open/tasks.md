@@ -759,6 +759,53 @@
 - [x] 2.170 The submit-time gate fails a proxy-injected anchor closed
       over an adopted abandonment tombstone, matching the quarantine gate
 
+- [x] 2.171 A restored episode that is itself the tombstone hands back a
+      promotion token, so a committed registration promotes it instead of
+      stranding the fresh anchor behind the lingering tombstone
+
+- [x] 2.172 The on-demand stale purge fences on the observed count and
+      detail, so a detail-only tombstone transition or lagging-clock
+      merge makes it miss and reconcile instead of deleting the fence
+
+- [x] 2.173 A purge-miss reconcile adopts a refreshed tombstone
+      regardless of its preserved old epoch
+
+- [x] 2.174 Owed poison debt alone makes the failed-settlement
+      suppression transitional, even under a non-poison local detail
+
+- [x] 2.175 The grouped settlement excludes internal warmup states from
+      its strike loop, matching the single-request terminal branch
+
+- [x] 2.176 The abandonment-driven settle yields to freshly registered
+      continuity, downgrading its tombstone to a plain reset when the
+      post-clear re-read shows a new anchor
+
+- [x] 2.177 The freshness check compares both continuity columns, so a
+      turn-state-only advance also downgrades the abandonment settle
+
+- [x] 2.178 A post-settle continuity re-read erases a tombstone written
+      over fresh continuity through the fenced detail-only rewrite
+
+- [x] 2.179 The abandonment settle is fenced to its authorizing episode
+      (epoch and count) and spares a replacement episode's cooldown; a
+      continuity-informed plain reset suppresses the blind tombstone
+      upgrade
+
+- [x] 2.180 The authorizing episode is captured before the continuity
+      clear's await, and the fence includes the admission generation so a
+      claimed replay survives the settle
+
+- [x] 2.181 The suppression keeps a local tombstone local until the
+      registration commits, never flipping it early to the superseded
+      sentinel
+
+- [x] 2.182 The tombstone promotion and erase retry once on transient
+      durable failures before deferring to the next completion's healing
+
+- [x] 2.183 The internal precreated-retry path threads the claim token
+      and a send-attempt baseline, handing an unused probe back on every
+      dispatchless exit
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

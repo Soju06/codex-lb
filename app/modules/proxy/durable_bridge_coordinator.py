@@ -335,6 +335,9 @@ class DurableBridgeSessionCoordinator:
         api_key_id: str | None,
         expected_updated_at_epoch: float | None = None,
         expected_admission_generation: int | None = None,
+        expected_consecutive_failures: int | None = None,
+        fence_last_detail: bool = False,
+        expected_last_detail: str | None = None,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).purge_retry_circuit(
@@ -343,6 +346,9 @@ class DurableBridgeSessionCoordinator:
                 api_key_scope=durable_bridge_api_key_scope(api_key_id),
                 expected_updated_at_epoch=expected_updated_at_epoch,
                 expected_admission_generation=expected_admission_generation,
+                expected_consecutive_failures=expected_consecutive_failures,
+                fence_last_detail=fence_last_detail,
+                expected_last_detail=expected_last_detail,
             )
 
     async def claim_live_session(

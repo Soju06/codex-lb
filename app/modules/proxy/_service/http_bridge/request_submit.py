@@ -3361,6 +3361,46 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state: _WebSocketRequestState | None = None,
         restart_reader: bool = False,
     ) -> bool:
+        # The admitted body's admission gate can claim the half-open probe;
+        # any exit that never advances a send attempt past its baseline must
+        # hand that probe back, or a failed reconnect leaves the lease
+        # suppressing traffic for up to the full window with no probe in
+        # flight — the same handback contract the submit finalizer applies.
+        admission_claimed_leases: list[float] = []
+        retry_send_baselines: list[tuple[_WebSocketRequestState, int]] = []
+        try:
+            return await self._retry_http_bridge_precreated_request_admitted(
+                session,
+                request_state=request_state,
+                restart_reader=restart_reader,
+                admission_claimed_leases=admission_claimed_leases,
+                retry_send_baselines=retry_send_baselines,
+            )
+        finally:
+            retry_claimed_half_open_until = admission_claimed_leases[-1] if admission_claimed_leases else 0.0
+            if retry_claimed_half_open_until > 0.0:
+                send_attempt_advanced = bool(retry_send_baselines) and (
+                    retry_send_baselines[-1][0].response_create_attempt_count > retry_send_baselines[-1][1]
+                )
+                if not send_attempt_advanced:
+                    async with self._http_bridge_retry_circuit_lock:
+                        unused_probe_state = self._http_bridge_retry_circuits.get(session.key)
+                        if (
+                            unused_probe_state is not None
+                            and unused_probe_state.half_open_until == retry_claimed_half_open_until
+                        ):
+                            unused_probe_state.half_open_until = 0.0
+                            unused_probe_state.cooldown_until = time.monotonic() - 1.0
+
+    async def _retry_http_bridge_precreated_request_admitted(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState | None = None,
+        restart_reader: bool = False,
+        admission_claimed_leases: list[float] | None = None,
+        retry_send_baselines: list[tuple[_WebSocketRequestState, int]] | None = None,
+    ) -> bool:
         clean_close_retry_max_count = self._http_bridge_clean_close_retry_max_count()
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
@@ -3432,6 +3472,7 @@ class _HTTPBridgeRequestSubmitMixin:
             session,
             allow_fresh_hard_account_switch=fresh_hard_request_account_switch_candidate,
             allow_proof_gated_continuity_replay=proof_gated_continuity_replay_candidate,
+            claimed_lease_out=admission_claimed_leases,
         ):
             return False
 
@@ -3459,6 +3500,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 if len(retryable_requests) != 1:
                     return False
                 request_state = retryable_requests[0]
+            if retry_send_baselines is not None:
+                # The send-attempt baseline: a retried request already carries
+                # prior attempts, so the release keys on advancement past
+                # this point, not on a zero count.
+                retry_send_baselines.append((request_state, request_state.response_create_attempt_count))
             model_fallback_replay = request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
             if request_state.previous_response_id is not None and not (
                 request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text

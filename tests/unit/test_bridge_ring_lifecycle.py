@@ -644,6 +644,62 @@ async def test_scheduled_purge_keeps_tombstones_until_bridge_retention(
 
 
 @pytest.mark.asyncio
+async def test_a_detail_only_tombstone_transition_fences_the_stale_purge(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    # The transitional tombstone supersede deliberately moves neither the
+    # timestamp nor the admission generation; a stale purge fenced only on
+    # those would delete the newly installed crash-safety fence and let
+    # the caller revoke quarantine while the old poisoned anchor is still
+    # the stored one. The purge fences on the observed count and detail.
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-purge-detail-fence",
+            api_key_scope="key-1",
+            consecutive_failures=2,
+            cooldown_until_epoch=2600.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=2000.0,
+            base_updated_at_epoch=0.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=2060.0,
+        )
+        assert await repository.supersede_retry_circuit_detail(
+            session_key_kind="session_header",
+            session_key_value="sid-purge-detail-fence",
+            api_key_scope="key-1",
+            expected_updated_at_epoch=2000.0,
+            expected_consecutive_failures=2,
+            expected_last_detail="stream_incomplete",
+            last_detail="anchor_abandoned",
+        )
+
+        purged = await repository.purge_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-purge-detail-fence",
+            api_key_scope="key-1",
+            expected_updated_at_epoch=2000.0,
+            expected_admission_generation=0,
+            expected_consecutive_failures=2,
+            fence_last_detail=True,
+            expected_last_detail="stream_incomplete",
+        )
+
+        assert purged is False, "the observed-detail fence must see the detail-only tombstone transition"
+        row = await session.get(
+            HttpBridgeRetryCircuit,
+            ("session_header", durable_bridge_hash("sid-purge-detail-fence"), "key-1"),
+        )
+        assert row is not None
+        assert row.last_detail == "anchor_abandoned", "the crash-safety fence survives the missed purge"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_a_strike_cannot_overwrite_an_abandonment_tombstone(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

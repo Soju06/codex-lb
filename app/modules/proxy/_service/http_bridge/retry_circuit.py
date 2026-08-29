@@ -641,6 +641,14 @@ class _HTTPBridgeRetryCircuitMixin:
                     api_key_id=key.api_key_id,
                     expected_updated_at_epoch=persisted.updated_at_epoch,
                     expected_admission_generation=getattr(persisted, "admission_generation", 0),
+                    # Detail-only transitions (the transitional tombstone
+                    # supersede) and lagging-clock merges move neither the
+                    # epoch nor the admission generation; fencing on the
+                    # observed count and detail keeps this purge from
+                    # deleting a row another replica just rewrote.
+                    expected_consecutive_failures=persisted.consecutive_failures,
+                    fence_last_detail=True,
+                    expected_last_detail=persisted.last_detail,
                 )
             except Exception:
                 logger.warning(
@@ -674,9 +682,19 @@ class _HTTPBridgeRetryCircuitMixin:
                         exc_info=True,
                     )
                     return False
-                if refreshed is not None and now_epoch - refreshed.updated_at_epoch <= (
-                    DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
-                    * (2 if getattr(refreshed, "admission_generation", 0) > 0 else 1)
+                if refreshed is not None and (
+                    # A detail-only tombstone rewrite keeps the old epoch, so
+                    # an age check would reject the very fence the missed
+                    # purge just proved exists — and planning would inject
+                    # the dead anchor the tombstone guards. Tombstones are
+                    # adopted regardless of circuit age; their lifetime
+                    # belongs to the bridge-retention purge.
+                    refreshed.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                    or now_epoch - refreshed.updated_at_epoch
+                    <= (
+                        DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+                        * (2 if getattr(refreshed, "admission_generation", 0) > 0 else 1)
+                    )
                 ):
                     persisted = refreshed
                 else:
@@ -1812,11 +1830,27 @@ class _HTTPBridgeRetryCircuitMixin:
                 state = self._http_bridge_retry_circuits.get(session.key)
                 if state is None:
                     return None
-                if _http_bridge_anchor_poison_detail(state.last_detail) is None:
+                if (
+                    _http_bridge_anchor_poison_detail(state.last_detail) is None
+                    and state.last_detail != _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                    # Owed debt IS poison evidence even when a later
+                    # non-poison strike overwrote the local detail (its
+                    # durable persist and reload can both fail): without a
+                    # token the debt survives the fresh registration and a
+                    # later strike abandons the anchor just registered.
+                    and state.owed_poison_detail is None
+                ):
                     # A clean episode owes no abandonment; marking it would
                     # refuse the clear a LATER poison strike genuinely owes,
                     # since only the supersession sentinel resets the marker
-                    # on a fresh strike.
+                    # on a fresh strike. An existing tombstone is NOT clean:
+                    # it is already the transitional durable state (a sticky
+                    # tombstone can carry later strikes onto a positive
+                    # count), and returning no token here would leave a
+                    # committed registration with nothing to promote — every
+                    # later submission carrying the freshly registered
+                    # anchor would then be rejected against the lingering
+                    # tombstone.
                     return None
                 prior_owed = state.owed_poison_detail
                 state.poison_anchor_cleared = True
@@ -1828,7 +1862,15 @@ class _HTTPBridgeRetryCircuitMixin:
                 prior_detail = state.last_detail
                 supersede_base_epoch = state.persisted_updated_at_epoch
                 supersede_base_count = state.consecutive_failures
-                state.last_detail = _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL
+                if state.last_detail != _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL:
+                    # A local tombstone stays a tombstone until the fresh
+                    # anchor's registration commits and the promotion
+                    # rewrites the durable row: flipping the local cache to
+                    # the superseded sentinel early would let a concurrent
+                    # proof-gated resend that cannot reload bypass the
+                    # fail-closed gates and send the still-stored poisoned
+                    # anchor.
+                    state.last_detail = _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL
             superseded = False
             try:
                 # A detail-only fenced update, not a strike write: the strike
@@ -2032,29 +2074,39 @@ class _HTTPBridgeRetryCircuitMixin:
         _captured_state, _prior_detail, _prior_owed, base_epoch, base_count, superseded = supersession
         if not superseded:
             return
-        try:
-            await self._durable_bridge.supersede_retry_circuit_detail(
-                session_key_kind=session.key.affinity_kind,
-                session_key_value=session.key.affinity_key,
-                api_key_id=session.key.api_key_id,
-                expected_updated_at_epoch=base_epoch,
-                expected_consecutive_failures=base_count,
-                expected_last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
-                last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL,
-            )
-        except Exception:
-            logger.warning(
-                "Failed to promote HTTP bridge anchor supersession bridge_kind=%s bridge_key=%s",
-                session.key.affinity_kind,
-                _hash_identifier(session.key.affinity_key),
-                exc_info=True,
-            )
+        for promote_attempt in range(2):
+            try:
+                await self._durable_bridge.supersede_retry_circuit_detail(
+                    session_key_kind=session.key.affinity_kind,
+                    session_key_value=session.key.affinity_key,
+                    api_key_id=session.key.api_key_id,
+                    expected_updated_at_epoch=base_epoch,
+                    expected_consecutive_failures=base_count,
+                    expected_last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
+                    last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL,
+                )
+                return
+            except Exception:
+                # One immediate retry covers a transient durable blip: a
+                # skipped promotion leaves the fresh anchor rejected on
+                # every replica until the next completion's settle-and-erase
+                # heals it. A second failure defers to that healing.
+                if promote_attempt == 0:
+                    continue
+                logger.warning(
+                    "Failed to promote HTTP bridge anchor supersession bridge_kind=%s bridge_key=%s",
+                    session.key.affinity_kind,
+                    _hash_identifier(session.key.affinity_key),
+                    exc_info=True,
+                )
 
     async def _clear_http_bridge_retry_circuit(
         self: Any,
         session: _HTTPBridgeSession,
         *,
         settled_detail: str | None = None,
+        settled_detail_authoritative: bool = False,
+        expected_episode: tuple[float, int, int] | None = None,
     ) -> bool:
         """Settle a hard key's retry circuit; ``True`` when settlement held.
 
@@ -2071,7 +2123,12 @@ class _HTTPBridgeRetryCircuitMixin:
             return True
         key_lock = await self._acquire_http_bridge_retry_circuit_key_lock(key)
         try:
-            return await self._clear_http_bridge_retry_circuit_serialized(session, settled_detail=settled_detail)
+            return await self._clear_http_bridge_retry_circuit_serialized(
+                session,
+                settled_detail=settled_detail,
+                settled_detail_authoritative=settled_detail_authoritative,
+                expected_episode=expected_episode,
+            )
         finally:
             key_lock.release()
 
@@ -2080,9 +2137,32 @@ class _HTTPBridgeRetryCircuitMixin:
         session: _HTTPBridgeSession,
         *,
         settled_detail: str | None = None,
+        settled_detail_authoritative: bool = False,
+        expected_episode: tuple[float, int, int] | None = None,
     ) -> bool:
         key = session.key
         durable_load_succeeded = await self._load_http_bridge_retry_circuit(session)
+        if expected_episode is not None:
+            # The caller settles a specific authorized episode — an
+            # abandonment clears only the circuit its abandonment
+            # invalidated. A replacement episode opened between the
+            # authorization and this settle (fresh strikes against a newly
+            # registered anchor) carries its own valid cooldown; resetting
+            # it would let the newly poisoned anchor retry immediately.
+            # The count discriminates lagging-clock merges the epoch alone
+            # cannot see. Nothing is popped on a mismatch: the settlement
+            # stays owed and the newer row stands untouched.
+            async with self._http_bridge_retry_circuit_lock:
+                fenced_state = self._http_bridge_retry_circuits.get(key)
+            if fenced_state is not None and (
+                fenced_state.persisted_updated_at_epoch != expected_episode[0]
+                or fenced_state.consecutive_failures != expected_episode[1]
+                # A replay claim advances only the admission generation:
+                # resetting beneath it would clear the circuit a claimed
+                # replay depends on and admit a second dispatch beside it.
+                or fenced_state.persisted_admission_generation != expected_episode[2]
+            ):
+                return False
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.pop(key, None)
             self._http_bridge_retry_circuit_loaded_keys.discard(key)
@@ -2103,6 +2183,11 @@ class _HTTPBridgeRetryCircuitMixin:
             expected_admission_generation = state.persisted_admission_generation if state is not None else None
         if (
             settled_detail is None
+            # An authoritative None was chosen after consulting continuity —
+            # the caller SAW fresh evidence replacing the poisoned anchor —
+            # and upgrading it back to a tombstone would fail the fresh
+            # continuity closed. Only a blind None is upgraded.
+            and not settled_detail_authoritative
             and state is not None
             and (
                 _http_bridge_anchor_poison_detail(state.last_detail) is not None

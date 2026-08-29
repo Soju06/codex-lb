@@ -1024,6 +1024,22 @@ async def _abandon_durable_http_bridge_continuity(
     """
     if session.durable_session_id is None or session.durable_owner_epoch is None:
         return False
+    # Captured BEFORE the continuity clear's await: this is the closest
+    # snapshot to the episode the poison consult validated, and a sibling
+    # replacing the circuit episode while the rebind is in flight must not
+    # be mistaken for the authorizing one — the settle below clears only
+    # the episode this abandonment invalidated.
+    async with service._http_bridge_retry_circuit_lock:
+        authorizing_state = service._http_bridge_retry_circuits.get(session.key)
+        abandonment_expected_episode = (
+            (
+                authorizing_state.persisted_updated_at_epoch,
+                authorizing_state.consecutive_failures,
+                authorizing_state.persisted_admission_generation,
+            )
+            if authorizing_state is not None
+            else None
+        )
     rebind_fence_kwargs: dict[str, Any] = {}
     if expected_continuity is not _POISON_ANCHOR_CAPTURE_UNAVAILABLE:
         # Fence the continuity clear on both anchors captured when the
@@ -1084,8 +1100,46 @@ async def _abandon_durable_http_bridge_continuity(
     # cannot repeat that failure, which is the same evidence a completed
     # response carries, so settle the circuit the same way. A genuinely new
     # failure re-opens it at the usual threshold.
+    # A sibling completion can race this settle after the continuity clear:
+    # it registers a FRESH anchor and erases its own transitional tombstone,
+    # and writing the tombstone here again would durably 404 every valid
+    # follow-up riding that fresh anchor, with no registration left to erase
+    # it. Re-read the continuity: an anchor that is present and different
+    # from the one this abandonment removed is fresh evidence, and the
+    # settle then writes a plain reset instead of the tombstone.
+    abandonment_settled_detail: str | None = _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+    abandoned_anchor, abandoned_turn_state = (
+        (expected_continuity[0], expected_continuity[1])
+        if isinstance(expected_continuity, tuple) and len(expected_continuity) == 2
+        else (None, None)
+    )
+
+    def _continuity_is_fresh(observed: tuple[str | None, str | None] | None) -> bool:
+        # Fresh evidence in EITHER continuity column: a delta can resolve
+        # through the turn state alone, so a turn-state advance without a
+        # response id is still continuity a tombstone must not fail closed.
+        return observed is not None and (
+            (observed[0] is not None and observed[0] != abandoned_anchor)
+            or (observed[1] is not None and observed[1] != abandoned_turn_state)
+        )
+
+    if session.durable_session_id:
+        try:
+            post_clear_continuity = await service._durable_bridge.session_latest_continuity(
+                session_id=session.durable_session_id
+            )
+        except Exception:
+            # Unknown continuity keeps the tombstone: the stale-tombstone
+            # cost is self-healing (the next completion settles and erases
+            # it), while a missing tombstone silently drops delta context.
+            post_clear_continuity = None
+        if _continuity_is_fresh(post_clear_continuity):
+            abandonment_settled_detail = None
     circuit_settled = await service._clear_http_bridge_retry_circuit(
-        session, settled_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+        session,
+        settled_detail=abandonment_settled_detail,
+        settled_detail_authoritative=True,
+        expected_episode=abandonment_expected_episode,
     )
     if not circuit_settled:
         # The clear reloads fresh state on every call, so one immediate
@@ -1095,7 +1149,10 @@ async def _abandon_durable_http_bridge_continuity(
         # marker must record that so the episode cannot clear now-empty
         # continuity again, and only the settlement is owed.
         circuit_settled = await service._clear_http_bridge_retry_circuit(
-            session, settled_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+            session,
+            settled_detail=abandonment_settled_detail,
+            settled_detail_authoritative=True,
+            expected_episode=abandonment_expected_episode,
         )
     if not circuit_settled:
         _log_http_bridge_event(
@@ -1107,6 +1164,47 @@ async def _abandon_durable_http_bridge_continuity(
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
+    if circuit_settled and abandonment_settled_detail is not None and session.durable_session_id:
+        # The pre-settle re-read closes most of the window, but a sibling
+        # registration can still land between that read and the settle
+        # write — and its own tombstone cleanup ran BEFORE this settle
+        # wrote a new one. Re-read once more after the write and erase the
+        # tombstone this settle left when fresh continuity now exists; the
+        # fenced detail-only rewrite defers to any newer write, and both
+        # sides reconciling after their own writes makes every
+        # interleaving converge.
+        try:
+            reconcile_continuity = await service._durable_bridge.session_latest_continuity(
+                session_id=session.durable_session_id
+            )
+        except Exception:
+            reconcile_continuity = None
+        if _continuity_is_fresh(reconcile_continuity):
+            try:
+                settled_row = await service._durable_bridge.lookup_retry_circuit(
+                    session_key_kind=session.key.affinity_kind,
+                    session_key_value=session.key.affinity_key,
+                    api_key_id=session.key.api_key_id,
+                )
+                if (
+                    settled_row is not None
+                    and settled_row.consecutive_failures == 0
+                    and settled_row.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                ):
+                    await service._durable_bridge.supersede_retry_circuit_detail(
+                        session_key_kind=session.key.affinity_kind,
+                        session_key_value=session.key.affinity_key,
+                        api_key_id=session.key.api_key_id,
+                        expected_updated_at_epoch=settled_row.updated_at_epoch,
+                        expected_consecutive_failures=0,
+                        expected_last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
+                        last_detail=None,
+                    )
+            except Exception:
+                logger.debug(
+                    "Failed to reconcile abandonment tombstone against fresh continuity",
+                    exc_info=True,
+                )
     return True
 
 
@@ -2274,6 +2372,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                     grouped_request_state
                 ):
                     continue
+                if grouped_request_state.request_kind == "prewarm" or grouped_request_state.skip_request_log:
+                    # Same exclusion the single-request terminal branch
+                    # applies: an internal warmup probe carries no anchor
+                    # and proves nothing about the key's continuity, and
+                    # one warmup plus one client request must not open the
+                    # circuit between them after a single real failure.
+                    continue
                 grouped_terminal_error = (
                     grouped_terminal_event.response.error
                     if grouped_terminal_event is not None and grouped_terminal_event.response is not None
@@ -3057,31 +3162,38 @@ class _HTTPBridgeUpstreamEventsMixin:
             if alias_registered and not completion_circuit_settlement_failed and completion_settles_onto_tombstone:
                 # The fresh anchor committed: erase the transitional
                 # tombstone the settle left, fenced on the exact reset row.
-                try:
-                    settled_row = await self._durable_bridge.lookup_retry_circuit(
-                        session_key_kind=session.key.affinity_kind,
-                        session_key_value=session.key.affinity_key,
-                        api_key_id=session.key.api_key_id,
-                    )
-                    if (
-                        settled_row is not None
-                        and settled_row.consecutive_failures == 0
-                        and settled_row.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
-                    ):
-                        await self._durable_bridge.supersede_retry_circuit_detail(
+                # One immediate retry covers a transient durable blip — a
+                # lingering tombstone rejects the fresh anchor on every
+                # replica until the next completion heals it.
+                for erase_attempt in range(2):
+                    try:
+                        settled_row = await self._durable_bridge.lookup_retry_circuit(
                             session_key_kind=session.key.affinity_kind,
                             session_key_value=session.key.affinity_key,
                             api_key_id=session.key.api_key_id,
-                            expected_updated_at_epoch=settled_row.updated_at_epoch,
-                            expected_consecutive_failures=0,
-                            expected_last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
-                            last_detail=None,
                         )
-                except Exception:
-                    logger.debug(
-                        "Failed to erase transitional circuit tombstone after registration",
-                        exc_info=True,
-                    )
+                        if (
+                            settled_row is not None
+                            and settled_row.consecutive_failures == 0
+                            and settled_row.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                        ):
+                            await self._durable_bridge.supersede_retry_circuit_detail(
+                                session_key_kind=session.key.affinity_kind,
+                                session_key_value=session.key.affinity_key,
+                                api_key_id=session.key.api_key_id,
+                                expected_updated_at_epoch=settled_row.updated_at_epoch,
+                                expected_consecutive_failures=0,
+                                expected_last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
+                                last_detail=None,
+                            )
+                        break
+                    except Exception:
+                        if erase_attempt == 0:
+                            continue
+                        logger.debug(
+                            "Failed to erase transitional circuit tombstone after registration",
+                            exc_info=True,
+                        )
             if (
                 not alias_registered
                 and not completion_circuit_settlement_failed

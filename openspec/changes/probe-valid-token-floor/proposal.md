@@ -16,16 +16,16 @@ verified that 16 is accepted.
   pinned account, bypass load-balancer scoring).
 
 This change does **not** include the warmup / compact-404 half of
-#1895, limit-warmup's separate `max_output_tokens=4` path, or any new
+issue #1895, limit-warmup's separate `max_output_tokens=4` path, or any new
 setting.
 
 # Capabilities
 
-### New Capabilities
+## New Capabilities
 
 - None
 
-### Modified Capabilities
+## Modified Capabilities
 
 - `usage-refresh-policy`: the operator probe `responses.create` MUST
   use `max_output_tokens=16` (the current Codex token floor), not `1`.

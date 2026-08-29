@@ -73,12 +73,16 @@ behavior can set the threshold to `100.0`.
   rate limiter; codex-lb auto-recovers on the next refresh tick after the
   upstream payload changes.
 - The dashboard Force Probe action fires one minimal `responses.create` against
-  the selected account and immediately refreshes its usage. An accepted 2xx
-  probe also contributes to that replica's probing-health recovery streak;
-  non-2xx results do not restore routing health. Settlement reloads and
-  normalizes weekly/monthly and zero-primary-capacity usage like ordinary
-  routing and is discarded when newer replica-local runtime activity arrives
-  during that snapshot load.
+  the selected account and immediately refreshes its usage. The probe body uses
+  `max_output_tokens=16` (the current Codex token floor); `1` is rejected
+  upstream with HTTP 400 and never wakes the limiter. An accepted 2xx probe
+  also contributes to that replica's probing-health recovery streak; non-2xx
+  results do not restore routing health. Settlement reloads and normalizes
+  weekly/monthly and zero-primary-capacity usage like ordinary routing and is
+  discarded when newer replica-local runtime activity arrives during that
+  snapshot load. This floor is the probe half of
+  [#1895](https://github.com/Soju06/codex-lb/issues/1895); warmup/compact-404
+  is a separate path.
 - Do not manually flip the codex-lb account state to `ACTIVE` while
   `/wham/usage` still reports the account as fully used. That only masks the
   upstream state and can route traffic back to an account that the upstream

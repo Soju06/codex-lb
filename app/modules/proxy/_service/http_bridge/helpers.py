@@ -1100,12 +1100,14 @@ def _trim_http_bridge_previous_response_input_items(input_items: list[JsonValue]
         ),
         None,
     )
-    if first_output_index is None or first_output_index == 0:
+    if first_output_index is None:
         return input_items
+    if first_output_index == 0:
+        return [_strip_http_bridge_replayed_tool_search_output_id(item) for item in input_items]
     prefix = input_items[:first_output_index]
     if not all(_is_http_bridge_previous_response_output_item(item) for item in prefix):
         return input_items
-    return input_items[first_output_index:]
+    return [_strip_http_bridge_replayed_tool_search_output_id(item) for item in input_items[first_output_index:]]
 
 
 def _is_http_bridge_previous_response_output_item(item: JsonValue) -> bool:
@@ -1116,6 +1118,14 @@ def _is_http_bridge_previous_response_output_item(item: JsonValue) -> bool:
         return False
     role = item.get("role")
     return role == "assistant" and _has_http_bridge_response_output_marker(item)
+
+
+def _strip_http_bridge_replayed_tool_search_output_id(item: JsonValue) -> JsonValue:
+    if not isinstance(item, dict) or _http_bridge_input_item_type(item) != "tool_search_output" or "id" not in item:
+        return item
+    stripped = dict(item)
+    stripped.pop("id", None)
+    return stripped
 
 
 def _has_http_bridge_response_output_marker(item: JsonValue) -> bool:

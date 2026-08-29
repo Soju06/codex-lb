@@ -86,6 +86,43 @@ async def test_proxy_compact_rejects_non_terminal_compaction_trigger_before_inst
 
 
 @pytest.mark.asyncio
+async def test_v1_proxy_compact_rejects_non_terminal_compaction_trigger_before_instruction_hoist(
+    async_client,
+    monkeypatch,
+):
+    email = "v1-compact-trigger-hoist@example.com"
+    raw_account_id = "acc_v1_compact_trigger_hoist"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_compact(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("compact should not be called when a trailing developer message hides a non-terminal trigger")
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/v1/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "input": [
+                {"role": "user", "content": "hello"},
+                {"type": "compaction_trigger"},
+                {"role": "developer", "content": "still trailing after the trigger"},
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "invalid_request_error"
+    assert error["param"] == "input"
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_preserves_single_terminal_compaction_trigger(async_client, monkeypatch):
     email = "compact-single-trigger@example.com"
     raw_account_id = "acc_compact_single_trigger"

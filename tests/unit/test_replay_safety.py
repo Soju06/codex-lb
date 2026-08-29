@@ -252,6 +252,22 @@ def test_account_neutral_replay_projection_removes_response_owned_bookkeeping() 
             "internal_chat_message_metadata_passthrough": metadata,
         },
         {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "github"},
+            "execution": "client",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "status": "completed",
+            "tools": [],
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
             "type": "message",
             "role": "assistant",
             "status": "completed",
@@ -350,6 +366,72 @@ def test_account_neutral_fresh_replay_accepts_self_contained_tool_search_pair() 
     assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is True
 
 
+def test_account_neutral_fresh_replay_accepts_tool_search_string_output() -> None:
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "execution": "client",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "output": "completed",
+            "status": "completed",
+        },
+    ]
+
+    assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is True
+
+
+def test_account_neutral_replay_projection_preserves_completed_tool_search_output_without_id() -> None:
+    input_items: list[JsonValue] = [
+        {"role": "user", "content": "old question"},
+        {
+            "type": "tool_search_call",
+            "id": "tsc_owner_a",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "execution": "client",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "id": "tso_owner_a",
+            "call_id": "call_search",
+            "execution": "client",
+            "output": "completed",
+            "status": "completed",
+        },
+        {"role": "user", "content": "next question"},
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(input_items, stored_count=1)
+
+    assert projection is not None
+    assert projection.input_items == [
+        {"role": "user", "content": "old question"},
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "execution": "client",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "output": "completed",
+            "status": "completed",
+        },
+        {"role": "user", "content": "next question"},
+    ]
+
+
 def test_account_neutral_fresh_replay_rejects_tool_search_arguments_with_nested_compaction() -> None:
     input_items: list[JsonValue] = [
         {
@@ -393,16 +475,55 @@ def test_account_neutral_fresh_replay_rejects_server_executed_tool_search_output
     assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is False
 
 
-@pytest.mark.parametrize("tools", [None, {"name": "workspace-search"}, "workspace-search"])
-def test_account_neutral_fresh_replay_rejects_tool_search_output_without_tools_list(tools: JsonValue) -> None:
+@pytest.mark.parametrize("tools", [{"name": "workspace-search"}, "workspace-search"])
+def test_account_neutral_fresh_replay_rejects_malformed_tool_search_tools_field(tools: JsonValue) -> None:
     output: dict[str, JsonValue] = {
         "type": "tool_search_output",
         "call_id": "call_search",
-        "output": "completed",
+        "status": "completed",
+        "tools": tools,
+    }
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "execution": "client",
+            "status": "completed",
+        },
+        output,
+    ]
+
+    assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is False
+
+
+def test_account_neutral_fresh_replay_rejects_ambiguous_tool_search_output_shape() -> None:
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "execution": "client",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "output": "completed",
+            "tools": [],
+            "status": "completed",
+        },
+    ]
+
+    assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is False
+
+
+def test_account_neutral_fresh_replay_rejects_tool_search_output_without_payload() -> None:
+    output: dict[str, JsonValue] = {
+        "type": "tool_search_output",
+        "call_id": "call_search",
         "status": "completed",
     }
-    if tools is not None:
-        output["tools"] = tools
     input_items: list[JsonValue] = [
         {
             "type": "tool_search_call",

@@ -18,9 +18,7 @@ _TOOL_CALL_TYPE_BY_OUTPUT_TYPE = {
     "tool_search_output": "tool_search_call",
 }
 _TOOL_CALL_TYPES = frozenset(_TOOL_CALL_TYPE_BY_OUTPUT_TYPE.values())
-_ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES = frozenset(
-    {"reasoning", "tool_search_call", "tool_search_output", "web_search_call"}
-)
+_ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES = frozenset({"reasoning", "web_search_call"})
 _INTERNAL_CHAT_MESSAGE_METADATA_FIELD = "internal_chat_message_metadata_passthrough"
 _ACCOUNT_NEUTRAL_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS = frozenset({"turn_id"})
 _ACCOUNT_NEUTRAL_TOOL_TYPES = frozenset({"custom", "function", "web_search", "web_search_preview"})
@@ -700,7 +698,9 @@ def _tool_output_is_self_contained(item_type: str, item: Mapping[str, JsonValue]
     if item.get("status") not in (None, "completed", "failed"):
         return False
     if item_type == "tool_search_output":
-        return item.get("execution") in (None, "client") and isinstance(item.get("tools"), list)
+        has_tools = isinstance(item.get("tools"), list)
+        has_output = isinstance(item.get("output"), str)
+        return item.get("execution") in (None, "client") and has_tools != has_output
     output = item.get("output")
     if isinstance(output, str):
         return True

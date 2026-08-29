@@ -5960,9 +5960,11 @@ async def test_v1_responses_http_bridge_trims_replayed_tool_search_previous_resp
         "call_id": "call_search_1",
     }
     replayed_tool_search_output = {
+        "id": "tso_replay",
         "type": "tool_search_output",
         "call_id": "call_search_1",
-        "output": [{"title": "context result"}],
+        "output": "completed",
+        "status": "completed",
     }
     next_user_message = {"role": "user", "content": [{"type": "input_text", "text": "continue"}]}
     second = await async_client.post(
@@ -5981,7 +5983,15 @@ async def test_v1_responses_http_bridge_trims_replayed_tool_search_previous_resp
     assert len(fake_upstream.sent_text) == 2
     second_upstream_payload = json.loads(fake_upstream.sent_text[1])
     assert second_upstream_payload["previous_response_id"] == "resp_bridge_1"
-    assert second_upstream_payload["input"] == [replayed_tool_search_output, next_user_message]
+    assert second_upstream_payload["input"] == [
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search_1",
+            "output": "completed",
+            "status": "completed",
+        },
+        next_user_message,
+    ]
 
 
 @pytest.mark.asyncio

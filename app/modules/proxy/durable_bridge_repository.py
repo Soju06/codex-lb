@@ -58,6 +58,7 @@ DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
 # Mirrors the HTTP bridge retry circuit's abandonment tombstone detail; the
 # scheduled purge preserves such rows until the bridge-retention cutoff.
 _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL = "anchor_abandoned"
+DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE = 50
 _PURGE_CLOSED_BATCH_SIZE = 500
 # Claim retry budget: insert races and epoch-CAS losses re-read and retry;
 # each round has a winner, so a small budget converges under any realistic
@@ -227,6 +228,12 @@ class DurableBridgeOperationEventInput:
     instance_id: str
     owner_epoch: int
     event_text: str
+
+
+@dataclass(frozen=True, slots=True)
+class DurableBridgeOperationPurgeBatchResult:
+    selected_operations: int
+    deleted_operations: int
 
 
 class DurableBridgeRepository:
@@ -2146,7 +2153,12 @@ class DurableBridgeRepository:
         turns.reverse()
         return turns
 
-    async def purge_operation_spool(self, *, cutoff: datetime, batch_size: int = 500) -> int:
+    async def purge_operation_spool_batch(
+        self,
+        *,
+        cutoff: datetime,
+        batch_size: int = DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE,
+    ) -> DurableBridgeOperationPurgeBatchResult:
         """Delete eligible transcript material past retention.
 
         Nonterminal rows are purgeable only after their owning session is
@@ -2195,7 +2207,10 @@ class DurableBridgeRepository:
             operation_ids = [str(operation.operation_id) for operation in selected.scalars().all()]
             if not operation_ids:
                 await self._session.commit()
-                return 0
+                return DurableBridgeOperationPurgeBatchResult(
+                    selected_operations=0,
+                    deleted_operations=0,
+                )
             deleted = await self._session.execute(
                 delete(HttpBridgeOperationRecord)
                 .where(
@@ -2209,7 +2224,20 @@ class DurableBridgeRepository:
             if deleted_ids:
                 await self._delete_operation_spool_material(deleted_ids)
             await self._session.commit()
-        return len(deleted_ids)
+        return DurableBridgeOperationPurgeBatchResult(
+            selected_operations=len(operation_ids),
+            deleted_operations=len(deleted_ids),
+        )
+
+    async def purge_operation_spool(
+        self,
+        *,
+        cutoff: datetime,
+        batch_size: int = DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE,
+    ) -> int:
+        """Delete one eligible transcript batch and return actual deletes."""
+        result = await self.purge_operation_spool_batch(cutoff=cutoff, batch_size=batch_size)
+        return result.deleted_operations
 
     async def append_operation_event_chunk(
         self,

@@ -85,7 +85,10 @@ from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.cap_partitioning import refresh_cap_partition
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
-from app.modules.proxy.durable_bridge_repository import missing_durable_bridge_tables
+from app.modules.proxy.durable_bridge_repository import (
+    DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE,
+    missing_durable_bridge_tables,
+)
 from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.ring_membership import (
@@ -103,8 +106,11 @@ from app.modules.runtime import api as runtime_api
 from app.modules.settings import api as settings_api
 from app.modules.sticky_sessions import api as sticky_sessions_api
 from app.modules.sticky_sessions.cleanup_scheduler import (
+    OperationRetentionCleanupResult,
     _abandoned_bridge_retention_seconds,
+    _record_operation_retention_cleanup,
     build_sticky_session_cleanup_scheduler,
+    operation_retention_metrics_enabled,
 )
 from app.modules.telemetry import api as telemetry_api
 from app.modules.telemetry.scheduler import build_telemetry_scheduler
@@ -315,6 +321,55 @@ def _log_non_multiproc_metrics_bind_conflict(port: int) -> None:
     )
 
 
+async def _purge_operation_spool_on_startup(*, retention_seconds: float) -> int:
+    """Run one bounded transcript purge and record a sanitized aggregate result."""
+
+    started_at = time.monotonic()
+    try:
+        operation_purge_result = await DurableBridgeSessionCoordinator(SessionLocal).purge_operation_spool_batch(
+            cutoff=utcnow() - timedelta(seconds=retention_seconds),
+        )
+    except Exception as exc:
+        result = OperationRetentionCleanupResult(
+            deleted_operations=0,
+            batches=0,
+            backlog_likely=True,
+            outcome="failed",
+            duration_seconds=max(time.monotonic() - started_at, 0.0),
+        )
+        _record_operation_retention_cleanup(result)
+        logger.warning(
+            "HTTP bridge operation transcript startup retention failed "
+            "deleted_operations=0 batches=0 outcome=failed backlog_likely=true "
+            "duration_seconds=%.3f error_type=%s",
+            result.duration_seconds,
+            type(exc).__name__,
+        )
+        raise RuntimeError("HTTP bridge operation transcript startup retention failed") from None
+
+    backlog_likely = operation_purge_result.selected_operations >= DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE
+    result = OperationRetentionCleanupResult(
+        deleted_operations=operation_purge_result.deleted_operations,
+        batches=1,
+        backlog_likely=backlog_likely,
+        outcome="batch_budget_exhausted" if backlog_likely else "completed",
+        duration_seconds=max(time.monotonic() - started_at, 0.0),
+    )
+    _record_operation_retention_cleanup(result)
+    if not operation_retention_metrics_enabled():
+        logger.info(
+            "HTTP bridge operation transcript startup retention "
+            "deleted_operations=%s batches=%s outcome=%s "
+            "backlog_likely=%s duration_seconds=%.3f",
+            result.deleted_operations,
+            result.batches,
+            result.outcome,
+            result.backlog_likely,
+            result.duration_seconds,
+        )
+    return operation_purge_result.deleted_operations
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import app.core.startup as startup_module
@@ -367,9 +422,8 @@ async def lifespan(app: FastAPI):
                     "deleted": deleted_bridge_rows,
                 },
             )
-        purged_operation_rows = await DurableBridgeSessionCoordinator(SessionLocal).purge_operation_spool(
-            cutoff=utcnow()
-            - timedelta(seconds=settings.http_responses_session_bridge_operation_spool_retention_seconds),
+        purged_operation_rows = await _purge_operation_spool_on_startup(
+            retention_seconds=settings.http_responses_session_bridge_operation_spool_retention_seconds,
         )
         if purged_operation_rows > 0:
             logger.info(

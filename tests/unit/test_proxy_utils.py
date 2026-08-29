@@ -38710,6 +38710,7 @@ async def test_stream_file_pinned_prompt_cache_429_stays_fail_closed(monkeypatch
     async def fake_select_account(**kwargs):
         selection_calls.append(dict(kwargs))
         assert kwargs.get("reallocate_sticky") is not True
+        assert kwargs.get("required_account_id") == file_owner.id
         excluded = set(cast(set[str], kwargs.get("exclude_account_ids") or set()))
         if file_owner.id in excluded:
             return AccountSelection(

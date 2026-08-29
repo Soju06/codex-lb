@@ -22,11 +22,11 @@ post-visible replay rules.
 
 # Capabilities
 
-### New Capabilities
+## New Capabilities
 
 - None
 
-### Modified Capabilities
+## Modified Capabilities
 
 - `responses-api-compat`: a pre-visible 429 on a soft prompt-cache streaming
   request MUST release that affinity and retry an eligible compatible account;

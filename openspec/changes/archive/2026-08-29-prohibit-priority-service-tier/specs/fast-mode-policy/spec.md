@@ -11,10 +11,11 @@ owner-forwarded payload. The administrator prohibition MUST take precedence
 over API-key service-tier enforcement. A prohibited tier MUST be represented
 on the upstream wire by omitting `service_tier`; absent and non-priority values
 MUST retain their existing behavior. The setting MUST take effect before
-model-source selection, quota reservation, request logging, and upstream
-OpenAI forwarding for HTTP requests; a Codex WebSocket connection MUST use the
-policy resolved when that connection began. Each stripped tier MUST emit an
-info-level diagnostic containing the request ID and stripped value.
+model-source selection, quota reservation, request-state capture, request
+logging, serialization, and upstream OpenAI forwarding for HTTP requests; a
+Codex WebSocket connection MUST use the policy resolved when that connection
+began. Each stripped tier MUST emit an info-level diagnostic containing the
+request ID and stripped value.
 
 #### Scenario: Operator disables Fast Mode for a harness alias
 
@@ -64,6 +65,7 @@ info-level diagnostic containing the request ID and stripped value.
 - **GIVEN** a Codex WebSocket connection began while `prohibitFastMode` was enabled
 - **WHEN** a `response.create` frame carries `service_tier: "priority"`
 - **THEN** its upstream payload omits `service_tier`
+- **AND** its effective request state omits `service_tier`
 
 #### Scenario: Policy changes are audited
 

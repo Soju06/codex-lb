@@ -5509,7 +5509,9 @@ The service MUST apply the same canonical priority-tier prohibition before
 forwarding an upstream payload from native `/responses`, OpenAI-compatible
 `/v1/responses`, native and `/v1` compact Responses, chat-to-Responses
 conversion, WebSocket `response.create`, dashboard warmup, and internal
-owner-forwarding paths whenever `prohibitFastMode` is enabled.
+owner-forwarding paths whenever `prohibitFastMode` is enabled. WebSocket
+`response.create` frames MUST use the `prohibitFastMode` policy snapshot
+captured when the connection began.
 
 #### Scenario: Native and OpenAI-compatible HTTP requests omit explicit priority
 

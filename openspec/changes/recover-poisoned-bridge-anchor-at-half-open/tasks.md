@@ -740,6 +740,11 @@
       from the poison episode it actually adopts instead of resetting it
       plain off the blind capture
 
+- [x] 2.166 A completion that cannot register a fresh anchor (no usable
+      response id or matched request) leaves a poison episode unsettled
+      instead of writing a zero-count tombstone the next load reads as a
+      disproved episode
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

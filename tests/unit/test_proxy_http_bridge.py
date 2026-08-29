@@ -37121,6 +37121,12 @@ async def test_an_idless_completion_keeps_the_quarantine(
     assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is True, (
         "no fresh durable anchor confirmed, so the quarantine must keep covering the stored poisoned one"
     )
+    service._durable_bridge.clear_retry_circuit.assert_not_awaited()
+    state = cast(Any, service)._http_bridge_retry_circuits.get(session.key)
+    assert state is not None and state.consecutive_failures == 2, (
+        "the poison episode stays unsettled: a zero-count tombstone would read as a disproved "
+        "episode on the next load and hand a full resend the old poisoned anchor"
+    )
 
 
 @pytest.mark.asyncio

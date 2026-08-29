@@ -378,7 +378,12 @@ swallowed durable alias failure leaves the old poisoned anchor as the
 stored one, and with the circuit already settled the quarantine is the
 only protection a replica change or restart has left. A completed event
 that never attempts the registration — no usable response id, or no
-matched request — confirms nothing, and the quarantine MUST survive it. When the settle
+matched request — confirms nothing, and the quarantine MUST survive it;
+such a completion MUST also leave a poison episode unsettled, because
+settling it would replace the poison row with a zero-count tombstone
+while the old anchor stays stored, and the next planning load would read
+the zero count as a disproved episode, revoke the quarantine, and inject
+the dead anchor into a full resend. When the settle
 succeeded and the registration then failed while poison evidence existed
 before the settle, that evidence MUST be re-seeded durably — the row
 re-opened at the circuit threshold with the prior poison class — because

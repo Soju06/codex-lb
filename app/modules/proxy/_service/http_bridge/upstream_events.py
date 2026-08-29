@@ -2971,7 +2971,24 @@ class _HTTPBridgeUpstreamEventsMixin:
                         completion_pre_settle_poison_detail is not None
                         or pre_settle_state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
                     )
-            if not terminal_request_state.verified_stale_anchor_replay:
+            completion_registration_possible = (
+                response_id is not None and matched_request_state is not None and not completed_empty_prewarm
+            )
+            if (
+                not terminal_request_state.verified_stale_anchor_replay
+                and completion_settles_onto_tombstone
+                and not completion_registration_possible
+            ):
+                # No usable response id or matched request: the registration
+                # block below never runs, so settling here would replace the
+                # poison row with a zero-count tombstone while the OLD
+                # poisoned anchor stays stored — the next planning load
+                # reads the zero count as a disproved episode, revokes the
+                # quarantine, and a full resend gets the dead anchor
+                # injected. Keep the episode unsettled; a completion that
+                # can actually register a fresh anchor settles it.
+                completion_circuit_settlement_failed = True
+            elif not terminal_request_state.verified_stale_anchor_replay:
                 # A completion replacing a poison episode settles with the
                 # transitional tombstone: a crash or takeover between this
                 # settle and the registration below would otherwise leave

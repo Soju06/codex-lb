@@ -225,6 +225,14 @@ is positively classified as pre-dispatch therefore leaves the body unowned and
 eligible for its first real dispatch on another account. Ambiguous failures
 remain owner-bound.
 
+Soft `prompt_cache_key` affinity is locality, not ownership. A pre-visible
+HTTP 429 on the warm-cache account (including inline-image HTTP streams) must
+set `reallocate_sticky=True` after excluding that account so another eligible
+account can finish the request. File pins, turn-state, and other required
+owners stay fail-closed and must not ride that release. Example: accounts A
+and B both accept images; A is selected via `prompt_cache_key` and returns 429
+before visible bytes; B completes the same request.
+
 ## Known Client Integrations (Reference)
 
 Third-party agents that consume the `/v1` Responses surface documented by this

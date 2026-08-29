@@ -38628,6 +38628,143 @@ async def test_stream_verified_fresh_replay_moves_off_owner_after_previsible_quo
 
 
 @pytest.mark.asyncio
+async def test_stream_inline_image_prompt_cache_429_reallocates_soft_sticky(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_prompt_cache_image_429_a")
+    account_b = _make_account("acc_prompt_cache_image_429_b")
+    selection_calls: list[dict[str, object]] = []
+    streamed_account_ids: list[str | None] = []
+
+    async def fake_select_account(**kwargs):
+        selection_calls.append(dict(kwargs))
+        excluded = set(cast(set[str], kwargs.get("exclude_account_ids") or set()))
+        if account_a.id in excluded:
+            assert kwargs.get("reallocate_sticky") is True
+            assert kwargs.get("required_account_id") is None
+            return AccountSelection(account=account_b, error_message=None)
+        return AccountSelection(account=account_a, error_message=None)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        streamed_account_ids.append(account_id)
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_service.ProxyResponseError(
+                429,
+                openai_error("rate_limit_exceeded", "upstream quota reached"),
+            )
+        assert account_id == account_b.chatgpt_account_id
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_image_failover_ok",'
+            '"status":"completed","usage":{"input_tokens":1,"output_tokens":1,'
+            '"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", AsyncMock(side_effect=fake_select_account))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(return_value={"failure_class": "rate_limit"}))
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "describe the image",
+            "input": [{"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="}],
+            "prompt_cache_key": "cache_inline_image_429",
+            "stream": True,
+        }
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service.stream_responses(
+            payload,
+            {},
+            openai_cache_affinity=True,
+        )
+    ]
+
+    assert json.loads(chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
+    assert streamed_account_ids == [account_a.chatgpt_account_id, account_b.chatgpt_account_id]
+    assert len(selection_calls) >= 2
+    assert selection_calls[1]["reallocate_sticky"] is True
+    assert selection_calls[1]["exclude_account_ids"] == {account_a.id}
+
+
+@pytest.mark.asyncio
+async def test_stream_file_pinned_prompt_cache_429_stays_fail_closed(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    file_owner = _make_account("acc_file_pin_image_429_owner")
+    other_account = _make_account("acc_file_pin_image_429_other")
+    selection_calls: list[dict[str, object]] = []
+    streamed_account_ids: list[str | None] = []
+
+    async def fake_select_account(**kwargs):
+        selection_calls.append(dict(kwargs))
+        assert kwargs.get("reallocate_sticky") is not True
+        excluded = set(cast(set[str], kwargs.get("exclude_account_ids") or set()))
+        if file_owner.id in excluded:
+            return AccountSelection(
+                account=None,
+                error_message="Previous response owner account is unavailable; retry later.",
+                error_code="previous_response_owner_unavailable",
+            )
+        return AccountSelection(account=file_owner, error_message=None)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        streamed_account_ids.append(account_id)
+        raise proxy_service.ProxyResponseError(
+            429,
+            openai_error("rate_limit_exceeded", "upstream quota reached"),
+        )
+        yield ""
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", AsyncMock(side_effect=fake_select_account))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(return_value={"failure_class": "rate_limit"}))
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=file_owner.id))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "read the file",
+            "input": [{"type": "input_file", "file_id": "file_pinned"}],
+            "prompt_cache_key": "cache_file_pin_429",
+            "stream": True,
+        }
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service.stream_responses(
+            payload,
+            {},
+            openai_cache_affinity=True,
+        )
+    ]
+
+    assert other_account.id not in {call.get("preferred_account_id") for call in selection_calls}
+    assert streamed_account_ids == [file_owner.chatgpt_account_id]
+    assert all(call.get("reallocate_sticky") is not True for call in selection_calls)
+    event = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert event["type"] == "response.failed"
+
+
+@pytest.mark.asyncio
 async def test_stream_verified_fresh_replay_moves_off_owner_after_refresh_connect_failure(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()

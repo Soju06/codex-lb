@@ -731,6 +731,21 @@ class _StreamingRetryMixin:
             )
             return True
 
+        def _release_soft_sticky_after_previsible_exclusion() -> None:
+            # Soft prompt-cache (and other non-required sticky) must not stay
+            # pinned to an excluded account. File, turn-state, and other
+            # required owners stay fail-closed; verified-replay already
+            # released affinity when it moved the body.
+            nonlocal affinity
+            if (
+                require_preferred_account
+                or file_preferred_account_id is not None
+                or turn_state_owner_account_id is not None
+                or routing_strategy == "single_account"
+            ):
+                return
+            affinity = replace(affinity, reallocate_sticky=True)
+
         async def _stream_post_refresh_with_capacity_recovery(
             account: Account,
             *,
@@ -2360,10 +2375,11 @@ class _StreamingRetryMixin:
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
                                     excluded_account_ids.add(account.id)
-                                    _move_verified_fresh_replay_from_owner(
+                                    if not _move_verified_fresh_replay_from_owner(
                                         account_id=account.id,
                                         outcome="owner_previsible_failure",
-                                    )
+                                    ):
+                                        _release_soft_sticky_after_previsible_exclusion()
                                     break
                                 await proxy._handle_stream_error(
                                     account,
@@ -2964,10 +2980,11 @@ class _StreamingRetryMixin:
                                 last_transient_exc = retry_exc
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
-                                _move_verified_fresh_replay_from_owner(
+                                if not _move_verified_fresh_replay_from_owner(
                                     account_id=account.id,
                                     outcome="owner_post_refresh_failure",
-                                )
+                                ):
+                                    _release_soft_sticky_after_previsible_exclusion()
                                 excluded_account_ids.add(account.id)
                                 continue
                             health_write_allowed = await _drain_pending_post_refresh_penalty_on_terminal(settlement)

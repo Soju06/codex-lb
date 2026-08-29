@@ -249,6 +249,7 @@ from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
     apply_enforced_service_tier_model_fallback,
+    apply_prohibit_fast_mode,
     enforce_strict_function_tools_format,
     enforce_strict_text_format,
     model_alias_requests_fast_mode,
@@ -4305,6 +4306,7 @@ async def v1_chat_completions(
             ),
             reservation=reservation,
             rate_limit_headers=rate_limit_headers,
+            prohibit_fast_mode=prohibit_fast_mode,
         )
     responses_payload.stream = True
     stream = context.service.stream_responses(
@@ -5150,6 +5152,7 @@ async def _source_chat_completion_response(
     allowed_reasoning_effort: str | None = None,
     reservation: ApiKeyUsageReservationData | None,
     rate_limit_headers: Mapping[str, str],
+    prohibit_fast_mode: bool = False,
 ) -> Response:
     source_payload = payload.model_dump(mode="json", exclude_none=True)
     source_payload["model"] = model
@@ -5160,6 +5163,7 @@ async def _source_chat_completion_response(
         allowed_reasoning_effort=allowed_reasoning_effort,
         materialize_allowed_reasoning_effort=allowed_reasoning_effort is not None,
     )
+    apply_prohibit_fast_mode(source_payload, prohibit_fast_mode=prohibit_fast_mode)
     sanitize_source_chat_payload(
         source_payload,
         allow_reasoning=source_model_supports_reasoning(source, model),
@@ -5837,7 +5841,9 @@ async def _stream_responses(
         service_tier_was_enforced = apply_api_key_enforcement(
             payload,
             api_key,
-            prohibit_fast_mode=prohibit_fast_mode,
+            # A forwarded payload carries the origin's signed effective tier.
+            # Restore that tier below, then apply the global policy once.
+            prohibit_fast_mode=prohibit_fast_mode and not forwarded_request,
         ).service_tier_was_enforced
     if forwarded_request:
         payload.service_tier = forwarded_effective_service_tier
@@ -5846,6 +5852,7 @@ async def _stream_responses(
             payload,
             service_tier_was_enforced=service_tier_was_enforced,
         )
+    apply_prohibit_fast_mode(payload, prohibit_fast_mode=prohibit_fast_mode)
     validate_model_access(api_key, payload.model)
     compact_payload: ResponsesCompactRequest | None = None
     if codex_session_affinity:

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.exceptions import ProxyModelNotAllowed, ProxyReasoningEffortNotAllowed
 from app.core.openai.exceptions import ClientPayloadError
-from app.core.openai.model_registry import ModelRegistry, get_model_registry
+from app.core.openai.model_registry import ModelRegistry, canonical_service_tier_value, get_model_registry
 from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesReasoning,
@@ -281,11 +281,12 @@ def apply_api_key_enforcement(
     client_reasoning_effort = payload._codex_lb_client_reasoning_effort or _client_reasoning_effort(payload)
     payload._codex_lb_client_reasoning_effort = client_reasoning_effort
     provider_reasoning_effort = _client_reasoning_effort_from_provider_aliases(payload)
-    normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
+    normalize_upstream_model_alias(payload)
 
     if api_key is None:
         _materialize_provider_reasoning_effort(payload, provider_reasoning_effort)
         pre_normalization_effort = normalize_unsupported_reasoning_effort(payload, registry=registry)
+        apply_prohibit_fast_mode(payload, prohibit_fast_mode=prohibit_fast_mode)
         return ApiKeyEnforcementResult(False, pre_normalization_effort)
 
     if api_key.enforced_model:
@@ -303,7 +304,7 @@ def apply_api_key_enforcement(
         if enforced_model_reasoning_effort is not None:
             client_reasoning_effort = enforced_model_reasoning_effort
             payload._codex_lb_client_reasoning_effort = client_reasoning_effort
-        normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
+        normalize_upstream_model_alias(payload)
         if (
             responses_input_uses_lite_tools(payload.input)
             and _model_responses_lite_capability(
@@ -371,7 +372,32 @@ def apply_api_key_enforcement(
                 api_key.enforced_service_tier,
                 effective_service_tier,
             )
+    apply_prohibit_fast_mode(payload, prohibit_fast_mode=prohibit_fast_mode)
     return ApiKeyEnforcementResult(service_tier_was_enforced, pre_normalization_effort)
+
+
+def apply_prohibit_fast_mode(
+    payload: ResponsesRequest | ResponsesCompactRequest | dict[str, JsonValue],
+    *,
+    prohibit_fast_mode: bool,
+    request_id: str | None = None,
+) -> bool:
+    """Remove a resolved priority tier when the global policy prohibits it."""
+    raw_service_tier = payload.get("service_tier") if isinstance(payload, dict) else payload.service_tier
+    service_tier = raw_service_tier if isinstance(raw_service_tier, str) else None
+    if not prohibit_fast_mode or service_tier is None or canonical_service_tier_value(service_tier) != "priority":
+        return False
+
+    logger.info(
+        "fast_mode_service_tier_prohibited request_id=%s stripped_service_tier=%s",
+        request_id or get_request_id(),
+        service_tier,
+    )
+    if isinstance(payload, dict):
+        payload.pop("service_tier", None)
+    else:
+        payload.service_tier = None
+    return True
 
 
 def apply_enforced_service_tier_model_fallback(
@@ -551,17 +577,13 @@ def model_alias_requests_fast_mode(model: str | None) -> bool:
     return alias is not None and alias[3]
 
 
-def normalize_upstream_model_alias(
-    payload: ResponsesRequest | ResponsesCompactRequest,
-    *,
-    prohibit_fast_mode: bool = False,
-) -> None:
+def normalize_upstream_model_alias(payload: ResponsesRequest | ResponsesCompactRequest) -> None:
     requested_model = payload.model
     alias = _resolve_model_alias_parts(requested_model)
     if alias is None:
         return
 
-    canonical_model, alias_effort, alias_service_tier, alias_requests_fast_mode = alias
+    canonical_model, alias_effort, alias_service_tier, _alias_requests_fast_mode = alias
     if payload.model != canonical_model:
         logger.info(
             "model_alias_normalized request_id=%s requested_model=%s normalized_model=%s",
@@ -589,14 +611,6 @@ def normalize_upstream_model_alias(
             )
 
     if alias_service_tier is not None and getattr(payload, "service_tier", None) is None:
-        if prohibit_fast_mode and alias_requests_fast_mode:
-            logger.info(
-                "model_alias_fast_mode_prohibited request_id=%s requested_model=%s normalized_model=%s",
-                get_request_id(),
-                requested_model,
-                canonical_model,
-            )
-            return
         setattr(payload, "service_tier", alias_service_tier)
         logger.info(
             "model_alias_service_tier_normalized request_id=%s requested_model=%s "

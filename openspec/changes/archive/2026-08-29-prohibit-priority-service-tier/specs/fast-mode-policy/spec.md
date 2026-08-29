@@ -1,11 +1,4 @@
-# Fast Mode Policy Specification
-
-## Purpose
-
-Define the operator policy that prevents outbound requests from selecting
-OpenAI's priority service tier.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Operators can prohibit priority service tiers
 

@@ -1910,6 +1910,43 @@ async def test_warmup_persists_conversation_id_in_request_log(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_warmup_prohibit_fast_mode_omits_alias_priority_tier(monkeypatch, caplog):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_warmup_prohibit_fast")
+    snapshot = proxy_warmup_service._snapshot_warmup_account(account)
+    upstream = AsyncMock(return_value=SimpleNamespace(id="warmup-prohibit-fast", usage=None))
+
+    monkeypatch.setattr(service._encryptor, "decrypt", lambda _token: "access-token")
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_resolve_upstream_route_for_account", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_compact_responses", upstream)
+    caplog.set_level("INFO", logger="app.modules.proxy.request_policy")
+
+    result = await service._submit_warmup_request(
+        account=snapshot,
+        api_key=None,
+        headers={},
+        warmup_model="gpt-5.6-sol-xhigh-fast",
+        prohibit_fast_mode=True,
+    )
+
+    assert result.success is True
+    upstream.assert_awaited_once()
+    upstream_call = upstream.await_args
+    assert upstream_call is not None
+    forwarded_payload = upstream_call.args[0]
+    assert forwarded_payload.model == "gpt-5.6-sol"
+    assert forwarded_payload.reasoning is not None
+    assert forwarded_payload.reasoning.effort == "high"
+    assert forwarded_payload.service_tier is None
+    upstream_request_id = upstream_call.args[1]["x-request-id"]
+    assert f"request_id={upstream_request_id}" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_model_source_persists_conversation_id_without_changing_useragent_group(monkeypatch):
     calls: list[dict[str, object]] = []
 
@@ -23593,6 +23630,39 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
     assert normalized_payload["model"] == "gpt-5.2"
     assert normalized_payload["reasoning"] == {"effort": "high"}
     assert normalized_payload["service_tier"] == "priority"
+
+
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_prohibits_explicit_priority(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=None))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": "hello",
+            "service_tier": "priority",
+        },
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=None,
+        prohibit_fast_mode=True,
+    )
+
+    reserve_usage.assert_awaited_once()
+    reserve_call = reserve_usage.await_args
+    assert reserve_call is not None
+    assert reserve_call.kwargs["request_service_tier"] is None
+    assert prepared.request_state.service_tier is None
+    assert "service_tier" not in json.loads(prepared.text_data)
 
 
 @pytest.mark.asyncio

@@ -213,6 +213,136 @@ async def test_backend_responses_prohibits_fast_model_alias_priority_tier(async_
     assert "service_tier" not in seen_payload
 
 
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.asyncio
+async def test_responses_prohibit_explicit_priority_service_tier(async_client, monkeypatch, path: str):
+    raw_account_id = f"acc_prohibit_explicit_{path.rsplit('/', 2)[-2]}"
+    auth_json = _make_auth_json(raw_account_id, f"{raw_account_id}@example.com")
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+    response = await async_client.put("/api/settings", json={"prohibitFastMode": True})
+    assert response.status_code == 200
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        del headers, access_token, account_id, kwargs
+        seen_payload.update(payload.to_payload())
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_prohibit_explicit",'
+            '"object":"response","status":"completed","output":[]}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        path,
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "stream": True,
+            "service_tier": "priority",
+        },
+    ) as response:
+        assert response.status_code == 200
+        _ = [line async for line in response.aiter_lines() if line]
+
+    assert "service_tier" not in seen_payload
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/backend-api/codex/responses/compact", "/v1/responses/compact"],
+)
+@pytest.mark.asyncio
+async def test_compact_responses_prohibits_explicit_priority_service_tier(async_client, monkeypatch, path: str):
+    raw_account_id = f"acc_prohibit_compact_{path.rsplit('/', 3)[-3]}"
+    auth_json = _make_auth_json(raw_account_id, f"{raw_account_id}@example.com")
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+    response = await async_client.put("/api/settings", json={"prohibitFastMode": True})
+    assert response.status_code == 200
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
+        del headers, access_token, account_id, kwargs
+        seen_payload.update(payload.to_payload())
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "compaction_summary": {
+                    "id": "cmp_prohibit_priority",
+                    "encrypted_content": "summary",
+                },
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        path,
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "service_tier": "priority",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "service_tier" not in seen_payload
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_conversion_prohibits_explicit_priority_service_tier(async_client, monkeypatch):
+    raw_account_id = "acc_prohibit_chat_priority"
+    auth_json = _make_auth_json(raw_account_id, "prohibit-chat-priority@example.com")
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+    response = await async_client.put("/api/settings", json={"prohibitFastMode": True})
+    assert response.status_code == 200
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        del headers, access_token, account_id, kwargs
+        seen_payload.update(payload.to_payload())
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_prohibit_chat",'
+            '"object":"response","status":"completed","output":[]}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "gpt-5.6-sol",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": True,
+            "service_tier": "priority",
+        },
+    ) as response:
+        assert response.status_code == 200
+        _ = [line async for line in response.aiter_lines() if line]
+
+    assert "service_tier" not in seen_payload
+
+
 @pytest.mark.parametrize(("path", "stream"), [("/backend-api/codex/responses", True), ("/v1/responses", False)])
 @pytest.mark.asyncio
 async def test_responses_prohibits_enforced_fast_model_alias_priority_tier(

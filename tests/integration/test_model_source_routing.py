@@ -1354,6 +1354,81 @@ async def test_cancelled_buffered_stream_logs_disconnect(async_client, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_source_chat_completion_prohibits_explicit_priority_service_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from starlette.requests import Request
+
+    import app.modules.proxy.api as proxy_api
+    from app.core.openai.chat_requests import ChatCompletionsRequest
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceChatCompletion
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_forward(_source: ModelSource, source_payload: dict[str, object]) -> SourceChatCompletion:
+        seen_payload.update(source_payload)
+        return SourceChatCompletion(
+            payload={"id": "chatcmpl_prohibit_priority", "object": "chat.completion", "choices": []},
+            usage=None,
+            timings=None,
+            upstream_status_code=200,
+        )
+
+    async def settle(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def record_log(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(proxy_api, "forward_chat_completion", fake_forward)
+    monkeypatch.setattr(proxy_api, "_settle_source_reservation", settle)
+    monkeypatch.setattr(proxy_api, "_log_source_chat_completion", record_log)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "query_string": b"",
+        }
+    )
+    source = ModelSource(
+        id="src_prohibit_priority",
+        name="prohibit-priority",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+    )
+    payload = ChatCompletionsRequest.model_validate(
+        {
+            "model": "source-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "service_tier": "priority",
+            "stream": False,
+        }
+    )
+
+    response = await proxy_api._source_chat_completion_response(
+        request,
+        payload,
+        source=source,
+        model="source-model",
+        api_key=None,
+        reservation=None,
+        rate_limit_headers={},
+        prohibit_fast_mode=True,
+    )
+
+    assert response.status_code == 200
+    assert "service_tier" not in seen_payload
+
+
+@pytest.mark.asyncio
 async def test_source_completion_success_log_finishes_after_cancellation(async_client, monkeypatch):
     from starlette.requests import Request
 

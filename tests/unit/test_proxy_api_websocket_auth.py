@@ -538,6 +538,84 @@ async def test_stream_responses_preserves_forwarded_effective_service_tier(monke
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_prohibits_forwarded_priority_service_tier_once(monkeypatch):
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/internal/bridge/responses",
+            "headers": [],
+            "client": ("10.0.0.12", 12345),
+        }
+    )
+    payload = ResponsesRequest(
+        model="gpt-5.6-sol",
+        instructions="hi",
+        input="hi",
+        service_tier="priority",
+    )
+    observed: dict[str, object] = {}
+    enforcement_prohibit_values: list[bool] = []
+
+    original_apply_api_key_enforcement = proxy_api_module.apply_api_key_enforcement
+
+    def capture_apply_api_key_enforcement(*args, prohibit_fast_mode=False, **kwargs):
+        enforcement_prohibit_values.append(prohibit_fast_mode)
+        return original_apply_api_key_enforcement(
+            *args,
+            prohibit_fast_mode=prohibit_fast_mode,
+            **kwargs,
+        )
+
+    async def fake_rate_limit_headers():
+        return {}
+
+    def fake_stream_http_responses(forwarded_payload, _headers, **_kwargs):
+        observed.update(forwarded_payload.to_payload())
+
+        async def body():
+            yield (
+                'data: {"type":"response.completed","response":'
+                '{"id":"resp_1","object":"response","status":"completed","output":[]}}\n\n'
+            )
+
+        return body()
+
+    monkeypatch.setattr(
+        proxy_api_module.proxy_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_enabled=True),
+    )
+    monkeypatch.setattr(proxy_api_module, "apply_api_key_enforcement", capture_apply_api_key_enforcement)
+    context = cast(
+        proxy_api_module.ProxyContext,
+        SimpleNamespace(
+            service=SimpleNamespace(
+                rate_limit_headers=fake_rate_limit_headers,
+                stream_http_responses=fake_stream_http_responses,
+            )
+        ),
+    )
+
+    response = await proxy_api_module._stream_responses(
+        request,
+        payload,
+        context,
+        None,
+        prefer_http_bridge=True,
+        skip_limit_enforcement=True,
+        include_rate_limit_headers=False,
+        forwarded_request=True,
+        prohibit_fast_mode=True,
+    )
+
+    assert response.status_code == 200
+    assert "service_tier" not in observed
+    assert payload.service_tier is None
+    assert enforcement_prohibit_values == [False]
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_does_not_release_forwarded_reservation_on_internal_bridge_error(monkeypatch):
     request = Request(
         {

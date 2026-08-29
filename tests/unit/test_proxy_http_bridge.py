@@ -36363,6 +36363,7 @@ async def test_a_failed_registration_restores_the_durable_poison_row(monkeypatch
     )
 
     persist.assert_awaited_once()
+    assert persist.await_args is not None
     restore_kwargs = persist.await_args.kwargs
     assert restore_kwargs["consecutive_failures"] == 2
     assert restore_kwargs["last_detail"] == "stream_incomplete"

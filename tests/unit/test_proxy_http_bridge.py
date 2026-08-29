@@ -37775,9 +37775,7 @@ async def test_a_failed_internal_retry_hands_the_claimed_probe_back() -> None:
     retried = await service._retry_http_bridge_precreated_request(session)
 
     assert retried is False
-    assert gate_state.half_open_until == 0.0, (
-        "a retry that never dispatched must hand its claimed half-open probe back"
-    )
+    assert gate_state.half_open_until == 0.0, "a retry that never dispatched must hand its claimed half-open probe back"
     assert await service._http_bridge_precreated_retry_allowed(session) is True, (
         "the next request re-claims the returned probe"
     )

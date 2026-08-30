@@ -123,6 +123,7 @@ describe("OauthDialog stale poll generation", () => {
       throw new Error("poll A did not start");
     }
     const pendingPollA = pollA;
+    expect(getOauthStatusMock).toHaveBeenCalledWith("flow-a");
 
     await user.click(screen.getByRole("button", { name: "Change method" }));
     await screen.findByRole("heading", { name: "Add account with OAuth" });

@@ -3054,15 +3054,32 @@ async def _prime_upstream_stream(
 
     Returns ``(primed_iterator, None)`` on success, where the returned
     iterator yields the captured first chunk followed by the rest of
-    ``upstream``. Returns ``(None, error_response)`` when the upstream
-    raised before yielding anything; in that case ``on_error`` is called
-    so the caller can release reservations.
+    ``upstream``. A pre-yield ``ProxyResponseError`` returns a structured
+    response. Cancellation or generator termination closes ``upstream``, runs
+    ``on_error`` when provided, and then propagates the original terminal.
     """
     iterator = upstream.__aiter__()
     try:
         first_chunk = await iterator.__anext__()
     except StopAsyncIteration:
         first_chunk = None
+    except (asyncio.CancelledError, GeneratorExit):
+        try:
+            await _await_cleanup_deferring_cancellation(_aclose_stream(iterator))
+        except BaseException as exc:
+            logger.warning(
+                "Failed to close Images upstream stream after first-frame termination",
+                exc_info=exc,
+            )
+        if on_error is not None:
+            try:
+                await _await_cleanup_deferring_cancellation(on_error())
+            except BaseException as exc:
+                logger.warning(
+                    "Failed to run Images first-frame termination cleanup",
+                    exc_info=exc,
+                )
+        raise
     except ProxyResponseError as exc:
         if on_error is not None:
             await on_error()

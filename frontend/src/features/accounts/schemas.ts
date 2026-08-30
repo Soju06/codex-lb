@@ -350,7 +350,6 @@ export const AccountBundlePreflightResponseSchema = z.object({
     index: z.number().int().nonnegative(),
     maskedIdentity: z.string(),
     state: z.enum(["new", "matching"]),
-    destinationAccountId: z.string().nullable(),
     metadata: AccountBundlePortableMetadataSchema,
   })),
 });

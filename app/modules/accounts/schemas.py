@@ -162,7 +162,6 @@ class AccountBundlePreflightAccount(DashboardModel):
     index: int
     masked_identity: str
     state: Literal["new", "matching"]
-    destination_account_id: str | None = None
     metadata: AccountBundlePortableMetadata
 
 

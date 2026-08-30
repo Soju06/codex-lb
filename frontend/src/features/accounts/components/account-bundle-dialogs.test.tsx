@@ -135,7 +135,6 @@ describe("account bundle dialogs", () => {
         index: 0,
         maskedIdentity: "s***@example.com",
         state: "matching",
-        destinationAccountId: "account-2",
         metadata: {
           alias: "Portable alias",
           planType: "team",

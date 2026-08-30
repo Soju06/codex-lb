@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { exportAccountBundle } from "@/features/accounts/api";
+import { AccountBundlePreflightResponseSchema } from "@/features/accounts/schemas";
 import { setUnauthorizedHandler } from "@/lib/api-client";
 
 describe("accounts api", () => {
@@ -24,5 +25,28 @@ describe("accounts api", () => {
 
     await expect(exportAccountBundle([], "bundle-passphrase")).rejects.toThrow("Authentication required");
     expect(unauthorizedHandler).toHaveBeenCalledOnce();
+  });
+
+  it("accepts masked-only account bundle preflight results", () => {
+    const parsed = AccountBundlePreflightResponseSchema.parse({
+      integrityToken: "digest",
+      accountCount: 1,
+      newCount: 0,
+      matchingCount: 1,
+      accounts: [{
+        index: 0,
+        maskedIdentity: "s***@example.com",
+        state: "matching",
+        metadata: {
+          alias: null,
+          planType: "team",
+          routingPolicy: "normal",
+          limitWarmupEnabled: false,
+          securityWorkAuthorized: false,
+        },
+      }],
+    });
+
+    expect(parsed.accounts[0]).not.toHaveProperty("destinationAccountId");
   });
 });

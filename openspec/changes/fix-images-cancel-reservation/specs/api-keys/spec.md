@@ -4,13 +4,13 @@
 
 Usage reservation의 최종 정산(finalize 또는 release)은 요청 단위에서 정확히 1회 수행되어야 한다. 재시도 가능한 중간 attempt에서는 정산을 defer하고, 요청 종료 시점에서 단일 지점이 정산 책임을 갖는다. 시스템은 이 동작을 SHALL 보장해야 한다.
 
-When an Images route owns a limited API-key reservation and cancellation or
-generator termination interrupts the first upstream SSE read, the system MUST
-close the upstream iterator, MUST finish the route-owned release attempt despite
-active cancellation, and MUST then propagate the original terminal unchanged.
-A failed close or release MUST be logged and MUST NOT replace the original
-terminal. Stale reclamation MUST remain an exceptional backstop and MUST NOT
-substitute for normal request-owned cleanup.
+When an Images route owns a limited API-key reservation and cancellation
+interrupts the first upstream SSE read, the system MUST close the upstream
+iterator, MUST finish the route-owned release attempt despite active
+cancellation, and MUST then propagate the original `CancelledError`. A failed
+close or release MUST be logged and MUST NOT replace the original cancellation.
+Stale reclamation MUST remain an exceptional backstop and MUST NOT substitute
+for normal request-owned cleanup.
 
 #### Scenario: 스트림 401 → refresh retry 성공 시 finalize 1회
 
@@ -47,11 +47,10 @@ substitute for normal request-owned cleanup.
 
 #### Scenario: Failed pre-first-frame cleanup preserves the original terminal
 
-- **GIVEN** cancellation or generator termination interrupts Images stream
-  priming before the first upstream SSE event
+- **GIVEN** cancellation interrupts Images stream priming before the first
+  upstream SSE event
 - **WHEN** closing the upstream iterator or releasing the route-owned
   reservation fails
 - **THEN** the proxy logs the cleanup failure
-- **AND** the original cancellation or generator termination propagates
-  unchanged
+- **AND** the original `CancelledError` propagates unchanged
 - **AND** a still-reserved reservation remains eligible for stale reclamation

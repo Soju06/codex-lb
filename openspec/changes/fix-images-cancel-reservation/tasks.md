@@ -6,8 +6,9 @@
 
 ## 2. First-Frame Cancellation Cleanup
 
-- [x] 2.1 Close the upstream iterator and invoke the Images-owned error callback through cancellation-deferring cleanup when `CancelledError` or `GeneratorExit` interrupts first-frame priming.
+- [x] 2.1 Close the upstream iterator and invoke the Images-owned error callback through cancellation-deferring cleanup when `CancelledError` interrupts first-frame priming.
 - [x] 2.2 Preserve the original terminal when cleanup fails, retain existing `ProxyResponseError` behavior, and leave post-first-frame image billing and captured-token finalization unchanged.
+- [x] 2.3 Reproduce synchronous coroutine-close `GeneratorExit`, document why it cannot await cleanup, and keep request-owned asynchronous cleanup limited to `CancelledError`.
 
 ## 3. Verification
 

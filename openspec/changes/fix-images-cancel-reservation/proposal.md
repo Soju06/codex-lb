@@ -8,12 +8,12 @@ request lifecycle.
 
 ## What Changes
 
-- Release the Images route-owned API-key reservation when cancellation or
-  generator termination interrupts first-frame priming.
+- Release the Images route-owned API-key reservation when cancellation
+  interrupts first-frame priming.
 - Close the upstream iterator and complete reservation cleanup despite active
   cancellation, then propagate the original terminal unchanged.
 - Keep cleanup failures diagnostic-only so they cannot replace the original
-  cancellation or generator termination.
+  cancellation.
 - Add route-level regression coverage for both `/v1/images/generations` and
   `/v1/images/edits`, proving exactly-once release before the first upstream
   frame while preserving existing post-first-frame image settlement.

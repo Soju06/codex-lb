@@ -21,8 +21,8 @@ must finish despite active cancellation.
 
 **Goals:**
 
-- Close the upstream iterator when cancellation or generator termination
-  interrupts its first `__anext__` call.
+- Close the upstream iterator when cancellation interrupts its first
+  `__anext__` call.
 - Invoke the route-owned error callback exactly once in a cancellation-safe
   cleanup window, then propagate the original terminal unchanged.
 - Restore limited-key quota immediately when release persistence succeeds.
@@ -39,21 +39,25 @@ must finish despite active cancellation.
 
 ## Decisions
 
-1. **Handle the terminal at the first-frame ownership seam.** Catch
-   `asyncio.CancelledError` and `GeneratorExit` only around
-   `iterator.__anext__()`. At that point the caller has committed the Images
-   reservation, no image usage has been captured, and the supplied `on_error`
-   callback remains its sole cleanup owner. Broader route `finally` blocks were
-   rejected because they would overlap successful captured-token settlement.
+1. **Handle cancellation at the first-frame ownership seam.** Catch
+   `asyncio.CancelledError` only around `iterator.__anext__()`. At that point
+   the caller has committed the Images reservation, no image usage has been
+   captured, and the supplied `on_error` callback remains its sole cleanup
+   owner. Broader route `finally` blocks were rejected because they would
+   overlap successful captured-token settlement. Catching `GeneratorExit` was
+   also rejected: `_prime_upstream_stream` is a normal coroutine, so synchronous
+   coroutine close forbids suspension and cannot await iterator or reservation
+   cleanup. FastAPI request disconnects cancel the owning task with
+   `CancelledError`, which is the confirmed route terminal.
 2. **Close and release as separate cancellation-deferring operations.** First
    close the iterator, then run `on_error`, using the existing cleanup deferral
    primitive for each operation. Attempting them independently ensures a close
    failure cannot skip reservation release. A raw await was rejected because
    repeated task cancellation could interrupt cleanup before persistence
    completes.
-3. **Preserve the original terminal.** Record close or callback failures with
-   cancellation-neutral warnings and use bare `raise`. Cleanup diagnostics must
-   never replace the client's `CancelledError` or a delivered `GeneratorExit`.
+3. **Preserve the original cancellation.** Record close or callback failures
+   with cancellation-neutral warnings and use bare `raise`. Cleanup diagnostics
+   must never replace the client's `CancelledError`.
 4. **Prove both Images owners at the route surface.** A parameterized
    integration regression creates a real limited key, starts generation or
    edit, waits until the fake upstream is blocked before its first yield,
@@ -69,9 +73,11 @@ must finish despite active cancellation.
   preserves the original terminal, and leaves the reservation eligible for the
   existing stale-reclamation backstop. This exceptional fallback does not
   weaken normal request-owned cleanup.
-- **`GeneratorExit` may not be delivered by current ASGI cancellation paths.**
-  Handling it at the same ownership seam is safe and prevents an equivalent
-  leak if an async-generator consumer closes priming directly.
+- **Synchronous coroutine close cannot await cleanup.** Calling `.close()` on
+  the suspended priming coroutine injects `GeneratorExit` and rejects any
+  attempted suspension. The handler therefore leaves `GeneratorExit` to normal
+  coroutine unwinding instead of pretending asynchronous cleanup can complete;
+  the Images HTTP routes use task cancellation and deliver `CancelledError`.
 - **Post-first-event cancellation is distinct.** Existing translated-stream
   finalization owns that lifecycle and remains unchanged by keeping this catch
   limited to the initial `__anext__` call.

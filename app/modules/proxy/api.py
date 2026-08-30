@@ -3055,15 +3055,15 @@ async def _prime_upstream_stream(
     Returns ``(primed_iterator, None)`` on success, where the returned
     iterator yields the captured first chunk followed by the rest of
     ``upstream``. A pre-yield ``ProxyResponseError`` returns a structured
-    response. Cancellation or generator termination closes ``upstream``, runs
-    ``on_error`` when provided, and then propagates the original terminal.
+    response. Cancellation closes ``upstream``, runs ``on_error`` when
+    provided, and then propagates the original ``CancelledError``.
     """
     iterator = upstream.__aiter__()
     try:
         first_chunk = await iterator.__anext__()
     except StopAsyncIteration:
         first_chunk = None
-    except (asyncio.CancelledError, GeneratorExit):
+    except asyncio.CancelledError:
         try:
             await _await_cleanup_deferring_cancellation(_aclose_stream(iterator))
         except BaseException as exc:

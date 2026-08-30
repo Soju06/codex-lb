@@ -46997,6 +46997,206 @@ async def test_http_bridge_eventless_retry_transport_failure_raises_bridge_timeo
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_transport_failure_abandons_through_the_fenced_consult(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The retry-transport funnel must apply the same capped threshold and
+    # fenced abandonment as the idle-recovery exhaustion: the legacy shape
+    # waited for the raw configured threshold (7) after the circuit opened
+    # at 2 and cleared continuity unfenced, so it could erase an anchor a
+    # sibling registered during the window.
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings()
+    settings.sse_keepalive_interval_seconds = 0.001
+    settings.stream_idle_timeout_seconds = 1.0
+    settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.002
+    settings.http_responses_session_bridge_anchor_poison_failure_threshold = 7
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_transport_fenced_abandon",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_id=None,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create"}',
+        transport="http",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-transport-fenced-abandon", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_transport_fenced_abandon"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    record_failure = AsyncMock(return_value=2)
+    abandon = AsyncMock(return_value=True)
+    poison_episode = object()
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 1)
+    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(
+        service,
+        "_retry_http_bridge_precreated_request",
+        AsyncMock(
+            side_effect=UpstreamWebSocketTransportError(
+                "dial failed",
+                error_code="upstream_unavailable",
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_effective_anchor_poison_detail",
+        AsyncMock(return_value="repeated_zero_event_idle_timeout"),
+    )
+    consult = AsyncMock(return_value=(poison_episode, ("resp_poisoned", None)))
+    monkeypatch.setattr(service, "_http_bridge_poison_anchor_clear_owed", consult)
+    monkeypatch.setattr(service, "_http_bridge_mark_poison_anchor_cleared", AsyncMock())
+    # The transport-funnel helper resolves the abandonment through the
+    # streaming module's own binding.
+    monkeypatch.setattr(http_bridge_streaming_module, "_abandon_durable_http_bridge_continuity", abandon)
+
+    [
+        event
+        async for event in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=10,
+            propagate_http_errors=False,
+            downstream_turn_state=None,
+        )
+    ]
+
+    consult.assert_awaited_once()
+    assert consult.await_args is not None
+    assert consult.await_args.kwargs["consecutive_failures"] == 2
+    assert consult.await_args.kwargs["configured_threshold"] == 7, (
+        "the consult receives the raw configured threshold and applies the circuit cap itself"
+    )
+    abandon.assert_awaited_once()
+    assert abandon.await_args is not None
+    assert abandon.await_args.kwargs["expected_continuity"] == ("resp_poisoned", None), (
+        "the transport funnel abandons through the captured continuity fence, never unfenced"
+    )
+    assert "settle_circuit" in abandon.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_transport_terminal_publishes_before_the_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The retry-transport funnel's consult and abandonment run as an
+    # owned settlement task AFTER the terminal frame: a slow durable
+    # store must not delay the client-visible failure, and the stream
+    # finalizer awaits the settlement so cancellation cannot skip it.
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings()
+    settings.sse_keepalive_interval_seconds = 0.001
+    settings.stream_idle_timeout_seconds = 1.0
+    settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.002
+    settings.http_responses_session_bridge_anchor_poison_failure_threshold = 2
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_transport_publish_order",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_id=None,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create"}',
+        transport="http",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-transport-publish-order", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_transport_publish_order"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    consult_entered = asyncio.Event()
+    release_consult = asyncio.Event()
+
+    async def gated_consult(*_args: Any, **_kwargs: Any) -> Any:
+        consult_entered.set()
+        await asyncio.wait_for(release_consult.wait(), timeout=5.0)
+        return None, ("resp_poisoned", None)
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 1)
+    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(
+        service,
+        "_retry_http_bridge_precreated_request",
+        AsyncMock(
+            side_effect=UpstreamWebSocketTransportError(
+                "dial failed",
+                error_code="upstream_unavailable",
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", AsyncMock(return_value=2))
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_effective_anchor_poison_detail",
+        AsyncMock(return_value="repeated_zero_event_idle_timeout"),
+    )
+    monkeypatch.setattr(service, "_http_bridge_poison_anchor_clear_owed", gated_consult)
+
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create"}',
+        queue_limit=10,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+    try:
+        events = []
+        terminal_seen = False
+        while not terminal_seen:
+            events.append(await asyncio.wait_for(anext(stream), timeout=5.0))
+            terminal_seen = "response.failed" in events[-1]
+        assert not release_consult.is_set()
+        await asyncio.wait_for(consult_entered.wait(), timeout=2.0)
+        # The terminal frame arrived while the settlement consult was
+        # still gated: publication was not delayed behind the durable
+        # store.
+    finally:
+        release_consult.set()
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_primary_eventless_timeout_poisons_anchor_after_threshold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -47037,6 +47237,7 @@ async def test_http_bridge_primary_eventless_timeout_poisons_anchor_after_thresh
     record_failure = AsyncMock(return_value=2)
     retire = AsyncMock()
     abandon = AsyncMock(return_value=True)
+    poison_episode = object()
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 1)
@@ -47044,9 +47245,23 @@ async def test_http_bridge_primary_eventless_timeout_poisons_anchor_after_thresh
     monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
-    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
+    # The merged eventless site records through the attempt-scoped
+    # recorder and abandons through the fenced consult flow rather than
+    # the legacy helper's unfenced two-argument call.
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure_for_attempt_selection", record_failure)
     monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
-    monkeypatch.setattr(http_bridge_streaming_module, "_abandon_durable_http_bridge_continuity", abandon)
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_effective_anchor_poison_detail",
+        AsyncMock(return_value="repeated_zero_event_idle_timeout"),
+    )
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_poison_anchor_clear_owed",
+        AsyncMock(return_value=(poison_episode, ("resp_poisoned", None))),
+    )
+    monkeypatch.setattr(service, "_http_bridge_mark_poison_anchor_cleared", AsyncMock())
+    monkeypatch.setattr(proxy_http_bridge_upstream_events, "_abandon_durable_http_bridge_continuity", abandon)
 
     events = [
         event
@@ -47063,12 +47278,16 @@ async def test_http_bridge_primary_eventless_timeout_poisons_anchor_after_thresh
     terminal = cast(dict[str, object], proxy_service.parse_sse_data_json(events[-1]))
     error = cast(dict[str, object], cast(dict[str, object], terminal["response"])["error"])
     assert error["code"] == "bridge_eventless_timeout"
-    abandon.assert_awaited_once_with(service, session)
-    retire.assert_awaited_once_with(
-        session,
-        detail="repeated_zero_event_idle_timeout",
-        response_events_seen=0,
-        retired_request_count=0,
+    abandon.assert_awaited_once()
+    assert abandon.await_args is not None
+    assert abandon.await_args.kwargs["detail"] == "repeated_zero_event_idle_timeout"
+    assert abandon.await_args.kwargs["expected_continuity"] == ("resp_poisoned", None)
+    assert "settle_circuit" in abandon.await_args.kwargs, (
+        "the fenced abandonment derives its settle decision from the stranded request states"
+    )
+    strike_kwargs = record_failure.await_args.kwargs if record_failure.await_args else {}
+    assert strike_kwargs.get("detail") == "bridge_eventless_timeout", (
+        "the strike keeps upstream's distinguishable pre-response eventless class"
     )
 
 

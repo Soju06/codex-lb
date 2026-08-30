@@ -644,6 +644,63 @@ async def test_scheduled_purge_keeps_tombstones_until_bridge_retention(
 
 
 @pytest.mark.asyncio
+async def test_a_lagging_clock_strike_fences_the_episode_reset(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    # A cross-replica lagging-clock strike merges a higher count without
+    # moving the epoch; a reset fenced only on epoch and admission
+    # generation would still match and zero the newer episode's cooldown.
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-reset-count-fence",
+            api_key_scope="key-1",
+            consecutive_failures=2,
+            cooldown_until_epoch=2600.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=2000.0,
+            base_updated_at_epoch=0.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=2060.0,
+        )
+        # Lagging clock: the merge lands a third strike without advancing
+        # the epoch past the observed 2000.0.
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-reset-count-fence",
+            api_key_scope="key-1",
+            consecutive_failures=3,
+            cooldown_until_epoch=2700.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=1990.0,
+            base_updated_at_epoch=2000.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=2160.0,
+        )
+
+        cleared = await repository.delete_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-reset-count-fence",
+            api_key_scope="key-1",
+            expected_updated_at_epoch=2000.0,
+            expected_admission_generation=0,
+            expected_consecutive_failures=2,
+        )
+
+        assert cleared is False, "the count fence must see the lagging-clock strike the epoch cannot"
+        row = await session.get(
+            HttpBridgeRetryCircuit,
+            ("session_header", durable_bridge_hash("sid-reset-count-fence"), "key-1"),
+        )
+        assert row is not None
+        assert row.consecutive_failures == 3, "the newer episode's count and cooldown survive"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_a_detail_only_tombstone_transition_fences_the_stale_purge(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

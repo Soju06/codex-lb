@@ -4295,20 +4295,69 @@ class _HTTPBridgeStreamingMixin:
                     or request_state.downstream_visible
                 ),
             )
-            if (
-                observed_response_events > 0
-                or consecutive_failures is None
-                or consecutive_failures
-                < _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-            ):
+            if observed_response_events > 0 or consecutive_failures is None:
                 return
-            if await _abandon_durable_http_bridge_continuity(self, session):
-                await self._retire_stale_pending_http_bridge_session(
-                    session,
-                    detail="repeated_zero_event_idle_timeout",
-                    response_events_seen=0,
-                    retired_request_count=0,
+
+            # Same capped, fenced flow as the idle-recovery exhaustion: the
+            # consult applies the effective (circuit-capped) threshold and
+            # captures the continuity the abandonment fences on, so this
+            # retry-transport funnel can neither wait past the opened
+            # circuit for the raw configured threshold nor erase continuity
+            # a sibling registered during the window. Only the strike above
+            # runs before publication; the consult and abandonment run as
+            # an owned settlement task the stream finalizer awaits, so a
+            # slow durable store never delays the client-visible terminal
+            # and a cancellation cannot skip the cleanup.
+            async def _transport_consult_and_clear() -> None:
+                poison_detail = await self._http_bridge_effective_anchor_poison_detail(
+                    session, _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL
                 )
+                if poison_detail is None:
+                    return
+                (
+                    poison_episode,
+                    poison_expected_anchor,
+                ) = await self._http_bridge_poison_anchor_clear_owed(
+                    session,
+                    consecutive_failures=consecutive_failures,
+                    configured_threshold=getattr(
+                        _service_get_settings(),
+                        "http_responses_session_bridge_anchor_poison_failure_threshold",
+                        _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
+                    ),
+                )
+                if poison_episode is None:
+                    return
+                async with session.pending_lock:
+                    eventless_pending_states = list(session.pending_requests)
+                durable_cleared = await _abandon_durable_http_bridge_continuity(
+                    self,
+                    session,
+                    detail=poison_detail,
+                    settle_circuit=_http_bridge_abandonment_may_settle_circuit(
+                        [request_state, *eventless_pending_states]
+                    ),
+                    expected_continuity=poison_expected_anchor,
+                    authorized_episode=poison_episode,
+                )
+                if durable_cleared:
+                    await self._http_bridge_mark_poison_anchor_cleared(session, episode=poison_episode)
+                    await self._retire_stale_pending_http_bridge_session(
+                        session,
+                        detail="repeated_zero_event_idle_timeout",
+                        response_events_seen=0,
+                        retired_request_count=0,
+                    )
+
+            nonlocal idle_settlement_task
+            idle_settlement_task = asyncio.create_task(
+                _transport_consult_and_clear(),
+                name=f"http-bridge-eventless-poison-settlement-{session.durable_session_id}",
+            )
+            transport_cleanup_tasks = getattr(self, "_background_cleanup_tasks", None)
+            if transport_cleanup_tasks is not None:
+                transport_cleanup_tasks.add(idle_settlement_task)
+                idle_settlement_task.add_done_callback(transport_cleanup_tasks.discard)
 
         async def startup_continuity_cooldown_terminal_event() -> str | None:
             if (
@@ -4985,6 +5034,7 @@ class _HTTPBridgeStreamingMixin:
                                                     [request_state, *idle_pending_states]
                                                 ),
                                                 expected_continuity=poison_expected_anchor,
+                                                authorized_episode=poison_episode,
                                             )
                                             if durable_cleared:
                                                 await self._http_bridge_mark_poison_anchor_cleared(

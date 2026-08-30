@@ -806,6 +806,46 @@
       and a send-attempt baseline, handing an unused probe back on every
       dispatchless exit
 
+- [x] 2.184 An episode-fenced settle never chases a moved row: the
+      CAS-miss chase re-fences only for completion callers, and a
+      replacement lineage keeps its cooldown
+
+- [x] 2.185 The pre-response eventless timeout keeps upstream's
+      distinguishable bridge_eventless_timeout detail while counting as
+      anchor-poison evidence: the poison map and both dialects' sticky
+      fences include it, and the eventless site routes through the fenced
+      consult flow with the truthful suppression message
+
+- [x] 2.186 The retry-transport failure funnel abandons through the same
+      capped consult and continuity fence, never the raw configured
+      threshold or an unfenced clear
+
+- [x] 2.187 The failed-registration poison restore transitions its own
+      tombstone through the fenced supersede before re-seeding
+
+- [x] 2.188 The durable reset CAS carries the observed failure count, so
+      a lagging-clock strike fences an episode reset the epoch cannot see
+
+- [x] 2.189 A poison upgrade stashes an active weaker quarantine with its
+      own deadline, and the poison revocation downgrades to it
+
+- [x] 2.190 An unpersisted local strike cannot strand a confirmed
+      abandonment's settle: the chase recognizes the same-lineage
+      lower-count row and settles through its own fence
+
+- [x] 2.191 The abandonment fences from the consulted episode when one is
+      passed, so a sibling settle emptying the registry cannot unfence it
+
+- [x] 2.192 The retry-transport funnel publishes its terminal before the
+      settlement task runs, and the finalizer awaits that task
+
+- [x] 2.193 The terminal and grouped funnels pass their consulted episode
+      into the abandonment, verified through spies on the real funnels
+
+- [x] 2.194 A completion whose pre-settle load failed recaptures its
+      quarantine-clear fence after the settle, so the inner-load-armed
+      quarantine clears on registration
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

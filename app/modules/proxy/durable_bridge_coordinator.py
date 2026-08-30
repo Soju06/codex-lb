@@ -273,6 +273,7 @@ class DurableBridgeSessionCoordinator:
         api_key_id: str | None,
         expected_updated_at_epoch: float | None = None,
         expected_admission_generation: int | None = None,
+        expected_consecutive_failures: int | None = None,
         reset_detail: str | None = None,
     ) -> bool:
         async with self._session() as session:
@@ -280,6 +281,7 @@ class DurableBridgeSessionCoordinator:
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,
                 api_key_scope=durable_bridge_api_key_scope(api_key_id),
+                expected_consecutive_failures=expected_consecutive_failures,
                 expected_updated_at_epoch=expected_updated_at_epoch,
                 expected_admission_generation=expected_admission_generation,
                 reset_detail=reset_detail,

@@ -1203,6 +1203,7 @@ async def _abandon_durable_http_bridge_continuity(
     detail: str = "repeated_zero_event_idle_timeout",
     settle_circuit: bool = False,
     expected_continuity: object = _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
+    authorized_episode: Any = None,
 ) -> bool:
     """Clear durable continuity before retiring a repeatedly poisoned bridge.
 
@@ -1219,7 +1220,16 @@ async def _abandon_durable_http_bridge_continuity(
     # be mistaken for the authorizing one — the settle below clears only
     # the episode this abandonment invalidated.
     async with service._http_bridge_retry_circuit_lock:
-        authorizing_state = service._http_bridge_retry_circuits.get(session.key)
+        # The consulted episode outranks a registry re-read: a sibling
+        # settle can remove the entry between the consult and this lock,
+        # and a None capture would run the settle unfenced — free to clear
+        # a replacement episode opened during the awaits below. The
+        # registry read remains only for legacy callers with no consult.
+        authorizing_state = (
+            authorized_episode
+            if authorized_episode is not None
+            else service._http_bridge_retry_circuits.get(session.key)
+        )
         abandonment_expected_episode = (
             (
                 authorizing_state.persisted_updated_at_epoch,
@@ -1851,6 +1861,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             detail=poison_candidate_detail,
                             settle_circuit=_http_bridge_abandonment_may_settle_circuit(pending_request_states),
                             expected_continuity=poison_expected_anchor,
+                            authorized_episode=poison_episode,
                         )
                         if not durable_cleared:
                             _log_http_bridge_event(
@@ -3041,6 +3052,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         session,
                         detail=grouped_clear_detail,
                         expected_continuity=grouped_expected_anchor,
+                        authorized_episode=grouped_poison_episode,
                         # A mixed group can hold a member with a verified safe
                         # replay whose dispatch claims the circuit generation;
                         # settling under it would remove the fence it depends
@@ -3541,7 +3553,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             # suppressed for the TTL because the clear cannot match), and a
             # failed registration would find no pre-settle poison detail to
             # re-seed.
-            await self._load_http_bridge_retry_circuit(session)
+            completion_pre_settle_load_succeeded = await self._load_http_bridge_retry_circuit(session)
             completion_quarantine_clear_fence = _http_bridge_quarantine_clear_fence(self, session.key)
             async with self._http_bridge_retry_circuit_lock:
                 pre_settle_state = self._http_bridge_retry_circuits.get(session.key)
@@ -3592,6 +3604,17 @@ class _HTTPBridgeUpstreamEventsMixin:
                         else None
                     ),
                 )
+                if not completion_pre_settle_load_succeeded:
+                    # The fence above was captured off a failed durable read;
+                    # the settle's own successful inner load may have armed
+                    # the poison quarantine AFTER that capture, and the final
+                    # fenced clear would then refuse to remove it — a healthy
+                    # key stuck for the whole poison window despite the fresh
+                    # anchor about to register. Recapture after the settle:
+                    # this still precedes the registration awaits, so a
+                    # quarantine armed by a genuinely concurrent strike
+                    # during those awaits stays outside the fence.
+                    completion_quarantine_clear_fence = _http_bridge_quarantine_clear_fence(self, session.key)
                 if not circuit_settled:
                     # The old poison episode was restored. Its owed clear is
                     # suppressed only once the fresh anchor actually
@@ -4310,6 +4333,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 [terminal_request_state, *terminal_surviving_states]
                             ),
                             expected_continuity=consult_expected_anchor,
+                            authorized_episode=consult_episode,
                         )
                         if durable_cleared:
                             # The abandonment succeeded even when its circuit

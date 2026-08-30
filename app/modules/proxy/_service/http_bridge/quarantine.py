@@ -254,6 +254,12 @@ def _quarantine_http_bridge_session(
     registry = _http_bridge_quarantine_registry(service)
     entry = registry.setdefault(session.key, _HTTPBridgeQuarantineEntry())
     already_quarantined = entry.quarantined_until > now
+    # Captured before the deadline extension below: a poison arm upgrading
+    # over an active weaker fence must stash the weaker's OWN deadline, not
+    # the extended one, so a later poison revocation downgrades to exactly
+    # the window the weaker evidence earned.
+    prior_reason = entry.reason
+    prior_quarantined_until = entry.quarantined_until
     entry.generation += 1
     ttl_seconds = _HTTP_BRIDGE_QUARANTINE_TTL_SECONDS
     if minimum_seconds is not None:
@@ -271,6 +277,19 @@ def _quarantine_http_bridge_session(
         and already_quarantined
         and reason != _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
     ):
+        if (
+            reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+            and already_quarantined
+            and prior_reason is not None
+            and prior_reason != _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+        ):
+            # The mirror of the weaker-over-poison stash below: the wedged
+            # or repeated-eventless fence stands on its own evidence, and a
+            # later load disproving the poison episode must downgrade to it
+            # instead of evicting the entry and freeing the still-wedged
+            # session before its original TTL.
+            entry.suppressed_weaker_reason = prior_reason
+            entry.suppressed_weaker_until = max(entry.suppressed_weaker_until, prior_quarantined_until)
         entry.reason = reason
         if reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
             entry.poison_generation = entry.generation

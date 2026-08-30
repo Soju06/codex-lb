@@ -502,13 +502,15 @@ class DurableBridgeRepository:
             # Only a reset/settle (which rewrites the row wholesale) or
             # another poison-class strike may change it.
             sticky_poison_detail = and_(
-                HttpBridgeRetryCircuit.last_detail.in_(("stream_incomplete", "stream_idle_timeout")),
+                HttpBridgeRetryCircuit.last_detail.in_(
+                    ("stream_incomplete", "stream_idle_timeout", "bridge_eventless_timeout")
+                ),
                 # The effective anchor-poison threshold, not the circuit
                 # threshold: a configured threshold of one authorizes the
                 # abandonment at the first poison strike, and its failed
                 # clear leaves a one-failure debt this predicate must keep.
                 HttpBridgeRetryCircuit.consecutive_failures >= sticky_threshold,
-                excluded.last_detail.notin_(("stream_incomplete", "stream_idle_timeout")),
+                excluded.last_detail.notin_(("stream_incomplete", "stream_idle_timeout", "bridge_eventless_timeout")),
             )
             # An abandonment tombstone is sticky against every strike
             # detail: continuity is already gone, the tombstone is what
@@ -611,13 +613,15 @@ class DurableBridgeRepository:
             # Only a reset/settle (which rewrites the row wholesale) or
             # another poison-class strike may change it.
             sticky_poison_detail = and_(
-                HttpBridgeRetryCircuit.last_detail.in_(("stream_incomplete", "stream_idle_timeout")),
+                HttpBridgeRetryCircuit.last_detail.in_(
+                    ("stream_incomplete", "stream_idle_timeout", "bridge_eventless_timeout")
+                ),
                 # The effective anchor-poison threshold, not the circuit
                 # threshold: a configured threshold of one authorizes the
                 # abandonment at the first poison strike, and its failed
                 # clear leaves a one-failure debt this predicate must keep.
                 HttpBridgeRetryCircuit.consecutive_failures >= sticky_threshold,
-                excluded.last_detail.notin_(("stream_incomplete", "stream_idle_timeout")),
+                excluded.last_detail.notin_(("stream_incomplete", "stream_idle_timeout", "bridge_eventless_timeout")),
             )
             # An abandonment tombstone is sticky against every strike
             # detail: continuity is already gone, the tombstone is what
@@ -811,6 +815,7 @@ class DurableBridgeRepository:
         api_key_scope: str,
         expected_updated_at_epoch: float | None = None,
         expected_admission_generation: int | None = None,
+        expected_consecutive_failures: int | None = None,
         reset_detail: str | None = None,
     ) -> bool:
         conditions = [
@@ -818,6 +823,11 @@ class DurableBridgeRepository:
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
             HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
         ]
+        if expected_consecutive_failures is not None:
+            # A lagging-clock strike merges a higher count without moving
+            # the epoch; the count keeps this reset from zeroing a newer
+            # episode's cooldown the caller never observed.
+            conditions.append(HttpBridgeRetryCircuit.consecutive_failures == expected_consecutive_failures)
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
             if expected_admission_generation is not None:

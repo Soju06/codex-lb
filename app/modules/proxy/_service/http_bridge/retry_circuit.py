@@ -64,6 +64,11 @@ _POISON_ANCHOR_CAPTURE_UNAVAILABLE: object = object()
 _HTTP_BRIDGE_ANCHOR_POISON_DETAILS = {
     "stream_idle_timeout": "repeated_zero_event_idle_timeout",
     "stream_incomplete": "repeated_zero_event_stream_incomplete",
+    # The pre-response eventless timeout keeps its distinguishable durable
+    # detail (deliberately not aliased onto stream_idle_timeout), but a
+    # repeatedly eventless anchored request is the original silent-wedge
+    # signature, so at threshold it authorizes the same fenced abandonment.
+    HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE: "repeated_zero_event_idle_timeout",
 }
 # Written over a surviving at-threshold row when a completion registered a
 # fresh anchor but its settlement failed. Deliberately outside the poison
@@ -1953,7 +1958,35 @@ class _HTTPBridgeRetryCircuitMixin:
             )
             return
         threshold = max(1, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD)
-        if row is not None and row.consecutive_failures >= threshold:
+        if row is not None and row.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL:
+            # The failed registration follows this completion's OWN settle,
+            # which wrote the transitional tombstone; the strike merge's
+            # sticky-tombstone rule would silently refuse to write the
+            # poison class back over it, degrading the re-seed to a
+            # threshold tombstone no replica arms a quarantine from. The
+            # fenced detail-only supersede is the one path allowed through
+            # that stickiness; a CAS miss means newer evidence owns the row
+            # and the merge below defers to it.
+            try:
+                await self._durable_bridge.supersede_retry_circuit_detail(
+                    session_key_kind=key.affinity_kind,
+                    session_key_value=key.affinity_key,
+                    api_key_id=key.api_key_id,
+                    expected_updated_at_epoch=row.updated_at_epoch,
+                    expected_consecutive_failures=row.consecutive_failures,
+                    expected_last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
+                    last_detail=poison_detail,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to transition HTTP bridge tombstone before poison restore bridge_kind=%s bridge_key=%s",
+                    key.affinity_kind,
+                    _hash_identifier(key.affinity_key),
+                    exc_info=True,
+                )
+            if row.consecutive_failures >= threshold:
+                return
+        elif row is not None and row.consecutive_failures >= threshold:
             return
         base_backoff = max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS)
         try:
@@ -2187,6 +2220,11 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.persisted_updated_at_epoch if state is not None and state.persisted_updated_at_epoch > 0 else None
             )
             expected_admission_generation = state.persisted_admission_generation if state is not None else None
+            # A lagging-clock strike merges a higher count without moving the
+            # epoch; the reset CAS carries the observed count so it cannot
+            # zero a newer episode's cooldown it never saw. A completion
+            # settle defeated this way still wins through the chase.
+            expected_consecutive_failures = state.consecutive_failures if state is not None else None
         if (
             settled_detail is None
             # An authoritative None was chosen after consulting continuity —
@@ -2234,6 +2272,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 api_key_id=key.api_key_id,
                 expected_updated_at_epoch=expected_updated_at_epoch,
                 expected_admission_generation=expected_admission_generation,
+                expected_consecutive_failures=expected_consecutive_failures,
                 reset_detail=settled_detail,
             )
             if reset_matched is False and expected_updated_at_epoch is not None:
@@ -2264,6 +2303,28 @@ class _HTTPBridgeRetryCircuitMixin:
                     # generation here would clear it anyway — leave the
                     # settlement owed instead.
                     pass
+                elif expected_episode is not None and (
+                    moved.updated_at_epoch != expected_episode[0]
+                    # Strictly greater, not unequal: merges only ever
+                    # increment the count, so a LOWER count at the same
+                    # epoch and admission generation cannot be foreign — it
+                    # is this worker's own episode observed before local
+                    # strikes whose durable writes failed. Refusing to
+                    # settle it would leave a confirmed abandonment's
+                    # cooldown standing against an anchor already removed.
+                    or moved.consecutive_failures > expected_episode[1]
+                    or getattr(moved, "admission_generation", 0) != expected_episode[2]
+                ):
+                    # An episode-fenced settle never chases a moved row: the
+                    # caller authorized clearing exactly one episode, and a
+                    # row that no longer matches the captured epoch, count,
+                    # and admission generation is a replacement lineage —
+                    # re-fencing on ITS version would durably zero the valid
+                    # cooldown a cross-replica completion-plus-strikes just
+                    # opened against the fresh anchor. The settlement stays
+                    # owed; the settle-wins chase is for completion callers,
+                    # whose own evidence outranks any concurrent strike.
+                    pass
                 else:
                     reset_matched = await self._durable_bridge.clear_retry_circuit(
                         session_key_kind=key.affinity_kind,
@@ -2271,6 +2332,7 @@ class _HTTPBridgeRetryCircuitMixin:
                         api_key_id=key.api_key_id,
                         expected_updated_at_epoch=moved.updated_at_epoch,
                         expected_admission_generation=getattr(moved, "admission_generation", None),
+                        expected_consecutive_failures=moved.consecutive_failures,
                         reset_detail=settled_detail,
                     )
             if reset_matched is False and expected_updated_at_epoch is not None:

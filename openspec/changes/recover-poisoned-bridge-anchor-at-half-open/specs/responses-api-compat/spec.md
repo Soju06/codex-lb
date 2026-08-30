@@ -7,8 +7,49 @@
 For a hard-affinity bridge key, the proxy MUST scope retry-circuit state by
 affinity kind, affinity key, and API-key scope (using a stable anonymous scope
 when no API key is present). The proxy MUST record only the documented
-pre-response failure classes (`stream_incomplete`, `clean_close`, and
-`stream_idle_timeout`).
+pre-response failure classes (`stream_incomplete`, `clean_close`,
+`stream_idle_timeout`, and the distinguishable pre-response
+`bridge_eventless_timeout`, which counts as anchor-poison evidence like
+the stream classes while keeping its own durable detail). Every funnel
+that abandons on repeated eventless failures — the idle-recovery
+exhaustion and the retry-transport failure path alike — MUST route
+through the capped poison consult and the captured continuity fence;
+none may compare against the raw configured threshold or clear
+continuity unfenced. The failed-registration poison restore MUST
+transition its own settle's tombstone through the fenced detail-only
+supersede before re-seeding — the strike merge's sticky tombstone would
+otherwise silently refuse the poison class and leave a threshold
+tombstone no replica arms a quarantine from. The durable reset CAS MUST
+carry the observed failure count alongside the epoch and admission
+generation, because a lagging-clock strike merges a higher count without
+moving the epoch; a completion settle defeated by that fence still wins
+through its chase. The episode fence's count comparison is strictly
+greater-than in the chase: merges only increment, so a LOWER durable
+count at the same epoch and admission generation is this worker's own
+lineage observed before local strikes whose durable writes failed, and a
+confirmed abandonment MUST still settle it rather than leave the removed
+anchor's cooldown standing. A poison arm upgrading over an active weaker
+quarantine MUST stash the weaker fence's reason and its OWN deadline —
+captured before the arm extends the entry — so a later load disproving
+the poison episode downgrades to the weaker fence instead of evicting
+the entry and freeing a still-wedged session before its original TTL,
+mirroring the existing weaker-over-poison stash. The abandonment's
+episode fence MUST derive from the consulted episode itself when the
+caller holds one — a sibling settle can remove the registry entry
+between the consult and the capture, and a None capture would run the
+settle unfenced against a replacement episode. The retry-transport
+funnel's consult and abandonment MUST run as an owned settlement task
+after its terminal frame is published, under the same finalizer await as
+the idle-recovery exhaustion, so a slow durable store never delays the
+client-visible failure and a cancellation cannot skip the cleanup.
+Every consult-backed funnel — terminal, grouped, idle, and transport
+alike — MUST pass its consulted episode into the abandonment. A
+completion whose pre-settle load failed MUST recapture its
+quarantine-clear fence after the settle: the settle's own successful
+inner load can arm the quarantine after the blind capture, and the
+unrecaptured fence would strand a healthy key for the poison window;
+the recapture still precedes the registration awaits, so concurrent
+strikes during those stay outside the fence.
 
 A bridge retirement MUST record one of those failures only when the retiring
 session still owns at least one pending request and no response event has been
@@ -466,7 +507,13 @@ continuity clear's await, the closest snapshot to the episode the poison
 consult validated — leaving a nonmatching newer row untouched, a claimed
 replay generation included: a replacement episode opened against the freshly registered
 anchor carries its own valid cooldown, and resetting it would let the
-newly poisoned anchor retry immediately. A continuity-informed plain
+newly poisoned anchor retry immediately. The episode fence binds the
+CAS-miss chase as well: when the fenced reset misses because the row
+moved, an episode-fenced settle MUST NOT re-fence on the moved row's own
+version — a nonmatching row is a replacement lineage whose valid cooldown
+the chase would durably zero — and the settlement stays owed; the
+settle-wins chase belongs to completion callers whose own evidence
+outranks concurrent strikes. A continuity-informed plain
 reset is authoritative: the state-derived tombstone upgrade applies only
 to a blind caller, never to one that saw fresh continuity replace the
 poisoned anchor. The suppression's local marker MUST NOT flip a local

@@ -55,6 +55,7 @@ REQUIRED_DURABLE_BRIDGE_TABLES = (
     "http_bridge_operation_event_chunks",
 )
 DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
+DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE = 50
 _PURGE_CLOSED_BATCH_SIZE = 500
 # Claim retry budget: insert races and epoch-CAS losses re-read and retry;
 # each round has a winner, so a small budget converges under any realistic
@@ -220,6 +221,12 @@ class DurableBridgeOperationEventInput:
     instance_id: str
     owner_epoch: int
     event_text: str
+
+
+@dataclass(frozen=True, slots=True)
+class DurableBridgeOperationPurgeBatchResult:
+    selected_operations: int
+    deleted_operations: int
 
 
 class DurableBridgeRepository:
@@ -1158,6 +1165,61 @@ class DurableBridgeRepository:
             values=values,
         )
 
+    async def clear_latest_response_anchor_if_matches(
+        self,
+        *,
+        session_id: str,
+        api_key_scope: str,
+        instance_id: str,
+        owner_epoch: int,
+        response_id: str,
+    ) -> DurableBridgeSessionSnapshot | None:
+        """Clear one response anchor and its matching alias under the owner fence.
+
+        The response-id predicate makes a concurrent newer completion win over
+        a stale denial. Only the denied response alias is removed; turn-state
+        and other response aliases remain routable.
+        """
+
+        values: dict[str, object] = {
+            "latest_response_id": None,
+            "latest_input_item_count": None,
+            "latest_input_full_fingerprint": None,
+            "latest_pending_tool_calls_json": None,
+        }
+        async with sqlite_writer_section():
+            cleared = await self._session.execute(
+                update(HttpBridgeSessionRecord)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                    HttpBridgeSessionRecord.latest_response_id == response_id,
+                )
+                .values(**values)
+                .returning(HttpBridgeSessionRecord.id)
+            )
+            if cleared.scalar_one_or_none() is None:
+                await self._session.rollback()
+                return None
+            await self._session.execute(
+                delete(HttpBridgeSessionAlias).where(
+                    HttpBridgeSessionAlias.session_id == session_id,
+                    HttpBridgeSessionAlias.alias_kind == "previous_response_id",
+                    HttpBridgeSessionAlias.alias_hash == durable_bridge_hash(response_id),
+                    HttpBridgeSessionAlias.alias_value == response_id,
+                    HttpBridgeSessionAlias.api_key_scope == api_key_scope,
+                )
+            )
+            row = await self._session.get(
+                HttpBridgeSessionRecord,
+                session_id,
+                populate_existing=True,
+            )
+            await self._session.commit()
+        return _to_snapshot(row)
+
     async def record_recovery_attempt(
         self,
         *,
@@ -1954,7 +2016,12 @@ class DurableBridgeRepository:
         turns.reverse()
         return turns
 
-    async def purge_operation_spool(self, *, cutoff: datetime, batch_size: int = 500) -> int:
+    async def purge_operation_spool_batch(
+        self,
+        *,
+        cutoff: datetime,
+        batch_size: int = DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE,
+    ) -> DurableBridgeOperationPurgeBatchResult:
         """Delete eligible transcript material past retention.
 
         Nonterminal rows are purgeable only after their owning session is
@@ -2003,7 +2070,10 @@ class DurableBridgeRepository:
             operation_ids = [str(operation.operation_id) for operation in selected.scalars().all()]
             if not operation_ids:
                 await self._session.commit()
-                return 0
+                return DurableBridgeOperationPurgeBatchResult(
+                    selected_operations=0,
+                    deleted_operations=0,
+                )
             deleted = await self._session.execute(
                 delete(HttpBridgeOperationRecord)
                 .where(
@@ -2017,7 +2087,20 @@ class DurableBridgeRepository:
             if deleted_ids:
                 await self._delete_operation_spool_material(deleted_ids)
             await self._session.commit()
-        return len(deleted_ids)
+        return DurableBridgeOperationPurgeBatchResult(
+            selected_operations=len(operation_ids),
+            deleted_operations=len(deleted_ids),
+        )
+
+    async def purge_operation_spool(
+        self,
+        *,
+        cutoff: datetime,
+        batch_size: int = DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE,
+    ) -> int:
+        """Delete one eligible transcript batch and return actual deletes."""
+        result = await self.purge_operation_spool_batch(cutoff=cutoff, batch_size=batch_size)
+        return result.deleted_operations
 
     async def append_operation_event_chunk(
         self,

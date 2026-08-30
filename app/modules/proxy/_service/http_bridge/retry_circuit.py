@@ -8,6 +8,7 @@ from typing import Any
 
 import anyio
 
+from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_circuit_total
 from app.modules.proxy._service.observability import _hash_identifier
 from app.modules.proxy._service.support import (
@@ -31,11 +32,16 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS = frozenset(
         "stream_incomplete",
         "clean_close",
         "stream_idle_timeout",
+        # Pre-response-start bridge silence. Deliberately *not* aliased onto
+        # stream_idle_timeout: the whole point is that a circuit opened before
+        # any response existed must be distinguishable from one opened by a
+        # started stream going quiet.
+        HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
     }
 )
 _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES = {
     # These diagnostics describe the same ambiguous idle/incomplete
-    # transport class. Keep the durable contract to the three documented
+    # transport class. Keep the durable contract to the documented
     # failure classes while retaining the more specific event in logs.
     "upstream_keepalive_timeout": "stream_idle_timeout",
     "missing_response_created_timeout": "stream_idle_timeout",

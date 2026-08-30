@@ -766,6 +766,95 @@ async def test_stream_http_502_unknown_code_fails_over_to_second_account(async_c
 
 
 # ===========================================================================
+# Streaming — Model-entitlement rejection is health neutral through the route
+# ===========================================================================
+
+
+_MODEL_ENTITLEMENT_REJECTION_MESSAGE = "The 'gpt-5.1' model is not supported when using Codex with a ChatGPT account."
+
+
+@pytest.mark.asyncio
+async def test_stream_model_entitlement_rejection_keeps_account_health_after_failover(async_client, monkeypatch):
+    """Routed regression: the entitlement 400 must not move any account's health.
+
+    The unit tests call ``_handle_stream_error`` directly; this drives the whole
+    HTTP route through selection, dispatch and failover with the exact upstream
+    rejection observed in the incident — HTTP 400, message only, neither
+    ``code`` nor ``type`` — and asserts the accounts that served the attempts
+    keep ``error_count`` 0 and no error backoff. It fails if any transport path
+    loses the message before the neutrality check or writes account health
+    somewhere ``_handle_stream_error`` is not consulted.
+    """
+    account_id_1 = await _import_account(async_client, "acc_entitle_a", "entitle_a@example.com")
+    account_id_2 = await _import_account(async_client, "acc_entitle_b", "entitle_b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        raise ProxyResponseError(
+            400,
+            {"error": {"message": _MODEL_ENTITLEMENT_REJECTION_MESSAGE}},
+            failure_phase="status",
+        )
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    # Failover is untouched: another account may hold a different entitlement,
+    # so the rejection must fan out before it surfaces to the client.
+    assert set(seen_account_ids) == {"acc_entitle_a", "acc_entitle_b"}
+    events = _extract_events(lines)
+    assert not any(e.get("type") == "response.completed" for e in events)
+
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    for imported_account_id in (account_id_1, account_id_2):
+        runtime = service._load_balancer._runtime.get(imported_account_id)
+        assert runtime is None or runtime.error_count == 0, (
+            f"model-scoped rejection must not move error_count for {imported_account_id}"
+        )
+        assert runtime is None or runtime.last_error_at is None, (
+            f"model-scoped rejection must not arm error backoff for {imported_account_id}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_stream_genuine_400_failover_still_records_error_control(async_client, monkeypatch):
+    """Control for the neutrality regression above: the same route and status
+    with a non-entitlement message must keep penalizing, proving the runtime
+    assertions would catch a health write."""
+    account_id_1 = await _import_account(async_client, "acc_entitle_ctl_a", "entitle_ctl_a@example.com")
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        raise ProxyResponseError(
+            400,
+            {"error": {"message": "Upstream request failed"}},
+            failure_phase="status",
+        )
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        [line async for line in resp.aiter_lines() if line]
+
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    runtime = service._load_balancer._runtime.get(account_id_1)
+    assert runtime is not None and runtime.error_count >= 1, (
+        "a genuine upstream 400 on the identical path must keep recording an account error"
+    )
+
+
+# ===========================================================================
 # Streaming — Non-server_error is NOT retried via transient path
 # ===========================================================================
 

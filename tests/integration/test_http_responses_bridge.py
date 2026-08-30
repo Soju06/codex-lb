@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import logging
 import socket
 import time
 from collections import deque
@@ -16057,3 +16058,156 @@ async def test_v1_responses_http_bridge_successor_claim_fences_the_retiring_rele
     # on the same key keeps working instead of failing with 409.
     third = await asyncio.wait_for(async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
     assert third.status_code == 200, third.text
+
+
+class _DeniesAnchoredTurnUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    """Completes unanchored turns and denies any turn that arrives with an anchor."""
+
+    async def send_text(self, text: str) -> None:
+        payload = json.loads(text)
+        previous_response_id = payload.get("previous_response_id")
+        if previous_response_id is None:
+            await super().send_text(text)
+            return
+        self.sent_text.append(text)
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "error",
+                        "status": 400,
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "previous_response_not_found",
+                            "message": f"Previous response with id '{previous_response_id}' not found.",
+                            "param": "previous_response_id",
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_denied(
+    async_client,
+    app_instance,
+    monkeypatch,
+    caplog,
+):
+    """A denied proxy-injected anchor must not be re-injected into the next turn.
+
+    Regression for the amplification in issue #1852: the denial leaves the dead
+    anchor in the session, the next full resend is trimmed against its stored
+    prefix, and upstream then receives a suffix of the conversation behind an id
+    it has already refused.
+    """
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_denied_anchor",
+        "http-bridge-denied-anchor@example.com",
+    )
+    account = await _get_account(account_id)
+    upstream = _DeniesAnchoredTurnUpstreamWebSocket()
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del self, deadline, request_id, kind, request_stage, sticky_key, sticky_kind
+        del reallocate_sticky, sticky_max_age_seconds, prefer_earlier_reset_accounts
+        del routing_strategy, model, exclude_account_ids, additional_limit_name
+        del api_key, preferred_account_id
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    headers = {"session_id": "http-bridge-denied-anchor-session"}
+
+    def _user_item(text: str) -> dict[str, Any]:
+        return {"role": "user", "content": [{"type": "input_text", "text": text}]}
+
+    turn_one_input = [_user_item("turn one")]
+    turn_two_input = [*turn_one_input, _user_item("turn two")]
+    turn_three_input = [*turn_two_input, _user_item("turn three")]
+
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+
+    first = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_one_input},
+        headers=headers,
+    )
+    assert first.status_code == 200
+
+    second = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_two_input},
+        headers=headers,
+    )
+    assert second.status_code == 502
+    assert second.json()["error"]["code"] == "stream_incomplete"
+
+    third = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_three_input},
+        headers=headers,
+    )
+    assert third.status_code == 200
+
+    dispatched = [json.loads(text) for text in upstream.sent_text]
+    anchored = [frame for frame in dispatched if frame.get("previous_response_id") is not None]
+    assert anchored, "expected the proxy to inject an anchor on the second turn"
+
+    final = dispatched[-1]
+    assert final.get("previous_response_id") is None, (
+        f"the denied anchor was re-injected into a later turn: {final.get('previous_response_id')}"
+    )
+    assert len(final["input"]) == len(turn_three_input), (
+        "the later turn was trimmed against the denied anchor's stored prefix"
+    )
+
+    # No client supplied an anchor in this test, so every anchor the diagnostics
+    # describe must be attributed to the proxy that injected it.
+    continuity_diagnostics = [
+        record.getMessage() for record in caplog.records if "continuity_fail_closed" in record.getMessage()
+    ]
+    assert continuity_diagnostics, "expected the denial to be recorded"
+    assert not [line for line in continuity_diagnostics if "previous_response_source=client_supplied" in line], (
+        "an anchored recovery retry reported a proxy-injected anchor as client-supplied"
+    )

@@ -735,7 +735,6 @@ async def test_codex_goal_restart_cannot_retire_owner_outside_api_key_scope(
     _install_proxy_settings_cache(
         monkeypatch,
         sticky_threads_enabled=False,
-        proxy_request_budget_seconds=0.05,
     )
 
     async def fail_stream(*args, **kwargs):

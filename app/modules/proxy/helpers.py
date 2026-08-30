@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Iterable
 
 from pydantic import ValidationError
@@ -40,6 +41,29 @@ _TRANSIENT_CODES = frozenset(
     {"server_error", "upstream_error", "stream_incomplete", "overloaded_error", "server_is_overloaded"}
 )
 _MODEL_CAPACITY_MESSAGE_MARKERS = ("selected model is at capacity",)
+_MODEL_UNSUPPORTED_MESSAGE_RE = re.compile(
+    r"^The '.+' model is not supported when using Codex with a ChatGPT account\.$"
+)
+
+
+def is_model_scoped_upstream_rejection(message: str | None) -> bool:
+    """Match the ChatGPT model-entitlement rejection for *any* requested model.
+
+    The rejection names the model, not the account: it reproduces on every
+    request for that model and says nothing about whether the serving account
+    can still stream the models it is entitled to. Callers use it to keep the
+    rejection out of account health while leaving failover alone -- a different
+    account may hold a different entitlement.
+
+    Unlike ``_is_account_model_unsupported_error`` this does not require the
+    caller to know the requested model or the normalized error code. Upstream
+    delivers this rejection over the Codex WebSocket with neither ``code`` nor
+    ``type`` populated, which normalizes to the ``upstream_error`` fallback, so
+    a code-gated match misses it on the live stream path.
+    """
+    if message is None:
+        return False
+    return _MODEL_UNSUPPORTED_MESSAGE_RE.fullmatch(" ".join(message.split())) is not None
 
 
 def _is_account_model_unsupported_error(

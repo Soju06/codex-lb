@@ -85,6 +85,14 @@ _wedged_teardown_cleanup_tasks: set[asyncio.Task[Any]] = set()
 # ``database_pool_size`` / ``database_max_overflow``.
 _POSTGRES_POOL_TIMEOUT_SECONDS = 30.0
 _POSTGRES_POOL_RECYCLE_SECONDS = 1800
+# Per-statement execution bound (issue #1971). One query hung on a half-dead
+# connection wedged the process-global settings-cache lock — and every
+# http-bridge submit parked behind it while holding its session's
+# pending_lock — for days. No runtime query legitimately runs this long
+# (retention and cleanup work is chunked); Alembic migrations use their own
+# synchronous engine and are not bounded by this. Fixed application constant
+# like the pool knobs above: not an operator decision.
+_POSTGRES_COMMAND_TIMEOUT_SECONDS = 60.0
 _database_url = normalize_sqlite_url(_settings.database_url)
 
 
@@ -120,7 +128,14 @@ def _postgres_async_connect_args(url: str) -> dict[str, object] | None:
     # bridge-session cleanup stop running, and account/stream lease expiry is
     # mis-evaluated. Forcing UTC keeps stored timestamps correct regardless of
     # the container time zone.
-    connect_args: dict[str, object] = {"server_settings": {"timezone": "UTC"}}
+    connect_args: dict[str, object] = {
+        "server_settings": {"timezone": "UTC"},
+        # Bound every statement so a query stalled on a half-dead connection
+        # cannot hold application locks forever (issue #1971). asyncpg cancels
+        # the statement server-side and raises, surfacing the stall as an
+        # error instead of an unbounded await.
+        "command_timeout": _POSTGRES_COMMAND_TIMEOUT_SECONDS,
+    }
     if os.environ.get("CODEX_LB_TEST_DATABASE_URL"):
         connect_args["prepared_statement_cache_size"] = 0
     return connect_args
@@ -389,15 +404,24 @@ async def _shielded_bounded(awaitable: Awaitable[object], timeout: float) -> asy
     anything the aiosqlite worker thread holds (issue #1682).
     """
     task = asyncio.ensure_future(awaitable)
-    waiter = asyncio.ensure_future(asyncio.wait({task}, timeout=timeout))
-    while not waiter.done():
-        try:
-            await asyncio.shield(waiter)
-        except asyncio.CancelledError:
-            # Teardown runs in ``finally`` blocks: the bound, not the caller's
-            # cancellation, decides abandonment. ``asyncio.wait`` cannot
-            # outlive its timeout, so this drain stays bounded.
-            continue
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    # The anyio shield keeps a level-cancelled scope from re-raising into
+    # every ``await`` (busy-spin); ``asyncio.wait`` removes its callback in a
+    # ``finally`` and never cancels ``task``, unlike 3.14's ``asyncio.shield``
+    # which leaks a done-callback per cancelled wait. The deadline (not a
+    # restarted timeout) keeps the bound exact under repeated edge cancels.
+    with anyio.CancelScope(shield=True):
+        while not task.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait({task}, timeout=remaining)
+            except asyncio.CancelledError:
+                # Teardown runs in ``finally`` blocks: the bound, not the
+                # caller's cancellation, decides abandonment.
+                continue
     if task.done():
         task.result()
         return None

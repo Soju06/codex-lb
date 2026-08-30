@@ -97,6 +97,71 @@ def test_fast_mode_prohibition_keeps_explicit_service_tier() -> None:
     assert request.service_tier == "flex"
 
 
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+@pytest.mark.parametrize("service_tier", ["priority", "fast"])
+def test_fast_mode_prohibition_strips_explicit_priority_service_tier(
+    request_type: type[ResponsesRequest] | type[ResponsesCompactRequest],
+    service_tier: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request = request_type.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "service_tier": service_tier,
+        }
+    )
+    caplog.set_level("INFO", logger="app.modules.proxy.request_policy")
+
+    apply_api_key_enforcement(request, None, prohibit_fast_mode=True)
+
+    assert request.service_tier is None
+    assert "fast_mode_service_tier_prohibited" in caplog.text
+    assert "stripped_service_tier=priority" in caplog.text
+
+
+def test_fast_mode_prohibition_overrides_api_key_enforced_priority() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "service_tier": "flex",
+        }
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-enforced-priority",
+            enforced_model=None,
+            enforced_reasoning_effort=None,
+            enforced_service_tier="priority",
+            allowed_reasoning_efforts=None,
+        ),
+    )
+
+    result = apply_api_key_enforcement(request, api_key, prohibit_fast_mode=True)
+
+    assert result.service_tier_was_enforced is False
+    assert request.service_tier is None
+
+
+def test_disabled_fast_mode_prohibition_preserves_explicit_priority() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "service_tier": "priority",
+        }
+    )
+
+    apply_api_key_enforcement(request, None, prohibit_fast_mode=False)
+
+    assert request.service_tier == "priority"
+
+
 def test_minimal_reasoning_alias_uses_upstream_safe_fallback() -> None:
     request = ResponsesRequest.model_validate(
         {

@@ -13,6 +13,7 @@ from app.db.models import Account, AccountStatus
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import (
     DEFAULT_PROBE_MODEL,
+    PROBE_MAX_OUTPUT_TOKENS,
     AccountNotProbableError,
     AccountsService,
 )
@@ -337,6 +338,10 @@ async def test_send_probe_request_uses_shared_http_client(monkeypatch):
     assert captured["headers"]["Authorization"] == f"Bearer {_PROBE_TOKEN_PLAINTEXT}"
     assert captured["headers"]["chatgpt-account-id"] == _CHATGPT_ACCOUNT_ID
     assert captured["json"]["model"] == "gpt-5.5-test"
+    assert captured["json"]["max_output_tokens"] == PROBE_MAX_OUTPUT_TOKENS
+    assert captured["json"]["max_output_tokens"] == 16
+    assert captured["json"]["stream"] is True
+    assert captured["json"]["store"] is False
     assert captured["timeout"].total == 30.0
     assert captured["timeout"].connect is None
     assert captured["timeout"].sock_connect == 10.0

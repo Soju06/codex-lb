@@ -34,6 +34,11 @@ Build the locked runtime virtual environment, then use pyproject.nix's `mkApplic
 
 The package source is filtered with `lib.fileset` to the application packages, metadata, license, and readme. Build the dashboard separately with nixpkgs' Bun package and the committed `frontend/bun.lock`, then copy the compiled output into `app/static` before Hatch builds the Python wheel. Keep the fetched frontend modules in a fixed-output derivation so network access is restricted to the dependency-fetching stage and Bun does not enter the runtime closure. Workspace metadata remains unfiltered at evaluation time, following uv2nix guidance that filtering the workspace root would introduce import-from-derivation behavior.
 
+Resolve `.env` and `.env.local` from the application's launch directory. An
+installed package lives outside the operator's checkout, so deriving env-file
+paths from the installed Python module would otherwise search the immutable
+package location instead of the directory where the operator invoked the CLI.
+
 ### Use an editable, Nix-managed development environment
 
 Apply uv2nix's editable overlay only to the development Python set and build the shell environment from default runtime dependencies plus the `dev` dependency group. Documentation tooling and optional metrics and tracing integrations remain opt-in. Set `UV_NO_SYNC`, `UV_PYTHON`, and `UV_PYTHON_DOWNLOADS` so uv remains available for lockfile operations without creating a competing environment or downloading an interpreter. The shell resolves its repository root dynamically and clears ambient `PYTHONPATH` to avoid host contamination.
@@ -52,6 +57,7 @@ The flake check builds the packaged application. Command and dashboard checks ar
 - **Native wheel patching can fail after dependency updates** → Keep nixpkgs, uv2nix, pyproject.nix, and build-system inputs pinned together and verify a clean build after lock updates.
 - **The development closure can grow when unrelated dependency sets are enabled** → Keep the default shell to runtime dependencies plus the `dev` group; leave documentation, metrics, and tracing dependencies opt-in.
 - **Editable setup depends on locating the checkout at shell entry** → Resolve `REPO_ROOT` with Git when available and fall back to the current directory for unpacked source trees.
+- **Launching from the wrong directory can select unintended env files** → Treat the launch directory as the explicit operator context, matching the documented local workflow; process environment variables retain precedence over env files.
 
 ## Migration Plan
 

@@ -20,7 +20,7 @@ from app.core.utils.proxy_env import outbound_proxy_env_configured
 
 logger = logging.getLogger(__name__)
 
-BASE_DIR = Path(__file__).resolve().parents[3]
+BASE_DIR = Path.cwd()
 ENV_FILES = (BASE_DIR / ".env", BASE_DIR / ".env.local")
 
 # OAuth protocol constants. These values identify codex-lb to OpenAI's OAuth

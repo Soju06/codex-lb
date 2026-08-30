@@ -56,8 +56,9 @@ nix flake check           # build the default package
 ```
 
 `nix run . -- --help` verifies the proxy command without starting the server.
-Application state still follows the normal data-directory rules and is never
-written into the immutable Nix store.
+The packaged app reads `.env` and `.env.local` from the directory where it is
+launched. Application state still follows the normal data-directory rules and
+is never written into the immutable Nix store.
 
 ## Timeout Invariant Linter Scope
 

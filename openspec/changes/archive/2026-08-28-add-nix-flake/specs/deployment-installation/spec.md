@@ -16,6 +16,7 @@ The repository MUST provide a locked Nix flake for each supported Nix platform. 
 - **WHEN** a user runs `nix run . -- --help`
 - **THEN** the packaged `codex-lb` command prints its CLI help and exits successfully
 - **AND** running `nix run .` without help arguments starts the proxy through the project-owned CLI entry point
+- **AND** the packaged app loads `.env` and `.env.local` from the directory where it is launched
 
 #### Scenario: Development shell is editable and complete
 

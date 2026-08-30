@@ -14,6 +14,7 @@ from httpx import ASGITransport, AsyncByteStream, AsyncClient
 from starlette.requests import ClientDisconnect
 from starlette.types import Message, Receive, Scope, Send
 
+import app.core.middleware.request_decompression as request_decompression_module
 from app.core.middleware.request_body_limit import add_request_body_limit_middleware
 from app.core.middleware.request_decompression import (
     RequestDecompressionMiddleware,
@@ -280,6 +281,43 @@ async def test_request_decompression_rejects_one_byte_over_decoded_boundary(
 
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "payload_too_large"
+
+
+@pytest.mark.asyncio
+async def test_zstd_streams_without_one_shot_allocation_attempt(monkeypatch):
+    payload = {"input": "x" * 512}
+    body = json.dumps(payload).encode("utf-8")
+    compressed = zstd.ZstdCompressor().compress(body)
+    real_decompressor = zstd.ZstdDecompressor
+
+    class AllocationBudgetDecompressor:
+        one_shot_attempted = False
+
+        def decompress(self, *_args, **_kwargs):
+            type(self).one_shot_attempted = True
+            raise MemoryError("one-shot output allocation exceeded the test budget")
+
+        def stream_reader(self, source):
+            if type(self).one_shot_attempted:
+                raise MemoryError("one-shot attempt consumed the test allocation budget")
+            return real_decompressor().stream_reader(source)
+
+    monkeypatch.setattr(
+        request_decompression_module.zstd,
+        "ZstdDecompressor",
+        AllocationBudgetDecompressor,
+    )
+
+    transport = ASGITransport(app=_build_echo_app())
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/echo",
+            content=compressed,
+            headers={"Content-Encoding": "zstd", "Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == payload
 
 
 @pytest.mark.asyncio

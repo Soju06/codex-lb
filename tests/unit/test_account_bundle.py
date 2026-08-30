@@ -230,7 +230,7 @@ def test_identity_conflict_mapping_redacts_domain_exception_identity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bundle_commit_invalidates_local_selection_before_cancellable_validation(monkeypatch) -> None:
+async def test_bundle_commit_propagates_selection_invalidation_before_cancellable_validation(monkeypatch) -> None:
     events: list[tuple[str, object]] = []
     validation_started = asyncio.Event()
     persisted_result = BundlePersistenceResult(
@@ -282,7 +282,7 @@ async def test_bundle_commit_invalidates_local_selection_before_cancellable_vali
     await validation_started.wait()
     assert events == [
         ("persisted", "quarantined-import"),
-        ("invalidate", False),
+        ("invalidate", True),
         ("unavailable", "quarantined-import"),
         ("validation", "started"),
     ]
@@ -291,7 +291,7 @@ async def test_bundle_commit_invalidates_local_selection_before_cancellable_vali
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert events.count(("invalidate", False)) == 1
+    assert events.count(("invalidate", True)) == 1
 
 
 @pytest.mark.asyncio

@@ -675,9 +675,9 @@ class AccountsService:
         await self._repo.account_bundle_identity_matches(accounts)
         persisted = await self._repo.persist_account_bundle(accounts, conflict_mode=conflict_mode)
         # Persistence quarantines every newly routable credential set in one
-        # committed transaction. Drop this replica's pre-quarantine selection
-        # snapshot before any cancellable validation work can begin.
-        get_account_selection_cache().invalidate(propagate=False)
+        # committed transaction. Invalidate selection across replicas before
+        # any cancellable validation work can begin.
+        get_account_selection_cache().invalidate()
         for result in persisted:
             if result.outcome != "skipped":
                 mark_account_routing_unavailable(result.account_id)

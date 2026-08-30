@@ -14,5 +14,5 @@
 
 - [x] 3.1 Re-run focused and complete `use-oauth` tests until they pass without sleeps
 - [x] 3.2 Run ESLint on changed files, frontend typecheck, and frontend build
-- [x] 3.3 Prove the visible OAuth dialog keeps flow B pending after a mocked stale flow-A success
+- [x] 3.3 Prove the visible OAuth dialog keeps flow B pending after a mocked stale flow-A success, including a committed OauthDialog + useOauth regression that starts A, resets/restarts B through the dialog, and ignores a late A success
 - [x] 3.4 Validate the scoped OpenSpec change strictly

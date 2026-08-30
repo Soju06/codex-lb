@@ -4,6 +4,11 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+    bun2nix = {
+      url = "github:nix-community/bun2nix/2.1.2";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     pyproject-nix = {
       url = "github:pyproject-nix/pyproject.nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -25,6 +30,7 @@
 
   outputs =
     {
+      bun2nix,
       nixpkgs,
       pyproject-nix,
       pyproject-build-systems,
@@ -98,74 +104,28 @@
         ];
       };
 
-      frontendNodeModules = forAllSystems (
-        system:
-        let
-          pkgs = nixpkgs.legacyPackages.${system};
-        in
-        pkgs.stdenvNoCC.mkDerivation {
-          pname = "codex-lb-frontend-node-modules";
-          inherit (projectMetadata) version;
-          src = frontendSource;
-
-          impureEnvVars = lib.fetchers.proxyImpureEnvVars ++ [
-            "GIT_PROXY_COMMAND"
-            "SOCKS_SERVER"
-          ];
-
-          nativeBuildInputs = [
-            pkgs.bun
-            pkgs.writableTmpDirAsHomeHook
-          ];
-
-          dontConfigure = true;
-          buildPhase = ''
-            runHook preBuild
-
-            export BUN_INSTALL_CACHE_DIR="$(mktemp -d)"
-            bun install \
-              --cpu="*" \
-              --frozen-lockfile \
-              --ignore-scripts \
-              --no-progress \
-              --os="*"
-
-            runHook postBuild
-          '';
-          installPhase = ''
-            runHook preInstall
-
-            mkdir -p "$out"
-            cp -R node_modules "$out/"
-
-            runHook postInstall
-          '';
-
-          dontFixup = true;
-          outputHash = "sha256-Z3aEhLSn7xfE/7w7etkXcPw+YAwZUkru5uMqrXYDtlQ=";
-          outputHashAlgo = "sha256";
-          outputHashMode = "recursive";
-        }
-      );
-
       frontendAssets = forAllSystems (
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          bun2nixPackage = bun2nix.packages.${system}.default;
         in
         pkgs.stdenvNoCC.mkDerivation {
           pname = "codex-lb-frontend";
           inherit (projectMetadata) version;
           src = frontendSource;
 
-          nativeBuildInputs = [ pkgs.bun ];
+          nativeBuildInputs = [ bun2nixPackage.hook ];
 
-          dontConfigure = true;
+          bunDeps = bun2nixPackage.fetchBunDeps {
+            bunNix = ./frontend/bun.nix;
+          };
+
+          dontRunLifecycleScripts = true;
+
           buildPhase = ''
             runHook preBuild
 
-            cp -R ${frontendNodeModules.${system}}/node_modules .
-            chmod -R u+w node_modules
             bun node_modules/@typescript/native/bin/tsc -b
             bun node_modules/vite/bin/vite.js build --outDir dist
 

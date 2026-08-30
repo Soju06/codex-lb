@@ -63,6 +63,7 @@ from app.core.clients.proxy_websocket import (
     filter_inbound_websocket_headers,
     is_account_neutral_websocket_error_code,
 )
+from app.core.clock import Scheduler, scheduler_for
 from app.core.errors import (
     OpenAIErrorEnvelope,
     openai_error,
@@ -859,7 +860,8 @@ async def _close_websocket_upstream_for_cleanup(
     request ownership and leases within its bounded cleanup budget.
     """
 
-    close_task = asyncio.create_task(
+    scheduler = scheduler_for(proxy)
+    close_task = scheduler.create_task(
         upstream.close(),
         name="proxy-websocket-upstream-close",
     )
@@ -876,6 +878,7 @@ async def _close_websocket_upstream_for_cleanup(
                 timeout_seconds=effective_timeout,
                 label="proxy websocket upstream close",
                 cleanup_tasks=proxy._background_cleanup_tasks,
+                scheduler=scheduler,
             )
         except Exception:
             _facade().logger.debug("Failed to cancel upstream websocket close task", exc_info=True)
@@ -884,7 +887,7 @@ async def _close_websocket_upstream_for_cleanup(
         await cancel_close_task()
         return
     try:
-        await asyncio.wait_for(asyncio.shield(close_task), timeout=effective_timeout)
+        await scheduler.wait_for(asyncio.shield(close_task), timeout=effective_timeout)
     except TimeoutError:
         _facade().logger.debug(
             "Upstream websocket close continued after cleanup budget timeout_seconds=%.3f",
@@ -899,6 +902,7 @@ async def _await_owned_websocket_task_after_reader_cancellation(
     task: asyncio.Task[Any],
     *,
     failure_message: str,
+    scheduler: Scheduler,
 ) -> None:
     """Observe owned child completion without replacing reader cancellation."""
 
@@ -906,10 +910,12 @@ async def _await_owned_websocket_task_after_reader_cancellation(
     timeout_seconds = _facade()._TASK_CANCEL_TIMEOUT_SECONDS if remaining is None else max(float(remaining), 0.0)
 
     try:
-        done, _ = await asyncio.wait(
-            {task},
+        done, _ = await scheduler.wait_for(
+            asyncio.wait({task}),
             timeout=timeout_seconds,
         )
+    except TimeoutError:
+        return
     except asyncio.CancelledError:
         raise
     if not done:
@@ -1424,7 +1430,7 @@ class _WebSocketMixin:
                 account_lease = None
                 if lease_to_release is None:
                     return
-                account_lease_release_task = asyncio.create_task(
+                account_lease_release_task = scheduler_for(proxy).create_task(
                     proxy._load_balancer.release_account_lease(lease_to_release),
                     name="proxy-websocket-finalization-connection-lease",
                 )
@@ -1446,6 +1452,7 @@ class _WebSocketMixin:
                     upstream_reader,
                     label="proxy websocket upstream reader",
                     cleanup_tasks=proxy._background_cleanup_tasks,
+                    scheduler=scheduler_for(proxy),
                 )
                 upstream_reader = None
             upstream_control = None
@@ -1489,6 +1496,7 @@ class _WebSocketMixin:
                     reader_to_await,
                     label="proxy websocket upstream reader",
                     cancel=False,
+                    scheduler=scheduler_for(proxy),
                 )
             except Exception:
                 # A completed reader failure must not hide an ownership
@@ -1615,7 +1623,7 @@ class _WebSocketMixin:
                                 break
                     message: Any | None = None
                     try:
-                        message = await asyncio.wait_for(
+                        message = await scheduler_for(proxy).wait_for(
                             websocket.receive(),
                             timeout=min(
                                 downstream_idle_timeout_seconds, _facade()._DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS
@@ -2512,7 +2520,7 @@ class _WebSocketMixin:
                     upstream_requires_security_work_authorized = request_state.require_security_work_authorized
                     upstream_turn_state = _facade()._upstream_turn_state_from_socket(upstream) or upstream_turn_state
                     upstream_control = _WebSocketUpstreamControl()
-                    upstream_reader = asyncio.create_task(
+                    upstream_reader = scheduler_for(proxy).create_task(
                         proxy._relay_upstream_websocket_messages(
                             websocket,
                             upstream,
@@ -2612,7 +2620,7 @@ class _WebSocketMixin:
                         # transport owner. A fresh connection re-acquires it
                         # for its selected account; the global turn admission
                         # remains attached to a claimed request state.
-                        retired_create_lease_release_task = asyncio.create_task(
+                        retired_create_lease_release_task = scheduler_for(proxy).create_task(
                             proxy._release_request_state_account_response_create_lease(request_state),
                             name="proxy-websocket-finalization-retired-create-lease",
                         )
@@ -2621,7 +2629,7 @@ class _WebSocketMixin:
                         retired_create_lease_release_task = None
                         if request_state_to_fail is not None:
                             owned_request_state = request_state_to_fail
-                            request_state_failure_task = asyncio.create_task(
+                            request_state_failure_task = scheduler_for(proxy).create_task(
                                 proxy._fail_pending_websocket_requests(
                                     account=None,
                                     account_id_value=account.id if account is not None else upstream_account_id,
@@ -2711,7 +2719,7 @@ class _WebSocketMixin:
                         # find either this slot or the registered child task.
                         request_state_to_fail = reader_replay
                         owned_request_state = request_state_to_fail
-                        request_state_failure_task = asyncio.create_task(
+                        request_state_failure_task = scheduler_for(proxy).create_task(
                             proxy._fail_pending_websocket_requests(
                                 account=account,
                                 account_id_value=account.id if account else None,
@@ -2779,7 +2787,7 @@ class _WebSocketMixin:
                             "Transparent websocket replay after upstream send failure request_id=%s",
                             replay_candidate.request_log_id or replay_candidate.request_id,
                         )
-                        retired_create_lease_release_task = asyncio.create_task(
+                        retired_create_lease_release_task = scheduler_for(proxy).create_task(
                             proxy._release_request_state_account_response_create_lease(replay_candidate),
                             name="proxy-websocket-finalization-retired-create-lease",
                         )
@@ -2859,6 +2867,7 @@ class _WebSocketMixin:
                             label="proxy websocket upstream reader",
                             cancel=False,
                             cleanup_tasks=proxy._background_cleanup_tasks,
+                            scheduler=scheduler_for(proxy),
                         )
                     except Exception:
                         # Reader failure must not skip lease release or the
@@ -2876,6 +2885,7 @@ class _WebSocketMixin:
                             timeout_seconds=task_cleanup_timeout,
                             label="proxy websocket retired create lease release",
                             cancel=False,
+                            scheduler=scheduler_for(proxy),
                         )
                     except Exception:
                         _facade().logger.warning(
@@ -2891,6 +2901,7 @@ class _WebSocketMixin:
                             timeout_seconds=task_cleanup_timeout,
                             label="proxy websocket unsent request finalization",
                             cancel=False,
+                            scheduler=scheduler_for(proxy),
                         )
                     except Exception:
                         _facade().logger.warning(
@@ -2973,7 +2984,8 @@ class _WebSocketMixin:
                     )
                 cleanup_phase = "complete"
 
-            cleanup_task = asyncio.create_task(
+            scheduler = scheduler_for(proxy)
+            cleanup_task = scheduler.create_task(
                 finalize_websocket_scope(),
                 name="proxy-websocket-finalization-scope-cleanup",
             )
@@ -2990,10 +3002,13 @@ class _WebSocketMixin:
                     )
 
             cleanup_task.add_done_callback(log_scope_cleanup_failure)
-            done, _ = await asyncio.wait(
-                {cleanup_task},
-                timeout=max(float(cleanup_timeout), 0.0),
-            )
+            try:
+                done, _ = await scheduler.wait_for(
+                    asyncio.wait({cleanup_task}),
+                    timeout=max(float(cleanup_timeout), 0.0),
+                )
+            except TimeoutError:
+                done = set()
             if not done:
                 _facade().logger.warning(
                     "Websocket scope cleanup exceeded its cleanup budget "
@@ -5044,7 +5059,7 @@ class _WebSocketMixin:
                     continue
                 if message.kind == "text" and message.text is not None:
                     downstream_activity.mark()
-                    terminal_task = asyncio.create_task(
+                    terminal_task = scheduler_for(proxy).create_task(
                         _process_and_forward_upstream_websocket_text(
                             proxy,
                             websocket,
@@ -5078,6 +5093,7 @@ class _WebSocketMixin:
                             await _await_owned_websocket_task_after_reader_cancellation(
                                 terminal_task,
                                 failure_message="Websocket terminal task failed during reader cancellation",
+                                scheduler=scheduler_for(proxy),
                             )
                             raise
                     finally:
@@ -5121,7 +5137,7 @@ class _WebSocketMixin:
                             )
                         break
                     continue
-                terminal_task = asyncio.create_task(
+                terminal_task = scheduler_for(proxy).create_task(
                     _process_upstream_websocket_transport_end(
                         proxy,
                         websocket,
@@ -5152,6 +5168,7 @@ class _WebSocketMixin:
                         await _await_owned_websocket_task_after_reader_cancellation(
                             terminal_task,
                             failure_message="Websocket transport-end task failed during reader cancellation",
+                            scheduler=scheduler_for(proxy),
                         )
                         raise
                 finally:
@@ -6519,7 +6536,8 @@ class _WebSocketMixin:
             remaining = list(pending_requests)
             pending_requests.clear()
             if remaining:
-                finalization_task = asyncio.create_task(
+                scheduler = scheduler_for(proxy)
+                finalization_task = scheduler.create_task(
                     self._finalize_claimed_websocket_requests(
                         account=account,
                         account_id_value=account_id_value,
@@ -6559,7 +6577,10 @@ class _WebSocketMixin:
             if not finalization_task.done() and timeout_seconds > 0:
                 # Do not cancel the child at the bound: it is the sole owner of
                 # the claimed states and remains visible to lifespan draining.
-                await asyncio.wait({finalization_task}, timeout=timeout_seconds)
+                try:
+                    await scheduler.wait_for(asyncio.wait({finalization_task}), timeout=timeout_seconds)
+                except TimeoutError:
+                    pass
             raise
         return settlement_succeeded
 

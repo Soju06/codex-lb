@@ -149,6 +149,7 @@ from app.core.request_locality import (
 )
 from app.core.resilience.overload import is_local_overload_error_code, merge_retry_after_headers
 from app.core.runtime_logging import log_error_response
+from app.core.socket_peer import raw_socket_peer_host
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.json_guards import is_json_list, is_json_mapping
@@ -8225,7 +8226,7 @@ async def _websocket_firewall_denial_response(websocket: WebSocket) -> JSONRespo
     settings = get_settings()
     client_ip = resolve_connection_client_ip(
         websocket.headers,
-        websocket.client.host if websocket.client else None,
+        raw_socket_peer_host(websocket),
         trust_proxy_headers=settings.firewall_trust_proxy_headers,
         trusted_proxy_networks=parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs),
         allowed_proxy_header_names=FORWARDED_CHAIN_HEADER_NAMES,

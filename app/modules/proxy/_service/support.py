@@ -10,9 +10,10 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, NoReturn, Protocol
+from typing import Any, Literal, NoReturn, Protocol, TypeVar
 
 import anyio
+from anyio.lowlevel import checkpoint_if_cancelled
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer.types import UpstreamError
@@ -31,6 +32,7 @@ from app.core.resilience.network_recovery import PROCESS_NETWORK_UNAVAILABLE_COD
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.sse import sse_event_type_from_block
 from app.db.models import Account
 from app.modules.api_keys.service import (
@@ -49,6 +51,40 @@ from app.modules.proxy.tool_call_dedupe import ToolCallDedupeKey
 from app.modules.proxy.work_admission import AdmissionLease
 
 logger = logging.getLogger(__name__)
+
+_TaskResultT = TypeVar("_TaskResultT")
+
+
+async def _await_task_deferring_cancellation(
+    task: asyncio.Task[_TaskResultT],
+) -> tuple[_TaskResultT, asyncio.CancelledError | None]:
+    """Finish critical cleanup while preserving the caller's cancellation."""
+
+    cancellation: asyncio.CancelledError | None = None
+    # The anyio shield keeps a level-cancelled Starlette scope from re-raising
+    # into every ``await``, which would otherwise busy-spin this loop until the
+    # owned task completes. ``wait_on_shared_future`` keeps the loop's waits
+    # off the task's done-callback list: Python 3.14's ``asyncio.shield``
+    # leaks a callback per cancelled wait (2026-08-30 event-loop livelock).
+    with anyio.CancelScope(shield=True):
+        while True:
+            try:
+                result = await wait_on_shared_future(task)
+                break
+            except asyncio.CancelledError as exc:
+                if task.cancelled():
+                    raise
+                cancellation = cancellation or exc
+    if cancellation is None:
+        # The shield also blocks the level cancellation this helper promises
+        # to surface. Probe for it without suspending so callers still get
+        # their cancellation marker after the owned task finished.
+        try:
+            await checkpoint_if_cancelled()
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+    return result, cancellation
+
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"

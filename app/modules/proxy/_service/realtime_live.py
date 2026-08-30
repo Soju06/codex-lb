@@ -28,8 +28,10 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import detach_session_objects
 from app.modules.api_keys.service import ApiKeyData
-from app.modules.proxy._service.streaming.retry import _await_task_deferring_cancellation
-from app.modules.proxy._service.support import _request_log_client_fields
+from app.modules.proxy._service.support import (
+    _await_task_deferring_cancellation,
+    _request_log_client_fields,
+)
 from app.modules.proxy.helpers import _header_account_id
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
 from app.modules.proxy.repo_bundle import ProxyRepoFactory

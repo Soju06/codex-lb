@@ -41,6 +41,7 @@ from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import get_background_session
 from app.modules.accounts.account_bundle import (
+    MAX_BUNDLE_ACCOUNTS,
     AccountBundlePayload,
     BundleAccount,
     BundleCredentials,
@@ -567,6 +568,8 @@ class AccountsService:
             if account_ids is not None
             else await self._repo.list_accounts(refresh_existing=True)
         )
+        if len(accounts) > MAX_BUNDLE_ACCOUNTS:
+            raise InvalidAuthJsonError("Account bundle exceeds the maximum account count")
         if account_ids is not None:
             found_ids = {account.id for account in accounts}
             missing_ids = [account_id for account_id in account_ids if account_id not in found_ids]
@@ -626,7 +629,6 @@ class AccountsService:
                 index=index,
                 masked_identity=mask_email(record.email),
                 state="matching" if match is not None else "new",
-                destination_account_id=match.id if match is not None else None,
                 metadata=AccountBundlePortableMetadata(
                     alias=record.alias,
                     plan_type=record.plan_type,
@@ -695,11 +697,16 @@ class AccountsService:
         persisted: list[BundlePersistenceResult],
     ) -> dict[str, str]:
         warnings: dict[str, str] = {}
+        validation_results = [result for result in persisted if result.outcome != "skipped"]
+        if not validation_results:
+            return warnings
+
+        # Share the fixed batch budget evenly so one slow account cannot
+        # prevent a later account from receiving its own bounded attempt.
+        account_timeout = BUNDLE_VALIDATION_TIMEOUT_SECONDS / len(validation_results)
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + BUNDLE_VALIDATION_TIMEOUT_SECONDS
-        for result in persisted:
-            if result.outcome == "skipped":
-                continue
+        for result in validation_results:
+            deadline = loop.time() + account_timeout
             account: Account | None = None
             validation_succeeded = False
             proxy_pause_required = False

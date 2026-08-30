@@ -2051,6 +2051,8 @@ def _validate_bundle_source_identities(
 ) -> None:
     identities_by_email_and_workspace: dict[str, dict[str | None, set[str | None]]] = {}
     identities_by_email: dict[str, set[str | None]] = {}
+    canonical_label_identities: dict[tuple[str, str], set[str | None]] = {}
+    legacy_label_identities: dict[tuple[str, str], set[str | None]] = {}
     for account in accounts:
         normalized_email = _normalized_email(account.email)
         workspace = _workspace_slot_key(account)
@@ -2060,7 +2062,7 @@ def _validate_bundle_source_identities(
         workspace_identities = identities_by_email_and_workspace.setdefault(normalized_email, {})
 
         if preserve_unknown_workspace_duplicates:
-            candidates = (workspace_identities.get(workspace),)
+            candidates: tuple[set[str | None] | None, ...] = (workspace_identities.get(workspace),)
         elif workspace is None:
             candidates = (identities_by_email.get(normalized_email),)
         else:
@@ -2068,6 +2070,10 @@ def _validate_bundle_source_identities(
                 workspace_identities.get(workspace),
                 workspace_identities.get(None),
             )
+        if account.workspace_id is not None and account.workspace_label is not None:
+            candidates = (*candidates, legacy_label_identities.get((normalized_email, account.workspace_label)))
+        elif account.workspace_id is None and account.workspace_label is not None:
+            candidates = (*candidates, canonical_label_identities.get((normalized_email, account.workspace_label)))
         if any(
             identities is not None and _bundle_identity_matches_any(identities, upstream_identity)
             for identities in candidates
@@ -2076,6 +2082,14 @@ def _validate_bundle_source_identities(
 
         workspace_identities.setdefault(workspace, set()).add(upstream_identity)
         identities_by_email.setdefault(normalized_email, set()).add(upstream_identity)
+        if account.workspace_id is not None and account.workspace_label is not None:
+            canonical_label_identities.setdefault((normalized_email, account.workspace_label), set()).add(
+                upstream_identity
+            )
+        elif account.workspace_label is not None:
+            legacy_label_identities.setdefault((normalized_email, account.workspace_label), set()).add(
+                upstream_identity
+            )
 
 
 def _bundle_identity_matches_any(

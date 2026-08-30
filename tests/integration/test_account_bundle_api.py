@@ -31,6 +31,7 @@ async def test_account_bundle_export_openapi_preserves_manual_json_body_schema(a
 @pytest.mark.asyncio
 async def test_account_bundle_export_authenticates_before_reading_body(async_client, app_instance) -> None:
     body_read = False
+    synthetic_value = "-".join(("must", "not", "be", "read"))
 
     async def deny_write_access():
         raise DashboardPermissionError("Read-only dashboard access", code="read_only_access")
@@ -38,7 +39,7 @@ async def test_account_bundle_export_authenticates_before_reading_body(async_cli
     async def body():
         nonlocal body_read
         body_read = True
-        yield b'{"accountIds":[],"passphrase":"must-not-be-read"}'
+        yield json.dumps({"accountIds": [], "passphrase": synthetic_value}).encode()
 
     app_instance.dependency_overrides[accounts_api_module.require_dashboard_write_access] = deny_write_access
     try:
@@ -134,6 +135,7 @@ async def test_account_bundle_export_preflight_skip_and_replace(async_client) ->
     assert preview["newCount"] == 0
     assert preview["matchingCount"] == 1
     assert preview["accounts"][0]["maskedIdentity"] == "b***@example.com"
+    assert "destinationAccountId" not in preview["accounts"][0]
     assert preview["accounts"][0]["metadata"]["alias"] == "portable"
     assert "refresh-token" not in preflight.text
 

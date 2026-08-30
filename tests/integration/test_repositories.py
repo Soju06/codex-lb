@@ -628,6 +628,48 @@ async def test_bundle_rejects_workspace_id_label_equivalent_duplicates(db_setup)
             await repo.persist_account_bundle([first, second], conflict_mode="replace")
 
 
+@pytest.mark.parametrize("preserve_unknown_workspace_duplicates", [False, True])
+@pytest.mark.parametrize("legacy_first", [False, True])
+def test_bundle_source_identity_rejects_canonical_label_matching_legacy_label(
+    preserve_unknown_workspace_duplicates: bool,
+    legacy_first: bool,
+) -> None:
+    canonical = _make_account("bundle-canonical", "duplicate@example.invalid")
+    legacy = _make_account("bundle-legacy", "DUPLICATE@example.invalid")
+    canonical.chatgpt_account_id = "upstream-123"
+    canonical.workspace_id = "ws-123"
+    canonical.workspace_label = "Team"
+    legacy.chatgpt_account_id = canonical.chatgpt_account_id
+    legacy.workspace_id = None
+    legacy.workspace_label = "Team"
+
+    accounts = [legacy, canonical] if legacy_first else [canonical, legacy]
+    with pytest.raises(AccountBundleIdentityError, match="duplicate account identities"):
+        _validate_bundle_source_identities(
+            accounts,
+            preserve_unknown_workspace_duplicates=preserve_unknown_workspace_duplicates,
+        )
+
+
+@pytest.mark.parametrize("preserve_unknown_workspace_duplicates", [False, True])
+def test_bundle_source_identity_allows_shared_label_for_distinct_canonical_ids(
+    preserve_unknown_workspace_duplicates: bool,
+) -> None:
+    first = _make_account("bundle-canonical-a", "operator@example.invalid")
+    second = _make_account("bundle-canonical-b", "OPERATOR@example.invalid")
+    first.chatgpt_account_id = "upstream-123"
+    first.workspace_id = "ws-a"
+    first.workspace_label = "Team"
+    second.chatgpt_account_id = first.chatgpt_account_id
+    second.workspace_id = "ws-b"
+    second.workspace_label = "Team"
+
+    _validate_bundle_source_identities(
+        [first, second],
+        preserve_unknown_workspace_duplicates=preserve_unknown_workspace_duplicates,
+    )
+
+
 @pytest.mark.parametrize(
     (
         "preserve_unknown_workspace_duplicates",

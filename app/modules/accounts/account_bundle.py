@@ -20,6 +20,7 @@ SCRYPT_P = 1
 SALT_BYTES = 16
 NONCE_BYTES = 12
 KEY_BYTES = 32
+MAX_BUNDLE_ACCOUNTS = 10_000
 
 
 class AccountBundleError(ValueError):
@@ -101,20 +102,31 @@ class AccountBundlePayload(BaseModel):
 
     version: Literal[1] = 1
     created_at: datetime
-    accounts: list[BundleAccount] = Field(max_length=10_000)
+    accounts: list[BundleAccount] = Field(max_length=MAX_BUNDLE_ACCOUNTS)
 
     @model_validator(mode="after")
     def reject_duplicate_identities(self) -> AccountBundlePayload:
-        seen: set[tuple[str, str | None, str | None]] = set()
+        seen_canonical_ids: set[tuple[str, str | None, str]] = set()
+        seen_canonical_aliases: set[tuple[str, str | None, str]] = set()
+        seen_legacy_keys: set[tuple[str, str | None, str | None]] = set()
         for account in self.accounts:
-            identity = (
-                account.email.lower(),
-                account.chatgpt_account_id,
-                account.workspace_id or account.workspace_label,
-            )
-            if identity in seen:
+            identity_prefix = (account.email.lower(), account.chatgpt_account_id)
+            if account.workspace_id is None:
+                legacy_key = (*identity_prefix, account.workspace_label)
+                if legacy_key in seen_legacy_keys or legacy_key in seen_canonical_aliases:
+                    raise ValueError("bundle contains duplicate account identities")
+                seen_legacy_keys.add(legacy_key)
+                continue
+
+            canonical_id = (*identity_prefix, account.workspace_id)
+            aliases = {account.workspace_id}
+            if account.workspace_label is not None:
+                aliases.add(account.workspace_label)
+            canonical_aliases = {(*identity_prefix, alias) for alias in aliases}
+            if canonical_id in seen_canonical_ids or not seen_legacy_keys.isdisjoint(canonical_aliases):
                 raise ValueError("bundle contains duplicate account identities")
-            seen.add(identity)
+            seen_canonical_ids.add(canonical_id)
+            seen_canonical_aliases.update(canonical_aliases)
         return self
 
 

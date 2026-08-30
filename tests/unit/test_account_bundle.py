@@ -4,7 +4,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from cryptography.fernet import Fernet, InvalidToken
@@ -19,6 +19,7 @@ from app.db.models import Account, AccountStatus
 from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts import service as accounts_service_module
 from app.modules.accounts.account_bundle import (
+    MAX_BUNDLE_ACCOUNTS,
     AccountBundleError,
     AccountBundleTooLargeError,
     BundleAccount,
@@ -43,6 +44,7 @@ from app.modules.accounts.service import (
     BUNDLE_VALIDATION_AGGREGATE_WARNING,
     BUNDLE_VALIDATION_WARNING,
     AccountsService,
+    InvalidAuthJsonError,
 )
 from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.updater import AccountRefreshResult, UsageUpdater, _BundleValidationAuthRepository
@@ -188,6 +190,24 @@ def test_destination_reencrypts_bundle_credentials_with_a_distinct_at_rest_key()
         source_encryptor.decrypt(destination.access_token_encrypted)
 
 
+@pytest.mark.asyncio
+async def test_export_rejects_too_many_accounts_before_identity_or_credential_work() -> None:
+    accounts = [SimpleNamespace()] * (MAX_BUNDLE_ACCOUNTS + 1)
+    repo = SimpleNamespace(
+        list_accounts=AsyncMock(return_value=accounts),
+        account_bundle_identity_matches=AsyncMock(),
+    )
+    service = AccountsService(repo=cast(AccountsRepository, repo))
+    decrypt = Mock()
+    service._encryptor = cast(TokenEncryptor, SimpleNamespace(decrypt=decrypt))
+
+    with pytest.raises(InvalidAuthJsonError, match="maximum account count"):
+        await service.export_account_bundle(None, "passphrase", max_bytes=MAX_BYTES)
+
+    repo.account_bundle_identity_matches.assert_not_awaited()
+    decrypt.assert_not_called()
+
+
 def test_payload_rejects_workspace_id_label_equivalent_duplicates() -> None:
     first = _account("duplicate@example.invalid")
     second = _account("DUPLICATE@example.invalid")
@@ -198,6 +218,31 @@ def test_payload_rejects_workspace_id_label_equivalent_duplicates() -> None:
 
     with pytest.raises(ValueError, match="duplicate account identities"):
         new_payload([first, second])
+
+
+@pytest.mark.parametrize("legacy_first", [False, True])
+def test_payload_rejects_canonical_workspace_label_matching_legacy_label(legacy_first: bool) -> None:
+    canonical = _account("duplicate@example.invalid")
+    legacy = _account("DUPLICATE@example.invalid")
+    canonical.workspace_id = "ws-123"
+    canonical.workspace_label = "Team"
+    legacy.workspace_id = None
+    legacy.workspace_label = "Team"
+
+    accounts = [legacy, canonical] if legacy_first else [canonical, legacy]
+    with pytest.raises(ValueError, match="duplicate account identities"):
+        new_payload(accounts)
+
+
+def test_payload_allows_shared_workspace_label_for_distinct_workspace_ids() -> None:
+    first = _account("operator@example.invalid")
+    second = _account("OPERATOR@example.invalid")
+    first.workspace_id = "canonical-slot-a"
+    first.workspace_label = "Shared label"
+    second.workspace_id = "canonical-slot-b"
+    second.workspace_label = "Shared label"
+
+    assert len(new_payload([first, second]).accounts) == 2
 
 
 def test_identity_conflict_mapping_redacts_domain_exception_identity() -> None:
@@ -1162,7 +1207,7 @@ async def test_post_import_validation_timeout_keeps_proxy_account_quarantined(mo
 
 
 @pytest.mark.asyncio
-async def test_post_import_validation_uses_one_deadline_for_the_batch(monkeypatch) -> None:
+async def test_post_import_validation_gives_every_account_a_bounded_attempt(monkeypatch) -> None:
     accounts = {
         account_id: SimpleNamespace(
             id=account_id,
@@ -1208,4 +1253,4 @@ async def test_post_import_validation_uses_one_deadline_for_the_batch(monkeypatc
         "remaining-account": BUNDLE_VALIDATION_WARNING,
     }
     assert unavailable == ["slow-account", "remaining-account"]
-    assert refresh.await_count == 1
+    assert refresh.await_count == 2

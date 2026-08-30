@@ -119,6 +119,7 @@ def _build_limit_inputs(payload: ApiKeyCreateRequest | ApiKeyUpdateRequest) -> l
     return limit_inputs
 
 
+@router.post("", response_model=ApiKeyCreateResponse, include_in_schema=False)
 @router.post("/", response_model=ApiKeyCreateResponse)
 async def create_api_key(
     request: Request,
@@ -165,6 +166,7 @@ async def create_api_key(
     )
 
 
+@router.get("", response_model=list[ApiKeyResponse], include_in_schema=False)
 @router.get("/", response_model=list[ApiKeyResponse])
 async def list_api_keys(
     context: ApiKeysContext = Depends(get_api_keys_context),

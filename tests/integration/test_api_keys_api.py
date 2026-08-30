@@ -145,6 +145,29 @@ async def _create_model_source(
 
 
 @pytest.mark.asyncio
+async def test_api_key_collection_routes_accept_equivalent_slash_forms(async_client):
+    canonical_list = await async_client.get("/api/api-keys/")
+    unslashed_list = await async_client.get("/api/api-keys", follow_redirects=False)
+    unslashed_create = await async_client.post(
+        "/api/api-keys",
+        json={"name": "unslashed-key", "allowedModels": []},
+        follow_redirects=False,
+    )
+
+    assert {
+        "canonical_get": canonical_list.status_code,
+        "unslashed_get": unslashed_list.status_code,
+        "unslashed_post": unslashed_create.status_code,
+    } == {
+        "canonical_get": 200,
+        "unslashed_get": 200,
+        "unslashed_post": 200,
+    }
+    assert unslashed_list.json() == canonical_list.json()
+    assert unslashed_create.json()["key"].startswith("sk-clb-")
+
+
+@pytest.mark.asyncio
 async def test_api_keys_crud_and_regenerate(async_client):
     create = await async_client.post(
         "/api/api-keys/",

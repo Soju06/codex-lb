@@ -158,13 +158,18 @@ class AccountsService:
         # Bundle validation may outlive its request waiter through the global
         # usage-refresh singleflight. Every repository used here therefore owns
         # a short-lived background session instead of capturing ``repo.session``.
-        self._bundle_validation_usage_updater = build_background_usage_updater()
+        self._bundle_validation_usage_updater = build_background_usage_updater(
+            redact_sensitive_logs=True,
+            bundle_validation_mode=True,
+        )
         # Existing non-active lifecycle state must survive replacement. This
         # validator can write usage but cannot refresh tokens or mutate account
         # lifecycle through an AuthManager.
         self._bundle_nonreactivating_validation_usage_updater = UsageUpdater(
             BackgroundUsageRepository(),
             additional_usage_repo=BackgroundAdditionalUsageRepository(),
+            redact_sensitive_logs=True,
+            bundle_validation_mode=True,
         )
         self._encryptor = TokenEncryptor()
         self._auth_manager = auth_manager
@@ -657,8 +662,12 @@ class AccountsService:
         accounts = self._bundle_accounts_for_destination(payload)
         await self._repo.account_bundle_identity_matches(accounts)
         persisted = await self._repo.persist_account_bundle(accounts, conflict_mode=conflict_mode)
+        # Persistence quarantines every newly routable credential set in one
+        # committed transaction. Drop this replica's pre-quarantine selection
+        # snapshot before any cancellable validation work can begin.
+        get_account_selection_cache().invalidate(propagate=False)
         for result in persisted:
-            if result.reactivate_on_success:
+            if result.outcome != "skipped":
                 mark_account_routing_unavailable(result.account_id)
         validation_warnings = await self._validate_imported_bundle_accounts(persisted)
         results = [
@@ -702,7 +711,7 @@ class AccountsService:
                 except Exception:
                     validation_succeeded = False
 
-            if proxy_pause_required and account is not None and result.reactivate_on_success:
+            if proxy_pause_required and account is not None and result.restore_status == AccountStatus.ACTIVE:
                 remaining = deadline - loop.time()
                 if remaining > 0:
                     try:
@@ -724,22 +733,32 @@ class AccountsService:
                     except Exception:
                         pass
 
-            if validation_succeeded and result.reactivate_on_success and account is not None:
+            if validation_succeeded and result.restore_status is not None and account is not None:
                 remaining = deadline - loop.time()
-                reactivated = False
+                restored = False
                 if remaining > 0:
                     try:
-                        reactivated = await asyncio.wait_for(
-                            self._bundle_validation_repo.reactivate_validated_bundle_account(
+                        restored = await asyncio.wait_for(
+                            self._bundle_validation_repo.restore_validated_bundle_account(
                                 account.id,
                                 expected_refresh_token_encrypted=account.refresh_token_encrypted,
+                                status=result.restore_status,
+                                deactivation_reason=result.restore_deactivation_reason,
+                                reset_at=result.restore_reset_at,
+                                blocked_at=result.restore_blocked_at,
                             ),
                             timeout=remaining,
                         )
                     except Exception:
-                        reactivated = False
-                if reactivated:
-                    clear_account_routing_unavailable(result.account_id)
+                        restored = False
+                if restored:
+                    if result.restore_status not in (
+                        AccountStatus.PAUSED,
+                        AccountStatus.REAUTH_REQUIRED,
+                        AccountStatus.DEACTIVATED,
+                    ):
+                        get_account_selection_cache().invalidate(propagate=False)
+                        clear_account_routing_unavailable(result.account_id)
                 else:
                     validation_succeeded = False
 
@@ -760,7 +779,12 @@ class AccountsService:
             return account, False, True
         updater = (
             self._bundle_validation_usage_updater
-            if result.reactivate_on_success
+            if result.restore_status
+            in (
+                AccountStatus.ACTIVE,
+                AccountStatus.RATE_LIMITED,
+                AccountStatus.QUOTA_EXCEEDED,
+            )
             else self._bundle_nonreactivating_validation_usage_updater
         )
         refresh_result = await updater.force_refresh_result(

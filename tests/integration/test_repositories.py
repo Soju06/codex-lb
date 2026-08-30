@@ -223,7 +223,7 @@ async def test_accounts_upsert_with_merge_enabled_raises_conflict_on_ambiguous_e
 
 
 @pytest.mark.asyncio
-async def test_bundle_replace_preserves_destination_local_state(db_setup):
+async def test_bundle_replace_preserves_durably_unavailable_destination_local_state(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)
         existing = _make_account("bundle-preserve", "bundle-preserve@example.invalid")
@@ -244,7 +244,7 @@ async def test_bundle_replace_preserves_destination_local_state(db_setup):
         result = await repo.persist_account_bundle([incoming], conflict_mode="replace")
 
         assert result[0].outcome == "replaced"
-        assert result[0].reactivate_on_success is False
+        assert result[0].restore_status is None
         stored = await session.get(Account, "bundle-preserve")
         assert stored is not None
         assert stored.alias == "portable-alias"
@@ -272,7 +272,7 @@ async def test_bundle_persistence_atomically_quarantines_and_reactivates_active_
             accounts_repository_module.BundlePersistenceResult(
                 account_id=incoming.id,
                 outcome="imported",
-                reactivate_on_success=True,
+                restore_status=AccountStatus.ACTIVE,
             )
         ]
         stored = await session.get(Account, incoming.id)
@@ -292,9 +292,13 @@ async def test_bundle_persistence_atomically_quarantines_and_reactivates_active_
         }
         assert set(quarantine_versions) == {NAMESPACE_ACCOUNT_ROUTING, NAMESPACE_ACCOUNT_SELECTION}
 
-        reactivated = await repo.reactivate_validated_bundle_account(
+        reactivated = await repo.restore_validated_bundle_account(
             incoming.id,
             expected_refresh_token_encrypted=token_version,
+            status=AccountStatus.ACTIVE,
+            deactivation_reason=None,
+            reset_at=None,
+            blocked_at=None,
         )
 
         assert reactivated is True
@@ -312,6 +316,303 @@ async def test_bundle_persistence_atomically_quarantines_and_reactivates_active_
             ).all()
         }
         assert reactivation_versions == {namespace: version + 1 for namespace, version in quarantine_versions.items()}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("destination_status", [AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED])
+async def test_bundle_replace_durably_quarantines_and_restores_routable_non_active_lifecycle(
+    db_setup,
+    destination_status,
+):
+    async with SessionLocal() as session:
+        status_key = destination_status.value.replace("_", "-")
+        account_id = f"bundle-{status_key}"
+        repo = AccountsRepository(session)
+        existing = _make_account(account_id, f"{account_id}@example.invalid")
+        existing.status = destination_status
+        existing.deactivation_reason = f"destination-{status_key}"
+        existing.reset_at = 101
+        existing.blocked_at = 202
+        await repo.upsert(existing, merge_by_email=False)
+
+        incoming = _make_account(account_id, f"{account_id}@example.invalid")
+        incoming.routing_policy = "normal"
+        incoming.limit_warmup_enabled = False
+        incoming.security_work_authorized = False
+        result = (await repo.persist_account_bundle([incoming], conflict_mode="replace"))[0]
+
+        assert result.restore_status == destination_status
+        assert result.restore_status is not None
+        assert result.restore_deactivation_reason == f"destination-{status_key}"
+        assert result.restore_reset_at == 101
+        assert result.restore_blocked_at == 202
+        stored = await session.get(Account, existing.id)
+        assert stored is not None
+        assert stored.status == AccountStatus.PAUSED
+        assert stored.deactivation_reason == BUNDLE_IMPORT_VALIDATION_PAUSE_REASON
+        assert stored.reset_at is None
+        assert stored.blocked_at is None
+
+        restored = await repo.restore_validated_bundle_account(
+            stored.id,
+            expected_refresh_token_encrypted=stored.refresh_token_encrypted,
+            status=result.restore_status,
+            deactivation_reason=result.restore_deactivation_reason,
+            reset_at=result.restore_reset_at,
+            blocked_at=result.restore_blocked_at,
+        )
+
+        assert restored is True
+        await session.refresh(stored)
+        assert stored.status == destination_status
+        assert stored.deactivation_reason == f"destination-{status_key}"
+        assert stored.reset_at == 101
+        assert stored.blocked_at == 202
+
+
+@pytest.mark.asyncio
+async def test_bundle_locked_recheck_refreshes_stale_destination_lifecycle(db_setup, monkeypatch):
+    del db_setup
+    account_id = "bundle-stale-identity-map"
+    email = "bundle-stale-identity-map@example.invalid"
+
+    async with SessionLocal() as stale_session:
+        repo = AccountsRepository(stale_session)
+        existing = _make_account(account_id, email)
+        stale_session.add(existing)
+        await stale_session.commit()
+        assert existing.status == AccountStatus.ACTIVE
+
+        async with SessionLocal() as concurrent_session:
+            concurrent = await concurrent_session.get(Account, account_id)
+            assert concurrent is not None
+            concurrent.status = AccountStatus.RATE_LIMITED
+            concurrent.deactivation_reason = "concurrent-rate-limit"
+            concurrent.reset_at = 303
+            concurrent.blocked_at = 404
+            await concurrent_session.commit()
+
+        # Keep the committed-but-stale object resident across the transaction
+        # boundary, matching a long-lived request session with
+        # ``expire_on_commit=False``.
+        assert existing.status == AccountStatus.ACTIVE
+
+        if repo._dialect_name() != "postgresql":
+            # SQLite has no PostgreSQL advisory locks, but its FOR UPDATE
+            # compilation still exercises the identity-map refresh performed
+            # by the locked candidate recheck. PostgreSQL test runs take the
+            # real lock path unchanged.
+            monkeypatch.setattr(repo, "_dialect_name", lambda: "postgresql")
+
+            async def _noop_lock(_: str) -> None:
+                return None
+
+            monkeypatch.setattr(repo, "_acquire_postgresql_merge_lock", _noop_lock)
+            monkeypatch.setattr(repo, "_acquire_postgresql_identity_lock", _noop_lock)
+
+        incoming = _make_account(account_id, email)
+        incoming.routing_policy = "normal"
+        incoming.limit_warmup_enabled = False
+        incoming.security_work_authorized = False
+        result = (await repo.persist_account_bundle([incoming], conflict_mode="replace"))[0]
+
+        assert result.restore_status == AccountStatus.RATE_LIMITED
+        assert result.restore_deactivation_reason == "concurrent-rate-limit"
+        assert result.restore_reset_at == 303
+        assert result.restore_blocked_at == 404
+        assert existing.status == AccountStatus.PAUSED
+        assert existing.deactivation_reason == BUNDLE_IMPORT_VALIDATION_PAUSE_REASON
+
+
+@pytest.mark.asyncio
+async def test_bundle_sqlite_writer_lock_refreshes_stale_destination_lifecycle(db_setup):
+    del db_setup
+    account_id = "bundle-sqlite-stale-identity-map"
+    email = "bundle-sqlite-stale-identity-map@example.invalid"
+
+    async with SessionLocal() as stale_session:
+        repo = AccountsRepository(stale_session)
+        if repo._dialect_name() != "sqlite":
+            pytest.skip("native SQLite regression")
+
+        existing = _make_account(account_id, email)
+        stale_session.add(existing)
+        await stale_session.commit()
+        assert existing.status == AccountStatus.ACTIVE
+
+        async with SessionLocal() as concurrent_session:
+            concurrent = await concurrent_session.get(Account, account_id)
+            assert concurrent is not None
+            concurrent.status = AccountStatus.RATE_LIMITED
+            concurrent.deactivation_reason = "concurrent-sqlite-rate-limit"
+            concurrent.reset_at = 505
+            concurrent.blocked_at = 606
+            await concurrent_session.commit()
+
+        assert existing.status == AccountStatus.ACTIVE
+
+        incoming = _make_account(account_id, email)
+        incoming.routing_policy = "normal"
+        incoming.limit_warmup_enabled = False
+        incoming.security_work_authorized = False
+        result = (await repo.persist_account_bundle([incoming], conflict_mode="replace"))[0]
+
+        assert result.restore_status == AccountStatus.RATE_LIMITED
+        assert result.restore_deactivation_reason == "concurrent-sqlite-rate-limit"
+        assert result.restore_reset_at == 505
+        assert result.restore_blocked_at == 606
+        assert existing.status == AccountStatus.PAUSED
+        assert existing.deactivation_reason == BUNDLE_IMPORT_VALIDATION_PAUSE_REASON
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "destination_status",
+    [AccountStatus.ACTIVE, AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED],
+)
+async def test_bundle_quarantine_refreshes_hard_sticky_outage_grace(db_setup, destination_status):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        existing = _make_account("bundle-sticky-grace", "bundle-sticky-grace@example.invalid")
+        existing.status = destination_status
+        existing.reset_at = 4_102_444_800
+        await repo.upsert(existing, merge_by_email=False)
+        long_ago = utcnow() - timedelta(days=30)
+        session.add(
+            StickySession(
+                account_id=existing.id,
+                key="bundle-sticky-grace-key",
+                kind=StickySessionKind.CODEX_SESSION,
+                updated_at=long_ago,
+            )
+        )
+        await session.commit()
+
+        incoming = _make_account(existing.id, existing.email)
+        incoming.routing_policy = "normal"
+        incoming.limit_warmup_enabled = False
+        incoming.security_work_authorized = False
+        await repo.persist_account_bundle([incoming], conflict_mode="replace")
+
+        stored = await session.get(Account, existing.id)
+        sticky = await session.get(
+            StickySession,
+            {"key": "bundle-sticky-grace-key", "kind": StickySessionKind.CODEX_SESSION},
+        )
+        assert stored is not None
+        assert stored.status == AccountStatus.PAUSED
+        assert stored.reset_at is None
+        assert sticky is not None
+        assert sticky.updated_at > long_ago + timedelta(days=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("existing_workspace_id", "existing_workspace_label", "incoming_workspace_id", "incoming_workspace_label"),
+    [
+        (None, "equivalent-slot", "equivalent-slot", None),
+        ("equivalent-slot", None, None, "equivalent-slot"),
+    ],
+)
+async def test_bundle_destination_matching_treats_workspace_id_and_label_keys_as_equivalent(
+    db_setup,
+    existing_workspace_id,
+    existing_workspace_label,
+    incoming_workspace_id,
+    incoming_workspace_label,
+):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        existing = _make_account("bundle-cross-column", "bundle-cross-column@example.invalid")
+        existing.chatgpt_account_id = "bundle-cross-column-upstream"
+        existing.workspace_id = existing_workspace_id
+        existing.workspace_label = existing_workspace_label
+        await repo.upsert(existing, merge_by_email=False)
+
+        incoming = _make_account("bundle-cross-column-source", "bundle-cross-column@example.invalid")
+        incoming.chatgpt_account_id = "bundle-cross-column-upstream"
+        incoming.workspace_id = incoming_workspace_id
+        incoming.workspace_label = incoming_workspace_label
+
+        matches = await repo.account_bundle_identity_matches([incoming])
+
+        assert matches[0] is not None
+        assert matches[0].id == existing.id
+
+
+@pytest.mark.asyncio
+async def test_bundle_destination_with_workspace_id_never_falls_back_to_workspace_label(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        existing = _make_account("bundle-label-only", "bundle-label-only@example.invalid")
+        existing.chatgpt_account_id = "bundle-label-only-upstream"
+        existing.workspace_label = "Friendly Workspace"
+        await repo.upsert(existing, merge_by_email=False)
+
+        incoming = _make_account("bundle-canonical-id", existing.email)
+        incoming.chatgpt_account_id = existing.chatgpt_account_id
+        incoming.workspace_id = "canonical-workspace-id"
+        incoming.workspace_label = existing.workspace_label
+
+        matches = await repo.account_bundle_identity_matches([incoming])
+
+        assert matches == [None]
+
+
+@pytest.mark.asyncio
+async def test_bundle_destination_matching_rejects_ambiguous_equivalent_workspace_candidates(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        by_id = _make_account("bundle-ambiguous-id", "bundle-ambiguous@example.invalid")
+        by_id.chatgpt_account_id = "bundle-ambiguous-upstream"
+        by_id.workspace_id = "bundle-equivalent-key"
+        await repo.upsert(by_id, merge_by_email=False)
+        by_label = _make_account("bundle-ambiguous-label", by_id.email)
+        by_label.chatgpt_account_id = by_id.chatgpt_account_id
+        by_label.workspace_label = by_id.workspace_id
+        await repo.upsert(by_label, merge_by_email=False)
+
+        incoming = _make_account("bundle-ambiguous-source", by_id.email)
+        incoming.chatgpt_account_id = by_id.chatgpt_account_id
+        incoming.workspace_id = by_id.workspace_id
+
+        with pytest.raises(AccountIdentityConflictError):
+            await repo.account_bundle_identity_matches([incoming])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("existing_workspace_id", "existing_workspace_label", "incoming_workspace_id", "incoming_workspace_label"),
+    [
+        (None, "ordinary-slot", "ordinary-slot", None),
+        ("ordinary-slot", None, None, "ordinary-slot"),
+    ],
+)
+async def test_ordinary_account_upsert_keeps_cross_column_workspace_slots_distinct(
+    db_setup,
+    existing_workspace_id,
+    existing_workspace_label,
+    incoming_workspace_id,
+    incoming_workspace_label,
+):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        existing = _make_account("ordinary-cross-column", "ordinary-cross-column@example.invalid")
+        existing.chatgpt_account_id = "ordinary-cross-column-upstream"
+        existing.workspace_id = existing_workspace_id
+        existing.workspace_label = existing_workspace_label
+        await repo.upsert_account_slot(existing, preserve_unknown_workspace_duplicates=False)
+
+        incoming = _make_account("ordinary-cross-column-source", "ordinary-cross-column@example.invalid")
+        incoming.chatgpt_account_id = "ordinary-cross-column-upstream"
+        incoming.workspace_id = incoming_workspace_id
+        incoming.workspace_label = incoming_workspace_label
+
+        stored = await repo.upsert_account_slot(incoming, preserve_unknown_workspace_duplicates=False)
+
+        assert stored.id == incoming.id
+        accounts = list((await session.execute(select(Account))).scalars().all())
+        assert {account.id for account in accounts} == {existing.id, incoming.id}
 
 
 @pytest.mark.asyncio

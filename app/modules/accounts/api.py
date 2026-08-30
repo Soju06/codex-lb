@@ -4,6 +4,7 @@ import logging
 from typing import NoReturn
 
 from fastapi import APIRouter, Depends, Request, Response
+from pydantic import ValidationError
 
 from app.core.audit.service import AuditService
 from app.core.auth.dependencies import (
@@ -19,6 +20,7 @@ from app.core.exceptions import (
     DashboardConflictError,
     DashboardNotFoundError,
     DashboardUpstreamError,
+    DashboardValidationError,
 )
 from app.core.middleware.multipart_content_encoding import (
     mark_account_bundle_failure_audited,
@@ -114,6 +116,17 @@ _ACCOUNT_IMPORT_OPENAPI_EXTRA = {
         }
     },
 }
+_ACCOUNT_BUNDLE_EXPORT_OPENAPI_EXTRA = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": AccountBundleExportRequest.model_json_schema(by_alias=True),
+            }
+        },
+    },
+    "responses": _ACCOUNT_IMPORT_OPENAPI_EXTRA["responses"],
+}
 
 
 def _set_sensitive_response_headers(response: Response) -> None:
@@ -132,6 +145,32 @@ def _bundle_multipart_policy(*, fields: int) -> MultipartPolicy:
         max_fields=fields,
         max_text_part_bytes=4096,
     )
+
+
+def _extend_bounded_export_body(body: bytearray, chunk: bytes, *, max_bytes: int) -> None:
+    if len(body) + len(chunk) > max_bytes:
+        raise MultipartPayloadTooLarge()
+    body.extend(chunk)
+
+
+async def _read_bundle_export_request(request: Request) -> AccountBundleExportRequest:
+    max_bytes = get_settings().account_bundle_max_bytes
+    raw_content_length = request.headers.get("content-length")
+    if raw_content_length is not None:
+        try:
+            content_length = int(raw_content_length)
+        except ValueError:
+            content_length = None
+        if content_length is not None and content_length > max_bytes:
+            raise MultipartPayloadTooLarge()
+
+    body = bytearray()
+    async for chunk in request.stream():
+        _extend_bounded_export_body(body, chunk, max_bytes=max_bytes)
+    try:
+        return AccountBundleExportRequest.model_validate_json(body)
+    except ValidationError as exc:
+        raise DashboardValidationError("Invalid request payload", code="validation_error") from exc
 
 
 def _raise_bundle_error(exc: Exception) -> NoReturn:
@@ -174,13 +213,13 @@ async def list_accounts(
     return AccountsResponse(accounts=accounts)
 
 
-@router.post("/bundle/export")
+@router.post("/bundle/export", openapi_extra=_ACCOUNT_BUNDLE_EXPORT_OPENAPI_EXTRA)
 async def export_account_bundle(
     request: Request,
-    payload: AccountBundleExportRequest,
     _write_access=Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> Response:
+    payload = await _read_bundle_export_request(request)
     try:
         bundle, account_count = await context.service.export_account_bundle(
             payload.account_ids,

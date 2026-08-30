@@ -29,3 +29,14 @@
 - [x] 5.5 Normalize duplicate workspace-slot/email identities across payload, preflight, and commit.
 - [x] 5.6 Reconcile asynchronous export selection and guard dialog close/reopen races.
 - [x] 5.7 Keep duplicate validation bounded at the maximum account count and index normalized destination-email lookups on both database backends.
+
+## 6. Post-review remediation
+
+- [x] 6.1 Quarantine every potentially routable replacement durably, restore its exact prior lifecycle only after exact-credential validation, and preserve already unavailable lifecycle states.
+- [x] 6.2 Authenticate and authorize bundle export before bounded manual body parsing, and redact all post-commit validation log details.
+- [x] 6.3 Match equivalent destination `workspace_id` and `workspace_label` slot keys across columns.
+- [x] 6.4 Bind replace confirmation to one preview, present durable commit success independently of refresh, honor privacy mode in export labels, and mark bundle passphrases as non-login credentials.
+- [x] 6.5 Add focused backend/frontend regressions and rerun the full applicable verification matrix.
+- [x] 6.6 Bind restoration to the exact credential version used by successful validation, including guarded token rotation, without adopting an unrelated concurrent replacement.
+- [x] 6.7 Reject an oversized export request chunk before appending or retaining it, and preserve legacy ordinary-import matching outside the bundle path.
+- [x] 6.8 Restrict bundle validation refreshes to guarded token-only rotation, suppress metadata/status/routing writes, and keep failed credentials quarantined.

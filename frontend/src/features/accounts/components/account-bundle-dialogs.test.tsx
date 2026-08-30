@@ -2,6 +2,7 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { usePrivacyStore } from "@/hooks/use-privacy";
 import { renderWithProviders } from "@/test/utils";
 
 import { ExportAccountBundleDialog, ImportAccountBundleDialog } from "./account-bundle-dialogs";
@@ -45,6 +46,7 @@ describe("account bundle dialogs", () => {
     preflightBundle.mockReset();
     commitBundle.mockReset();
     exportBundle.mockResolvedValue(new Blob(["opaque"]));
+    usePrivacyStore.setState({ blurred: false });
     vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:test");
     vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
@@ -107,6 +109,20 @@ describe("account bundle dialogs", () => {
     expect(screen.queryByRole("checkbox", { name: /Second account/ })).not.toBeInTheDocument();
   });
 
+  it("honors privacy mode for email-derived export labels", () => {
+    usePrivacyStore.setState({ blurred: true });
+    renderWithProviders(
+      <ExportAccountBundleDialog
+        open
+        accounts={[{ ...accounts[0], displayName: accounts[0].email }, accounts[1]]}
+        onOpenChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("first@example.com")).toHaveClass("privacy-blur");
+    expect(screen.getByText("Second account")).not.toHaveClass("privacy-blur");
+  });
+
   it("shows only masked preflight data and requires replace confirmation", async () => {
     const user = userEvent.setup();
     const onCommitted = vi.fn().mockResolvedValue(undefined);
@@ -138,6 +154,7 @@ describe("account bundle dialogs", () => {
       <ImportAccountBundleDialog open onOpenChange={vi.fn()} onCommitted={onCommitted} />,
     );
 
+    expect(screen.getByLabelText("Passphrase")).toHaveAttribute("autocomplete", "new-password");
     const file = new File(["opaque-bundle"], "accounts.clb-account-bundle");
     await user.upload(screen.getByLabelText("Encrypted account bundle"), file);
     await user.type(screen.getByLabelText("Passphrase"), "bundle-passphrase");
@@ -191,6 +208,87 @@ describe("account bundle dialogs", () => {
     expect(screen.getByLabelText("Passphrase")).toHaveValue("");
     expect(screen.getByRole("button", { name: "Review bundle" })).toBeDisabled();
     expect(preflightBundle).toHaveBeenCalledOnce();
+  });
+
+  it("requires replacement confirmation again after returning to choose another bundle", async () => {
+    const user = userEvent.setup();
+    preflightBundle
+      .mockResolvedValueOnce({
+        integrityToken: "digest-a",
+        accountCount: 1,
+        newCount: 0,
+        matchingCount: 1,
+        accounts: [],
+      })
+      .mockResolvedValueOnce({
+        integrityToken: "digest-b",
+        accountCount: 1,
+        newCount: 0,
+        matchingCount: 1,
+        accounts: [],
+      });
+    renderWithProviders(
+      <ImportAccountBundleDialog open onOpenChange={vi.fn()} onCommitted={vi.fn()} />,
+    );
+
+    await user.upload(
+      screen.getByLabelText("Encrypted account bundle"),
+      new File(["bundle-a"], "a.clb-account-bundle"),
+    );
+    await user.type(screen.getByLabelText("Passphrase"), "bundle-passphrase");
+    await user.click(screen.getByRole("button", { name: "Review bundle" }));
+    await user.click(await screen.findByRole("radio", { name: "Replace matching accounts" }));
+    await user.click(screen.getByText(/I understand that matching destination/));
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await user.upload(
+      screen.getByLabelText("Encrypted account bundle"),
+      new File(["bundle-b"], "b.clb-account-bundle"),
+    );
+    await user.type(screen.getByLabelText("Passphrase"), "bundle-passphrase");
+    await user.click(screen.getByRole("button", { name: "Review bundle" }));
+
+    expect(await screen.findByRole("radio", { name: "Skip matching accounts" })).toBeChecked();
+    expect(screen.queryByText(/I understand that matching destination/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: "Replace matching accounts" }));
+    expect(screen.getByRole("button", { name: "Import bundle" })).toBeDisabled();
+  });
+
+  it("shows a successful commit even when the account refresh fails", async () => {
+    const user = userEvent.setup();
+    const onCommitted = vi.fn().mockRejectedValue(new Error("refresh failed"));
+    preflightBundle.mockResolvedValue({
+      integrityToken: "digest",
+      accountCount: 1,
+      newCount: 1,
+      matchingCount: 0,
+      accounts: [],
+    });
+    commitBundle.mockResolvedValue({
+      summary: { imported: 1, replaced: 0, skipped: 0, failed: 0 },
+      results: [{ index: 0, outcome: "imported", destinationAccountId: "account-1", warning: null }],
+      warnings: [],
+    });
+    renderWithProviders(
+      <ImportAccountBundleDialog open onOpenChange={vi.fn()} onCommitted={onCommitted} />,
+    );
+
+    await user.upload(
+      screen.getByLabelText("Encrypted account bundle"),
+      new File(["opaque-bundle"], "accounts.clb-account-bundle"),
+    );
+    await user.type(screen.getByLabelText("Passphrase"), "bundle-passphrase");
+    await user.click(screen.getByRole("button", { name: "Review bundle" }));
+    await user.click(await screen.findByRole("button", { name: "Import bundle" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Imported 1, replaced 0, skipped 0, failed 0.",
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Import bundle" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Passphrase")).not.toBeInTheDocument();
+    expect(commitBundle).toHaveBeenCalledOnce();
+    expect(onCommitted).toHaveBeenCalledOnce();
   });
 
   it("ignores an export completion after close and reopen", async () => {

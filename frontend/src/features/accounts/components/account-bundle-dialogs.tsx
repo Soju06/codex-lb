@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { isEmailLabel } from "@/components/blur-email";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -23,6 +24,7 @@ import type {
   AccountBundlePreflightResponse,
   AccountSummary,
 } from "@/features/accounts/schemas";
+import { usePrivacyStore } from "@/hooks/use-privacy";
 
 type ExportAccountBundleDialogProps = {
   open: boolean;
@@ -32,6 +34,7 @@ type ExportAccountBundleDialogProps = {
 
 export function ExportAccountBundleDialog({ open, accounts, onOpenChange }: ExportAccountBundleDialogProps) {
   const { t } = useTranslation();
+  const blurred = usePrivacyStore((state) => state.blurred);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set(accounts.map((account) => account.accountId)));
   const [passphrase, setPassphrase] = useState("");
   const [confirmation, setConfirmation] = useState("");
@@ -132,14 +135,16 @@ export function ExportAccountBundleDialog({ open, accounts, onOpenChange }: Expo
                 <label key={account.accountId} className="flex cursor-pointer items-center gap-2 rounded p-1.5 text-sm hover:bg-muted/50">
                   <Checkbox
                     checked={selectedIds.has(account.accountId)}
-                    onCheckedChange={(checked) => setSelectedIds((current) => {
+                    onCheckedChange={(checked) => {
                       selectionEdited.current = true;
-                      const next = new Set(current);
-                      if (checked === true) next.add(account.accountId); else next.delete(account.accountId);
-                      return next;
-                    })}
+                      setSelectedIds((current) => {
+                        const next = new Set(current);
+                        if (checked === true) next.add(account.accountId); else next.delete(account.accountId);
+                        return next;
+                      });
+                    }}
                   />
-                  <span className="min-w-0 truncate">{account.displayName}</span>
+                  <span className={`min-w-0 truncate${blurred && isEmailLabel(account.displayName, account.email) ? " privacy-blur" : ""}`}>{account.displayName}</span>
                 </label>
               ))}
               {accounts.length === 0 ? <p className="p-2 text-xs text-muted-foreground">{t("accounts.bundle.zeroAccounts")}</p> : null}
@@ -221,6 +226,8 @@ export function ImportAccountBundleDialog({ open, onOpenChange, onCommitted }: I
     const generation = ++operationGeneration.current;
     setBusy(true);
     setError(null);
+    setConflictMode("skip");
+    setConfirmReplace(false);
     try {
       const preview = await preflightAccountBundle(file, passphrase);
       if (generation === operationGeneration.current) setPreflight(preview);
@@ -245,10 +252,16 @@ export function ImportAccountBundleDialog({ open, onOpenChange, onCommitted }: I
         conflictMode,
         confirmReplace,
       });
-      await onCommitted();
-      if (generation !== operationGeneration.current) return;
-      setResult(committed);
-      setPassphrase("");
+      if (generation === operationGeneration.current) {
+        setResult(committed);
+        setPassphrase("");
+      }
+      try {
+        await onCommitted();
+      } catch {
+        // The bundle is already committed. A failed refresh must not present
+        // the durable import as failed or leave the commit action retryable.
+      }
     } catch (caught) {
       if (generation === operationGeneration.current) {
         setError(caught instanceof Error ? caught.message : t("accounts.bundle.error"));
@@ -267,7 +280,9 @@ export function ImportAccountBundleDialog({ open, onOpenChange, onCommitted }: I
         </DialogHeader>
         {result ? (
           <div className="space-y-4">
-            <p className="text-sm">{t("accounts.bundle.resultSummary", result.summary)}</p>
+            <output aria-live="polite" className="block text-sm">
+              {t("accounts.bundle.resultSummary", result.summary)}
+            </output>
             {result.warnings.map((warning) => <p key={warning} className="text-xs text-amber-600">{warning}</p>)}
             <DialogFooter><Button type="button" onClick={() => handleOpenChange(false)}>{t("common.actions.close")}</Button></DialogFooter>
           </div>
@@ -292,14 +307,14 @@ export function ImportAccountBundleDialog({ open, onOpenChange, onCommitted }: I
             ) : null}
             {error ? <p role="alert" className="text-xs text-destructive">{error}</p> : null}
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => { setFile(null); setPassphrase(""); setPreflight(null); setError(null); }}>{t("accounts.bundle.back")}</Button>
+              <Button type="button" variant="outline" onClick={() => { setFile(null); setPassphrase(""); setPreflight(null); setConflictMode("skip"); setConfirmReplace(false); setError(null); }}>{t("accounts.bundle.back")}</Button>
               <Button type="button" disabled={busy || (conflictMode === "replace" && !confirmReplace)} onClick={() => void runCommit()}>{busy ? t("accounts.bundle.importing") : t("accounts.bundle.importAction")}</Button>
             </DialogFooter>
           </div>
         ) : (
           <form className="space-y-4" onSubmit={runPreflight}>
             <div className="space-y-2"><Label htmlFor="bundle-import-file">{t("accounts.bundle.file")}</Label><Input id="bundle-import-file" type="file" accept=".clb-account-bundle,application/vnd.codex-lb.account-bundle" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></div>
-            <div className="space-y-2"><Label htmlFor="bundle-import-passphrase">{t("accounts.bundle.passphrase")}</Label><Input id="bundle-import-passphrase" type="password" autoComplete="current-password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} /></div>
+            <div className="space-y-2"><Label htmlFor="bundle-import-passphrase">{t("accounts.bundle.passphrase")}</Label><Input id="bundle-import-passphrase" type="password" autoComplete="new-password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} /></div>
             {error ? <p role="alert" className="text-xs text-destructive">{error}</p> : null}
             <DialogFooter><Button type="submit" disabled={busy || !file || !passphrase}>{busy ? t("accounts.bundle.preflighting") : t("accounts.bundle.preflightAction")}</Button></DialogFooter>
           </form>

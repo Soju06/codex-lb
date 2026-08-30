@@ -254,6 +254,21 @@ def test_helm_codex_prewarm_defaults_off_like_settings() -> None:
     ) in configmap
 
 
+def test_helm_default_disables_global_backpressure_and_honors_override() -> None:
+    default_rendered = _helm_template("--show-only", "templates/configmap.yaml")
+    override_rendered = _helm_template(
+        "--set",
+        "config.backpressureMaxConcurrentRequests=37",
+        "--show-only",
+        "templates/configmap.yaml",
+    )
+    (default_configmap,) = _helm_documents(default_rendered)
+    (override_configmap,) = _helm_documents(override_rendered)
+
+    assert default_configmap["data"]["CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS"] == "0"
+    assert override_configmap["data"]["CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS"] == "37"
+
+
 def test_helm_pool_budget_values_flow_to_runtime_and_hpa_templates() -> None:
     configmap = (_CHART_DIR / "templates" / "configmap.yaml").read_text()
     deployment = (_CHART_DIR / "templates" / "deployment.yaml").read_text()

@@ -28,6 +28,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import detach_session_objects
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy._service.streaming.retry import _await_task_deferring_cancellation
 from app.modules.proxy._service.support import _request_log_client_fields
 from app.modules.proxy.helpers import _header_account_id
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
@@ -487,7 +488,10 @@ class _RealtimeLiveMixin:
         account = selection.account
         account_lease: AccountLease | None = selection.lease
         if account is None or account.id != owner_account_id:
-            await proxy._load_balancer.release_account_lease(account_lease)
+            release_task = asyncio.create_task(proxy._load_balancer.release_account_lease(account_lease))
+            _, release_cancellation = await _await_task_deferring_cancellation(release_task)
+            if release_cancellation is not None:
+                raise release_cancellation
             raise ProxyResponseError(
                 503,
                 openai_error(
@@ -502,6 +506,7 @@ class _RealtimeLiveMixin:
         log_status = "error"
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         route: ResolvedUpstreamRoute | None = None
+        release_cancellation: asyncio.CancelledError | None = None
         try:
             # Account-selection inputs are intentionally cached for routing, but
             # live sideband attachment is a credential-use boundary. A forced
@@ -610,7 +615,8 @@ class _RealtimeLiveMixin:
                         logger.warning("Failed to close realtime live upstream websocket")
                         log_status = "error"
             finally:
-                await proxy._load_balancer.release_account_lease(account_lease)
+                release_task = asyncio.create_task(proxy._load_balancer.release_account_lease(account_lease))
+                _, release_cancellation = await _await_task_deferring_cancellation(release_task)
             try:
                 await proxy._write_request_log(
                     account_id=None,
@@ -635,3 +641,5 @@ class _RealtimeLiveMixin:
                 )
             except Exception:
                 logger.exception("Failed to write realtime live websocket request log")
+            if release_cancellation is not None:
+                raise release_cancellation

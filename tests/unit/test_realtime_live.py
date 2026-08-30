@@ -800,6 +800,15 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease()
             raise AssertionError("unreachable")
 
     lease = cast(AccountLease, object())
+    release_started = asyncio.Event()
+    finish_release = asyncio.Event()
+
+    class ContendedLoadBalancer(_FakeLoadBalancer):
+        async def release_account_lease(self, lease) -> None:
+            release_started.set()
+            await finish_release.wait()
+            self.released.append(lease)
+
     account = SimpleNamespace(
         id="account-a",
         status=AccountStatus.ACTIVE,
@@ -814,6 +823,7 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease()
         return upstream
 
     service = _ProxyService(account, lease, live_websocket_connector=fake_connect_live_websocket)
+    service._load_balancer = ContendedLoadBalancer()
     task = asyncio.create_task(
         service.proxy_realtime_live_websocket(
             cast(Any, downstream),
@@ -825,9 +835,12 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease()
     )
     await asyncio.wait_for(downstream.accepted_event.wait(), timeout=1)
     task.cancel()
+    await asyncio.wait_for(release_started.wait(), timeout=1)
+    task.cancel()
+    finish_release.set()
 
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.wait_for(task, timeout=1)
 
     assert downstream.close_codes == [1011]
     assert upstream.close_calls == [(1000, "")]

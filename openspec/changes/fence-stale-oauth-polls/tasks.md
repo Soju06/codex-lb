@@ -9,6 +9,7 @@
 - [x] 2.1 Add a monotonic generation incremented by `reset` and `start`
 - [x] 2.2 Capture flow ID and completion credentials before poll awaits, and ignore the result when generation or flow identity no longer match after the status await and after the completion await
 - [x] 2.3 Keep current-flow success, error, and pending poll behavior unchanged
+- [x] 2.4 Ignore stale `startOauth` success and error continuations after reset/restart
 
 ## 3. Verify
 

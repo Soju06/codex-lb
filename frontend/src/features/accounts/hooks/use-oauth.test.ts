@@ -46,15 +46,18 @@ function renderUseOauth(queryClient = createTestQueryClient()) {
 function createDeferred<T>(): {
   readonly promise: Promise<T>;
   readonly resolve: (value: T) => void;
+  readonly reject: (reason?: unknown) => void;
 } {
   let resolve: ((value: T) => void) | undefined;
-  const promise = new Promise<T>((res) => {
+  let reject: ((reason?: unknown) => void) | undefined;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  if (resolve === undefined) {
+  if (resolve === undefined || reject === undefined) {
     throw new Error("deferred executor did not run");
   }
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function browserOauthStart(flowId: string) {
@@ -565,6 +568,83 @@ describe("useOauth", () => {
     });
 
     expect(completeOauthMock).not.toHaveBeenCalled();
+    expect(result.current.state.flowId).toBe("flow-b");
+    expect(result.current.state.status).toBe("pending");
+    expect(result.current.state.errorMessage).toBeNull();
+  });
+
+  it("does not apply a stale start success onto flow B after restart", async () => {
+    const startA = createDeferred<ReturnType<typeof browserOauthStart>>();
+    startOauthMock
+      .mockImplementationOnce(() => startA.promise)
+      .mockResolvedValueOnce(browserOauthStart("flow-b"));
+
+    const { result } = renderUseOauth();
+
+    let pendingStartA: Promise<unknown> | undefined;
+    act(() => {
+      pendingStartA = result.current.start("browser");
+    });
+    if (pendingStartA === undefined) {
+      throw new Error("start A did not begin");
+    }
+    expect(result.current.state.status).toBe("starting");
+
+    await act(async () => {
+      result.current.reset();
+      await result.current.start("browser");
+    });
+    expect(result.current.state.flowId).toBe("flow-b");
+    expect(result.current.state.status).toBe("pending");
+
+    const startedA = pendingStartA;
+    await act(async () => {
+      startA.resolve(browserOauthStart("flow-a"));
+      await startedA;
+    });
+
+    expect(result.current.state.flowId).toBe("flow-b");
+    expect(result.current.state.status).toBe("pending");
+    expect(result.current.state.authorizationUrl).toBe(
+      "https://auth.example.com/authorize?flow=flow-b",
+    );
+    expect(result.current.state.errorMessage).toBeNull();
+  });
+
+  it("does not apply a stale start error onto flow B after restart", async () => {
+    const startA = createDeferred<ReturnType<typeof browserOauthStart>>();
+    startOauthMock
+      .mockImplementationOnce(() => startA.promise)
+      .mockResolvedValueOnce(browserOauthStart("flow-b"));
+
+    const { result } = renderUseOauth();
+
+    let pendingStartA: Promise<unknown> | undefined;
+    act(() => {
+      pendingStartA = result.current.start("browser");
+    });
+    if (pendingStartA === undefined) {
+      throw new Error("start A did not begin");
+    }
+
+    await act(async () => {
+      result.current.reset();
+      await result.current.start("browser");
+    });
+    expect(result.current.state.flowId).toBe("flow-b");
+    expect(result.current.state.status).toBe("pending");
+
+    const startedA = pendingStartA;
+    let startAError: unknown;
+    await act(async () => {
+      startA.reject(new Error("stale start failed"));
+      startAError = await startedA.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    });
+    expect(startAError).toBeInstanceOf(Error);
+
     expect(result.current.state.flowId).toBe("flow-b");
     expect(result.current.state.status).toBe("pending");
     expect(result.current.state.errorMessage).toBeNull();

@@ -166,12 +166,16 @@ export function useOauth() {
 
   const start = useCallback(async (forceMethod?: "browser" | "device", accountId?: string) => {
     generationRef.current += 1;
+    const generation = generationRef.current;
     clearPollTimer();
     clearCountdownTimer();
     setOauthState((prev) => ({ ...prev, status: "starting", errorMessage: null }));
 
     try {
       const response = await startOauth({ forceMethod, accountId });
+      if (generationRef.current !== generation) {
+        return stateRef.current;
+      }
       const method = response.method === "device" ? "device" : "browser";
       const nextState = OAuthStateSchema.parse({
         flowId: response.flowId ?? null,
@@ -206,6 +210,9 @@ export function useOauth() {
 
       return nextState;
     } catch (error) {
+      if (generationRef.current !== generation) {
+        throw error;
+      }
       const message = error instanceof Error ? error.message : "Failed to start OAuth";
       clearPollTimer();
       clearCountdownTimer();

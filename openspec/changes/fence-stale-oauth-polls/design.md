@@ -33,6 +33,8 @@ Keep a monotonic generation counter on the hook instance. `reset()` and `start()
 
 After the status await and after the completion await, `poll()` continues only when the generation is unchanged and the captured flow ID still matches the live flow. Otherwise it returns without `completeOauth`, without `setOauthState`, and without cache invalidation.
 
+`start()` uses the same generation: it increments before `startOauth`, then applies the new flow only if that generation is still current after the await (and skips error-state writes in `catch` when it is not). Closing or restarting while start is in flight is the UI path that needs this latch.
+
 Aborting the HTTP request is optional later; a late response must still be ignored even if abort is unavailable.
 
 ### Capture credentials before awaits
@@ -47,7 +49,7 @@ Generation covers reset-to-idle and restart-to-a-new-flow. The flow-ID check is 
 
 - **Compare flow ID only:** reset-to-idle then a later start can reuse timing windows; generation is the reset latch.
 - **React Query / AbortController as the only fence:** still need an apply-side generation check for responses that complete after abort.
-- **Fence `complete` and `manualCallback` in the same change:** those paths are not the reported poll race; leave them unless a second failing test appears.
+- **Fence `complete` and `manualCallback` in the same change:** those paths are not the reported poll race; leave them unless a second failing test appears. `start` is fenced because its await has the same generation-mixing shape as poll.
 
 ## Risks / Trade-offs
 

@@ -10,6 +10,6 @@ or explicitly settle the release before propagating the cancellation.
 
 - **GIVEN** a Live handler owns an account stream lease
 - **AND** release of that lease has started but is suspended
-- **WHEN** the handler receives caller cancellation
+- **WHEN** caller cancellation is delivered repeatedly while release remains suspended
 - **THEN** the release completes exactly once
 - **AND** the account slot is returned before cancellation propagates

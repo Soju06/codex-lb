@@ -5,18 +5,18 @@
 
 ## 2. Regression
 
-- [ ] 2.1 Add exact-format coverage for service creation and regeneration.
-- [ ] 2.2 Add exact-format coverage through the API create/regenerate path.
-- [ ] 2.3 Capture the focused tests failing against the current generator.
+- [x] 2.1 Add exact-format coverage for service creation and regeneration.
+- [x] 2.2 Add exact-format coverage through the API create/regenerate path.
+- [x] 2.3 Capture the focused tests failing against the current generator.
 
 ## 3. Implementation
 
-- [ ] 3.1 Generate new API keys with `secrets.token_hex(24)`.
-- [ ] 3.2 Preserve hash validation and existing-key compatibility unchanged.
+- [x] 3.1 Generate new API keys with `secrets.token_hex(24)`.
+- [x] 3.2 Preserve hash validation and existing-key compatibility unchanged.
 
 ## 4. Verification
 
-- [ ] 4.1 Run focused API-key unit and integration tests.
+- [x] 4.1 Run focused API-key unit and integration tests.
 - [ ] 4.2 Exercise create, list, and regenerate through a live local HTTP API.
 - [ ] 4.3 Run changed-file format, lint, type, and strict OpenSpec checks.
 - [ ] 4.4 Run the repository risk-based local CI gate.

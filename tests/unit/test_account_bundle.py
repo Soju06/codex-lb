@@ -46,6 +46,7 @@ from app.modules.accounts.service import (
     AccountsService,
     InvalidAuthJsonError,
 )
+from app.modules.usage import updater as usage_updater_module
 from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.updater import AccountRefreshResult, UsageUpdater, _BundleValidationAuthRepository
 
@@ -1207,50 +1208,50 @@ async def test_post_import_validation_timeout_keeps_proxy_account_quarantined(mo
 
 
 @pytest.mark.asyncio
-async def test_post_import_validation_gives_every_account_a_bounded_attempt(monkeypatch) -> None:
+async def test_post_import_validation_timeout_does_not_detach_unbounded_refreshes(monkeypatch) -> None:
+    account_ids = ("slow-account", "waiting-account", "remaining-account")
     accounts = {
         account_id: SimpleNamespace(
             id=account_id,
+            chatgpt_account_id=account_id,
             status=AccountStatus.PAUSED,
             refresh_token_encrypted=f"token-{account_id}".encode(),
         )
-        for account_id in ("slow-account", "remaining-account")
+        for account_id in account_ids
     }
     validation_repo = SimpleNamespace(get_by_id=AsyncMock(side_effect=lambda account_id: accounts[account_id]))
     service = AccountsService(repo=cast(AccountsRepository, SimpleNamespace()))
     service._bundle_validation_repo = cast(BackgroundAccountsRepository, validation_repo)
     service._background_import_usage_refresh_allowed = AsyncMock(return_value=True)
 
-    async def never_finishes(*_args, **_kwargs):
+    refreshes_started: list[str] = []
+
+    async def never_finishes(account, **_kwargs):
+        refreshes_started.append(account.id)
         await asyncio.Event().wait()
 
-    refresh = AsyncMock(side_effect=never_finishes)
-    service._bundle_validation_usage_updater = cast(
-        UsageUpdater,
-        SimpleNamespace(force_refresh_result=refresh),
-    )
+    monkeypatch.setattr(service._bundle_validation_usage_updater, "_refresh_account", never_finishes)
     unavailable: list[str] = []
-    monkeypatch.setattr(accounts_service_module, "BUNDLE_VALIDATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(accounts_service_module, "BUNDLE_VALIDATION_TIMEOUT_SECONDS", 0.03)
     monkeypatch.setattr(accounts_service_module, "mark_account_routing_unavailable", unavailable.append)
 
-    warnings = await service._validate_imported_bundle_accounts(
-        [
-            BundlePersistenceResult(
-                account_id="slow-account",
-                outcome="imported",
-                restore_status=AccountStatus.ACTIVE,
-            ),
-            BundlePersistenceResult(
-                account_id="remaining-account",
-                outcome="imported",
-                restore_status=AccountStatus.ACTIVE,
-            ),
-        ]
-    )
+    await usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.cancel_all()
+    try:
+        warnings = await service._validate_imported_bundle_accounts(
+            [
+                BundlePersistenceResult(
+                    account_id=account_id,
+                    outcome="imported",
+                    restore_status=AccountStatus.ACTIVE,
+                )
+                for account_id in account_ids
+            ]
+        )
 
-    assert warnings == {
-        "slow-account": BUNDLE_VALIDATION_WARNING,
-        "remaining-account": BUNDLE_VALIDATION_WARNING,
-    }
-    assert unavailable == ["slow-account", "remaining-account"]
-    assert refresh.await_count == 2
+        assert warnings == {account_id: BUNDLE_VALIDATION_WARNING for account_id in account_ids}
+        assert unavailable == list(account_ids)
+        assert refreshes_started == ["slow-account"]
+        assert list(usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight) == ["slow-account"]
+    finally:
+        await usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.cancel_all()
+        await asyncio.sleep(0)

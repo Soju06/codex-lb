@@ -37,6 +37,7 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.upstream_proxy.resolver import _is_missing_upstream_proxy_schema
 from app.core.usage.models import UsagePayload
+from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import get_background_session
@@ -121,6 +122,13 @@ IMPORT_PROXY_REQUIRED_PAUSE_REASON = "upstream_proxy_required_on_import"
 BUNDLE_VALIDATION_WARNING = "Account validation could not be completed."
 BUNDLE_VALIDATION_AGGREGATE_WARNING = "Some imported accounts could not be validated."
 BUNDLE_VALIDATION_TIMEOUT_SECONDS = 45.0
+
+
+def _consume_bundle_validation_task_result(
+    task: asyncio.Task[tuple[Account | None, bool, bool]],
+) -> None:
+    if not task.cancelled():
+        task.exception()
 
 
 class InvalidAuthJsonError(Exception):
@@ -702,23 +710,41 @@ class AccountsService:
             return warnings
 
         # Share the fixed batch budget evenly so one slow account cannot
-        # prevent a later account from receiving its own bounded attempt.
+        # consume the bounded opportunity reserved for every later account.
         account_timeout = BUNDLE_VALIDATION_TIMEOUT_SECONDS / len(validation_results)
         loop = asyncio.get_running_loop()
+        pending_validation: asyncio.Task[tuple[Account | None, bool, bool]] | None = None
         for result in validation_results:
             deadline = loop.time() + account_timeout
             account: Account | None = None
             validation_succeeded = False
             proxy_pause_required = False
+
+            # Singleflight work intentionally outlives a cancelled waiter.
+            # Retain the sequential slot until that work actually finishes.
+            if pending_validation is not None:
+                remaining = deadline - loop.time()
+                if remaining > 0:
+                    try:
+                        await wait_on_shared_future(pending_validation, timeout=remaining)
+                    except Exception:
+                        pass
+                if pending_validation.done():
+                    pending_validation = None
+
             remaining = deadline - loop.time()
-            if remaining > 0:
+            if pending_validation is None and remaining > 0:
+                pending_validation = asyncio.create_task(self._validate_imported_bundle_account(result))
+                pending_validation.add_done_callback(_consume_bundle_validation_task_result)
                 try:
-                    account, validation_succeeded, proxy_pause_required = await asyncio.wait_for(
-                        self._validate_imported_bundle_account(result),
+                    account, validation_succeeded, proxy_pause_required = await wait_on_shared_future(
+                        pending_validation,
                         timeout=remaining,
                     )
                 except Exception:
                     validation_succeeded = False
+                if pending_validation.done():
+                    pending_validation = None
 
             if proxy_pause_required and account is not None and result.restore_status == AccountStatus.ACTIVE:
                 remaining = deadline - loop.time()

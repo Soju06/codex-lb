@@ -471,9 +471,11 @@ async def test_v1_audio_transcriptions_forwards_prompt(async_client, monkeypatch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_phase", ["forward", "release"])
 async def test_subscription_transcription_cancellation_releases_reservation(
     async_client,
     monkeypatch: pytest.MonkeyPatch,
+    cancel_phase: str,
 ) -> None:
     await _enable_api_key_auth(async_client)
     await _import_account(async_client, "acc_transcribe_cancel", "cancel-transcribe@example.com")
@@ -492,6 +494,7 @@ async def test_subscription_transcription_cancellation_releases_reservation(
 
     forward_started = asyncio.Event()
     allow_upstream_finish = asyncio.Event()
+    allow_release_finish = asyncio.Event()
 
     async def transcribe(
         self,
@@ -503,9 +506,9 @@ async def test_subscription_transcription_cancellation_releases_reservation(
         headers,
         api_key=None,
     ):
-        del self, audio_bytes, filename, content_type, prompt, headers, api_key
         forward_started.set()
-        await allow_upstream_finish.wait()
+        if cancel_phase == "forward":
+            await allow_upstream_finish.wait()
         return {"text": "cancelled transcription"}
 
     monkeypatch.setattr(proxy_module.ProxyService, "transcribe", transcribe)
@@ -519,7 +522,10 @@ async def test_subscription_transcription_cancellation_releases_reservation(
         nonlocal release_calls
         release_calls += 1
         release_started.set()
-        await asyncio.sleep(0)
+        if cancel_phase == "release":
+            await allow_release_finish.wait()
+        else:
+            await asyncio.sleep(0)
         await original_release(reservation)
         release_finished.set()
 
@@ -533,15 +539,19 @@ async def test_subscription_transcription_cancellation_releases_reservation(
             files={"file": ("sample.wav", b"\x01\x02", "audio/wav")},
         )
     )
-    await asyncio.wait_for(forward_started.wait(), timeout=1)
+    if cancel_phase == "forward":
+        await asyncio.wait_for(forward_started.wait(), timeout=1)
+    else:
+        await asyncio.wait_for(release_started.wait(), timeout=1)
 
     request_task.cancel()
+    allow_release_finish.set()
     try:
         with pytest.raises(asyncio.CancelledError):
             await request_task
     finally:
         allow_upstream_finish.set()
-
+        allow_release_finish.set()
     assert release_started.is_set()
     assert release_finished.is_set()
     assert release_calls == 1

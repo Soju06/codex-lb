@@ -6783,6 +6783,26 @@ async def _transcribe_request(
     )
     rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(context, api_key, reservation)
     cancellation_handled = False
+
+    async def release_reservation() -> bool:
+        async def attempt_release() -> BaseException | None:
+            try:
+                await _release_reservation(reservation)
+            except BaseException as exc:
+                return exc
+            return None
+
+        release_exc, cancellation_deferred = await _await_result_deferring_cancellation(attempt_release())
+        if release_exc is not None:
+            if not cancellation_deferred:
+                raise release_exc
+            logger.warning(
+                "Failed to release subscription transcription reservation after request cancellation model=%s",
+                _TRANSCRIPTION_MODEL,
+                exc_info=release_exc,
+            )
+        return cancellation_deferred
+
     try:
         result = await context.service.transcribe(
             audio_bytes=multipart.audio_bytes,
@@ -6816,8 +6836,8 @@ async def _transcribe_request(
             headers=rate_limit_headers,
         )
     finally:
-        if not cancellation_handled:
-            await _release_reservation(reservation)
+        if not cancellation_handled and await release_reservation():
+            raise asyncio.CancelledError
     return JSONResponse(content=result, headers=rate_limit_headers)
 
 

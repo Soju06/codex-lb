@@ -445,8 +445,31 @@ settles onto the tombstone again — never onto a plain reset — since its
 registration can equally fail or never run. The tombstone MUST outlive the
 circuit-state TTL: neither the load-path stale purge nor the on-demand
 fenced purge may take it, and the scheduled purge reaps it only past the
-bridge-retention cutoff its caller supplies, because the continuity it
-guards lives for the bridge retention window, not the circuit TTL. A
+bridge-retention cutoff its caller supplies AND only when no durable
+session — resolved by the key directly or through an alias — still
+stores continuity for it: a crash between a poison settle and its
+registration leaves a live session whose lease delta-only requests keep
+refreshing while the tombstone's own epoch stays fixed, and an age-only
+reap would hand the next request the poisoned anchor the tombstone
+fences. The continuity it guards lives for the session, not the circuit
+TTL. A consult that authorizes a local episode from a durable poison row
+MUST adopt that row's epoch, admission generation, and higher count onto
+the episode unconditionally — an unpersisted local write and a
+cross-replica strike that moved the row alike leave a stale local fence
+that both settlement attempts would reject, standing the removed
+anchor's cooldown. A promote or erase whose fenced rewrite misses MUST
+reconcile on the row's own values — strike merges keep the tombstone
+sticky, so a miss means the count moved, not that the tombstone was
+replaced: a zeroed row erases plain, a positive count promotes to the
+superseded sentinel, and a second miss defers to the next completion.
+The merged-opening quarantine arm MUST use the effective anchor-poison
+threshold, so a configured threshold of one arms from an adopted
+one-failure poison row even when the local strike was clean. The poison
+classification carries its OWN deadline: only a poison arm may extend
+it, a weaker arm extends only the shared session fence, and the
+anchor-is-dead answer expires on the poison deadline even while weaker
+evidence keeps the session fenced — an expired classification also stops
+outranking a weaker arm's reason. A
 pre-settle capture can be blind — the completion's durable read failed —
 while the settle's own load adopts an at-threshold poison row the capture
 never saw. The settle MUST derive its reset detail from the state it

@@ -1379,31 +1379,7 @@ async def _abandon_durable_http_bridge_continuity(
         except Exception:
             reconcile_continuity = None
         if _continuity_is_fresh(reconcile_continuity):
-            try:
-                settled_row = await service._durable_bridge.lookup_retry_circuit(
-                    session_key_kind=session.key.affinity_kind,
-                    session_key_value=session.key.affinity_key,
-                    api_key_id=session.key.api_key_id,
-                )
-                if (
-                    settled_row is not None
-                    and settled_row.consecutive_failures == 0
-                    and settled_row.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
-                ):
-                    await service._durable_bridge.supersede_retry_circuit_detail(
-                        session_key_kind=session.key.affinity_kind,
-                        session_key_value=session.key.affinity_key,
-                        api_key_id=session.key.api_key_id,
-                        expected_updated_at_epoch=settled_row.updated_at_epoch,
-                        expected_consecutive_failures=0,
-                        expected_last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
-                        last_detail=None,
-                    )
-            except Exception:
-                logger.debug(
-                    "Failed to reconcile abandonment tombstone against fresh continuity",
-                    exc_info=True,
-                )
+            await service._http_bridge_reconcile_transitional_tombstone(session)
     return True
 
 
@@ -3668,39 +3644,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 await self._http_bridge_promote_transitional_supersession(session, anchor_advance_supersession)
             if alias_registered and not completion_circuit_settlement_failed and completion_settles_onto_tombstone:
                 # The fresh anchor committed: erase the transitional
-                # tombstone the settle left, fenced on the exact reset row.
-                # One immediate retry covers a transient durable blip — a
-                # lingering tombstone rejects the fresh anchor on every
-                # replica until the next completion heals it.
-                for erase_attempt in range(2):
-                    try:
-                        settled_row = await self._durable_bridge.lookup_retry_circuit(
-                            session_key_kind=session.key.affinity_kind,
-                            session_key_value=session.key.affinity_key,
-                            api_key_id=session.key.api_key_id,
-                        )
-                        if (
-                            settled_row is not None
-                            and settled_row.consecutive_failures == 0
-                            and settled_row.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
-                        ):
-                            await self._durable_bridge.supersede_retry_circuit_detail(
-                                session_key_kind=session.key.affinity_kind,
-                                session_key_value=session.key.affinity_key,
-                                api_key_id=session.key.api_key_id,
-                                expected_updated_at_epoch=settled_row.updated_at_epoch,
-                                expected_consecutive_failures=0,
-                                expected_last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
-                                last_detail=None,
-                            )
-                        break
-                    except Exception:
-                        if erase_attempt == 0:
-                            continue
-                        logger.debug(
-                            "Failed to erase transitional circuit tombstone after registration",
-                            exc_info=True,
-                        )
+                # tombstone the settle left, fenced on the row's own
+                # values, with one reconcile round covering both a
+                # transient durable blip and a CAS miss under a sticky
+                # concurrent strike.
+                await self._http_bridge_reconcile_transitional_tombstone(session)
             if (
                 not alias_registered
                 and not completion_circuit_settlement_failed

@@ -52,6 +52,12 @@ class _HTTPBridgeQuarantineEntry:
     # speculative poison window bump ``generation`` without touching this,
     # so a revocation can still recognize its own arm.
     poison_generation: int = 0
+    # The poison classification's OWN deadline. The shared
+    # ``quarantined_until`` keeps the session fenced under whatever
+    # evidence extended it last, but only a poison arm may extend this
+    # one: weaker arms landing near the end of a poison window must not
+    # prolong the anchor-is-dead classification indefinitely.
+    poison_quarantined_until: float = 0.0
     # A weaker fence that arrived while the poison reason was active: the
     # no-downgrade guard keeps the poison reason, and a later revocation of
     # the poison evidence downgrades to this instead of evicting the entry.
@@ -132,6 +138,7 @@ def _revoke_http_bridge_poison_quarantine(
         # let disproved poison evidence outlive its revocation.
         and entry.poison_generation == generation
     ):
+        entry.poison_quarantined_until = 0.0
         if entry.suppressed_weaker_reason is not None and entry.suppressed_weaker_until > time.monotonic():
             entry.reason = entry.suppressed_weaker_reason
             entry.quarantined_until = entry.suppressed_weaker_until
@@ -199,6 +206,9 @@ def _http_bridge_session_key_poison_quarantined(service: Any, key: _HTTPBridgeSe
         entry is not None
         and entry.quarantined_until > now
         and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+        # The classification expires on the poison arm's OWN deadline even
+        # while weaker evidence keeps the shared session fence alive.
+        and entry.poison_quarantined_until > now
     )
 
 
@@ -275,6 +285,10 @@ def _quarantine_http_bridge_session(
     if not (
         entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
         and already_quarantined
+        # An expired poison classification no longer outranks the weaker
+        # arm: the anchor-is-dead window ended on its own deadline, and
+        # the weaker evidence takes the reason normally.
+        and entry.poison_quarantined_until > now
         and reason != _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
     ):
         if (
@@ -293,6 +307,7 @@ def _quarantine_http_bridge_session(
         entry.reason = reason
         if reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
             entry.poison_generation = entry.generation
+            entry.poison_quarantined_until = max(entry.poison_quarantined_until, now + ttl_seconds)
     else:
         # The weaker fence stands on its own evidence; record it, with its
         # own expiry, so a later revocation of the poison arm can downgrade

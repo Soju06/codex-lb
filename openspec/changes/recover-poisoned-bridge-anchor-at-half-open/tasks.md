@@ -846,6 +846,26 @@
       quarantine-clear fence after the settle, so the inner-load-armed
       quarantine clears on registration
 
+- [x] 2.195 The scheduled purge reaps a tombstone only when no durable
+      session (direct or alias-resolved) still stores continuity for its
+      key, so a live session cannot outlive its fail-closed fence
+
+- [x] 2.196 The consult adopts the authorizing durable row's epoch,
+      admission generation, and higher count onto an unpersisted episode
+
+- [x] 2.197 Promote and erase CAS misses reconcile on the row's own
+      values through the shared tombstone reconcile
+
+- [x] 2.198 The merged-opening arm uses the effective poison threshold,
+      arming from an adopted one-failure row under a clean local strike
+
+- [x] 2.199 The consult adopts a moved row's fence over a positive but
+      stale local epoch, not only over an unpersisted one
+
+- [x] 2.200 The poison classification expires on its own deadline: weaker
+      arms extend only the shared session fence and cannot prolong the
+      anchor-is-dead answer
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

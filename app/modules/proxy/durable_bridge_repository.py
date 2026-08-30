@@ -3295,9 +3295,44 @@ class DurableBridgeRepository:
             )
         )
         if tombstone_cutoff_epoch is not None:
+            # A crash between a poison settle and its registration leaves a
+            # live session storing the poisoned continuity while delta-only
+            # requests keep refreshing its lease; the tombstone's own
+            # updated_at_epoch stays fixed, so an age cutoff alone would
+            # reap the fail-closed fence out from under that live session.
+            # The tombstone falls only when no session still resolves the
+            # key with continuity to protect.
+            session_continuity_exists = (
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.session_key_kind == HttpBridgeRetryCircuit.session_key_kind,
+                    HttpBridgeSessionRecord.session_key_hash == HttpBridgeRetryCircuit.session_key_hash,
+                    HttpBridgeSessionRecord.api_key_scope == HttpBridgeRetryCircuit.api_key_scope,
+                    (HttpBridgeSessionRecord.latest_response_id.is_not(None))
+                    | (HttpBridgeSessionRecord.latest_turn_state.is_not(None)),
+                )
+                .exists()
+            )
+            alias_continuity_exists = (
+                select(HttpBridgeSessionAlias.id)
+                .join(
+                    HttpBridgeSessionRecord,
+                    HttpBridgeSessionAlias.session_id == HttpBridgeSessionRecord.id,
+                )
+                .where(
+                    HttpBridgeSessionAlias.alias_kind == HttpBridgeRetryCircuit.session_key_kind,
+                    HttpBridgeSessionAlias.alias_hash == HttpBridgeRetryCircuit.session_key_hash,
+                    HttpBridgeSessionAlias.api_key_scope == HttpBridgeRetryCircuit.api_key_scope,
+                    (HttpBridgeSessionRecord.latest_response_id.is_not(None))
+                    | (HttpBridgeSessionRecord.latest_turn_state.is_not(None)),
+                )
+                .exists()
+            )
+            live_continuity_exists = session_continuity_exists | alias_continuity_exists
             stale_predicate = stale_predicate | (
                 (HttpBridgeRetryCircuit.last_detail == _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL)
                 & (HttpBridgeRetryCircuit.updated_at_epoch < tombstone_cutoff_epoch)
+                & ~live_continuity_exists
             )
         deleted_count = 0
         while True:

@@ -1334,6 +1334,20 @@ class _HTTPBridgeRetryCircuitMixin:
                     )
                 )
             ):
+                if row_detail_is_poison:
+                    # The consulted poison row IS the authorization: the
+                    # abandonment fences from this episode snapshot, and a
+                    # stale local identity — an unpersisted write (epoch
+                    # zero) or a cross-replica strike that moved the row
+                    # after this worker's own — would make both settlement
+                    # attempts reject the newer fence and leave the removed
+                    # anchor's cooldown and quarantine standing. Adopt the
+                    # row's epoch, admission generation, and higher count
+                    # unconditionally.
+                    state.persisted_updated_at_epoch = persisted.updated_at_epoch
+                    state.persisted_admission_generation = getattr(persisted, "admission_generation", 0)
+                    if persisted.consecutive_failures > state.consecutive_failures:
+                        state.consecutive_failures = persisted.consecutive_failures
                 return state, expected_anchor
             return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
 
@@ -1762,18 +1776,12 @@ class _HTTPBridgeRetryCircuitMixin:
                     # leave its speculative quarantine suppressing a valid
                     # anchor.
                     adopted_poison_class = _http_bridge_anchor_poison_detail(state.last_detail) is not None
-                    merged_poison_opened = (
-                        adopted_poison_class
-                        and consecutive_failures >= threshold
-                        and (
-                            not quarantine_poisoned_anchor or merged_cooldown_remaining > quarantine_cooldown_remaining
-                        )
-                    )
-                    # Revocation mirrors the arm's own justification: a
-                    # poison quarantine can be armed at the effective
-                    # anchor-poison threshold, which sits at or below the
-                    # circuit threshold, so it survives whenever the adopted
-                    # state still satisfies that bar.
+                    # The effective anchor-poison threshold, which sits at
+                    # or below the circuit threshold: with a configured
+                    # threshold of one, a non-poison local strike adopting a
+                    # one-failure poison row must still arm the quarantine,
+                    # or the loaded-key cache hands the next request the
+                    # dead anchor.
                     poison_arm_threshold = _http_bridge_effective_anchor_poison_threshold(
                         getattr(
                             _service_get_settings(),
@@ -1781,6 +1789,16 @@ class _HTTPBridgeRetryCircuitMixin:
                             threshold,
                         )
                     )
+                    merged_poison_opened = (
+                        adopted_poison_class
+                        and consecutive_failures >= poison_arm_threshold
+                        and (
+                            not quarantine_poisoned_anchor or merged_cooldown_remaining > quarantine_cooldown_remaining
+                        )
+                    )
+                    # Revocation mirrors the arm's own justification: the
+                    # quarantine survives whenever the adopted state still
+                    # satisfies that same bar.
                     merged_poison_revoked = quarantine_poisoned_anchor and not (
                         adopted_poison_class and consecutive_failures >= poison_arm_threshold
                     )
@@ -2093,6 +2111,49 @@ class _HTTPBridgeRetryCircuitMixin:
         finally:
             key_lock.release()
 
+    async def _http_bridge_reconcile_transitional_tombstone(self: Any, session: _HTTPBridgeSession) -> None:
+        """Rewrite a lingering transitional tombstone off the row's own values.
+
+        Strike merges keep ``anchor_abandoned`` sticky, so a CAS miss on a
+        promote or erase does NOT mean the tombstone was replaced — it means
+        the count moved underneath the fence while the tombstone stood, and
+        the freshly committed anchor would stay rejected on every replica.
+        One reload-and-rewrite round converges the interleavings: a zeroed
+        row erases to a plain reset, a positive count promotes to the
+        superseded sentinel, and a second miss defers to newer evidence and
+        the next completion's settle-and-erase.
+        """
+        for reconcile_attempt in range(2):
+            try:
+                row = await self._durable_bridge.lookup_retry_circuit(
+                    session_key_kind=session.key.affinity_kind,
+                    session_key_value=session.key.affinity_key,
+                    api_key_id=session.key.api_key_id,
+                )
+                if row is None or row.last_detail != _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL:
+                    return
+                rewrote = await self._durable_bridge.supersede_retry_circuit_detail(
+                    session_key_kind=session.key.affinity_kind,
+                    session_key_value=session.key.affinity_key,
+                    api_key_id=session.key.api_key_id,
+                    expected_updated_at_epoch=row.updated_at_epoch,
+                    expected_consecutive_failures=row.consecutive_failures,
+                    expected_last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
+                    last_detail=(
+                        None if row.consecutive_failures == 0 else _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL
+                    ),
+                )
+                if rewrote:
+                    return
+            except Exception:
+                if reconcile_attempt == 0:
+                    continue
+                logger.debug(
+                    "Failed to reconcile transitional circuit tombstone",
+                    exc_info=True,
+                )
+                return
+
     async def _http_bridge_promote_transitional_supersession(
         self: Any,
         session: _HTTPBridgeSession,
@@ -2115,7 +2176,7 @@ class _HTTPBridgeRetryCircuitMixin:
             return
         for promote_attempt in range(2):
             try:
-                await self._durable_bridge.supersede_retry_circuit_detail(
+                promoted = await self._durable_bridge.supersede_retry_circuit_detail(
                     session_key_kind=session.key.affinity_kind,
                     session_key_value=session.key.affinity_key,
                     api_key_id=session.key.api_key_id,
@@ -2124,6 +2185,12 @@ class _HTTPBridgeRetryCircuitMixin:
                     expected_last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
                     last_detail=_HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL,
                 )
+                if promoted is False:
+                    # A concurrent strike moved the count while stickiness
+                    # kept the tombstone detail: reporting success here
+                    # would leave the freshly committed anchor rejected on
+                    # every replica. Reconcile on the row's own values.
+                    await self._http_bridge_reconcile_transitional_tombstone(session)
                 return
             except Exception:
                 # One immediate retry covers a transient durable blip: a

@@ -40898,6 +40898,201 @@ async def test_the_poison_restore_transitions_its_own_tombstone() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_consult_adopts_the_authorizing_rows_identity() -> None:
+    # A local poison episode whose durable write failed carries no epoch;
+    # authorizing it from another replica's durable row without adopting
+    # that row's identity left the abandonment's reset epoch-unfenced —
+    # able to zero a same-count replacement or a claimed replay.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-consult-adopts-identity")
+    session.durable_session_id = "durable-consult-adopts-identity"
+    session.durable_owner_epoch = 3
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=time.monotonic())
+    state.consecutive_failures = 2
+    state.last_detail = "stream_incomplete"
+    state.persisted_updated_at_epoch = 0.0
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    row_epoch = time.time() - 20.0
+    service._durable_bridge = SimpleNamespace(
+        session_latest_continuity=AsyncMock(return_value=("resp_poisoned", None)),
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=3,
+                cooldown_until_epoch=time.time() + 60.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=row_epoch,
+                admission_generation=2,
+            )
+        ),
+    )
+
+    episode, expected_anchor = await service._http_bridge_poison_anchor_clear_owed(
+        session,
+        consecutive_failures=2,
+        configured_threshold=2,
+    )
+
+    assert episode is state
+    assert expected_anchor == ("resp_poisoned", None)
+    assert state.persisted_updated_at_epoch == row_epoch, (
+        "the consulted episode must carry the authorizing durable row's epoch"
+    )
+    assert state.persisted_admission_generation == 2
+    assert state.consecutive_failures == 3, "the higher durable count is adopted for the reset fence"
+
+
+@pytest.mark.asyncio
+async def test_the_consult_adopts_a_moved_row_over_a_stale_local_fence() -> None:
+    # A cross-replica poison strike can move the row after this worker's
+    # own strike persisted: the local epoch is positive but stale, and an
+    # episode returned with it would make both settlement attempts reject
+    # the newer fence — the removed anchor's cooldown and quarantine would
+    # stand after a successful abandonment.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-consult-adopts-moved-row")
+    session.durable_session_id = "durable-consult-adopts-moved-row"
+    session.durable_owner_epoch = 3
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=time.monotonic())
+    state.consecutive_failures = 2
+    state.last_detail = "stream_incomplete"
+    state.persisted_updated_at_epoch = time.time() - 60.0
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    moved_epoch = time.time() - 5.0
+    service._durable_bridge = SimpleNamespace(
+        session_latest_continuity=AsyncMock(return_value=("resp_poisoned", None)),
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=3,
+                cooldown_until_epoch=time.time() + 60.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=moved_epoch,
+                admission_generation=1,
+            )
+        ),
+    )
+
+    episode, _anchor = await service._http_bridge_poison_anchor_clear_owed(
+        session,
+        consecutive_failures=2,
+        configured_threshold=2,
+    )
+
+    assert episode is state
+    assert state.persisted_updated_at_epoch == moved_epoch, (
+        "a positive but stale local epoch must still yield to the consulted row's fence"
+    )
+    assert state.persisted_admission_generation == 1
+    assert state.consecutive_failures == 3
+
+
+@pytest.mark.asyncio
+async def test_a_weaker_arm_cannot_extend_the_poison_classification() -> None:
+    # A weaker quarantine landing near the end of a poison window extends
+    # the shared session fence, but the anchor-is-dead classification
+    # expires on the poison arm's OWN deadline — repeated weaker arms must
+    # not prolong it indefinitely.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-weaker-cannot-extend-poison")
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+    )
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    poison_deadline = entry.poison_quarantined_until
+    assert poison_deadline > time.monotonic()
+
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason="reattach_missing_response_created",
+    )
+
+    assert entry.reason == http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+    assert entry.poison_quarantined_until == poison_deadline, (
+        "a weaker arm must not extend the poison classification's own deadline"
+    )
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is True
+
+    # The poison window ends while weaker evidence keeps the session
+    # fenced: the classification drops, the fence stands.
+    entry.poison_quarantined_until = time.monotonic() - 1.0
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is False
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is True
+
+
+@pytest.mark.asyncio
+async def test_a_sticky_strike_cannot_strand_the_promotion() -> None:
+    # A concurrent strike moves the count while stickiness keeps the
+    # tombstone detail: the promotion's CAS misses, and treating that as
+    # success left the freshly committed anchor rejected on every replica.
+    # The reconcile promotes on the row's own values.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-promotion-reconcile")
+    row_epoch = time.time() - 10.0
+    supersede = AsyncMock(side_effect=[False, True])
+    service._durable_bridge = SimpleNamespace(
+        supersede_retry_circuit_detail=supersede,
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=3,
+                cooldown_until_epoch=time.time() + 60.0,
+                last_detail="anchor_abandoned",
+                updated_at_epoch=row_epoch,
+            )
+        ),
+    )
+
+    await service._http_bridge_promote_transitional_supersession(
+        session, (None, "stream_incomplete", None, time.time() - 30.0, 2, True)
+    )
+
+    assert supersede.await_count == 2
+    reconcile_kwargs = supersede.await_args_list[1].kwargs
+    assert reconcile_kwargs["expected_consecutive_failures"] == 3
+    assert reconcile_kwargs["expected_updated_at_epoch"] == row_epoch
+    assert reconcile_kwargs["last_detail"] == "anchor_superseded", (
+        "a surviving positive-count tombstone reconciles to the superseded sentinel"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_threshold_one_merge_arms_the_quarantine_on_a_clean_strike(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With the poison threshold configured to one, a non-poison local
+    # strike whose durable merge adopts a one-failure poison row must arm
+    # the quarantine at the effective threshold — comparing against the
+    # circuit threshold of two left the loaded-key cache handing the next
+    # request the dead anchor.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-threshold-one-merge-arm")
+    monkeypatch.setattr(
+        http_bridge_retry_circuit_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_anchor_poison_failure_threshold=1),
+    )
+    now_wall = time.time()
+    merged = SimpleNamespace(
+        consecutive_failures=1,
+        cooldown_until_epoch=now_wall + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=now_wall,
+        admission_generation=0,
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=merged),
+    )
+
+    await service._record_http_bridge_retry_circuit_failure(session, detail="clean_close")
+
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is True, (
+        "the adopted one-failure poison row satisfies the effective threshold and must quarantine"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_committed_registration_promotes_the_transitional_tombstone() -> None:
     # The failed-settlement branch persists the transitional tombstone
     # before the registration; once the fresh anchor commits, the durable

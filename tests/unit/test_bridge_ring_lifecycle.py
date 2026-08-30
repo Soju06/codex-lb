@@ -644,6 +644,62 @@ async def test_scheduled_purge_keeps_tombstones_until_bridge_retention(
 
 
 @pytest.mark.asyncio
+async def test_a_tombstone_outlives_its_still_live_session(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    # A crash between a poison settle and its registration leaves a live
+    # session storing the poisoned continuity while delta requests keep
+    # its lease fresh; the tombstone's fixed epoch would age past the
+    # retention cutoff and an age-only reap would hand the next request
+    # the old anchor. The tombstone falls only when no session still
+    # resolves the key with continuity.
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claimed = await _claim(
+            repository,
+            instance_id="alive",
+            session_key_value="sid-tombstone-live-session",
+            latest_turn_state="turn-live",
+        )
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-tombstone-live-session",
+            api_key_scope="__anonymous__",
+            consecutive_failures=2,
+            cooldown_until_epoch=2600.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=2000.0,
+            base_updated_at_epoch=0.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=2060.0,
+        )
+        await session.execute(
+            update(HttpBridgeRetryCircuit)
+            .where(HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash("sid-tombstone-live-session"))
+            .values(consecutive_failures=0, last_detail="anchor_abandoned")
+        )
+        await session.commit()
+
+        deleted = await repository.purge_retry_circuits_before(100000.0, tombstone_cutoff_epoch=90000.0)
+        assert deleted == 0, "a tombstone whose session still stores continuity survives the age cutoff"
+
+        cleared = await repository.rebind_session_account(
+            session_id=claimed.id,
+            instance_id="alive",
+            owner_epoch=claimed.owner_epoch,
+            account_id="acc-1",
+            clear_continuity=True,
+        )
+        assert cleared
+
+        deleted = await repository.purge_retry_circuits_before(100000.0, tombstone_cutoff_epoch=90000.0)
+        assert deleted == 1, "the tombstone falls once its session's continuity is gone"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_a_lagging_clock_strike_fences_the_episode_reset(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

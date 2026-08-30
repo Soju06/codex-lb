@@ -7,6 +7,7 @@ import pytest
 
 from app.core.auth import generate_unique_account_id
 from app.core.crypto import TokenEncryptor
+from app.core.exceptions import DashboardPermissionError
 from app.db.models import Account
 from app.db.session import SessionLocal
 from app.modules.accounts import api as accounts_api_module
@@ -14,6 +15,73 @@ from app.modules.accounts import api as accounts_api_module
 from .test_account_opencode_auth_export import _make_auth_json
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio
+async def test_account_bundle_export_openapi_preserves_manual_json_body_schema(async_client) -> None:
+    openapi = (await async_client.get("/openapi.json")).json()
+    request_body = openapi["paths"]["/api/accounts/bundle/export"]["post"]["requestBody"]
+
+    assert request_body["required"] is True
+    schema = request_body["content"]["application/json"]["schema"]
+    assert set(schema["required"]) == {"passphrase"}
+    assert set(schema["properties"]) == {"accountIds", "passphrase"}
+
+
+@pytest.mark.asyncio
+async def test_account_bundle_export_authenticates_before_reading_body(async_client, app_instance) -> None:
+    body_read = False
+
+    async def deny_write_access():
+        raise DashboardPermissionError("Read-only dashboard access", code="read_only_access")
+
+    async def body():
+        nonlocal body_read
+        body_read = True
+        yield b'{"accountIds":[],"passphrase":"must-not-be-read"}'
+
+    app_instance.dependency_overrides[accounts_api_module.require_dashboard_write_access] = deny_write_access
+    try:
+        response = await async_client.post(
+            "/api/accounts/bundle/export",
+            content=body(),
+            headers={"content-type": "application/json"},
+        )
+    finally:
+        app_instance.dependency_overrides.pop(accounts_api_module.require_dashboard_write_access, None)
+
+    assert response.status_code == 403
+    assert body_read is False
+    assert response.headers["cache-control"].startswith("no-store")
+
+
+@pytest.mark.asyncio
+async def test_account_bundle_export_request_body_is_bounded(async_client, monkeypatch) -> None:
+    monkeypatch.setattr(
+        accounts_api_module,
+        "get_settings",
+        lambda: SimpleNamespace(account_bundle_max_bytes=8),
+    )
+
+    response = await async_client.post(
+        "/api/accounts/bundle/export",
+        content=b'{"accountIds":[]}',
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "payload_too_large"
+    assert response.headers["cache-control"].startswith("no-store")
+
+
+def test_account_bundle_export_rejects_single_oversized_chunk_before_retaining_it() -> None:
+    body = bytearray()
+    oversized_chunk = b"123456789"
+
+    with pytest.raises(accounts_api_module.MultipartPayloadTooLarge):
+        accounts_api_module._extend_bounded_export_body(body, oversized_chunk, max_bytes=8)
+
+    assert body == bytearray()
 
 
 @pytest.mark.asyncio

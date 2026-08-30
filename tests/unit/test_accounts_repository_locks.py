@@ -326,10 +326,10 @@ async def test_bundle_persist_locks_upstream_identities_once_before_slot_locks(m
     repo, recorded = _make_postgres_repo(monkeypatch)
     first = _stub_account("acc_bundle_a", "z@example.com", chatgpt_id="workspace-z")
     second = _stub_account("acc_bundle_b", "a@example.com", chatgpt_id="workspace-a")
-
-    async def fake_collect_candidates(account: Account, *, include_email: bool) -> frozenset[str]:
-        del include_email
-        return frozenset((cast(str, account.chatgpt_account_id),))
+    empty_result = MagicMock()
+    empty_result.__iter__.return_value = iter(())
+    empty_result.scalars.return_value.all.return_value = []
+    cast(Any, repo.session.execute).return_value = empty_result
 
     async def fake_lock_account_identities(
         _session: object,
@@ -340,7 +340,6 @@ async def test_bundle_persist_locks_upstream_identities_once_before_slot_locks(m
         recorded["order"].append(f"upstream-batch:{','.join(ordered)}")
         return ordered
 
-    monkeypatch.setattr(repo, "_collect_postgresql_upsert_identity_candidates", fake_collect_candidates)
     monkeypatch.setattr(repository_module, "lock_postgresql_account_identities", fake_lock_account_identities)
     monkeypatch.setattr(repository_module, "bump_cache_invalidation_in_transaction", AsyncMock())
 

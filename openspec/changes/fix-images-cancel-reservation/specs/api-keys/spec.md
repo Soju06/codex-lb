@@ -45,12 +45,24 @@ for normal request-owned cleanup.
 - **AND** the original `CancelledError` propagates after cleanup completes
 - **AND** stale-reservation reclamation is not required for that request
 
-#### Scenario: Failed pre-first-frame cleanup preserves the original terminal
+#### Scenario: Failed upstream close does not prevent reservation release
 
 - **GIVEN** cancellation interrupts Images stream priming before the first
   upstream SSE event
-- **WHEN** closing the upstream iterator or releasing the route-owned
-  reservation fails
-- **THEN** the proxy logs the cleanup failure
+- **WHEN** closing the upstream iterator fails but the route-owned reservation
+  release succeeds
+- **THEN** the proxy logs the close failure
+- **AND** the Images route releases its reservation exactly once
+- **AND** the reservation reaches `released` state and its reserved quota is
+  restored
 - **AND** the original `CancelledError` propagates unchanged
-- **AND** a still-reserved reservation remains eligible for stale reclamation
+- **AND** stale-reservation reclamation is not required for that request
+
+#### Scenario: Failed reservation release preserves the original cancellation
+
+- **GIVEN** cancellation interrupts Images stream priming before the first
+  upstream SSE event
+- **WHEN** releasing the route-owned reservation fails
+- **THEN** the proxy logs the release failure
+- **AND** the original `CancelledError` propagates unchanged
+- **AND** the still-reserved reservation remains eligible for stale reclamation

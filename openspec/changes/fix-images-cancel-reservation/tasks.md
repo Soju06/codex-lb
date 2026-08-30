@@ -16,3 +16,4 @@
 - [x] 3.2 Run Ruff check on every changed Python file.
 - [x] 3.3 Run scoped and repository-spec OpenSpec validation and verify the change artifacts are coherent.
 - [x] 3.4 Inspect the final diff and worktree status for scope, simplicity, and unrelated changes.
+- [x] 3.5 Distinguish iterator-close and reservation-release failure outcomes so stale reclamation remains conditional on release failure.

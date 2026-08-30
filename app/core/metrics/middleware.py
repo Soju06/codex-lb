@@ -11,6 +11,8 @@ from app.core.metrics.prometheus import (
     requests_total,
 )
 
+_SUPPORTED_METHODS = frozenset(("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"))
+
 
 def _normalize_path(path: str) -> str:
     if path.startswith("/v1/"):
@@ -19,9 +21,13 @@ def _normalize_path(path: str) -> str:
         return "/api/..."
     if path.startswith("/health/"):
         return "/health/..."
-    if len(path) > 50:
-        return path[:50]
-    return path or "/"
+    if path == "/health":
+        return path
+    return "/other"
+
+
+def _normalize_method(method: str) -> str:
+    return method if method in _SUPPORTED_METHODS else "OTHER"
 
 
 class MetricsMiddleware:
@@ -40,7 +46,7 @@ class MetricsMiddleware:
 
         start = time.monotonic()
         status_code = 500
-        method = scope.get("method", "GET")
+        method = _normalize_method(scope.get("method", "GET"))
         path = _normalize_path(scope.get("path", "/"))
 
         active_connections.inc()

@@ -1147,6 +1147,28 @@ class RequestLogsRepository:
                 await _safe_rollback(self._session)
                 raise
 
+    async def latest_successful_log_for_request_id(self, request_id: str, *, request_kind: str) -> RequestLog | None:
+        """Return the newest *successful* ``request_kind`` log for ``request_id``.
+
+        A stable request id can carry more than one row. A warmup probe that
+        succeeded upstream and then failed while recording its effect writes a
+        success row followed by an error row under the same id, so a caller
+        reconciling "did this request already happen upstream" must not read
+        only the newest row: the status and kind belong in the query.
+        """
+
+        stmt = (
+            select(RequestLog)
+            .where(
+                RequestLog.request_id == ensure_request_id(request_id),
+                RequestLog.request_kind == request_kind,
+                RequestLog.status == "success",
+            )
+            .order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
+            .limit(1)
+        )
+        return await self._session.scalar(stmt)
+
     async def update_model_for_request(self, request_id: str, model: str) -> int:
         """Override the ``model`` field of any logs matching ``request_id``.
 

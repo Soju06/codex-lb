@@ -16,6 +16,7 @@ from app.core.metrics.prometheus import (
 from app.db.models import StickySessionKind
 from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
+    _forget_http_bridge_denied_anchor_fence_owner,
     _http_bridge_allow_durable_takeover,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_live_previous_response_alias_owner,
@@ -433,6 +434,24 @@ class _HTTPBridgeSessionRegistryMixin:
         async with self._http_bridge_lock:
             self._unregister_http_bridge_previous_response_ids_locked(session)
 
+    async def _unregister_http_bridge_previous_response_id(
+        self: _HTTPBridgeServiceProtocol,
+        session: _HTTPBridgeSession,
+        response_id: str,
+        *,
+        expected_durable_session_id: str | None = None,
+        expected_durable_owner_epoch: int | None = None,
+    ) -> bool:
+        async with self._http_bridge_lock:
+            if (
+                expected_durable_session_id is not None and session.durable_session_id != expected_durable_session_id
+            ) or (
+                expected_durable_owner_epoch is not None and session.durable_owner_epoch != expected_durable_owner_epoch
+            ):
+                return False
+            self._unregister_http_bridge_previous_response_id_locked(session, response_id)
+        return True
+
     def _detach_http_bridge_session_locked(
         self: _HTTPBridgeServiceProtocol,
         key: _HTTPBridgeSessionKey,
@@ -493,19 +512,31 @@ class _HTTPBridgeSessionRegistryMixin:
         self: _HTTPBridgeServiceProtocol,
         session: _HTTPBridgeSession,
     ) -> None:
-        current_session = self._http_bridge_sessions.get(session.key)
         for response_id in tuple(session.previous_response_ids):
-            alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
-            if (
+            self._unregister_http_bridge_previous_response_id_locked(session, response_id)
+        session.previous_response_ids.clear()
+        session.previous_response_alias_registration_generations.clear()
+
+    def _unregister_http_bridge_previous_response_id_locked(
+        self: _HTTPBridgeServiceProtocol,
+        session: _HTTPBridgeSession,
+        response_id: str,
+    ) -> None:
+        if response_id not in session.previous_response_ids:
+            return
+        alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
+        current_session = self._http_bridge_sessions.get(session.key)
+        if (
+            not (
                 current_session is not None
                 and current_session is not session
                 and response_id in current_session.previous_response_ids
-            ):
-                continue
-            if self._http_bridge_previous_response_index.get(alias_key) == session.key:
-                self._http_bridge_previous_response_index.pop(alias_key, None)
-        session.previous_response_ids.clear()
-        session.previous_response_alias_registration_generations.clear()
+            )
+            and self._http_bridge_previous_response_index.get(alias_key) == session.key
+        ):
+            self._http_bridge_previous_response_index.pop(alias_key, None)
+        session.previous_response_ids.discard(response_id)
+        session.previous_response_alias_registration_generations.pop(response_id, None)
 
     def _promote_http_bridge_session_to_codex_affinity(
         self: _HTTPBridgeServiceProtocol,
@@ -556,6 +587,14 @@ class _HTTPBridgeSessionRegistryMixin:
                 )
                 if lookup.owner_instance_id == current_instance:
                     break
+                if lookup.owner_instance_id is None and claim_attempt == 0:
+                    # The lookup used to decide ``allow_takeover`` can race a
+                    # concurrent close/release. If the first claim lands after
+                    # ownership has already been cleared, retry once with the
+                    # forced epoch-advance path instead of treating an ownerless
+                    # row as a foreign replica.
+                    await asyncio.sleep(0)
+                    continue
                 if not allow_takeover or claim_attempt > 0:
                     break
                 if not _http_bridge_allow_durable_takeover(lookup):
@@ -591,8 +630,26 @@ class _HTTPBridgeSessionRegistryMixin:
                         error_type="server_error",
                     ),
                 )
-            session.durable_session_id = lookup.session_id
-            session.durable_owner_epoch = lookup.owner_epoch
+            async with session.lifecycle_lock:
+                previous_durable_session_id = session.durable_session_id
+                previous_durable_owner_epoch = session.durable_owner_epoch
+                next_owner_changed = (
+                    previous_durable_session_id != lookup.session_id
+                    or previous_durable_owner_epoch != lookup.owner_epoch
+                )
+                if next_owner_changed:
+                    previous_owner_key = (
+                        previous_durable_session_id
+                        if previous_durable_session_id is not None
+                        else f"local:{id(session)}"
+                    )
+                    _forget_http_bridge_denied_anchor_fence_owner(
+                        self,
+                        previous_owner_key,
+                        owner_epoch=previous_durable_owner_epoch,
+                    )
+                session.durable_session_id = lookup.session_id
+                session.durable_owner_epoch = lookup.owner_epoch
             session.headers = _headers_with_turn_state(session.headers, session.downstream_turn_state)
             if (
                 PROMETHEUS_AVAILABLE

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import replace
 from typing import Any, TypeVar, cast
 
@@ -63,8 +63,12 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
     _await_task_deferring_cancellation,
+    _forget_http_bridge_denied_anchor_fence,
     _http_bridge_abandonment_may_settle_circuit,
+    _http_bridge_denied_anchor_fence_current_map,
+    _http_bridge_denied_anchor_fence_entry,
     _http_bridge_durable_lease_ttl_seconds,
+    _http_bridge_event_proves_upstream_liveness,
     _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
@@ -72,7 +76,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_retry_circuit_attempt_selection_for_pending_requests,
     _log_http_bridge_event,
     _normalize_http_bridge_error_event,
+    _record_http_bridge_denied_anchor_fence,
     _record_http_bridge_stuck_retire,
+    _record_http_bridge_unmatched_upstream_liveness,
+    _schedule_http_bridge_background_cleanup,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _clear_http_bridge_quarantine,
@@ -230,6 +237,17 @@ _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (
     120.0,
 )
 _HTTP_BRIDGE_RECOVERY_SETTLEMENT_LEASE_REFRESH_INTERVAL_SECONDS = 10.0
+_HTTP_BRIDGE_DENIED_ANCHOR_CLEAR_RETRY_DELAYS = (
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    4.0,
+    8.0,
+    15.0,
+    30.0,
+    60.0,
+)
 # A single missing response.created is not proof that an account is bad: the
 # upstream may have accepted the request while the transport was silent. Only
 # repeated failures on separate bridge retirements are allowed to influence
@@ -639,23 +657,194 @@ def _schedule_http_bridge_recovery_settlement_retry(
     session: Any,
     **kwargs: Any,
 ) -> None:
-    task = asyncio.create_task(
+    _schedule_http_bridge_background_cleanup(
+        service,
         _retry_http_bridge_recovery_settlement(service, session, **kwargs),
         name=f"http-bridge-recovery-settlement-{_hash_identifier(kwargs['request_fingerprint'])}",
+        error_message="HTTP bridge recovery settlement retry failed",
+        attribute=("_http_bridge_recovery_session_id", kwargs["session_id"]),
     )
-    setattr(task, "_http_bridge_recovery_session_id", kwargs["session_id"])
-    service._background_cleanup_tasks.add(task)
 
-    def _discard(done_task: asyncio.Task[Any]) -> None:
-        service._background_cleanup_tasks.discard(done_task)
-        try:
-            done_task.result()
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.error("HTTP bridge recovery settlement retry failed", exc_info=True)
 
-    task.add_done_callback(_discard)
+async def _retry_denied_http_bridge_anchor_clear(
+    service: Any,
+    session: Any,
+    *,
+    session_id: str | None,
+    api_key_id: str | None,
+    instance_id: str,
+    owner_epoch: int | None,
+    response_id: str,
+    durable_cleared: bool = False,
+) -> None:
+    """Retry a transient durable clear under the original owner fence."""
+    if session_id is None or owner_epoch is None:
+        await _retry_denied_http_bridge_anchor_local_cleanup(
+            service,
+            session,
+            response_id=response_id,
+            owner_key=f"local:{id(session)}",
+        )
+        return
+    for delay_seconds in _HTTP_BRIDGE_DENIED_ANCHOR_CLEAR_RETRY_DELAYS:
+        if session.durable_session_id != session_id or session.durable_owner_epoch != owner_epoch:
+            return
+        await _wait_for_http_bridge_recovery_settlement_retry(
+            service,
+            session_id=session_id,
+            owner_epoch=owner_epoch,
+            api_key_id=api_key_id,
+            delay_seconds=delay_seconds,
+        )
+        if not durable_cleared:
+            try:
+                cleared = await service._durable_bridge.clear_live_session_response_anchor_if_matches(
+                    session_id=session_id,
+                    api_key_id=api_key_id,
+                    instance_id=instance_id,
+                    owner_epoch=owner_epoch,
+                    response_id=response_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Retrying denied HTTP bridge response-anchor clear after durable failure", exc_info=True)
+                continue
+            if cleared is None:
+                # A clean no-match means the captured owner fence or denied
+                # response is already gone.  It is a terminal bookkeeping
+                # outcome, not a transient durable failure; keep the local
+                # alias and denial fence because ownership may have advanced,
+                # but do not spend the remaining retry budget on it.
+                return
+            durable_cleared = True
+        # Owner rebinding can happen while the lease-renewal backoff is
+        # sleeping. Serialize the final ownership check with rebinders before
+        # touching the alias or the process-local denial fence.
+        async with session.lifecycle_lock:
+            if session.durable_session_id != session_id or session.durable_owner_epoch != owner_epoch:
+                return
+            try:
+                unregister_succeeded = await service._unregister_http_bridge_previous_response_id(
+                    session,
+                    response_id,
+                    expected_durable_session_id=session_id,
+                    expected_durable_owner_epoch=owner_epoch,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Retrying denied HTTP bridge response-alias unregister after cleanup failure",
+                    exc_info=True,
+                )
+                continue
+            if unregister_succeeded is False:
+                return
+            if not _forget_http_bridge_denied_anchor_fence(
+                service,
+                response_id,
+                owner_key=session_id,
+                owner_epoch=owner_epoch,
+            ):
+                return
+            session.denied_proxy_injected_anchor_ids.discard(response_id)
+            session.denied_proxy_injected_anchor_cleanup_pending.discard(response_id)
+            session.denied_proxy_injected_anchor_generation += 1
+            return
+    logger.error(
+        "Denied HTTP bridge response-anchor clear retry budget exhausted session_id=%s response_id=%s",
+        _hash_identifier(session_id),
+        _hash_identifier(response_id),
+    )
+
+
+async def _retry_denied_http_bridge_anchor_local_cleanup(
+    service: Any,
+    session: Any,
+    *,
+    response_id: str,
+    owner_key: str,
+) -> None:
+    """Retry process-local alias cleanup for a session without a durable owner."""
+    for delay_seconds in _HTTP_BRIDGE_DENIED_ANCHOR_CLEAR_RETRY_DELAYS:
+        if delay_seconds:
+            await asyncio.sleep(delay_seconds)
+        async with session.lifecycle_lock:
+            if session.durable_session_id is not None or session.durable_owner_epoch is not None:
+                return
+            entry = _http_bridge_denied_anchor_fence_entry(service, response_id)
+            try:
+                unregister_succeeded = await service._unregister_http_bridge_previous_response_id(
+                    session,
+                    response_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Retrying local denied HTTP bridge response-alias unregister after cleanup failure",
+                    exc_info=True,
+                )
+                continue
+            if unregister_succeeded is False:
+                continue
+            # The local session can lose its durable identity after a
+            # successor has already claimed the same response id.  Remove
+            # this session's alias even when the process-local fence now
+            # belongs to that durable successor; only forget the fence when
+            # this local owner still owns it.
+            if entry is not None and entry.owner_key == owner_key:
+                _forget_http_bridge_denied_anchor_fence(
+                    service,
+                    response_id,
+                    owner_key=owner_key,
+                    owner_epoch=None,
+                )
+            session.denied_proxy_injected_anchor_ids.discard(response_id)
+            session.denied_proxy_injected_anchor_cleanup_pending.discard(response_id)
+            session.denied_proxy_injected_anchor_generation += 1
+            return
+    logger.error(
+        "Denied HTTP bridge local response-anchor cleanup retry budget exhausted response_id=%s",
+        _hash_identifier(response_id),
+    )
+
+
+def _schedule_denied_http_bridge_anchor_clear_retry(
+    service: Any,
+    session: Any,
+    *,
+    response_id: str,
+    session_id: str | None = None,
+    api_key_id: str | None = None,
+    instance_id: str | None = None,
+    owner_epoch: int | None = None,
+    durable_cleared: bool = False,
+) -> None:
+    session_id = session.durable_session_id if session_id is None else session_id
+    owner_epoch = session.durable_owner_epoch if owner_epoch is None else owner_epoch
+    api_key_id = session.key.api_key_id if api_key_id is None else api_key_id
+    instance_id = (
+        _service_get_settings().http_responses_session_bridge_instance_id if instance_id is None else instance_id
+    )
+    if instance_id is None:
+        return
+    _schedule_http_bridge_background_cleanup(
+        service,
+        _retry_denied_http_bridge_anchor_clear(
+            service,
+            session,
+            session_id=session_id,
+            api_key_id=api_key_id,
+            instance_id=instance_id,
+            owner_epoch=owner_epoch,
+            response_id=response_id,
+            durable_cleared=durable_cleared,
+        ),
+        name=f"http-bridge-denied-anchor-clear-{_hash_identifier(response_id)}",
+        error_message="HTTP bridge denied-anchor clear retry failed",
+    )
 
 
 T = TypeVar("T")
@@ -1208,6 +1397,249 @@ async def _abandon_durable_http_bridge_continuity(
     return True
 
 
+async def _invalidate_denied_http_bridge_anchor(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    denied_response_id: str | None,
+) -> bool:
+    """Retire an anchor upstream has explicitly denied.
+
+    ``previous_response_not_found`` against an anchor the proxy injected is a
+    verdict, not a symptom: the id came from this proxy's own durable record,
+    no client asked for it, and upstream says it does not exist. The poison
+    counter cannot act on that verdict because it only scores reader failures
+    (see ``_HTTP_BRIDGE_ANCHOR_POISON_DETAILS``), so the dead id survives at
+    any threshold and is re-injected into the following turn, where the
+    store-context trim strips the resent history against it and upstream never
+    emits ``response.created``.
+
+    Clearing costs nothing that is not already lost. The next turn simply
+    dispatches unanchored with the history the client sends, which is the
+    client's own replay rather than a server-side one, so no forked child
+    response can be created against a parent this proxy cannot see.
+
+    The durable clear is conditional on the denied id still being the durable
+    latest response, and removes only that response alias. The in-memory clear
+    is unconditional for the same id even when the durable write is fenced,
+    because it strictly removes one way for the denied id to come back. A
+    durable row that survives re-injects the id on a later turn, which is denied
+    in turn and re-enters this path, so the clear is re-attempted rather than
+    lost.
+
+    ``closed`` only fences new admissions. Requests admitted before a session
+    closed can still deliver a terminal denial and must publish its provenance
+    and finish the same cleanup.
+    """
+    if denied_response_id is None:
+        return False
+    sibling_advanced = False
+    async with session.lifecycle_lock:
+        # Serialize publication with the submitter's final tombstone check and
+        # upstream send. A sibling completion can advance the current carrier
+        # while an already-prepared request still holds the denied id; that
+        # request must remain fenced even when there is no current anchor left
+        # to clear.
+        session.denied_proxy_injected_anchor_generation += 1
+        # Retain denial provenance after the session-local tombstone is retired.
+        # A request that began on an absent canonical session otherwise receives
+        # a successor with no local generation and can redispatch this id.
+        durable_session_id = session.durable_session_id
+        durable_owner_epoch = session.durable_owner_epoch
+        durable_api_key_id = session.key.api_key_id
+        durable_instance_id = _service_get_settings().http_responses_session_bridge_instance_id
+        owner_key = durable_session_id if durable_session_id is not None else f"local:{id(session)}"
+        recorded_generation = _record_http_bridge_denied_anchor_fence(
+            service,
+            denied_response_id,
+            owner_key=owner_key,
+            owner_epoch=durable_owner_epoch,
+        )
+        current_fence = _http_bridge_denied_anchor_fence_current_map(service).get(owner_key)
+        recorded_entry = _http_bridge_denied_anchor_fence_entry(service, denied_response_id)
+        record_won_owner_slot = (
+            current_fence == denied_response_id
+            and recorded_entry is not None
+            and recorded_entry.owner_key == owner_key
+            and recorded_entry.generation == recorded_generation
+        )
+        # Keep one current session-local tombstone.  Displaced ids remain
+        # fenced in the process ledger while any prepared request pins them;
+        # retaining every historical id here would make the session carrier
+        # grow without bound and duplicate that ledger's ownership fence.  A
+        # stale detached predecessor must not erase a successor's tombstone,
+        # so only replace the set when this publication owns the current slot.
+        if record_won_owner_slot:
+            session.denied_proxy_injected_anchor_ids.clear()
+            session.denied_proxy_injected_anchor_ids.add(denied_response_id)
+        elif not session.denied_proxy_injected_anchor_ids:
+            # A detached predecessor may still have a request pinned to its
+            # own session object. Keep that one local tombstone without
+            # growing a second historical slot beside a successor's entry.
+            session.denied_proxy_injected_anchor_ids.add(denied_response_id)
+        # Another request may have completed and advanced the anchor between
+        # the denied dispatch and this frame. Only retire the id that was
+        # refused.
+        if session.last_completed_response_id != denied_response_id:
+            sibling_advanced = True
+        elif hasattr(session, "denied_proxy_injected_anchor_cleanup_pending") and recorded_entry is not None:
+            # Only the current anchor needs durable/alias cleanup. A sibling
+            # that already advanced the carrier leaves a historical fence for
+            # any pinned request, but has no unresolved cleanup to preserve at
+            # session close.
+            session.denied_proxy_injected_anchor_cleanup_pending.add(denied_response_id)
+    cleared = False
+    no_durable_owner = durable_session_id is None or durable_owner_epoch is None
+    if sibling_advanced:
+        if no_durable_owner:
+            _forget_http_bridge_denied_anchor_fence(
+                service,
+                denied_response_id,
+                owner_key=owner_key,
+                owner_epoch=durable_owner_epoch,
+            )
+        getattr(session, "denied_proxy_injected_anchor_cleanup_pending", set()).discard(denied_response_id)
+        return False
+    retry_durable_clear = False
+    unregister_succeeded = False
+    owner_matches_for_cleanup = False
+    unregister_error: BaseException | None = None
+    durable_error: BaseException | None = None
+    try:
+        try:
+            if not no_durable_owner:
+                lookup = await service._durable_bridge.clear_live_session_response_anchor_if_matches(
+                    session_id=durable_session_id,
+                    api_key_id=durable_api_key_id,
+                    instance_id=durable_instance_id,
+                    owner_epoch=durable_owner_epoch,
+                    response_id=denied_response_id,
+                )
+                cleared = lookup is not None
+                # ``None`` is a clean fenced no-match (the owner epoch or
+                # latest response changed), not a durable failure.  Preserve
+                # the local alias and tombstone for the newer owner, but do
+                # not schedule background retries; raised failures below are
+                # the retryable case.
+        except Exception:
+            retry_durable_clear = True
+            logger.warning("Failed to clear denied HTTP bridge response anchor", exc_info=True)
+        finally:
+            try:
+                if cleared or no_durable_owner:
+                    async with session.lifecycle_lock:
+                        owner_matches_for_cleanup = (
+                            session.durable_session_id == durable_session_id
+                            and session.durable_owner_epoch == durable_owner_epoch
+                        )
+                        if owner_matches_for_cleanup:
+                            try:
+                                unregister_result = await service._unregister_http_bridge_previous_response_id(
+                                    session,
+                                    denied_response_id,
+                                    expected_durable_session_id=durable_session_id,
+                                    expected_durable_owner_epoch=durable_owner_epoch,
+                                )
+                                unregister_succeeded = unregister_result is not False
+                            except asyncio.CancelledError as exc:
+                                unregister_error = exc
+                            except Exception as exc:
+                                unregister_error = exc
+                                retry_durable_clear = True
+            finally:
+                async with session.lifecycle_lock:
+                    if session.last_completed_response_id == denied_response_id:
+                        session.last_completed_response_id = None
+                        session.last_completed_response_account_id = None
+                        session.last_completed_input_count = 0
+                        session.last_completed_input_prefix_fingerprint = None
+                        session.last_pending_tool_calls.clear()
+                    if owner_matches_for_cleanup and (cleared or no_durable_owner) and unregister_succeeded:
+                        session.denied_proxy_injected_anchor_ids.discard(denied_response_id)
+                        session.denied_proxy_injected_anchor_cleanup_pending.discard(denied_response_id)
+                        session.denied_proxy_injected_anchor_generation += 1
+                        _forget_http_bridge_denied_anchor_fence(
+                            service,
+                            denied_response_id,
+                            owner_key=durable_session_id if durable_session_id is not None else f"local:{id(session)}",
+                            owner_epoch=durable_owner_epoch,
+                        )
+                if retry_durable_clear:
+                    _schedule_denied_http_bridge_anchor_clear_retry(
+                        service,
+                        session,
+                        response_id=denied_response_id,
+                        session_id=durable_session_id,
+                        api_key_id=durable_api_key_id,
+                        instance_id=durable_instance_id,
+                        owner_epoch=durable_owner_epoch,
+                        durable_cleared=cleared,
+                    )
+    except asyncio.CancelledError as exc:
+        durable_error = exc
+    if unregister_error is not None:
+        raise unregister_error
+    if durable_error is not None:
+        raise durable_error
+    return cleared
+
+
+def _denied_proxy_injected_anchor_id(
+    request_states: Iterable["_WebSocketRequestState"],
+) -> str | None:
+    """Choose the anchor a denial may retire, if any.
+
+    Only an anchor shared exclusively by requests that codex-lb injected onto
+    full-resend-shaped payloads can be retired. A client-supplied or delta-only
+    sibling has no other way to convey prior context once its anchor is gone,
+    which is the same rule the expired-anchor path applies before clearing
+    durable continuity.
+    """
+    requests_by_anchor: dict[str, list[_WebSocketRequestState]] = {}
+    for request_state in request_states:
+        previous_response_id = request_state.previous_response_id
+        if previous_response_id is not None:
+            requests_by_anchor.setdefault(previous_response_id, []).append(request_state)
+
+    safely_retirable_anchors = [
+        previous_response_id
+        for previous_response_id, grouped_request_states in requests_by_anchor.items()
+        if all(
+            request_state.proxy_injected_previous_response_id
+            and request_state.proxy_injected_anchor_had_full_resend_payload
+            for request_state in grouped_request_states
+        )
+    ]
+    if len(safely_retirable_anchors) == 1:
+        return safely_retirable_anchors[0]
+    return None
+
+
+async def _retire_denied_http_bridge_anchor(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    request_states: Iterable["_WebSocketRequestState"],
+) -> None:
+    """Best-effort retirement of an anchor upstream denied.
+
+    Retirement is bookkeeping. It must never change how the denial itself is
+    delivered downstream, so a failure here is logged and swallowed rather than
+    escaping into terminal-event handling.
+    """
+    denied_response_id = _denied_proxy_injected_anchor_id(request_states)
+    if denied_response_id is None:
+        return
+    try:
+        await _invalidate_denied_http_bridge_anchor(
+            service,
+            session,
+            denied_response_id=denied_response_id,
+        )
+    except Exception:
+        logger.warning("Failed to retire a denied proxy-injected HTTP bridge anchor", exc_info=True)
+
+
 class _HTTPBridgeUpstreamEventsMixin:
     async def _fail_http_bridge_reader_and_maybe_retire(
         self: Any,
@@ -1439,6 +1871,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                             session,
                             detail=poison_candidate_detail,
                             response_events_seen=observed_response_events,
+                            # Reader-failure retirement must never revive: the
+                            # pending turns were already terminally failed and
+                            # this reader is condemned, so a post-suspension
+                            # liveness signal (which durable-anchor
+                            # rehydration can spoof without upstream evidence)
+                            # would only leave a readerless session registered.
+                            allow_liveness_revive=False,
                             **retry_circuit_attempt_kwargs,
                         )
                         return True
@@ -1482,6 +1921,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                         response_events_seen=observed_response_events,
                         retired_request_count=failed_pending_count,
                         retired_request_states=pending_request_states,
+                        # See the poison branch above: reader-failure
+                        # retirement never revives a condemned session.
+                        allow_liveness_revive=False,
                         **retry_circuit_attempt_kwargs,
                     )
                 else:
@@ -1499,6 +1941,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                         # own strike above and intentionally does not pass it.
                         retired_request_count=failed_pending_count,
                         retired_request_states=pending_request_states,
+                        # See the poison branch above: reader-failure
+                        # retirement never revives a condemned session.
+                        allow_liveness_revive=False,
                         **retry_circuit_attempt_kwargs,
                     )
                 # The failed requests are already drained and finalized, so a
@@ -2134,6 +2579,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # that attempt transition before any later recovery await can
                 # classify the send as eventless.
                 _mark_response_create_attempt_observed(matched_request_state, event_type)
+                session.last_upstream_event_generation += 1
                 now = _service_time().monotonic()
                 if matched_request_state.latency_first_upstream_event_ms is None:
                     matched_request_state.latency_first_upstream_event_ms = int(
@@ -2311,6 +2757,15 @@ class _HTTPBridgeUpstreamEventsMixin:
 
         if len(grouped_previous_response_request_states) > 1:
             session.upstream_control.reconnect_requested = True
+            if is_previous_response_not_found_event:
+                # This branch settles every request that shared the denied
+                # anchor and then returns, so the single-request retirement
+                # below is never reached for a fan-out denial.
+                await _retire_denied_http_bridge_anchor(
+                    self,
+                    session,
+                    request_states=grouped_previous_response_request_states,
+                )
             grouped_error_reason = (
                 "previous_response_not_found"
                 if is_previous_response_not_found_event
@@ -2649,15 +3104,39 @@ class _HTTPBridgeUpstreamEventsMixin:
             # whatever was waiting for it waits until a timeout fires, so the
             # drop needs to be visible rather than inferred from a missing
             # downstream response.
+            #
+            # The frame still proves the upstream transport is alive. Nothing
+            # resets the downstream pre-response silence clock from here (that
+            # clock only sees matched queue items), so record the liveness as an
+            # explicit marker: a later bridge_eventless_timeout with a non-zero
+            # count is a local matching wedge, not a silent upstream.
+            unmatched_liveness_count = _record_http_bridge_unmatched_upstream_liveness(
+                session,
+                event_type=event_type,
+            )
             logger.warning(
                 "HTTP bridge upstream event matched no pending request account_id=%s bridge_kind=%s "
-                "event_type=%s has_response_id=%s pending_count=%d",
+                "event_type=%s has_response_id=%s pending_count=%d unmatched_upstream_liveness=%d",
                 session.account.id,
                 session.key.affinity_kind,
                 event_type or "unknown",
                 response_id is not None,
                 pending_request_count,
+                unmatched_liveness_count,
             )
+            if _http_bridge_event_proves_upstream_liveness(event_type):
+                _log_http_bridge_event(
+                    "unmatched_upstream_liveness",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    pending_count=pending_request_count,
+                    detail=(
+                        f"event_type={event_type or 'unknown'} unmatched_upstream_liveness={unmatched_liveness_count}"
+                    ),
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
 
         if status_request_state is not None and event_type not in {
             "response.completed",
@@ -2723,6 +3202,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 original_text=text,
             )
             event_block = f"data: {rewritten_text}\n\n"
+            await _retire_denied_http_bridge_anchor(
+                self,
+                session,
+                request_states=(status_request_state,),
+            )
 
         retry_error_code = _websocket_precreated_retry_error_code(
             status_request_state,

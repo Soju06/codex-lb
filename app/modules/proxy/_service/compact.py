@@ -9,6 +9,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, NoReturn, Protocol, TypeVar, cast
 
 import aiohttp
+import anyio
+from anyio.lowlevel import checkpoint_if_cancelled
 from pydantic import ValidationError
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
@@ -32,6 +34,7 @@ from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.retry import backoff_seconds
+from app.core.utils.shared_future import wait_on_shared_future
 from app.db.models import Account, AccountStatus, DashboardSettings, StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
@@ -1015,13 +1018,26 @@ class _CompactMixin:
                 name=f"compact-deferred-health-{request_id}",
             )
             cancellation_pending = False
-            while not flush_task.done():
+            # The anyio shield keeps a level-cancelled Starlette scope from
+            # re-raising into every ``await`` (busy-spin), and
+            # ``wait_on_shared_future`` keeps waits off the task's
+            # done-callback list (3.14 shield leaks one per cancelled wait).
+            with anyio.CancelScope(shield=True):
+                while not flush_task.done():
+                    try:
+                        await wait_on_shared_future(flush_task)
+                    except asyncio.CancelledError:
+                        cancellation_pending = True
+                    except Exception:
+                        break
+            if not cancellation_pending:
+                # The shield also blocks the level cancellation this block
+                # promises to re-raise after the flush. Probe without
+                # suspending so a disconnected compact request still cancels.
                 try:
-                    await asyncio.shield(flush_task)
+                    await checkpoint_if_cancelled()
                 except asyncio.CancelledError:
                     cancellation_pending = True
-                except Exception:
-                    break
             try:
                 flush_task.result()
             except Exception:

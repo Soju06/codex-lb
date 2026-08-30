@@ -34,8 +34,19 @@ async def select_responses_model_source(
     *,
     raw_model: str | None = None,
     require_streaming: bool = False,
+    only_disabled: bool = False,
 ) -> tuple[ModelSource, str] | None:
-    """Resolve ``model`` to a Responses-capable model source, if any."""
+    """Resolve ``model`` to a Responses-capable model source, if any.
+
+    ``only_disabled`` inverts the enabled-state filter and leaves every other
+    rule -- candidate order, API key model allowlist, source assignment scope,
+    subscription-registry precedence, route shape, streaming -- untouched, so
+    the answer is exactly "the source this request would have used, had the
+    operator not switched it off". Callers use it after the ordinary lookup
+    misses, to refuse the request instead of handing a source-owned model to a
+    subscription account that cannot serve it. Sharing one function keeps the
+    two lookups from drifting apart the way the transports once did.
+    """
     assigned_source_ids = allowed_source_ids_for_api_key(api_key)
     exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
     candidates = [candidate for candidate in (raw_model, model) if candidate]
@@ -55,6 +66,7 @@ async def select_responses_model_source(
                 candidate,
                 allowed_source_ids=assigned_source_ids,
                 require_streaming=require_streaming,
+                only_disabled=only_disabled,
             )
             if source is not None:
                 break
@@ -80,10 +92,20 @@ async def responses_model_is_source_owned(
     *,
     raw_model: str | None = None,
 ) -> bool:
-    """True when ``model`` is served by an enabled Responses-capable source.
+    """True when ``model`` is served by a Responses-capable source, even a disabled one.
 
     Used by the WebSocket path, which cannot forward to a model source and must
     fail the session so the client falls back to the HTTP transport.
+
+    Disabled-source ownership counts as ownership here: the WebSocket transport
+    cannot serve a source-owned model regardless of the source's enabled state,
+    and dispatching the turn to a subscription account instead produces the
+    opaque upstream 400 (``The '<model>' model is not supported when using
+    Codex with a ChatGPT account.``). Bouncing the turn to HTTP lands it on the
+    disabled-source denial there, which answers 503 ``model_source_disabled``
+    and names the actual condition. The second, ``only_disabled`` probe runs
+    only after the ordinary lookup misses, so enabled sources keep resolving in
+    a single query.
 
     The API key's ``enforced_model`` is considered alongside the requested
     model, matching how the HTTP handlers build their candidate list: an
@@ -114,12 +136,23 @@ async def responses_model_is_source_owned(
     if not model and not raw:
         return False
     try:
+        if (
+            await select_responses_model_source(
+                model or raw or "",
+                api_key,
+                raw_model=raw,
+                require_streaming=True,
+            )
+            is not None
+        ):
+            return True
         return (
             await select_responses_model_source(
                 model or raw or "",
                 api_key,
                 raw_model=raw,
                 require_streaming=True,
+                only_disabled=True,
             )
             is not None
         )

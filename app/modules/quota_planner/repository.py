@@ -3,8 +3,22 @@ from __future__ import annotations
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import cast as typing_cast
 
-from sqlalchemy import ColumnElement, Integer, and_, cast, false, func, literal, or_, select, text, update
+from sqlalchemy import (
+    ColumnElement,
+    Integer,
+    and_,
+    cast,
+    false,
+    func,
+    literal,
+    literal_column,
+    or_,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,9 +77,45 @@ class DemandBin:
 
 
 _WARMUP_BUDGET_LOCK_KEY = "quota_planner:warmup_budget"
+WARMUP_EXECUTION_CLAIM_TTL_SECONDS = 300.0
+_SQLITE_NOW = "(strftime('%Y-%m-%d %H:%M:%f', 'now') || '000')"
 
 
-def _active_warmup_budget_clause(since: datetime) -> ColumnElement[bool]:
+def _db_now_expr(dialect_name: str) -> ColumnElement[datetime]:
+    if dialect_name == "postgresql":
+        return typing_cast(ColumnElement[datetime], func.clock_timestamp())
+    return typing_cast(ColumnElement[datetime], literal_column(_SQLITE_NOW))
+
+
+def _db_now_plus_seconds_expr(dialect_name: str, *, ttl_seconds: float) -> ColumnElement[datetime]:
+    ttl_seconds = max(1.0, float(ttl_seconds))
+    if dialect_name == "postgresql":
+        return typing_cast(
+            ColumnElement[datetime],
+            literal_column(f"(clock_timestamp() + make_interval(secs => {ttl_seconds:.3f}))"),
+        )
+    return typing_cast(
+        ColumnElement[datetime],
+        literal_column(f"(strftime('%Y-%m-%d %H:%M:%f', 'now', '+{ttl_seconds:.3f} seconds') || '000')"),
+    )
+
+
+def _expired_warmup_claim_clause(*, dialect_name: str) -> ColumnElement[bool]:
+    now = _db_now_expr(dialect_name)
+    return and_(
+        QuotaPlannerDecision.lease_expires_at.is_not(None),
+        QuotaPlannerDecision.lease_expires_at <= now,
+    )
+
+
+def warmup_claim_is_expired(decision: QuotaPlannerDecision, *, now: datetime | None = None) -> bool:
+    if decision.status != "executing" or decision.action != "warmup" or decision.lease_expires_at is None:
+        return False
+    current = to_utc_naive(now or utcnow())
+    return to_utc_naive(decision.lease_expires_at) <= current
+
+
+def _active_warmup_budget_clause(since: datetime, *, dialect_name: str) -> ColumnElement[bool]:
     """Filter warmup decisions consuming the daily count budget since ``since``.
 
     ``executed`` decisions count by ``executed_at`` (completion time).
@@ -87,6 +137,10 @@ def _active_warmup_budget_clause(since: datetime) -> ColumnElement[bool]:
             ),
             and_(
                 QuotaPlannerDecision.status == "executing",
+                or_(
+                    QuotaPlannerDecision.lease_expires_at.is_(None),
+                    QuotaPlannerDecision.lease_expires_at > _db_now_expr(dialect_name),
+                ),
                 or_(
                     QuotaPlannerDecision.executed_at >= since,
                     and_(
@@ -212,6 +266,7 @@ class QuotaPlannerRepository:
         since: datetime,
         max_warmups: int,
         max_credits: float,
+        claim_ttl_seconds: float = WARMUP_EXECUTION_CLAIM_TTL_SECONDS,
     ) -> QuotaPlannerDecision | None:
         """Atomically claim a planned warmup decision within the daily budgets.
 
@@ -238,8 +293,11 @@ class QuotaPlannerRepository:
         (already claimed elsewhere, or a budget guard failed).
         """
         since = to_utc_naive(since)
+        dialect_name = self._dialect_name()
         active_warmups = (
-            select(func.count(QuotaPlannerDecision.id)).where(_active_warmup_budget_clause(since)).scalar_subquery()
+            select(func.count(QuotaPlannerDecision.id))
+            .where(_active_warmup_budget_clause(since, dialect_name=dialect_name))
+            .scalar_subquery()
         )
         warmup_cost = (
             select(func.coalesce(func.sum(RequestLog.cost_usd), 0.0))
@@ -252,15 +310,29 @@ class QuotaPlannerRepository:
             )
             .scalar_subquery()
         )
+        claim_now = _db_now_expr(dialect_name)
+        claim_expires_at = _db_now_plus_seconds_expr(dialect_name, ttl_seconds=claim_ttl_seconds)
         stmt = (
             update(QuotaPlannerDecision)
             .where(
                 QuotaPlannerDecision.id == decision_id,
-                QuotaPlannerDecision.status == "planned",
+                QuotaPlannerDecision.action == "warmup",
+                or_(
+                    QuotaPlannerDecision.status == "planned",
+                    and_(
+                        QuotaPlannerDecision.status == "executing",
+                        _expired_warmup_claim_clause(dialect_name=dialect_name),
+                    ),
+                ),
                 active_warmups < max_warmups,
                 warmup_cost < max_credits,
             )
-            .values(status="executing", reason="warmup_executing", executed_at=to_utc_naive(utcnow()))
+            .values(
+                status="executing",
+                reason="warmup_executing",
+                executed_at=claim_now,
+                lease_expires_at=claim_expires_at,
+            )
             .returning(QuotaPlannerDecision.id)
         )
         async with sqlite_writer_section():
@@ -268,7 +340,7 @@ class QuotaPlannerRepository:
             # statement snapshot (and, on PostgreSQL, the advisory lock scope)
             # is not tied to earlier reads on this session.
             await self._session.commit()
-            if self._dialect_name() == "postgresql":
+            if dialect_name == "postgresql":
                 await self._session.execute(
                     text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
                     {"key": _WARMUP_BUDGET_LOCK_KEY},
@@ -279,6 +351,21 @@ class QuotaPlannerRepository:
             return None
         return await self._session.get(QuotaPlannerDecision, claimed_id, populate_existing=True)
 
+    async def list_expired_warmup_claims(self, *, limit: int = 100) -> list[QuotaPlannerDecision]:
+        dialect_name = self._dialect_name()
+        stmt = (
+            select(QuotaPlannerDecision)
+            .where(
+                QuotaPlannerDecision.action == "warmup",
+                QuotaPlannerDecision.status == "executing",
+                _expired_warmup_claim_clause(dialect_name=dialect_name),
+            )
+            .order_by(QuotaPlannerDecision.lease_expires_at.asc(), QuotaPlannerDecision.created_at.asc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def update_decision_status(
         self,
         decision_id: str,
@@ -288,12 +375,16 @@ class QuotaPlannerRepository:
         executed_at: datetime | None = None,
         state_after_json: str | None = None,
         expected_status: str | Collection[str] | None = None,
+        expected_executed_at: datetime | None = None,
+        expected_lease_expires_at: datetime | None = None,
     ) -> QuotaPlannerDecision | None:
         values: dict[str, object] = {"status": status}
         if reason is not None:
             values["reason"] = reason
         if executed_at is not None:
             values["executed_at"] = _to_db_naive_utc(executed_at)
+        if status != "executing":
+            values["lease_expires_at"] = None
         if state_after_json is not None:
             values["state_after_json"] = state_after_json
         stmt = update(QuotaPlannerDecision).where(QuotaPlannerDecision.id == decision_id).values(**values)
@@ -302,7 +393,48 @@ class QuotaPlannerRepository:
                 stmt = stmt.where(QuotaPlannerDecision.status == expected_status)
             else:
                 stmt = stmt.where(QuotaPlannerDecision.status.in_(tuple(expected_status)))
+        if expected_executed_at is not None:
+            stmt = stmt.where(QuotaPlannerDecision.executed_at == _to_db_naive_utc(expected_executed_at))
+        if expected_lease_expires_at is not None:
+            stmt = stmt.where(QuotaPlannerDecision.lease_expires_at == _to_db_naive_utc(expected_lease_expires_at))
         stmt = stmt.returning(QuotaPlannerDecision.id)
+        async with sqlite_writer_section():
+            updated_id = await self._session.scalar(stmt)
+            await self._session.commit()
+        if updated_id is None:
+            return None
+        row = await self._session.get(QuotaPlannerDecision, updated_id)
+        if row is None:
+            return None
+        await self._session.refresh(row)
+        return row
+
+    async def skip_stale_warmup_claim(
+        self,
+        decision_id: str,
+        *,
+        reason: str,
+        executed_at: datetime | None = None,
+    ) -> QuotaPlannerDecision | None:
+        dialect_name = self._dialect_name()
+        values: dict[str, object] = {
+            "status": "skipped",
+            "reason": reason,
+            "lease_expires_at": None,
+        }
+        if executed_at is not None:
+            values["executed_at"] = _to_db_naive_utc(executed_at)
+        stmt = (
+            update(QuotaPlannerDecision)
+            .where(
+                QuotaPlannerDecision.id == decision_id,
+                QuotaPlannerDecision.action == "warmup",
+                QuotaPlannerDecision.status == "executing",
+                _expired_warmup_claim_clause(dialect_name=dialect_name),
+            )
+            .values(**values)
+            .returning(QuotaPlannerDecision.id)
+        )
         async with sqlite_writer_section():
             updated_id = await self._session.scalar(stmt)
             await self._session.commit()
@@ -323,7 +455,9 @@ class QuotaPlannerRepository:
         ``_active_warmup_budget_clause``).
         """
         since = to_utc_naive(since)
-        stmt = select(func.count(QuotaPlannerDecision.id)).where(_active_warmup_budget_clause(since))
+        stmt = select(func.count(QuotaPlannerDecision.id)).where(
+            _active_warmup_budget_clause(since, dialect_name=self._dialect_name())
+        )
         return int(await self._session.scalar(stmt) or 0)
 
     async def count_executed_warmups_since(self, since: datetime) -> int:

@@ -688,10 +688,9 @@ async def lifespan(app: FastAPI):
         recovery_settlements_drained = True
         # Settle detached recovery journals while their origin leases are
         # still held; bridge teardown below may release those owner fences.
-        remaining_drain_seconds = shutdown_state.remaining_drain_timeout_seconds() or 0.0
         recovery_settlements_drained = await _drain_proxy_persistence_tasks(
             proxy_service,
-            remaining_drain_seconds,
+            shutdown_state.remaining_post_drain_cleanup_timeout_seconds() or 0.0,
             task_name_prefixes=("http-bridge-recovery-settlement-",),
             failure_message="Failed to pre-drain proxy settlement tasks during shutdown",
         )

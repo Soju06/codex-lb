@@ -43,6 +43,26 @@ class ResponseFailedEvent(TypedDict):
 
 
 PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE = "Upstream websocket closed before response.completed"
+# Local bridge recovery (fresh replay, context-overflow rollover, previous
+# response rebind) tears down our own upstream session. It is not an upstream
+# close and must not be reported as one.
+HTTP_BRIDGE_LOCAL_RESET_MESSAGE = "HTTP responses session bridge reset this session locally before response.completed"
+# ``stream_incomplete`` raised against a continuation anchor is ambiguous: the
+# turn may already exist upstream. Neither of these messages proves the account
+# misbehaved, so neither may drive an account-health penalty.
+STREAM_INCOMPLETE_ANCHOR_NEUTRAL_MESSAGES = frozenset(
+    {
+        PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+        HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
+    }
+)
+# Pre-response-start bridge silence. Distinct from ``stream_idle_timeout``,
+# whose budget (``stream_idle_timeout_seconds``) only governs gaps *after*
+# ``response.created``. When the bridge saw no unmatched upstream liveness,
+# nothing was created upstream and a retry forks no context. If liveness was
+# observed but not matched to a response, callers must treat retry as
+# at-least-once.
+HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE = "bridge_eventless_timeout"
 PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found"
 PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE = "Previous response was not found; retry without previous_response_id."
 

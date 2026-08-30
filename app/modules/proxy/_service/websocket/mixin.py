@@ -64,6 +64,7 @@ from app.core.clients.proxy_websocket import (
     is_account_neutral_websocket_error_code,
 )
 from app.core.errors import (
+    STREAM_INCOMPLETE_ANCHOR_NEUTRAL_MESSAGES,
     OpenAIErrorEnvelope,
     openai_error,
     response_failed_event,
@@ -1815,7 +1816,10 @@ class _WebSocketMixin:
                                     # response.create that switches to a source-owned model
                                     # would otherwise be forwarded to the subscription account
                                     # already attached to the open upstream. Model sources are
-                                    # only reachable from the HTTP request path.
+                                    # only reachable from the HTTP request path. Ownership
+                                    # includes disabled sources, which no subscription account
+                                    # can serve either; over HTTP those meet the 503
+                                    # ``model_source_disabled`` denial.
                                     #
                                     # Gated on an existing upstream on purpose: a first turn has
                                     # no socket yet and must fall through to the connect guard,
@@ -2820,15 +2824,26 @@ class _WebSocketMixin:
             scope_cancelled = True
             raise
         finally:
-            remaining_drain_timeout = shutdown_state.remaining_drain_timeout_seconds()
-            cleanup_timeout = (
-                _WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS
-                if remaining_drain_timeout is None
-                else max(float(remaining_drain_timeout), 0.0)
-            )
-            task_cleanup_timeout = (
-                _facade()._TASK_CANCEL_TIMEOUT_SECONDS if remaining_drain_timeout is None else cleanup_timeout
-            )
+
+            def current_scope_cleanup_timeout() -> float:
+                # The scope-cleanup wait guards terminal settlement (request
+                # finalization, lease release), which may legitimately outlive
+                # the drain deadline: when the server has published its
+                # post-drain cleanup reserve, draw on the shared
+                # drain-plus-reserve remainder — mirroring the shielded
+                # terminal-settlement wait — so an exhausted drain does not
+                # abandon the cleanup task with a zero budget. Without a
+                # published reserve (reversible operator drain, embedded
+                # lifespans) this stays bounded by the drain remainder.
+                remaining = shutdown_state.remaining_post_drain_cleanup_timeout_seconds()
+                if remaining is None:
+                    remaining = shutdown_state.remaining_drain_timeout_seconds()
+                return _WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS if remaining is None else max(float(remaining), 0.0)
+
+            def current_cleanup_timeout() -> float:
+                remaining = shutdown_state.remaining_drain_timeout_seconds()
+                return _facade()._TASK_CANCEL_TIMEOUT_SECONDS if remaining is None else max(float(remaining), 0.0)
+
             cleanup_phase = "not_started"
 
             async def finalize_websocket_scope() -> None:
@@ -2849,7 +2864,7 @@ class _WebSocketMixin:
                     await _close_websocket_upstream_for_cleanup(
                         proxy,
                         upstream,
-                        timeout_seconds=task_cleanup_timeout,
+                        timeout_seconds=current_cleanup_timeout(),
                     )
                 if reader_to_await is not None:
                     try:
@@ -2873,7 +2888,7 @@ class _WebSocketMixin:
                         cleanup_phase = "retired_create_lease"
                         await _facade()._await_cancelled_task(
                             retired_create_lease_release_task,
-                            timeout_seconds=task_cleanup_timeout,
+                            timeout_seconds=current_cleanup_timeout(),
                             label="proxy websocket retired create lease release",
                             cancel=False,
                         )
@@ -2888,7 +2903,7 @@ class _WebSocketMixin:
                         cleanup_phase = "unsent_request"
                         await _facade()._await_cancelled_task(
                             request_state_failure_task,
-                            timeout_seconds=task_cleanup_timeout,
+                            timeout_seconds=current_cleanup_timeout(),
                             label="proxy websocket unsent request finalization",
                             cancel=False,
                         )
@@ -2990,15 +3005,16 @@ class _WebSocketMixin:
                     )
 
             cleanup_task.add_done_callback(log_scope_cleanup_failure)
+            scope_cleanup_timeout = current_scope_cleanup_timeout()
             done, _ = await asyncio.wait(
                 {cleanup_task},
-                timeout=max(float(cleanup_timeout), 0.0),
+                timeout=scope_cleanup_timeout,
             )
             if not done:
                 _facade().logger.warning(
                     "Websocket scope cleanup exceeded its cleanup budget "
                     "timeout_seconds=%.3f cleanup_phase=%s background_cleanup_tasks=%d",
-                    max(float(cleanup_timeout), 0.0),
+                    scope_cleanup_timeout,
                     cleanup_phase,
                     sum(1 for task in proxy._background_cleanup_tasks if not task.done()),
                 )
@@ -3478,6 +3494,9 @@ class _WebSocketMixin:
         # model is not supported when using Codex with a ChatGPT account."
         # Codex clients fall back to the HTTP transport when a WebSocket
         # connect fails, and that path routes to the source correctly.
+        # Ownership includes disabled sources: no subscription account can
+        # serve those either, and the HTTP fallback answers them with the
+        # informative 503 ``model_source_disabled`` denial.
         #
         # Evaluated once per connect series rather than inside the failover
         # loop below: source ownership is a property of the requested model, so
@@ -6160,7 +6179,7 @@ class _WebSocketMixin:
         if (
             error_code == "stream_incomplete"
             and request_state.previous_response_id is not None
-            and error_message == "Upstream websocket closed before response.completed"
+            and error_message in STREAM_INCOMPLETE_ANCHOR_NEUTRAL_MESSAGES
         ):
             settlement.account_health_error = False
         proxy._cancel_request_state_api_key_reservation_heartbeat(request_state)
@@ -6550,7 +6569,7 @@ class _WebSocketMixin:
         try:
             settlement_succeeded = await asyncio.shield(finalization_task)
         except asyncio.CancelledError:
-            remaining_timeout = shutdown_state.remaining_drain_timeout_seconds()
+            remaining_timeout = shutdown_state.remaining_post_drain_cleanup_timeout_seconds()
             timeout_seconds = (
                 _facade()._TASK_CANCEL_TIMEOUT_SECONDS
                 if remaining_timeout is None
@@ -6588,11 +6607,18 @@ class _WebSocketMixin:
         if penalize_account:
             for request_state in remaining:
                 request_error_code = request_state.error_code_override or error_code
+                request_error_message = request_state.error_message_override or error_message
+                if (
+                    request_error_code == "stream_incomplete"
+                    and request_state.previous_response_id is not None
+                    and request_error_message in STREAM_INCOMPLETE_ANCHOR_NEUTRAL_MESSAGES
+                ):
+                    continue
                 if request_error_code in _facade()._TRANSIENT_RETRY_CODES or _facade()._should_penalize_stream_error(
                     request_error_code
                 ):
                     penalty_code = request_error_code
-                    penalty_message = request_state.error_message_override or error_message
+                    penalty_message = request_error_message
                     break
 
         reservation_release_succeeded = True

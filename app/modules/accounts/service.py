@@ -87,6 +87,8 @@ _DETAIL_BUCKET_SECONDS = 3600  # 1h → 168 points
 DEFAULT_PROBE_MODEL = "gpt-5.5"
 PROBE_REQUEST_TIMEOUT_SECONDS = 30.0
 PROBE_CONNECT_TIMEOUT_SECONDS = 10.0
+# Codex rejects probe completions below this output-token floor (1 → 400, 16 → 200).
+PROBE_MAX_OUTPUT_TOKENS = 16
 # Network/upstream failure sentinel for ``probe_status_code`` — kept as ``0`` so
 # the value is distinguishable from any real HTTP status the upstream might
 # return.
@@ -834,7 +836,7 @@ class AccountsService:
                     "content": [{"type": "input_text", "text": "."}],
                 }
             ],
-            "max_output_tokens": 1,
+            "max_output_tokens": PROBE_MAX_OUTPUT_TOKENS,
             "stream": True,
             "store": False,
         }

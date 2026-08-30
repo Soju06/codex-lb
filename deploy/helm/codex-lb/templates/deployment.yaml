@@ -10,6 +10,9 @@ launch headroom above the enforced arithmetic minimum.
 {{- if lt $shutdownDrainTimeoutSeconds $preStopSleepSeconds }}
 {{- fail "config.shutdownDrainTimeoutSeconds must be greater than or equal to preStopSleepSeconds so routing dwell fits inside the shared drain deadline." }}
 {{- end }}
+{{- if gt $shutdownDrainTimeoutSeconds 300 }}
+{{- fail "config.shutdownDrainTimeoutSeconds must be less than or equal to 300 seconds, matching the application shutdown limit." }}
+{{- end }}
 {{- $preStopStartFailureBudgetSeconds := 2 }}
 {{- $postDrainCleanupBufferSeconds := 30 }}
 {{- $minimumTerminationGraceSeconds := add (add $shutdownDrainTimeoutSeconds $preStopStartFailureBudgetSeconds) $postDrainCleanupBufferSeconds }}

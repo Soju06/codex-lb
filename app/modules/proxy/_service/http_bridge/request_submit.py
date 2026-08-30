@@ -81,11 +81,14 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR,
     _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR,
     _await_task_deferring_cancellation,
+    _bind_http_bridge_proxy_injected_anchor,
     _build_http_bridge_prewarm_text,
     _http_bridge_abandonment_may_settle_circuit,
+    _http_bridge_denied_anchor_fence_advanced,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_key_strength,
+    _http_bridge_payload_looks_like_full_resend,
     _http_bridge_precreated_retry_failure_error,
     _http_bridge_prewarm_enabled,
     _http_bridge_request_budget_seconds,
@@ -740,6 +743,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 payload.previous_response_id is not None
                 or _sticky_key_from_turn_state_header(headers or {}) is not None
             ),
+            # Hard turn-state operation recovery can inject its anchor later,
+            # after the request state is prepared. Preserve the original
+            # payload shape so a full resend remains eligible for denied-anchor
+            # retirement when that operation path supplies the id.
+            proxy_injected_anchor_had_full_resend_payload=_http_bridge_payload_looks_like_full_resend(payload),
             payload_conversation_bound=bool(payload.conversation),
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
@@ -1298,8 +1306,11 @@ class _HTTPBridgeRequestSubmitMixin:
                         hard_turn_chain_advanced = True
                         text_data = _text_with_previous_response_id(text_data, terminal_hard_turn_response_id)
                         request_state.request_text = text_data
-                        request_state.previous_response_id = terminal_hard_turn_response_id
-                        request_state.proxy_injected_previous_response_id = True
+                        _bind_http_bridge_proxy_injected_anchor(
+                            self,
+                            request_state,
+                            response_id=terminal_hard_turn_response_id,
+                        )
                         request_state.hard_continuity_anchor = True
                         operation_parent_response_id = terminal_hard_turn_response_id
                         operation_fingerprint = durable_bridge_operation_fingerprint(
@@ -1348,8 +1359,11 @@ class _HTTPBridgeRequestSubmitMixin:
                             if completed_response_id and completed_response_id != request_state.previous_response_id:
                                 text_data = _text_with_previous_response_id(text_data, completed_response_id)
                                 request_state.request_text = text_data
-                                request_state.previous_response_id = completed_response_id
-                                request_state.proxy_injected_previous_response_id = True
+                                _bind_http_bridge_proxy_injected_anchor(
+                                    self,
+                                    request_state,
+                                    response_id=completed_response_id,
+                                )
                                 operation_parent_response_id = completed_response_id
                                 hard_turn_chain_advanced = True
                                 seen_hard_turn_response_ids.add(completed_response_id)
@@ -1687,14 +1701,34 @@ class _HTTPBridgeRequestSubmitMixin:
         request_enqueued = False
         admission_waiter_registered = False
         try:
+            # Register the submit as an admission waiter BEFORE any suspension
+            # outside the lock: the waiter count keeps the idle sweeper and
+            # close-time retire from evicting the session while the settings
+            # snapshot below resolves, and a previous turn's finalizer
+            # unwinding concurrently cannot see an apparently idle session
+            # and release the lease the reacquire installs.
             async with session.pending_lock:
-                await self._ensure_http_bridge_session_stream_lease_locked(session, request_state=request_state)
-                # Register the submit as an admission waiter atomically with the
-                # reacquire so a previous turn's finalizer unwinding concurrently
-                # cannot see an apparently idle session and release this lease
-                # before the turn is counted into the session queue.
                 session.admission_waiter_count += 1
                 admission_waiter_registered = True
+                # Snapshot under the same lock: with the waiter registered, a
+                # held lease cannot be idle-released, so a session that does
+                # not need reacquisition here will not need it at the
+                # reacquire either.
+                needs_stream_lease = session.account_lease is None and not session.closed
+            # Resolved before the reacquire's pending_lock — the settings-cache
+            # refresh behind this can run a DB query and must not suspend the
+            # critical section (issue #1971) — and only when the reacquire can
+            # actually run: a session already holding its lease never depended
+            # on a settings read to admit a turn.
+            fair_share_threshold_pct = (
+                await self._http_bridge_fair_share_threshold_pct(session) if needs_stream_lease else 0
+            )
+            async with session.pending_lock:
+                await self._ensure_http_bridge_session_stream_lease_locked(
+                    session,
+                    request_state=request_state,
+                    fair_share_threshold_pct=fair_share_threshold_pct,
+                )
         except BaseException:
             # Recovery claims are made before admission. If reacquiring an
             # idle session's stream lease fails, no upstream frame can have
@@ -1736,6 +1770,11 @@ class _HTTPBridgeRequestSubmitMixin:
             await _await_task_deferring_cancellation(cleanup_task)
             raise
         try:
+            # Reuses the pre-prewarm snapshot: the registered admission waiter
+            # kept the lease from idle release, so this reacquire is a no-op
+            # unless the session closed mid-prewarm — a fresh refresh here
+            # could only stall an otherwise admissible request on a
+            # TTL-expired settings read (issue #1971).
             async with session.pending_lock:
                 if session.queued_request_count >= queue_limit:
                     _log_http_bridge_event(
@@ -1755,7 +1794,11 @@ class _HTTPBridgeRequestSubmitMixin:
                             error_type="rate_limit_error",
                         ),
                     )
-                await self._ensure_http_bridge_session_stream_lease_locked(session, request_state=request_state)
+                await self._ensure_http_bridge_session_stream_lease_locked(
+                    session,
+                    request_state=request_state,
+                    fair_share_threshold_pct=fair_share_threshold_pct,
+                )
                 session.queued_request_count += 1
                 if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                     session.unanchored_reservation_id = None
@@ -2032,6 +2075,29 @@ class _HTTPBridgeRequestSubmitMixin:
                                     "The recovery checkpoint was consumed before dispatch; retry the request.",
                                 ),
                             )
+                    if (
+                        request_state.proxy_injected_previous_response_id
+                        and request_state.previous_response_id is not None
+                        and (
+                            request_state.previous_response_id in session.denied_proxy_injected_anchor_ids
+                            or request_state.denied_proxy_injected_anchor_fence_was_already_denied
+                            or _http_bridge_denied_anchor_fence_advanced(self, request_state)
+                        )
+                    ):
+                        _record_continuity_fail_closed(
+                            surface="http_bridge",
+                            reason="denied_proxy_anchor_before_dispatch",
+                            previous_response_id=request_state.previous_response_id,
+                            session_id=request_state.session_id,
+                            upstream_error_code="previous_response_not_found",
+                        )
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "stream_incomplete",
+                                "The previous response anchor was rejected upstream; retry the request.",
+                            ),
+                        )
                     if (
                         request_state.verified_stale_anchor_replay
                         and request_state.verified_stale_anchor_retry_circuit_generation_captured
@@ -2678,18 +2744,48 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.response_event_count,
                     int(request_state.response_id is not None or request_state.latency_response_created_ms is not None),
                 ),
+                # The session was already closed when the last admission
+                # waiter cancelled; its reader is gone, so post-suspension
+                # liveness signals cannot make it serviceable again.
+                allow_liveness_revive=False,
             )
         await self._maybe_release_idle_http_bridge_session_lease(session)
+
+    async def _http_bridge_fair_share_threshold_pct(
+        self: Any,
+        session: "_HTTPBridgeSession",
+    ) -> int:
+        """Resolve the keyed fair-share threshold WITHOUT holding pending_lock.
+
+        The settings-cache refresh runs a DB query behind a process-global
+        lock; awaiting it while holding a session's ``pending_lock`` let one
+        stalled query wedge every keyed submit process-wide (issue #1971).
+        Callers resolve the snapshot first and pass it into
+        ``_ensure_http_bridge_session_stream_lease_locked``.
+        """
+        if session.key.api_key_id is None:
+            return 0
+        return _api_key_fair_share_threshold_pct_from_settings(await _service_get_settings_cache().get())
 
     async def _ensure_http_bridge_session_stream_lease_locked(
         self: Any,
         session: "_HTTPBridgeSession",
         *,
         request_state: _WebSocketRequestState | None = None,
+        fair_share_threshold_pct: int | None = None,
     ) -> None:
         """Reacquire the account stream lease for a session idled between turns.
 
-        Callers hold ``session.pending_lock``. The lease is released when the
+        Callers hold ``session.pending_lock`` and MUST pass
+        ``fair_share_threshold_pct`` (see
+        ``_http_bridge_fair_share_threshold_pct``) computed before acquiring
+        it: resolving the threshold reads the settings cache, whose refresh
+        runs a DB query behind a process-global lock — one stalled refresh
+        under ``pending_lock`` wedged every keyed submit for days
+        (issue #1971). The ``None`` fallback resolves it inline and exists
+        for lock-free callers only.
+
+        The lease is released when the
         session's last in-flight turn detaches, so an idle session does not
         occupy a per-account stream slot; the next turn must pass normal cap
         admission again. Denial raises the standard local-cap envelope so the
@@ -2713,8 +2809,9 @@ class _HTTPBridgeRequestSubmitMixin:
         if load_balancer is None:
             return
         api_key_id = session.key.api_key_id
-        fair_share_threshold_pct = 0
-        if api_key_id is not None:
+        if api_key_id is None:
+            fair_share_threshold_pct = 0
+        elif fair_share_threshold_pct is None:
             fair_share_threshold_pct = _api_key_fair_share_threshold_pct_from_settings(
                 await _service_get_settings_cache().get()
             )
@@ -3066,6 +3163,15 @@ class _HTTPBridgeRequestSubmitMixin:
             should_reconnect = (
                 not has_visible_pending
                 and session.queued_request_count == 0
+                # A registered admission waiter owns a turn that has not yet
+                # been counted into the queue (it may be suspended on the
+                # pre-lock fair-share resolve, issue #1971); retiring under it
+                # would fail an admitted turn with upstream_unavailable. A
+                # deferred retirement re-runs on the turn's own drain
+                # triggers once it proceeds; if the waiter instead fails
+                # admission, its cleanup releases the idle lease and the
+                # flagged session falls back to idle-TTL close.
+                and session.admission_waiter_count == 0
                 and session.unanchored_reservation_id is None
                 and not session.upstream_close_attempted
             )
@@ -3128,10 +3234,31 @@ class _HTTPBridgeRequestSubmitMixin:
         retired_request_count: int | None = None,
         retry_circuit_attempt_selection: _HTTPBridgeRetryCircuitAttemptSelection | None = None,
         retired_request_states: list[_WebSocketRequestState] | None = None,
+        allow_liveness_revive: bool = True,
     ) -> None:
         async with session.pending_lock:
             if retired_request_states is None:
                 retired_request_states = list(session.pending_requests)
+            baseline_completed_response_id = session.last_completed_response_id
+            # Baseline the upstream event generation at entry, alongside the
+            # completed-response baseline, so a prelude-only upstream event
+            # arriving during the retry-circuit strike await (which bumps the
+            # generation without touching per-request response counters) is
+            # still detected as post-suspension liveness.
+            baseline_event_generation = session.last_upstream_event_generation
+            # Snapshot the retirement fences at entry. Fence owners (durable
+            # stale-owner rejection, never-graft replacement rejection,
+            # previous-response-owner unavailability, alias-registration
+            # failure) set ``closed``/``reconnect_requested``/
+            # ``retire_after_drain`` without detaching the session or claiming
+            # the upstream close, so identity and close-claim guards alone
+            # cannot see them. A fence raised after this snapshot must survive
+            # the liveness revive below; erasing it would turn the fence
+            # owner's drain-retirement into a permanent no-op and let a
+            # condemned socket stay registered and reusable.
+            entry_closed = session.closed
+            entry_reconnect_requested = session.upstream_control.reconnect_requested
+            entry_retire_after_drain = session.upstream_control.retire_after_drain
             if retired_request_count is None:
                 retired_request_count = sum(
                     1
@@ -3249,13 +3376,90 @@ class _HTTPBridgeRequestSubmitMixin:
                         cache_key_family=session.key.affinity_kind,
                         model_class=_extract_model_class(session.request_model) if session.request_model else None,
                     )
-        session.closed = True
+
+        async with session.pending_lock:
+            current_response_events_seen = max(
+                (getattr(request_state, "response_event_count", 0) for request_state in session.pending_requests),
+                default=0,
+            )
+            current_response_created = any(
+                request_state.response_id is not None or request_state.latency_response_created_ms is not None
+                for request_state in session.pending_requests
+            )
+            completed_response_id = session.last_completed_response_id
+        # The snapshot above avoids awaiting pending_lock while the global
+        # registry lock is held, preserving bounded cleanup for other sessions.
+        caller_response_events_seen = response_events_seen or 0
+        observed_new_completed_response = (
+            completed_response_id is not None and completed_response_id != baseline_completed_response_id
+        )
+        became_healthy_during_suspend = current_response_events_seen > caller_response_events_seen or (
+            caller_response_events_seen == 0 and (current_response_created or observed_new_completed_response)
+        )
+        should_close = False
         async with self._http_bridge_lock:
+            if session.last_upstream_event_generation != baseline_event_generation:
+                became_healthy_during_suspend = True
+            # A fence raised while this coroutine was suspended condemns the
+            # session even if it also showed liveness: the fence owner leaves
+            # the session registered and never claims the upstream close, so
+            # neither guard below can see it. Only fences newly raised since
+            # the entry snapshot block the revive; the entry-time retirement
+            # state belongs to this retirement and is cleared on revive.
+            fence_raised_during_suspend = (
+                (session.closed and not entry_closed)
+                or (session.upstream_control.reconnect_requested and not entry_reconnect_requested)
+                or (session.upstream_control.retire_after_drain and not entry_retire_after_drain)
+            )
             # Bounded close may return while resource finalization is still
             # running. Detachment transfers ownership instead of freeing the
             # capacity slot at canonical removal, and leaves a failed close
             # discoverable by shutdown/account invalidation for a later retry.
-            self._detach_http_bridge_session_locked(session.key, expected_session=session)
+            if session.upstream_close_attempted:
+                # A close owner already claimed retirement; converge with its
+                # bookkeeping and fall through so this path still emits the
+                # shared retirement telemetry (``should_close`` resolves to
+                # False below, so the close is not re-attempted).
+                session.closed = True
+                self._detach_http_bridge_session_locked(session.key, expected_session=session)
+            elif (
+                allow_liveness_revive
+                and became_healthy_during_suspend
+                and not fence_raised_during_suspend
+                and self._http_bridge_sessions.get(session.key) is session
+            ):
+                # The pending snapshot is only advisory; a terminal response
+                # may already have left the deque. A close owner cannot have
+                # claimed retirement in between: the branch above falls
+                # through under this same lock hold without awaiting.
+                #
+                # Revive only while this session is still the registered owner
+                # of its key. The acquisition loop can detach a
+                # ``retiring_with_visible_requests`` generation with
+                # ``mark_closed=False`` while this coroutine is suspended;
+                # clearing the retirement flags on that detached generation
+                # would make its drain-retirement a permanent no-op and leak
+                # the socket, durable/account leases, and capacity slot. A
+                # detached generation falls through to the bounded close
+                # below instead (the detach call is a no-op for it), as does
+                # a session fenced during the suspension: the bounded close
+                # conservatively satisfies the fence owner's intent.
+                #
+                # ``allow_liveness_revive=False`` callers (the reader-failure
+                # funnel and deferred retirement of an already-closed session)
+                # never reach this branch. Their pending turns were already
+                # terminally failed and their reader is condemned, so there is
+                # no turn left for the revive to save — and the
+                # completed-response signal above can be advanced by durable
+                # anchor rehydration, which copies registry state without any
+                # upstream evidence. Reviving there would leave a condemned,
+                # readerless session registered and reusable.
+                session.closed = False
+                session.upstream_control.reconnect_requested = False
+                session.upstream_control.retire_after_drain = False
+                return
+            else:
+                self._detach_http_bridge_session_locked(session.key, expected_session=session)
         async with session.pending_lock:
             should_close = not session.upstream_close_attempted
             if should_close:
@@ -3333,8 +3537,12 @@ class _HTTPBridgeRequestSubmitMixin:
                     retry_text_data,
                 )
                 if using_fresh_replay:
-                    request_state.previous_response_id = None
-                    request_state.proxy_injected_previous_response_id = False
+                    _bind_http_bridge_proxy_injected_anchor(
+                        self,
+                        request_state,
+                        response_id=None,
+                        proxy_injected=False,
+                    )
                     request_state.request_text = retry_text_data
                 await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text_data)
             _clear_websocket_request_error_overrides(request_state)
@@ -3950,8 +4158,12 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state.deferred_reasoning_downstream_texts = []
         request_state.awaiting_response_created = True
         if retry_text != request_state.request_text:
-            request_state.previous_response_id = None
-            request_state.proxy_injected_previous_response_id = False
+            _bind_http_bridge_proxy_injected_anchor(
+                self,
+                request_state,
+                response_id=None,
+                proxy_injected=False,
+            )
             request_state.request_text = retry_text
 
         async with session.pending_lock:

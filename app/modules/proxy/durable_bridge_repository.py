@@ -1357,6 +1357,61 @@ class DurableBridgeRepository:
             values=values,
         )
 
+    async def clear_latest_response_anchor_if_matches(
+        self,
+        *,
+        session_id: str,
+        api_key_scope: str,
+        instance_id: str,
+        owner_epoch: int,
+        response_id: str,
+    ) -> DurableBridgeSessionSnapshot | None:
+        """Clear one response anchor and its matching alias under the owner fence.
+
+        The response-id predicate makes a concurrent newer completion win over
+        a stale denial. Only the denied response alias is removed; turn-state
+        and other response aliases remain routable.
+        """
+
+        values: dict[str, object] = {
+            "latest_response_id": None,
+            "latest_input_item_count": None,
+            "latest_input_full_fingerprint": None,
+            "latest_pending_tool_calls_json": None,
+        }
+        async with sqlite_writer_section():
+            cleared = await self._session.execute(
+                update(HttpBridgeSessionRecord)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                    HttpBridgeSessionRecord.latest_response_id == response_id,
+                )
+                .values(**values)
+                .returning(HttpBridgeSessionRecord.id)
+            )
+            if cleared.scalar_one_or_none() is None:
+                await self._session.rollback()
+                return None
+            await self._session.execute(
+                delete(HttpBridgeSessionAlias).where(
+                    HttpBridgeSessionAlias.session_id == session_id,
+                    HttpBridgeSessionAlias.alias_kind == "previous_response_id",
+                    HttpBridgeSessionAlias.alias_hash == durable_bridge_hash(response_id),
+                    HttpBridgeSessionAlias.alias_value == response_id,
+                    HttpBridgeSessionAlias.api_key_scope == api_key_scope,
+                )
+            )
+            row = await self._session.get(
+                HttpBridgeSessionRecord,
+                session_id,
+                populate_existing=True,
+            )
+            await self._session.commit()
+        return _to_snapshot(row)
+
     async def record_recovery_attempt(
         self,
         *,

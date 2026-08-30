@@ -23,6 +23,8 @@ class _HTTPBridgeServiceProtocol(Protocol):
     _http_bridge_owner_client: Any
     _http_bridge_sessions: Any
     _http_bridge_detached_sessions: Any
+    _http_bridge_denied_anchor_fences: Any
+    _http_bridge_denied_anchor_fence_generation: int
     _http_bridge_inflight_sessions: Any
     _http_bridge_turn_state_index: Any
     _http_bridge_previous_response_index: Any
@@ -80,6 +82,11 @@ class _HTTPBridgeServiceProtocol(Protocol):
     ) -> tuple[list[_HTTPBridgeSession], list[asyncio.Future[_HTTPBridgeSession]]]: ...
     def _unregister_http_bridge_turn_states_locked(self, session: _HTTPBridgeSession) -> None: ...
     def _unregister_http_bridge_previous_response_ids_locked(self, session: _HTTPBridgeSession) -> None: ...
+    def _unregister_http_bridge_previous_response_id_locked(
+        self,
+        session: _HTTPBridgeSession,
+        response_id: str,
+    ) -> None: ...
     async def _register_http_bridge_turn_state_impl(
         self,
         session: _HTTPBridgeSession,
@@ -100,6 +107,14 @@ class _HTTPBridgeServiceProtocol(Protocol):
         input_item_count: int | None = None,
         input_full_fingerprint: str | None = None,
         pending_tool_calls: Mapping[str, str] | None = None,
+    ) -> bool: ...
+    async def _unregister_http_bridge_previous_response_id(
+        self,
+        session: _HTTPBridgeSession,
+        response_id: str,
+        *,
+        expected_durable_session_id: str | None = None,
+        expected_durable_owner_epoch: int | None = None,
     ) -> bool: ...
     def _schedule_http_bridge_session_closes(
         self,

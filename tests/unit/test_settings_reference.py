@@ -72,7 +72,12 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # 131 -> 132: operation_spool_format. The default remains rows_v1 because a
 # rolling deployment may enable chunks_v2 only after every replica can read it;
 # no existing timeout or size setting can express that compatibility fence.
-MAX_SETTINGS_FIELDS = 132
+# 132 -> 133: http_responses_session_bridge_server_recovery_max_attempts. The
+# bounded server-owned eventless recovery cap was hardcoded at 6 while the
+# bound-eventless-server-recovery spec called it "configured"; the maintainer
+# asked for it to be promoted to a setting on PR #1633 (2026-08-20/08-26),
+# consistent with that PR's budget-from-settings principle.
+MAX_SETTINGS_FIELDS = 133
 
 
 def test_generated_settings_reference_matches_code() -> None:

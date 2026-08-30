@@ -67,4 +67,5 @@ def test_shutdown_values_are_typed_in_chart_schema() -> None:
     assert properties["config"]["properties"]["shutdownDrainTimeoutSeconds"] == {
         "type": "integer",
         "minimum": 1,
+        "maximum": 300,
     }

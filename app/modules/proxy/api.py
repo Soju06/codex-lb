@@ -76,6 +76,7 @@ from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import (
+    HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
     is_previous_response_not_found_error,
@@ -249,6 +250,7 @@ from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
     apply_enforced_service_tier_model_fallback,
+    apply_prohibit_fast_mode,
     enforce_strict_function_tools_format,
     enforce_strict_text_format,
     model_alias_requests_fast_mode,
@@ -1125,8 +1127,8 @@ async def responses(
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
     try:
-        source_selection = (
-            None
+        source_selection, continuity_suppressed = (
+            (None, False)
             if source_route_excluded
             else await _select_responses_model_source_with_continuity(
                 request,
@@ -1142,6 +1144,20 @@ async def responses(
     source = source_selection[0] if source_selection is not None else None
     if source_selection is not None:
         responses_payload.model = source_selection[1]
+    elif not source_route_excluded and not continuity_suppressed:
+        # The ordinary lookup itself missed (continuity suppression means an
+        # enabled source claimed the model, so the disabled probe must not
+        # override the recorded subscription anchor).
+        disabled_denial = await _disabled_model_source_denial(
+            request,
+            responses_payload.model,
+            api_key,
+            route="responses",
+            raw_model=raw_source_model,
+            require_streaming=True,
+        )
+        if disabled_denial is not None:
+            return disabled_denial
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -1304,8 +1320,8 @@ async def v1_responses(
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
     try:
-        source_selection = (
-            None
+        source_selection, continuity_suppressed = (
+            (None, False)
             if source_route_excluded
             else await _select_responses_model_source_with_continuity(
                 request,
@@ -1321,6 +1337,20 @@ async def v1_responses(
     source = source_selection[0] if source_selection is not None else None
     if source_selection is not None:
         responses_payload.model = source_selection[1]
+    elif not source_route_excluded and not continuity_suppressed:
+        # The ordinary lookup itself missed (continuity suppression means an
+        # enabled source claimed the model, so the disabled probe must not
+        # override the recorded subscription anchor).
+        disabled_denial = await _disabled_model_source_denial(
+            request,
+            responses_payload.model,
+            api_key,
+            route="responses",
+            raw_model=raw_source_model,
+            require_streaming=responses_payload.stream is True,
+        )
+        if disabled_denial is not None:
+            return disabled_denial
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -4260,6 +4290,7 @@ async def v1_chat_completions(
     if prohibit_fast_mode and _is_fast_mode_model_alias(effective_model):
         effective_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
+    source_route_attempted = not responses_shaped_payload and payload.messages is not None
     source_selection = (
         await _select_chat_model_source(
             responses_payload.model,
@@ -4267,11 +4298,24 @@ async def v1_chat_completions(
             raw_model=effective_model,
             require_streaming=payload.stream is True,
         )
-        if not responses_shaped_payload and payload.messages is not None
+        if source_route_attempted
         else None
     )
     source = source_selection[0] if source_selection is not None else None
     request_model = source_selection[1] if source_selection is not None else responses_payload.model
+    if source is None and source_route_attempted:
+        # Before any reservation is taken, so a refusal strands nothing.
+        disabled_denial = await _disabled_model_source_denial(
+            request,
+            responses_payload.model,
+            api_key,
+            route="chat",
+            raw_model=effective_model,
+            require_streaming=payload.stream is True,
+            headers=rate_limit_headers,
+        )
+        if disabled_denial is not None:
+            return disabled_denial
     if source is None:
         apply_enforced_service_tier_model_fallback(
             responses_payload,
@@ -4305,6 +4349,7 @@ async def v1_chat_completions(
             ),
             reservation=reservation,
             rate_limit_headers=rate_limit_headers,
+            prohibit_fast_mode=prohibit_fast_mode,
         )
     responses_payload.stream = True
     stream = context.service.stream_responses(
@@ -4407,7 +4452,15 @@ async def _select_chat_model_source(
     *,
     raw_model: str | None = None,
     require_streaming: bool = False,
+    only_disabled: bool = False,
 ) -> tuple[ModelSource, str] | None:
+    """Resolve ``model`` to a Chat Completions-capable model source, if any.
+
+    ``only_disabled`` mirrors :func:`select_responses_model_source`: every rule
+    stays the same except the enabled-state filter, which is inverted, so the
+    result names the source the request would have used had it not been
+    switched off.
+    """
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
     exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
     candidates = [candidate for candidate in (raw_model, model) if candidate]
@@ -4427,6 +4480,7 @@ async def _select_chat_model_source(
                 candidate,
                 allowed_source_ids=assigned_source_ids,
                 require_streaming=require_streaming,
+                only_disabled=only_disabled,
             )
             if source is not None:
                 break
@@ -4445,6 +4499,7 @@ async def _select_responses_model_source(
     *,
     raw_model: str | None = None,
     require_streaming: bool = False,
+    only_disabled: bool = False,
 ) -> tuple[ModelSource, str] | None:
     # Shared with the WebSocket path so both transports agree on which models
     # belong to a model source.
@@ -4453,6 +4508,7 @@ async def _select_responses_model_source(
         api_key,
         raw_model=raw_model,
         require_streaming=require_streaming,
+        only_disabled=only_disabled,
     )
 
 
@@ -4464,8 +4520,17 @@ async def _select_responses_model_source_with_continuity(
     *,
     raw_model: str | None = None,
     require_streaming: bool = False,
-) -> tuple[ModelSource, str] | None:
-    """Select a source unless recorded subscription continuity owns the anchor."""
+) -> tuple[tuple[ModelSource, str] | None, bool]:
+    """Select a source unless recorded subscription continuity owns the anchor.
+
+    Returns ``(selection, continuity_suppressed)``. ``continuity_suppressed``
+    is ``True`` only when an enabled source claimed the model but a recorded
+    subscription owner for ``previous_response_id`` pinned the turn to a
+    subscription account instead. Callers use it to tell that case apart from
+    a genuine lookup miss: only a genuine miss may consult the disabled-source
+    denial, because a continuity-suppressed turn already has a subscription
+    anchor that must keep being served.
+    """
     source_selection = await _select_responses_model_source(
         payload.model,
         api_key,
@@ -4473,14 +4538,83 @@ async def _select_responses_model_source_with_continuity(
         require_streaming=require_streaming,
     )
     if source_selection is None or payload.previous_response_id is None:
-        return source_selection
+        return source_selection, False
     owner_account_id = await context.service._resolve_websocket_previous_response_owner(
         previous_response_id=payload.previous_response_id,
         api_key=api_key,
         session_id=proxy_affinity_module._owner_lookup_session_id_from_headers(request.headers),
         surface="http_source_route",
     )
-    return None if owner_account_id is not None else source_selection
+    if owner_account_id is not None:
+        return None, True
+    return source_selection, False
+
+
+async def _disabled_model_source_denial(
+    request: Request,
+    model: str,
+    api_key: ApiKeyData | None,
+    *,
+    route: Literal["chat", "responses"],
+    raw_model: str | None = None,
+    require_streaming: bool = False,
+    headers: Mapping[str, str] | None = None,
+) -> JSONResponse | None:
+    """Refuse a request whose model source exists but is switched off.
+
+    Called only after the ordinary lookup missed. A miss has two very different
+    causes that the routing code cannot otherwise tell apart: the model belongs
+    to nobody, or it belongs to a model source (or a source model) an operator
+    disabled. Only the first may fall through to subscription selection --
+    handing a source-owned slug to a ChatGPT account produces
+    ``The '<model>' model is not supported when using Codex with a ChatGPT
+    account.``, which burns the account's health signal and tells the operator
+    nothing about the source they switched off.
+
+    Returns ``None`` when no disabled source claims the model, leaving every
+    other request on its existing path.
+    """
+    if _allowed_source_ids_for_api_key(api_key) is None:
+        registry_models = get_model_registry().get_models_with_fallback()
+        candidates = [candidate for candidate in (raw_model, model) if candidate]
+        if candidates and all(candidate in registry_models for candidate in candidates):
+            # Mirrors the subscription-registry precedence rule inside the
+            # lookups: an unscoped key never source-routes a registry slug, so
+            # every candidate would be skipped and the probe is a guaranteed
+            # miss. Returning early keeps the extra background session off the
+            # ordinary subscription hot path, where this helper runs on every
+            # request whose model no source claims.
+            return None
+    selection = (
+        await _select_responses_model_source(
+            model,
+            api_key,
+            raw_model=raw_model,
+            require_streaming=require_streaming,
+            only_disabled=True,
+        )
+        if route == "responses"
+        else await _select_chat_model_source(
+            model,
+            api_key,
+            raw_model=raw_model,
+            require_streaming=require_streaming,
+            only_disabled=True,
+        )
+    )
+    if selection is None:
+        return None
+    source, matched_model = selection
+    # The source name is operator-facing configuration, not a client-visible
+    # identifier, so the envelope names the model and the condition only.
+    reason = "is disabled" if not source.is_enabled else "has that model disabled"
+    error = openai_error(
+        "model_source_disabled",
+        f"The model '{matched_model}' is served by an OpenAI-compatible model source that {reason}. "
+        "Enable the source and its model in codex-lb, or request a different model.",
+        error_type="upstream_error",
+    )
+    return _logged_error_json_response(request, 503, error, headers=headers)
 
 
 async def _select_embeddings_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
@@ -5150,6 +5284,7 @@ async def _source_chat_completion_response(
     allowed_reasoning_effort: str | None = None,
     reservation: ApiKeyUsageReservationData | None,
     rate_limit_headers: Mapping[str, str],
+    prohibit_fast_mode: bool = False,
 ) -> Response:
     source_payload = payload.model_dump(mode="json", exclude_none=True)
     source_payload["model"] = model
@@ -5160,6 +5295,7 @@ async def _source_chat_completion_response(
         allowed_reasoning_effort=allowed_reasoning_effort,
         materialize_allowed_reasoning_effort=allowed_reasoning_effort is not None,
     )
+    apply_prohibit_fast_mode(source_payload, prohibit_fast_mode=prohibit_fast_mode)
     sanitize_source_chat_payload(
         source_payload,
         allow_reasoning=source_model_supports_reasoning(source, model),
@@ -5837,7 +5973,9 @@ async def _stream_responses(
         service_tier_was_enforced = apply_api_key_enforcement(
             payload,
             api_key,
-            prohibit_fast_mode=prohibit_fast_mode,
+            # A forwarded payload carries the origin's signed effective tier.
+            # Restore that tier below, then apply the global policy once.
+            prohibit_fast_mode=prohibit_fast_mode and not forwarded_request,
         ).service_tier_was_enforced
     if forwarded_request:
         payload.service_tier = forwarded_effective_service_tier
@@ -5846,6 +5984,7 @@ async def _stream_responses(
             payload,
             service_tier_was_enforced=service_tier_was_enforced,
         )
+    apply_prohibit_fast_mode(payload, prohibit_fast_mode=prohibit_fast_mode)
     validate_model_access(api_key, payload.model)
     compact_payload: ResponsesCompactRequest | None = None
     if codex_session_affinity:
@@ -6177,7 +6316,13 @@ async def _stream_responses(
             == "server_indefinite_recovery"
             and getattr(startup_error, "http_bridge_durable_recovery_eligible", False)
             and startup_error_code
-            in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
+            in {
+                HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
+                "stream_incomplete",
+                "stream_idle_timeout",
+                "upstream_request_timeout",
+                "upstream_unavailable",
+            }
             and _responses_origin_may_release_reservation(
                 service_cleanup_ready_event=responses_service_cleanup_ready_event,
                 owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
@@ -7663,9 +7808,9 @@ async def _stream_response_error_events(
             yield line
     except ProxyResponseError as exc:
         error_code = exc.payload.get("error", {}).get("code") if isinstance(exc.payload, dict) else None
+        settings = get_settings()
         indefinite_recovery = (
-            get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode
-            == "server_indefinite_recovery"
+            settings.http_responses_session_bridge_ambiguous_continuation_recovery_mode == "server_indefinite_recovery"
         )
         if (
             recovery_stream_factory is not None
@@ -7673,15 +7818,24 @@ async def _stream_response_error_events(
             and (not require_durable_recovery_fence or getattr(exc, "http_bridge_durable_recovery_eligible", False))
             and not saw_downstream_event
             and error_code
-            in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
+            in {
+                HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
+                "stream_incomplete",
+                "stream_idle_timeout",
+                "upstream_request_timeout",
+                "upstream_unavailable",
+            }
         ):
             # Keep the client stream alive while the server owns recovery.
             # The operation remains serialized by the durable operation
             # fingerprint; each new upstream attempt is still at-least-once.
             retry_delay = max(1.0, min(30.0, float(exc.retry_after_seconds or 5.0)))
-            while True:
+            recovery_attempts = 0
+            server_recovery_max_attempts = settings.http_responses_session_bridge_server_recovery_max_attempts
+            while recovery_attempts < server_recovery_max_attempts:
                 yield ": codex-lb recovery in progress\n\n"
                 await asyncio.sleep(retry_delay)
+                recovery_attempts += 1
                 try:
                     retry_stream = recovery_stream_factory()
                     retry_saw_downstream_event = False
@@ -7692,12 +7846,14 @@ async def _stream_response_error_events(
                         yield line
                     return
                 except ProxyResponseError as retry_exc:
+                    exc = retry_exc
                     retry_code = (
                         retry_exc.payload.get("error", {}).get("code") if isinstance(retry_exc.payload, dict) else None
                     )
                     if (
                         retry_code
                         not in {
+                            HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
                             "stream_incomplete",
                             "stream_idle_timeout",
                             "upstream_request_timeout",
@@ -7709,7 +7865,6 @@ async def _stream_response_error_events(
                             and not getattr(retry_exc, "http_bridge_durable_recovery_eligible", False)
                         )
                     ):
-                        exc = retry_exc
                         break
                     retry_delay = max(1.0, min(30.0, float(retry_exc.retry_after_seconds or retry_delay)))
                 except (ProxyRateLimitError, ProxyAuthError) as retry_limit_exc:
@@ -7744,7 +7899,17 @@ async def _stream_response_error_events(
                         retry_after_seconds=5,
                     )
                     break
+            else:
+                logger.warning(
+                    "HTTP bridge server recovery exhausted before downstream event after %s attempts",
+                    server_recovery_max_attempts,
+                )
         await release_owned_reservation()
+        response_id = None
+        if isinstance(exc.payload, dict):
+            response_id = _response_id_from_event_payload(cast(dict[str, JsonValue], exc.payload))
+        if response_id is None:
+            response_id = f"resp_{uuid4().hex}"
         envelope = _parse_error_envelope(exc.payload)
         _, envelope = _mask_previous_response_not_found_error(
             envelope,
@@ -7767,6 +7932,7 @@ async def _stream_response_error_events(
                 error.code if error and error.code else "upstream_error",
                 error.message if error and error.message else "Upstream error",
                 error.type if error and error.type else "server_error",
+                response_id=response_id,
                 error_param=error.param if error else None,
             )
         )
@@ -9597,6 +9763,12 @@ def _mask_previous_response_not_found_error(
 def _status_for_error(error_value: OpenAIError | None) -> int:
     if error_value and error_value.code == "previous_response_not_found":
         return 502
+    if error_value and error_value.code == HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE:
+        # The bridge never matched a response.created event upstream, so this
+        # is our availability problem: 503, not a 502 that claims the upstream
+        # returned a bad response. Retry safety depends on whether the bridge
+        # observed unmatched upstream liveness before timing out.
+        return 503
     if error_value and error_value.code in _UNAVAILABLE_SELECTION_ERROR_CODES:
         return 503
     if error_value and error_value.code in {"rate_limit_exceeded", "usage_limit_reached", "insufficient_quota"}:

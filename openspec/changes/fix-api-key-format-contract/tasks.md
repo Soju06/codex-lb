@@ -17,7 +17,7 @@
 ## 4. Verification
 
 - [x] 4.1 Run focused API-key unit and integration tests.
-- [ ] 4.2 Exercise create, list, and regenerate through a live local HTTP API.
-- [ ] 4.3 Run changed-file format, lint, type, and strict OpenSpec checks.
-- [ ] 4.4 Run the repository risk-based local CI gate.
-- [ ] 4.5 Complete independent PR-readiness review and cleanup.
+- [x] 4.2 Exercise create, list, and regenerate through a live local HTTP API.
+- [x] 4.3 Run changed-file format, lint, type, and strict OpenSpec checks.
+- [x] 4.4 Run the repository risk-based local CI gate.
+- [x] 4.5 Complete independent PR-readiness review and cleanup.

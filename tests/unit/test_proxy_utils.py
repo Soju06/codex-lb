@@ -23676,7 +23676,7 @@ async def test_connect_proxy_websocket_pinned_forced_refresh_transient_error_sta
 
 
 @pytest.mark.asyncio
-async def test_connect_proxy_websocket_cancellation_before_handoff_releases_stream_lease(monkeypatch):
+async def test_connect_proxy_websocket_repeated_cancellation_finishes_erased_stream_lease_release(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_cancel_handoff")
     request_state = proxy_service._WebSocketRequestState(
@@ -23688,8 +23688,11 @@ async def test_connect_proxy_websocket_cancellation_before_handoff_releases_stre
         started_at=0.0,
     )
     selected_lease = await service._load_balancer.acquire_account_lease(account.id, kind="stream")
-    started = asyncio.Event()
-    release = asyncio.Event()
+    connect_started = asyncio.Event()
+    release_started = asyncio.Event()
+    finish_release = asyncio.Event()
+    release_events: list[str] = []
+    original_release = service._load_balancer.release_account_lease
 
     async def fake_select_websocket_connect_account(*args: object, **kwargs: object) -> Account:
         del args, kwargs
@@ -23698,12 +23701,23 @@ async def test_connect_proxy_websocket_cancellation_before_handoff_releases_stre
 
     async def blocking_connect_attempt(*args: object, **kwargs: object) -> tuple[Account, object]:
         del args, kwargs
-        started.set()
-        await release.wait()
-        return account, object()
+        connect_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def release_account_lease(lease: AccountLease | None) -> None:
+        assert request_state.websocket_stream_lease is None
+        assert lease is selected_lease
+        release_events.append("release-start")
+        release_started.set()
+        await finish_release.wait()
+        await original_release(lease)
+        release_events.append("release-finish")
 
     monkeypatch.setattr(service, "_select_websocket_connect_account", fake_select_websocket_connect_account)
     monkeypatch.setattr(service, "_try_open_websocket_connect_attempt", blocking_connect_attempt)
+    monkeypatch.setattr(websocket_mixin, "responses_model_is_source_owned", AsyncMock(return_value=False))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_proxy_settings())
 
     task = asyncio.create_task(
@@ -23720,15 +23734,18 @@ async def test_connect_proxy_websocket_cancellation_before_handoff_releases_stre
             websocket=cast(WebSocket, SimpleNamespace()),
         )
     )
-    try:
-        await asyncio.wait_for(started.wait(), timeout=1.0)
-        assert await service._load_balancer.account_pressure_snapshot(account.id) == (0, 1, 0.0)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    finally:
-        release.set()
+    await asyncio.wait_for(connect_started.wait(), timeout=1.0)
+    assert await service._load_balancer.account_pressure_snapshot(account.id) == (0, 1, 0.0)
 
+    task.cancel()
+    await asyncio.wait_for(release_started.wait(), timeout=1.0)
+    task.cancel()
+    finish_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1.0)
+    release_events.append("cancel-reraised")
+
+    assert release_events == ["release-start", "release-finish", "cancel-reraised"]
     assert await service._load_balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
 
 
@@ -27111,7 +27128,7 @@ async def test_fail_pending_websocket_requests_marks_client_disconnect_without_p
 
 
 @pytest.mark.asyncio
-async def test_fail_pending_websocket_requests_releases_orphaned_stream_lease(monkeypatch):
+async def test_terminal_websocket_repeated_cancellation_releases_entire_erased_stream_lease_batch(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_ws_orphaned_lease")
@@ -27120,36 +27137,82 @@ async def test_fail_pending_websocket_requests_releases_orphaned_stream_lease(mo
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
     monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
 
-    lease = await service._load_balancer.acquire_account_lease(account.id, kind="stream")
-    assert lease is not None
+    leases = [await service._load_balancer.acquire_account_lease(account.id, kind="stream") for _ in range(2)]
+    assert all(lease is not None for lease in leases)
+    release_started = asyncio.Event()
+    finish_first_release = asyncio.Event()
+    release_events: list[str] = []
+    original_release = service._load_balancer.release_account_lease
+    request_states = [
+        proxy_service._WebSocketRequestState(
+            request_id=f"ws_req_orphaned_{index}",
+            response_id=f"resp_ws_orphaned_{index}",
+            model="gpt-5.5",
+            service_tier="auto",
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=0.0,
+            websocket_stream_lease=lease,
+        )
+        for index, lease in enumerate(leases)
+    ]
+    post_release_io_started = asyncio.Event()
 
-    request_state = proxy_service._WebSocketRequestState(
-        request_id="ws_req_orphaned",
-        response_id="resp_ws_orphaned",
-        model="gpt-5.5",
-        service_tier="auto",
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=0.0,
+    class _BlockedEventQueue:
+        async def put(self, _value: str | None) -> None:
+            post_release_io_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    request_states[0].event_queue = cast(Any, _BlockedEventQueue())
+
+    async def release_account_lease(released_lease: AccountLease | None) -> None:
+        index = leases.index(released_lease)
+        assert request_states[index].websocket_stream_lease is None
+        release_events.append(f"release-{index}-start")
+        if index == 0:
+            release_started.set()
+            await finish_first_release.wait()
+        await original_release(released_lease)
+        release_events.append(f"release-{index}-finish")
+
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    terminal_cleanup = asyncio.create_task(
+        service._finalize_claimed_websocket_requests(
+            account=account,
+            account_id_value=account.id,
+            remaining=request_states,
+            error_code="stream_incomplete",
+            error_message="Upstream websocket closed before response.completed",
+            api_key=None,
+            websocket=None,
+            client_send_lock=None,
+            response_create_gate=None,
+            downstream_activity=None,
+            status="error",
+            penalize_account=False,
+            suppress_sequenced_downstream_errors=False,
+        )
     )
-    request_state.websocket_stream_lease = lease
-    pending_requests = deque([request_state])
+    await asyncio.wait_for(release_started.wait(), timeout=1)
 
-    await service._fail_pending_websocket_requests(
-        account=account,
-        account_id_value=account.id,
-        pending_requests=pending_requests,
-        pending_lock=anyio.Lock(),
-        error_code="stream_incomplete",
-        error_message="Upstream websocket closed before response.completed",
-        api_key=None,
-    )
+    terminal_cleanup.cancel()
+    terminal_cleanup.cancel()
+    finish_first_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(terminal_cleanup, timeout=1)
+    release_events.append("cancel-reraised")
 
-    assert request_state.websocket_stream_lease is None
+    assert release_events == [
+        "release-0-start",
+        "release-0-finish",
+        "release-1-start",
+        "release-1-finish",
+        "cancel-reraised",
+    ]
+    assert post_release_io_started.is_set() is False
     snapshot = await service._load_balancer.account_pressure_snapshot(account.id)
     assert snapshot[1] == 0, f"inflight_streams should be 0, got {snapshot[1]}"
-    assert list(pending_requests) == []
-    assert await service.drain_persistence_tasks(timeout_seconds=1)
 
 
 @pytest.mark.asyncio
@@ -30040,8 +30103,10 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during_release", [False, True], ids=["normal", "repeated-cancellation"])
 async def test_process_upstream_websocket_text_owner_replay_releases_old_account_create_lease(
     monkeypatch,
+    cancel_during_release: bool,
 ):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -30054,6 +30119,24 @@ async def test_process_upstream_websocket_text_owner_replay_releases_old_account
 
     old_lease = await service._load_balancer.acquire_account_lease(old_account.id, kind="response_create")
     assert old_lease is not None
+    release_started = asyncio.Event()
+    finish_release = asyncio.Event()
+    release_events: list[str] = []
+    original_release = service._load_balancer.release_account_lease
+
+    async def release_account_lease(lease: AccountLease | None) -> None:
+        if lease is not old_lease:
+            await original_release(lease)
+            return
+        assert pending_request.account_response_create_lease is None
+        assert pending_request.account_response_create_release is None
+        release_events.append("release-start")
+        release_started.set()
+        await finish_release.wait()
+        await original_release(lease)
+        release_events.append("release-finish")
+
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
 
     anchored_payload = {
         "type": "response.create",
@@ -30085,7 +30168,7 @@ async def test_process_upstream_websocket_text_owner_replay_releases_old_account
         fresh_upstream_request_text=json.dumps(fresh_payload, separators=(",", ":")),
         fresh_upstream_request_is_retry_safe=True,
         account_response_create_lease=old_lease,
-        account_response_create_release=service._load_balancer.release_account_lease,
+        account_response_create_release=original_release,
     )
     pending_requests = deque([pending_request])
     upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -30099,16 +30182,31 @@ async def test_process_upstream_websocket_text_owner_replay_releases_old_account
         },
     }
 
-    downstream_text = await service._process_upstream_websocket_text(
-        json.dumps(upstream_payload, separators=(",", ":")),
-        account=old_account,
-        account_id_value=old_account.id,
-        pending_requests=pending_requests,
-        pending_lock=anyio.Lock(),
-        api_key=None,
-        upstream_control=upstream_control,
-        response_create_gate=response_create_gate,
+    processing = asyncio.create_task(
+        service._process_upstream_websocket_text(
+            json.dumps(upstream_payload, separators=(",", ":")),
+            account=old_account,
+            account_id_value=old_account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=response_create_gate,
+        )
     )
+    await asyncio.wait_for(release_started.wait(), timeout=1)
+    if cancel_during_release:
+        processing.cancel()
+        processing.cancel()
+    finish_release.set()
+    if cancel_during_release:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(processing, timeout=1)
+        release_events.append("cancel-reraised")
+        assert release_events == ["release-start", "release-finish", "cancel-reraised"]
+        assert await service._load_balancer.account_pressure_snapshot(old_account.id) == (0, 0, 0.0)
+        return
+    downstream_text = await asyncio.wait_for(processing, timeout=1)
 
     assert downstream_text == json.dumps(upstream_payload, separators=(",", ":"))
     finalize_request_state.assert_not_awaited()

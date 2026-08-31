@@ -187,8 +187,10 @@ async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains
     request_sent = asyncio.Event()
     cleanup_started = asyncio.Event()
     cleanup_cancelled = asyncio.Event()
+    cleanup_budget_exceeded = asyncio.Event()
     release_cleanup = asyncio.Event()
     cleanup_request_ids: list[str] = []
+    connection_lease = object()
 
     class _BlockingDownstreamWebSocket:
         def __init__(self) -> None:
@@ -239,7 +241,12 @@ async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains
         state.response_create_gate_acquired = True
         state.awaiting_response_created = True
 
-    async def connect_upstream(*_args: object, **_kwargs: object) -> tuple[Account, UpstreamWebSocket]:
+    async def connect_upstream(
+        *_args: object,
+        request_state: proxy_service._WebSocketRequestState,
+        **_kwargs: object,
+    ) -> tuple[Account, UpstreamWebSocket]:
+        request_state.websocket_stream_lease = cast(Any, connection_lease)
         account = cast(Account, SimpleNamespace(id="account_pending_cleanup", codex_installation_id=None))
         return account, cast(UpstreamWebSocket, upstream)
 
@@ -272,7 +279,16 @@ async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains
     monkeypatch.setattr(service, "_relay_upstream_websocket_messages", relay_until_cancelled)
     monkeypatch.setattr(service, "_acquire_account_response_create_lease_or_overload", AsyncMock(return_value=object()))
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", block_cleanup)
-    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    original_warning = proxy_service.logger.warning
+
+    def observe_cleanup_warning(message: str, *args: object, **kwargs: Any) -> None:
+        if message.startswith("Websocket scope cleanup exceeded its cleanup budget"):
+            cleanup_budget_exceeded.set()
+        original_warning(message, *args, **kwargs)
+
+    monkeypatch.setattr(proxy_service.logger, "warning", observe_cleanup_warning)
 
     scope_task = asyncio.create_task(
         service.proxy_responses_websocket(
@@ -290,9 +306,10 @@ async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains
     started_at = asyncio.get_running_loop().time()
     scope_task.cancel()
     await asyncio.wait_for(cleanup_started.wait(), timeout=1)
-    await asyncio.sleep(0.01)
+    await asyncio.wait_for(cleanup_budget_exceeded.wait(), timeout=1)
     assert scope_task.done() is False
 
+    release_cleanup.set()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(scope_task, timeout=1)
     elapsed = asyncio.get_running_loop().time() - started_at
@@ -301,20 +318,11 @@ async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains
     assert cleanup_request_ids == [request_state.request_id]
     assert 0.05 <= elapsed < 0.3
     assert any(
-        task.get_name() == "proxy-websocket-finalization-scope-cleanup"
-        for task in service._background_cleanup_tasks
-        if not task.done()
-    )
-    assert any(
         "Websocket scope cleanup exceeded its cleanup budget" in message and "cleanup_phase=pending_requests" in message
         for message in caplog.messages
     )
-
-    persistence_drain = asyncio.create_task(service.drain_persistence_tasks(timeout_seconds=1))
-    await asyncio.sleep(0)
-    assert persistence_drain.done() is False
-    release_cleanup.set()
-    assert await asyncio.wait_for(persistence_drain, timeout=1)
+    release_account_lease.assert_awaited_once_with(connection_lease)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert service._background_cleanup_tasks == set()
 
 
@@ -740,12 +748,11 @@ async def test_cancelled_scope_isolates_owned_reconnect_child_failure_and_finish
     await asyncio.wait_for(child_started.wait(), timeout=1)
 
     scope_task.cancel()
-    await asyncio.sleep(0)
+    scope_task.cancel()
     release_child.set()
 
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(scope_task, timeout=1)
-    await asyncio.sleep(0)
 
     assert upstream.sent_text == []
     assert [request_id for attempt in cleanup_attempts for request_id in attempt] == [
@@ -946,6 +953,83 @@ async def test_drain_start_during_admission_rejects_turn_before_connect_or_send(
             "Failed to release websocket account create lease during terminal cleanup request_id=request_late_drain"
             in caplog.messages
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancellation_mode", ["edge", "level"])
+async def test_response_create_release_failure_reraises_cancellation_after_erased_cleanup(
+    caplog: pytest.LogCaptureFixture,
+    cancellation_mode: str,
+) -> None:
+    gate = asyncio.Semaphore(1)
+    await gate.acquire()
+    request_state = _request_state("request_cancelled_failed_create_release")
+    request_state.response_create_gate = gate
+    request_state.response_create_gate_acquired = True
+    request_state.awaiting_response_created = True
+    account_create_lease = object()
+    request_state.account_response_create_lease = cast(Any, account_create_lease)
+    release_started = asyncio.Event()
+    finish_release = asyncio.Event()
+    release_events: list[str] = []
+    cancel_scopes: list[anyio.CancelScope] = []
+
+    async def fail_release(lease: object | None) -> None:
+        assert lease is account_create_lease
+        assert request_state.account_response_create_lease is None
+        assert request_state.account_response_create_release is None
+        release_events.append("release-start")
+        release_started.set()
+        await finish_release.wait()
+        release_events.append("release-failed")
+        raise RuntimeError("account create release failed")
+
+    async def release_ownership() -> bool:
+        async def release_and_reraise() -> None:
+            cancellation = await websocket_mixin._release_websocket_response_create_ownership_for_cleanup(
+                request_state,
+                gate,
+            )
+            if cancellation is not None:
+                raise cancellation
+
+        if cancellation_mode == "level":
+            with anyio.CancelScope() as cancel_scope:
+                cancel_scopes.append(cancel_scope)
+                try:
+                    await release_and_reraise()
+                except asyncio.CancelledError:
+                    release_events.append("cancel-reraised")
+                    return True
+            return False
+        await release_and_reraise()
+        return True
+
+    request_state.account_response_create_release = cast(Any, fail_release)
+    caplog.set_level(logging.WARNING)
+    cleanup = asyncio.create_task(release_ownership())
+    await asyncio.wait_for(release_started.wait(), timeout=1)
+
+    if cancellation_mode == "level":
+        cancel_scopes[0].cancel()
+        finish_release.set()
+        assert await asyncio.wait_for(cleanup, timeout=1)
+    else:
+        cleanup.cancel()
+        cleanup.cancel()
+        finish_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(cleanup, timeout=1)
+        release_events.append("cancel-reraised")
+
+    assert release_events == ["release-start", "release-failed", "cancel-reraised"]
+    assert gate.locked() is False
+    assert request_state.response_create_gate is None
+    assert request_state.account_response_create_lease is None
+    assert (
+        "Failed to release websocket account create lease during terminal cleanup "
+        "request_id=request_cancelled_failed_create_release" in caplog.messages
+    )
 
 
 @pytest.mark.asyncio
@@ -1804,9 +1888,11 @@ async def test_reader_cancellation_after_transport_end_claim_waits_for_child_own
 
 
 @pytest.mark.asyncio
-async def test_scope_cancellation_finalizes_turn_when_connection_lease_release_fails(
+@pytest.mark.parametrize("release_fails", [False, True], ids=["release-succeeds", "release-fails"])
+async def test_scope_repeated_cancellation_finishes_erased_connection_lease_release(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    release_fails: bool,
 ) -> None:
     request_logs = _RequestLogsRecorder()
 
@@ -1867,6 +1953,9 @@ async def test_scope_cancellation_finalizes_turn_when_connection_lease_release_f
     captured_response_create_gate: asyncio.Semaphore | None = None
     upstream_send_completed = asyncio.Event()
     upstream_closed = asyncio.Event()
+    connection_release_started = asyncio.Event()
+    finish_connection_release = asyncio.Event()
+    connection_release_events: list[str] = []
 
     class _Downstream:
         def __init__(self) -> None:
@@ -1954,7 +2043,13 @@ async def test_scope_cancellation_finalizes_turn_when_connection_lease_release_f
     async def release_lease(lease: object | None) -> None:
         release_calls.append(lease)
         if lease is connection_lease:
-            raise RuntimeError("connection lease release failed")
+            assert request_state.websocket_stream_lease is None
+            connection_release_events.append("release-start")
+            connection_release_started.set()
+            await finish_connection_release.wait()
+            connection_release_events.append("release-finish")
+            if release_fails:
+                raise RuntimeError("connection lease release failed")
 
     async def release_reservation(
         reservation_to_release: ApiKeyUsageReservationData | None,
@@ -1990,11 +2085,19 @@ async def test_scope_cancellation_finalizes_turn_when_connection_lease_release_f
     await asyncio.wait_for(upstream_send_completed.wait(), timeout=1)
 
     scope_task.cancel()
+    await asyncio.wait_for(connection_release_started.wait(), timeout=1)
+    second_cancellation_processed = asyncio.get_running_loop().create_future()
+    scope_task.cancel()
+    asyncio.get_running_loop().call_soon(second_cancellation_processed.set_result, None)
+    await asyncio.wait_for(second_cancellation_processed, timeout=1)
+    assert scope_task.done() is False
+    finish_connection_release.set()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(scope_task, timeout=1)
+    connection_release_events.append("cancel-reraised")
     assert await service.drain_persistence_tasks(timeout_seconds=1)
-    await asyncio.sleep(0)
 
+    assert connection_release_events == ["release-start", "release-finish", "cancel-reraised"]
     assert release_calls.count(account_create_lease) == 1
     assert release_calls.count(connection_lease) == 1
     assert admission_releases == [request_state.request_id]
@@ -2006,7 +2109,10 @@ async def test_scope_cancellation_finalizes_turn_when_connection_lease_release_f
     assert len(request_logs.calls) == 1
     assert request_logs.calls[0]["request_id"] == request_state.request_id
     assert request_logs.calls[0]["status"] == "cancelled"
-    assert "Failed to release websocket connection lease during scope cleanup" in caplog.messages
+    if release_fails:
+        assert "Failed to release websocket connection lease during scope cleanup" in caplog.messages
+    else:
+        assert "Failed to release websocket connection lease during scope cleanup" not in caplog.messages
     assert service._background_cleanup_tasks == set()
 
 

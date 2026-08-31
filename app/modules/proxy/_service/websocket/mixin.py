@@ -13,6 +13,7 @@ from typing import Any, Iterator, Mapping, NoReturn, cast
 
 import aiohttp
 import anyio
+from anyio.lowlevel import checkpoint_if_cancelled
 from fastapi import WebSocket
 from pydantic import ValidationError
 
@@ -328,6 +329,7 @@ from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _account_capacity_wait_payload,
+    _await_task_deferring_cancellation,
     _clear_websocket_precreated_replay_fallback,
     _clear_websocket_request_error_overrides,
     _DownstreamWebSocketActivity,
@@ -942,9 +944,10 @@ async def _await_owned_websocket_task_after_reader_cancellation(
 async def _release_websocket_response_create_ownership_for_cleanup(
     request_state: _WebSocketRequestState,
     response_create_gate: asyncio.Semaphore,
-) -> None:
-    """Release every create owner even when one release side effect fails."""
+) -> asyncio.CancelledError | None:
+    """Release every create owner and return cancellation after cleanup."""
 
+    cancellation: asyncio.CancelledError | None = None
     response_create_admission = request_state.response_create_admission
     account_response_create_lease = request_state.account_response_create_lease
     account_response_create_release = request_state.account_response_create_release
@@ -968,16 +971,39 @@ async def _release_websocket_response_create_ownership_for_cleanup(
                 )
         if account_response_create_lease is not None and account_response_create_release is not None:
             try:
-                await account_response_create_release(account_response_create_lease)
+                release_task = asyncio.create_task(
+                    account_response_create_release(account_response_create_lease),
+                    name="proxy-websocket-terminal-response-create-lease-release",
+                )
+                _, cancellation = await _await_task_deferring_cancellation(release_task)
+            except asyncio.CancelledError as exc:
+                release_error = exc.__cause__
+                if release_error is None:
+                    raise
+                _facade().logger.warning(
+                    "Failed to release websocket account create lease during terminal cleanup request_id=%s",
+                    request_state.request_log_id or request_state.request_id,
+                    exc_info=(type(release_error), release_error, release_error.__traceback__),
+                )
+                cancellation = exc
             except Exception:
                 _facade().logger.warning(
                     "Failed to release websocket account create lease during terminal cleanup request_id=%s",
                     request_state.request_log_id or request_state.request_id,
                     exc_info=True,
                 )
+                try:
+                    await checkpoint_if_cancelled()
+                except asyncio.CancelledError as exc:
+                    cancellation = exc
+                if cancellation is None:
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        cancellation = asyncio.CancelledError()
     finally:
         if response_create_gate_acquired:
             response_create_gate.release()
+    return cancellation
 
 
 async def _process_and_forward_upstream_websocket_text(
@@ -1448,10 +1474,19 @@ class _WebSocketMixin:
                 _track_websocket_owned_task(proxy, account_lease_release_task)
             release_task = account_lease_release_task
             try:
-                await asyncio.shield(release_task)
+                try:
+                    _, cancellation = await _await_task_deferring_cancellation(release_task)
+                except Exception:
+                    await checkpoint_if_cancelled()
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise asyncio.CancelledError() from None
+                    raise
             finally:
                 if release_task.done():
                     account_lease_release_task = None
+            if cancellation is not None:
+                raise cancellation
 
         async def retire_current_upstream() -> None:
             nonlocal account, upstream, upstream_control, upstream_reader
@@ -2637,8 +2672,19 @@ class _WebSocketMixin:
                             name="proxy-websocket-finalization-retired-create-lease",
                         )
                         _track_websocket_owned_task(proxy, retired_create_lease_release_task)
-                        await asyncio.shield(retired_create_lease_release_task)
+                        try:
+                            _, cancellation = await _await_task_deferring_cancellation(
+                                retired_create_lease_release_task
+                            )
+                        except Exception:
+                            await checkpoint_if_cancelled()
+                            current_task = asyncio.current_task()
+                            if current_task is not None and current_task.cancelling():
+                                raise asyncio.CancelledError() from None
+                            raise
                         retired_create_lease_release_task = None
+                        if cancellation is not None:
+                            raise cancellation
                         if request_state_to_fail is not None:
                             owned_request_state = request_state_to_fail
                             request_state_failure_task = asyncio.create_task(
@@ -2804,8 +2850,19 @@ class _WebSocketMixin:
                             name="proxy-websocket-finalization-retired-create-lease",
                         )
                         _track_websocket_owned_task(proxy, retired_create_lease_release_task)
-                        await asyncio.shield(retired_create_lease_release_task)
+                        try:
+                            _, cancellation = await _await_task_deferring_cancellation(
+                                retired_create_lease_release_task
+                            )
+                        except Exception:
+                            await checkpoint_if_cancelled()
+                            current_task = asyncio.current_task()
+                            if current_task is not None and current_task.cancelling():
+                                raise asyncio.CancelledError() from None
+                            raise
                         retired_create_lease_release_task = None
+                        if cancellation is not None:
+                            raise cancellation
                         upstream_control = None
                         upstream = None
                         await release_current_account_lease()
@@ -2861,6 +2918,7 @@ class _WebSocketMixin:
                 return _facade()._TASK_CANCEL_TIMEOUT_SECONDS if remaining is None else max(float(remaining), 0.0)
 
             cleanup_phase = "not_started"
+            connection_lease_released = asyncio.Event()
 
             async def finalize_websocket_scope() -> None:
                 nonlocal cleanup_phase
@@ -3002,6 +3060,8 @@ class _WebSocketMixin:
                         "Failed to release websocket connection lease during scope cleanup",
                         exc_info=True,
                     )
+                finally:
+                    connection_lease_released.set()
                 cleanup_phase = "complete"
 
             cleanup_task = asyncio.create_task(
@@ -3022,10 +3082,14 @@ class _WebSocketMixin:
 
             cleanup_task.add_done_callback(log_scope_cleanup_failure)
             scope_cleanup_timeout = current_scope_cleanup_timeout()
-            done, _ = await asyncio.wait(
-                {cleanup_task},
-                timeout=scope_cleanup_timeout,
+            cleanup_wait_task = asyncio.create_task(
+                asyncio.wait(
+                    {cleanup_task},
+                    timeout=scope_cleanup_timeout,
+                ),
+                name="proxy-websocket-finalization-scope-cleanup-wait",
             )
+            (done, _), cancellation = await _await_task_deferring_cancellation(cleanup_wait_task)
             if not done:
                 _facade().logger.warning(
                     "Websocket scope cleanup exceeded its cleanup budget "
@@ -3034,6 +3098,15 @@ class _WebSocketMixin:
                     cleanup_phase,
                     sum(1 for task in proxy._background_cleanup_tasks if not task.done()),
                 )
+                if scope_cancelled or cancellation is not None:
+                    connection_lease_wait_task = asyncio.create_task(
+                        connection_lease_released.wait(),
+                        name="proxy-websocket-finalization-connection-lease-wait",
+                    )
+                    _, connection_cancellation = await _await_task_deferring_cancellation(connection_lease_wait_task)
+                    cancellation = cancellation or connection_cancellation
+            if cancellation is not None:
+                raise cancellation
 
     async def _prepare_websocket_response_create_request(
         self,
@@ -3618,7 +3691,20 @@ class _WebSocketMixin:
             selected_stream_lease = request_state.websocket_stream_lease
             request_state.websocket_stream_lease = None
             if account is None:
-                await proxy._load_balancer.release_account_lease(selected_stream_lease)
+                release_task = asyncio.create_task(
+                    proxy._load_balancer.release_account_lease(selected_stream_lease),
+                    name="proxy-websocket-connect-stream-lease-release",
+                )
+                try:
+                    _, cancellation = await _await_task_deferring_cancellation(release_task)
+                except Exception:
+                    await checkpoint_if_cancelled()
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise asyncio.CancelledError() from None
+                    raise
+                if cancellation is not None:
+                    raise cancellation
                 if (
                     last_failover_exc is not None
                     and not require_preferred_account
@@ -3679,7 +3765,20 @@ class _WebSocketMixin:
                 # acquired stream lease so it does not keep consuming a
                 # stream-concurrency slot for a connection that never opens,
                 # exclude it, and reselect a healthy account.
-                await proxy._load_balancer.release_account_lease(selected_stream_lease)
+                release_task = asyncio.create_task(
+                    proxy._load_balancer.release_account_lease(selected_stream_lease),
+                    name="proxy-websocket-connect-stream-lease-release",
+                )
+                try:
+                    _, cancellation = await _await_task_deferring_cancellation(release_task)
+                except Exception:
+                    await checkpoint_if_cancelled()
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise asyncio.CancelledError() from None
+                    raise
+                if cancellation is not None:
+                    raise cancellation
                 selected_stream_lease = None
                 # Record a capacity-style failure so that if every account
                 # attempt hits a transient refresh-claim failover, the loop
@@ -3748,7 +3847,20 @@ class _WebSocketMixin:
                     # Release the dead route's stream lease before recording
                     # the backoff so its concurrency slot never outlives the
                     # failed connection attempt.
-                    await proxy._load_balancer.release_account_lease(selected_stream_lease)
+                    release_task = asyncio.create_task(
+                        proxy._load_balancer.release_account_lease(selected_stream_lease),
+                        name="proxy-websocket-connect-stream-lease-release",
+                    )
+                    try:
+                        _, cancellation = await _await_task_deferring_cancellation(release_task)
+                    except Exception:
+                        await checkpoint_if_cancelled()
+                        current_task = asyncio.current_task()
+                        if current_task is not None and current_task.cancelling():
+                            raise asyncio.CancelledError() from None
+                        raise
+                    if cancellation is not None:
+                        raise cancellation
                     selected_stream_lease = None
                     if confirmed_pre_dispatch:
                         await _record_or_defer_confirmed_route_backoff(account)
@@ -3759,7 +3871,20 @@ class _WebSocketMixin:
                 error = _parse_openai_error(exc.payload)
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
                 error_message = error.message if error else None
-                await proxy._load_balancer.release_account_lease(selected_stream_lease)
+                release_task = asyncio.create_task(
+                    proxy._load_balancer.release_account_lease(selected_stream_lease),
+                    name="proxy-websocket-connect-stream-lease-release",
+                )
+                try:
+                    _, cancellation = await _await_task_deferring_cancellation(release_task)
+                except Exception:
+                    await checkpoint_if_cancelled()
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise asyncio.CancelledError() from None
+                    raise
+                if cancellation is not None:
+                    raise cancellation
                 selected_stream_lease = None
                 if confirmed_pre_dispatch:
                     await _record_or_defer_confirmed_route_backoff(account)
@@ -3776,11 +3901,37 @@ class _WebSocketMixin:
                 )
                 return None, None
             except BaseException:
-                await proxy._load_balancer.release_account_lease(selected_stream_lease)
+                release_task = asyncio.create_task(
+                    proxy._load_balancer.release_account_lease(selected_stream_lease),
+                    name="proxy-websocket-connect-stream-lease-release",
+                )
+                try:
+                    _, cancellation = await _await_task_deferring_cancellation(release_task)
+                except Exception:
+                    await checkpoint_if_cancelled()
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise asyncio.CancelledError() from None
+                    raise
+                if cancellation is not None:
+                    raise cancellation
                 raise
 
             if connect_result is None:
-                await proxy._load_balancer.release_account_lease(selected_stream_lease)
+                release_task = asyncio.create_task(
+                    proxy._load_balancer.release_account_lease(selected_stream_lease),
+                    name="proxy-websocket-connect-stream-lease-release",
+                )
+                try:
+                    _, cancellation = await _await_task_deferring_cancellation(release_task)
+                except Exception:
+                    await checkpoint_if_cancelled()
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise asyncio.CancelledError() from None
+                    raise
+                if cancellation is not None:
+                    raise cancellation
                 return None, None
             request_state.websocket_stream_lease = selected_stream_lease
             _clear_websocket_precreated_replay_fallback(request_state)
@@ -5753,7 +5904,20 @@ class _WebSocketMixin:
                 # to a replacement account, and the reconnect/send path
                 # re-acquires the account-local slot only when this field is
                 # clear.
-                await proxy._release_request_state_account_response_create_lease(request_state)
+                release_task = asyncio.create_task(
+                    proxy._release_request_state_account_response_create_lease(request_state),
+                    name="proxy-websocket-owner-replay-response-create-lease-release",
+                )
+                try:
+                    _, cancellation = await _await_task_deferring_cancellation(release_task)
+                except Exception:
+                    await checkpoint_if_cancelled()
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise asyncio.CancelledError() from None
+                    raise
+                if cancellation is not None:
+                    raise cancellation
                 request_state.excluded_account_ids.add(account.id)
                 request_state.affinity_policy = replace(
                     request_state.affinity_policy,
@@ -5782,7 +5946,20 @@ class _WebSocketMixin:
                 )
                 request_state.error_param_override = _websocket_event_error_param(event_type, payload)
                 request_state.error_http_status_override = _facade()._http_error_status_from_payload(payload) or 400
-                await proxy._release_request_state_account_response_create_lease(request_state)
+                release_task = asyncio.create_task(
+                    proxy._release_request_state_account_response_create_lease(request_state),
+                    name="proxy-websocket-model-replay-response-create-lease-release",
+                )
+                try:
+                    _, cancellation = await _await_task_deferring_cancellation(release_task)
+                except Exception:
+                    await checkpoint_if_cancelled()
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise asyncio.CancelledError() from None
+                    raise
+                if cancellation is not None:
+                    raise cancellation
                 request_state.excluded_account_ids.add(account.id)
                 request_state.affinity_policy = replace(
                     request_state.affinity_policy,
@@ -6592,6 +6769,7 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         finalization_task: asyncio.Task[bool] | None = None
+        leases_released = asyncio.Event()
         await pending_lock.acquire()
         try:
             remaining = list(pending_requests)
@@ -6612,6 +6790,7 @@ class _WebSocketMixin:
                         status=status,
                         penalize_account=penalize_account,
                         suppress_sequenced_downstream_errors=suppress_sequenced_downstream_errors,
+                        leases_released=leases_released,
                     ),
                     name="proxy-websocket-finalization-pending-requests",
                 )
@@ -6627,18 +6806,13 @@ class _WebSocketMixin:
 
         try:
             settlement_succeeded = await asyncio.shield(finalization_task)
-        except asyncio.CancelledError:
-            remaining_timeout = shutdown_state.remaining_post_drain_cleanup_timeout_seconds()
-            timeout_seconds = (
-                _facade()._TASK_CANCEL_TIMEOUT_SECONDS
-                if remaining_timeout is None
-                else max(float(remaining_timeout), 0.0)
+        except asyncio.CancelledError as cancellation:
+            lease_wait_task = asyncio.create_task(
+                leases_released.wait(),
+                name="proxy-websocket-finalization-pending-lease-wait",
             )
-            if not finalization_task.done() and timeout_seconds > 0:
-                # Do not cancel the child at the bound: it is the sole owner of
-                # the claimed states and remains visible to lifespan draining.
-                await asyncio.wait({finalization_task}, timeout=timeout_seconds)
-            raise
+            await _await_task_deferring_cancellation(lease_wait_task)
+            raise cancellation
         return settlement_succeeded
 
     async def _finalize_claimed_websocket_requests(
@@ -6657,6 +6831,7 @@ class _WebSocketMixin:
         status: str,
         penalize_account: bool,
         suppress_sequenced_downstream_errors: bool,
+        leases_released: asyncio.Event | None = None,
     ) -> bool:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -6700,6 +6875,54 @@ class _WebSocketMixin:
                     exc_info=True,
                 )
 
+        deferred_cancellation: asyncio.CancelledError | None = None
+        for request_state in remaining:
+            if response_create_gate is not None:
+                response_create_cancellation = await _release_websocket_response_create_ownership_for_cleanup(
+                    request_state,
+                    response_create_gate,
+                )
+                deferred_cancellation = deferred_cancellation or response_create_cancellation
+            if request_state.websocket_stream_lease is not None:
+                websocket_stream_lease = request_state.websocket_stream_lease
+                request_state.websocket_stream_lease = None
+                stream_cancellation: asyncio.CancelledError | None = None
+                try:
+                    release_task = asyncio.create_task(
+                        proxy._load_balancer.release_account_lease(websocket_stream_lease),
+                        name="proxy-websocket-terminal-stream-lease-release",
+                    )
+                    _, stream_cancellation = await _await_task_deferring_cancellation(release_task)
+                except asyncio.CancelledError as exc:
+                    release_error = exc.__cause__
+                    if release_error is None:
+                        raise
+                    _facade().logger.warning(
+                        "Failed to release websocket stream lease during terminal cleanup request_id=%s",
+                        request_state.request_log_id or request_state.request_id,
+                        exc_info=(type(release_error), release_error, release_error.__traceback__),
+                    )
+                    stream_cancellation = exc
+                except Exception:
+                    _facade().logger.warning(
+                        "Failed to release websocket stream lease during terminal cleanup request_id=%s",
+                        request_state.request_log_id or request_state.request_id,
+                        exc_info=True,
+                    )
+                    try:
+                        await checkpoint_if_cancelled()
+                    except asyncio.CancelledError as exc:
+                        stream_cancellation = exc
+                    if stream_cancellation is None:
+                        current_task = asyncio.current_task()
+                        if current_task is not None and current_task.cancelling():
+                            stream_cancellation = asyncio.CancelledError()
+                deferred_cancellation = deferred_cancellation or stream_cancellation
+        if leases_released is not None:
+            leases_released.set()
+        if deferred_cancellation is not None:
+            raise deferred_cancellation
+
         request_log_handoff_succeeded = True
         last_index = len(remaining) - 1
         for index, request_state in enumerate(remaining):
@@ -6734,22 +6957,6 @@ class _WebSocketMixin:
                         exc_info=True,
                     )
 
-            if response_create_gate is not None:
-                await _release_websocket_response_create_ownership_for_cleanup(
-                    request_state,
-                    response_create_gate,
-                )
-            if request_state.websocket_stream_lease is not None:
-                websocket_stream_lease = request_state.websocket_stream_lease
-                request_state.websocket_stream_lease = None
-                try:
-                    await proxy._load_balancer.release_account_lease(websocket_stream_lease)
-                except Exception:
-                    _facade().logger.warning(
-                        "Failed to release websocket stream lease during terminal cleanup request_id=%s",
-                        request_state.request_log_id or request_state.request_id,
-                        exc_info=True,
-                    )
             if request_state.event_queue is not None:
                 try:
                     await request_state.event_queue.put(
@@ -6932,10 +7139,12 @@ class _WebSocketMixin:
         )
         response_create_gate = request_state.response_create_gate
         if response_create_gate is not None:
-            await _release_websocket_response_create_ownership_for_cleanup(
+            cancellation = await _release_websocket_response_create_ownership_for_cleanup(
                 request_state,
                 response_create_gate,
             )
+            if cancellation is not None:
+                raise cancellation
         try:
             await proxy._send_downstream_websocket_text(
                 websocket,

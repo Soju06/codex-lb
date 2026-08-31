@@ -1,6 +1,6 @@
 ## Why
 
-HTTP-bridge reconnect already fails closed for every required preferred owner,
+HTTP-bridge reconnect already fails closed for every owner required to be preferred,
 but a live file-pin owner is not marked as continuity provenance. Selection
 therefore cannot distinguish the genuine "owner account no longer exists"
 case from ordinary required-owner misses. The useful observable improvement is

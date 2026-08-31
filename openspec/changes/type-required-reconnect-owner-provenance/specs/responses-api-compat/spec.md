@@ -27,9 +27,9 @@ existing terminal fail-closed response.
 - **AND** it MUST retry `account_a` without enabling fallback
 - **AND** it MUST continue successfully if `account_a` recovers
 
-#### Scenario: Terminal transient miss remains fail closed
+#### Scenario: Terminal transient miss remains fail-closed
 
-- **GIVEN** reconnect has any required preferred owner
+- **GIVEN** reconnect has any owner required to be preferred
 - **AND** bounded recovery cannot select that owner before termination
 - **WHEN** reconnect returns the terminal selection failure
 - **THEN** it MUST return the existing 502 `previous_response_owner_unavailable`

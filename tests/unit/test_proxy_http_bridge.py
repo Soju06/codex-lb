@@ -25551,7 +25551,7 @@ async def test_get_or_create_http_bridge_session_soft_continuity_owner_blocks_st
         (None, True, 503, "no_accounts"),
         ("no_accounts", True, 503, "no_accounts"),
         ("preferred_account_unavailable", True, 503, "preferred_account_unavailable"),
-        ("hard_affinity_saturated", True, 503, "hard_affinity_saturated"),
+        ("hard_affinity_saturated", True, 502, "previous_response_owner_unavailable"),
         ("account_stream_cap", True, 429, "account_stream_cap"),
         ("account_response_create_cap", True, 429, "account_response_create_cap"),
         ("continuity_owner_policy_conflict", True, 503, "continuity_owner_policy_conflict"),

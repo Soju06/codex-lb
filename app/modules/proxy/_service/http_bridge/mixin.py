@@ -1757,15 +1757,14 @@ class _HTTPBridgeMixin(
                     selected_account_id=None,
                 )
                 if proxy_connect_failover.last_error is not None:
-                    # No eligible replacement exists after a confirmed
-                    # pre-dispatch route failure: preserve the original
-                    # sanitized failure instead of generating ``no_accounts``.
+                    # Preserve a confirmed pre-dispatch route failure instead
+                    # of generating ``no_accounts``.
                     raise proxy_connect_failover.last_error
                 if (
                     require_preferred_account
                     and preferred_account_id is not None
                     and preferred_account_is_continuity_owner
-                    and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE
+                    and selection.error_code in (CONTINUITY_OWNER_UNAVAILABLE, "hard_affinity_saturated")
                 ):
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 status_code, error_payload = selection_failure_response(selection)

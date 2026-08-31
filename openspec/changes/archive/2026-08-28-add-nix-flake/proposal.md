@@ -8,7 +8,7 @@ Nix users currently lack a reproducible project environment and a first-class wa
 - Expose the built proxy as the default package and default flake app so `nix build` and `nix run` work conventionally.
 - Add an editable development shell with runtime dependencies, the `dev` dependency group, and repository tooling.
 - Add a flake check that builds the packaged application.
-- Resolve `.env` and `.env.local` from the directory where the application is launched so installed commands retain the documented local configuration behavior.
+- Load `.env` and `.env.local` from the launch directory for the packaged Nix commands via an explicit `CODEX_LB_ENV_FILE` settings-load override defaulted by the package wrapper, so installed commands retain the documented local configuration behavior without changing discovery elsewhere.
 - Document the Nix development and run paths in the existing installation context.
 
 ## Capabilities
@@ -26,5 +26,5 @@ None.
 - Adds root-level `flake.nix` and `flake.lock` files.
 - Adds upstream flake inputs for nixpkgs and the pyproject.nix/uv2nix build stack.
 - Extends deployment-installation OpenSpec requirements and context with the Nix workflow.
-- Changes env-file discovery for installed commands from the package source directory to the launch directory.
+- Adds the `CODEX_LB_ENV_FILE` bootstrap override for env-file locations; the Nix package wrapper defaults it to the launch directory. Env-file discovery for non-Nix launch paths is unchanged.
 - Does not change the proxy API or container installation paths.

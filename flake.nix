@@ -188,11 +188,40 @@
           package = pythonSet.codex-lb;
         }
       );
+
+      # The application discovers `.env` / `.env.local` next to its module
+      # root, which for this package is the read-only Nix store where env
+      # files can never exist. Instead of changing that discovery for every
+      # launch mode, the packaged entry points default the explicit
+      # CODEX_LB_ENV_FILE settings-load override to the launch directory,
+      # preserving `nix run` env-file ergonomics without touching non-Nix
+      # behavior. An operator-provided CODEX_LB_ENV_FILE always wins.
+      launchDirEnvFileHook = ''
+        export CODEX_LB_ENV_FILE="''${CODEX_LB_ENV_FILE:-$PWD/.env:$PWD/.env.local}"
+      '';
+
+      wrappedApplications = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        pkgs.symlinkJoin {
+          name = "codex-lb-${projectMetadata.version}";
+          paths = [ applicationPackages.${system} ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          postBuild = ''
+            for program in "$out"/bin/*; do
+              wrapProgram "$program" --run ${lib.escapeShellArg launchDirEnvFileHook}
+            done
+          '';
+          meta = codexLbMeta;
+        }
+      );
     in
     {
       packages = forAllSystems (system: {
-        default = applicationPackages.${system};
-        codex-lb = applicationPackages.${system};
+        default = wrappedApplications.${system};
+        codex-lb = wrappedApplications.${system};
       });
 
       apps = forAllSystems (
@@ -200,7 +229,7 @@
         let
           app = {
             type = "app";
-            program = lib.getExe applicationPackages.${system};
+            program = lib.getExe wrappedApplications.${system};
           };
         in
         {
@@ -251,7 +280,7 @@
       );
 
       checks = forAllSystems (system: {
-        default = applicationPackages.${system};
+        default = wrappedApplications.${system};
       });
 
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt);

@@ -57,8 +57,12 @@ nix flake check           # build the default package
 
 `nix run . -- --help` verifies the proxy command without starting the server.
 The packaged app reads `.env` and `.env.local` from the directory where it is
-launched. Application state still follows the normal data-directory rules and
-is never written into the immutable Nix store.
+launched: the wrapper defaults the `CODEX_LB_ENV_FILE` settings-load override
+(an `os.pathsep`-separated path list) to the launch directory because the
+packaged module root sits in the read-only Nix store where env files cannot
+exist. An operator-provided `CODEX_LB_ENV_FILE` wins, and non-Nix launch
+paths keep module-root discovery. Application state still follows the normal
+data-directory rules and is never written into the immutable Nix store.
 
 ## Timeout Invariant Linter Scope
 

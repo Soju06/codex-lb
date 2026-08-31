@@ -8,7 +8,7 @@ requires the same account, so the request surfaces the 429 even when another
 compatible account has capacity.
 
 This is distinct from the soft prompt-cache affinity theory discussed in
-#1924, #1964, and #1965. Prompt-cache exclusion already selects a replacement
+Issues #1924, #1964, and #1965. Prompt-cache exclusion already selects a replacement
 on current `main`; the conflict comes from the newly established dispatch-owner
 requirement.
 

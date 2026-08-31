@@ -12,10 +12,11 @@ established file, previous-response, turn-state, or existing dispatch owner.
 - **GIVEN** a streaming Responses body is not a canonical account-neutral fresh
   replay
 - **AND** the body has no independently established required account owner
+- **AND** account B is eligible and the request retry budget remains
 - **WHEN** account A rejects the request with HTTP 429 before any response event
 - **THEN** the proxy does not record account A as the dispatch owner
-- **AND** normal failover selection may dispatch the body first on eligible
-  account B
+- **AND** the proxy MUST attempt dispatch on account B before returning account
+  A's 429
 
 #### Scenario: Existing required owner remains fail-closed after HTTP 429
 

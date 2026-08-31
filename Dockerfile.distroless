@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM ghcr.io/astral-sh/uv:0.12.5 AS uv-bin
+FROM ghcr.io/astral-sh/uv:0.12.8 AS uv-bin
 
 FROM rust:1.96.0-slim-bookworm AS native-egress-build
 

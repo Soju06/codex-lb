@@ -85,7 +85,7 @@ def _error_format(request: Request) -> str | None:
     path = request.url.path
     if path.startswith("/api/"):
         return "dashboard"
-    if path.startswith("/v1/") or path.startswith("/backend-api/"):
+    if path in {"/v1", "/backend-api"} or path.startswith(("/v1/", "/backend-api/")):
         return "openai"
     return None
 

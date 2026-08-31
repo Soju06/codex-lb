@@ -248,6 +248,26 @@ def _http_bridge_precreated_retry_recovery_kwargs(retry_method: Any) -> dict[str
     return {}
 
 
+def _http_bridge_unsafe_new_response_anchor_error(
+    *,
+    code: str | None,
+    param: str | None,
+    message: str | None,
+) -> bool:
+    """Classify the upstream's terse invalid-anchor error only when opted in."""
+    settings = _service_get_settings()
+    if not (
+        getattr(settings, "http_responses_session_bridge_unsafe_new_response_recovery_enabled", False)
+        and getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
+        == "server_indefinite_recovery"
+    ):
+        return False
+    if code != "invalid_request_error":
+        return False
+    normalized = " ".join((message or "").lower().replace("`", "").replace("_", " ").split()).strip(" .")
+    return param == "previous_response_id" or normalized == "invalid previous response id"
+
+
 _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (
     0.25,
     0.5,

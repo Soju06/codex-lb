@@ -2033,6 +2033,12 @@ class HttpBridgeOperationRecord(Base):
             unique=True,
         ),
         Index("idx_http_bridge_operations_session_parent_state", "session_id", "parent_response_id", "state"),
+        Index(
+            "idx_http_bridge_operations_session_state_created",
+            "session_id",
+            "state",
+            "created_at",
+        ),
         Index("idx_http_bridge_operations_parent_state", "parent_response_id", "state", "updated_at"),
         Index("idx_http_bridge_operations_response_state", "response_id", "state"),
         Index("idx_http_bridge_operations_state_updated", "state", "updated_at"),

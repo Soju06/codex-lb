@@ -2238,6 +2238,161 @@ async def test_chunk_format_resets_on_failed_rebind_and_unknown_claim(
 
 
 @pytest.mark.asyncio
+async def test_unknown_operation_latest_parent_fallback_requires_unique_model_match(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-operation-parent-fallback",
+            session_key_value="sid-operation-parent-fallback",
+        )
+        assert await repository.renew_session(
+            session_id=claim.id,
+            instance_id="inst-operation-parent-fallback",
+            owner_epoch=claim.owner_epoch,
+            lease_ttl_seconds=120.0,
+            latest_response_id="resp-latest-parent",
+        )
+
+        fingerprint = durable_bridge_hash("operation-parent-fallback")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-parent-fallback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-latest-parent",
+        )
+        assert operation is not None
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-parent-fallback",
+            owner_epoch=claim.owner_epoch,
+            state="unknown",
+        )
+
+        recovered = await repository.get_unique_unknown_operation_for_latest_parent(
+            session_id=claim.id,
+            model="gpt-5.6",
+            api_key_scope="__anonymous__",
+        )
+        assert recovered is not None
+        assert recovered.operation_id == operation_id
+
+        wrong_model = await repository.get_unique_unknown_operation_for_latest_parent(
+            session_id=claim.id,
+            model="gpt-5.4",
+            api_key_scope="__anonymous__",
+        )
+        assert wrong_model is None
+
+        duplicate_fingerprint = durable_bridge_hash("operation-parent-fallback-duplicate")
+        duplicate_id = durable_bridge_operation_id(claim.id, duplicate_fingerprint)
+        duplicate = await repository.record_operation(
+            operation_id=duplicate_id,
+            session_id=claim.id,
+            instance_id="inst-operation-parent-fallback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=duplicate_fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-latest-parent",
+        )
+        assert duplicate is not None
+        assert await repository.update_operation(
+            operation_id=duplicate_id,
+            session_id=claim.id,
+            instance_id="inst-operation-parent-fallback",
+            owner_epoch=claim.owner_epoch,
+            state="unknown",
+        )
+        assert (
+            await repository.get_unique_unknown_operation_for_latest_parent(
+                session_id=claim.id,
+                model="gpt-5.6",
+                api_key_scope="__anonymous__",
+            )
+            is None
+        )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_operation_recent_lookup_is_bounded_to_session_model_and_age(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-operation-recent-parent",
+            session_key_value="sid-operation-recent-parent",
+        )
+        fingerprint = durable_bridge_hash("operation-recent-parent")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-recent-parent",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-old-parent",
+            request_text='{"type":"response.create","input":"retry"}',
+        )
+        assert operation is not None
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-recent-parent",
+            owner_epoch=claim.owner_epoch,
+            state="unknown",
+        )
+
+        recent = await repository.get_recent_unknown_operations(
+            session_id=claim.id,
+            model="gpt-5.6",
+            api_key_scope="__anonymous__",
+            max_age_seconds=60.0,
+            limit=8,
+        )
+        assert [item.operation_id for item in recent] == [operation_id]
+
+        wrong_model = await repository.get_recent_unknown_operations(
+            session_id=claim.id,
+            model="gpt-5.4",
+            api_key_scope="__anonymous__",
+        )
+        assert wrong_model == []
+
+        await session.execute(
+            update(HttpBridgeOperationRecord)
+            .where(HttpBridgeOperationRecord.operation_id == operation_id)
+            .values(created_at=utcnow() - timedelta(seconds=120))
+        )
+        await session.commit()
+        expired = await repository.get_recent_unknown_operations(
+            session_id=claim.id,
+            model="gpt-5.6",
+            api_key_scope="__anonymous__",
+            max_age_seconds=60.0,
+        )
+        assert expired == []
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_operation_retry_reset_clears_partial_spool(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

@@ -1,0 +1,34 @@
+services:
+  server:
+    image: codex-lb-server:continuity-v24-20260830-safe-recovery
+    env_file:
+      - .env.local
+    # Production override: keep the live process single-parented and avoid
+    # Uvicorn's development reloader spawning a second process.
+    command:
+      - uvicorn
+      - app.main:app
+      - --no-proxy-headers
+      - --host
+      - 0.0.0.0
+      - --port
+      - "2455"
+      - --ws-max-size
+      - "134217728"
+    ports:
+      - "2455:2455"
+      - "1455:1455"
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - codex-lb-data:/var/lib/codex-lb
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; [urllib.request.urlopen(url).close() for url in ('http://localhost:2455/health/ready', 'http://localhost:9090/metrics')]"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  codex-lb-data:
+    name: codex-lb-data

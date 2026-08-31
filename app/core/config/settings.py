@@ -382,6 +382,41 @@ class Settings(BaseSettings):
     http_responses_session_bridge_complete_transcript_max_turns: int = Field(default=256, gt=0, le=512)
     http_responses_session_bridge_complete_transcript_max_input_items: int = Field(default=4096, gt=0, le=32768)
     http_responses_session_bridge_complete_transcript_max_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
+    # Keep a reconnecting client request open while an operation-fenced
+    # server-side recovery waits for the hard-key retry circuit to cool down.
+    # This is deliberately separate from the recovery mode because waiting
+    # through an ambiguous upstream handoff is an at-least-once tradeoff.
+    # Disabled by default; operators must explicitly opt in after evaluating
+    # the duplicate-work risk for their upstream deployment.
+    http_responses_session_bridge_parked_recovery_enabled: bool = False
+    # Bounded lookup tuning for the explicit parked-recovery mode. These
+    # values only widen the exact-match candidate search; they never relax
+    # parent/body equality or permit fuzzy replay.
+    http_responses_session_bridge_parked_recovery_recent_unknown_max_age_seconds: float = Field(
+        default=15 * 60,
+        ge=30,
+        le=60 * 60,
+    )
+    http_responses_session_bridge_parked_recovery_recent_unknown_limit: int = Field(
+        default=8,
+        ge=1,
+        le=32,
+    )
+    # The production Compose entrypoint can opt into a slightly longer
+    # pre-response keepalive window together with parked recovery. The cap is
+    # deliberately small so a silent upstream cannot pin connections forever.
+    http_responses_session_bridge_pre_response_keepalive_max_count: int = Field(
+        default=6,
+        ge=1,
+        le=12,
+    )
+    # When enabled together with server_indefinite_recovery, an explicit
+    # previous_response_id loss may be recovered by replaying a proof-gated
+    # full-history request without the stale anchor. The upstream then mints a
+    # new response id. This is intentionally a separate opt-in because the
+    # original turn may have been accepted even though its anchor was lost;
+    # replay therefore has at-least-once / duplicate-side-effect semantics.
+    http_responses_session_bridge_unsafe_new_response_recovery_enabled: bool = False
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     http_responses_session_bridge_advertise_base_url: str | None = None

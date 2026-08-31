@@ -1227,6 +1227,7 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
     event_type: str | None,
     upstream_control: _WebSocketUpstreamControl,
     original_text: str,
+    unsafe_new_response_recovery: bool = False,
 ) -> tuple[OpenAIEvent | None, dict[str, JsonValue] | None, str | None, str]:
     error_code = _normalize_error_code(
         _websocket_event_error_code(event_type, payload),
@@ -1239,6 +1240,8 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
         param=error_param,
         message=error_message,
     )
+    if not should_rewrite and unsafe_new_response_recovery:
+        should_rewrite = True
     reason = "previous_response_not_found"
     if not should_rewrite and _facade()._is_previous_response_not_found_public_shape(
         code=error_code,

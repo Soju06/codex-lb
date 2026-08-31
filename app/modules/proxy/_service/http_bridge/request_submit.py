@@ -97,6 +97,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_retry_circuit_attempt_selection_for_pending_requests,
     _log_http_bridge_event,
     _record_continuity_fail_closed,
+    _record_http_bridge_parked_recovery,
     _record_http_bridge_prewarm_outcome,
     _register_http_bridge_turn_state_aliases_locked,
     _release_http_bridge_unanchored_handoff,
@@ -109,6 +110,7 @@ from app.modules.proxy._service.http_bridge.retry_circuit import (
     _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
     _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
     _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
+    HTTPBridgeParkedRecovery,
     _http_bridge_retry_circuit_suppression_message,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -400,6 +402,79 @@ def _http_bridge_complete_transcript_root_recovery_candidate(
     )
 
 
+_HTTP_BRIDGE_RECENT_UNKNOWN_OPERATION_MAX_AGE_SECONDS = 15 * 60
+_HTTP_BRIDGE_RECENT_UNKNOWN_OPERATION_LIMIT = 8
+
+
+def _http_bridge_recent_unknown_operation_max_age_seconds() -> float:
+    settings = _service_get_settings()
+    if not (
+        bool(getattr(settings, "http_responses_session_bridge_parked_recovery_enabled", False))
+        and getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
+        == "server_indefinite_recovery"
+    ):
+        return float(_HTTP_BRIDGE_RECENT_UNKNOWN_OPERATION_MAX_AGE_SECONDS)
+    configured = getattr(
+        settings,
+        "http_responses_session_bridge_parked_recovery_recent_unknown_max_age_seconds",
+        _HTTP_BRIDGE_RECENT_UNKNOWN_OPERATION_MAX_AGE_SECONDS,
+    )
+    try:
+        return max(30.0, min(60 * 60.0, float(configured)))
+    except (TypeError, ValueError):
+        return float(_HTTP_BRIDGE_RECENT_UNKNOWN_OPERATION_MAX_AGE_SECONDS)
+
+
+def _http_bridge_recent_unknown_operation_limit() -> int:
+    settings = _service_get_settings()
+    if not (
+        bool(getattr(settings, "http_responses_session_bridge_parked_recovery_enabled", False))
+        and getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
+        == "server_indefinite_recovery"
+    ):
+        return _HTTP_BRIDGE_RECENT_UNKNOWN_OPERATION_LIMIT
+    configured = getattr(
+        settings,
+        "http_responses_session_bridge_parked_recovery_recent_unknown_limit",
+        _HTTP_BRIDGE_RECENT_UNKNOWN_OPERATION_LIMIT,
+    )
+    try:
+        return max(1, min(32, int(configured)))
+    except (TypeError, ValueError):
+        return _HTTP_BRIDGE_RECENT_UNKNOWN_OPERATION_LIMIT
+
+
+def _http_bridge_request_shape(text_data: str) -> str:
+    """Return bounded, non-content diagnostics for a normalized request body.
+
+    Mismatch diagnostics must never log the response prompt or tool payload.
+    A digest, byte length, and shallow shape are sufficient to distinguish
+    metadata-only changes from a genuinely different turn while keeping the
+    recovery decision itself exact-match and fail-closed.
+    """
+    digest = _hash_identifier(text_data)
+    try:
+        payload = json.loads(text_data)
+    except (TypeError, json.JSONDecodeError):
+        return f"len={len(text_data)} hash={digest} json=invalid"
+    if not isinstance(payload, dict):
+        return f"len={len(text_data)} hash={digest} json={type(payload).__name__}"
+    keys = sorted(str(key) for key in payload)
+    key_summary = ",".join(keys[:16])
+    if len(keys) > 16:
+        key_summary += ",..."
+    input_value = payload.get("input")
+    if isinstance(input_value, list):
+        input_summary = f"list:{len(input_value)}"
+    elif isinstance(input_value, str):
+        input_summary = f"str:{len(input_value)}"
+    elif input_value is None:
+        input_summary = "none"
+    else:
+        input_summary = type(input_value).__name__
+    return f"len={len(text_data)} hash={digest} keys={key_summary} input={input_summary}"
+
+
 def _http_bridge_operation_fingerprint(
     *,
     session_id: str,
@@ -634,7 +709,15 @@ def _text_without_operation_id(text_data: str) -> str:
 
 
 def _text_without_account_installation_id(text_data: str) -> str:
-    """Normalize account-specific installation metadata out of a fingerprint."""
+    """Normalize account metadata and JSON ordering out of a fingerprint.
+
+    Codex can resend the same logical ``response.create`` payload with a
+    different object-key order after a reconnect. Hashing the wire spelling
+    would create a second durable operation fence for that retry, defeating
+    the retained UNKNOWN tombstone and allowing the retry circuit to report
+    ``operation_not_found``. Canonical JSON keeps the fence semantic rather
+    than dependent on serialization details.
+    """
     try:
         payload = json.loads(text_data)
     except (TypeError, json.JSONDecodeError):
@@ -642,26 +725,30 @@ def _text_without_account_installation_id(text_data: str) -> str:
     if not isinstance(payload, dict):
         return text_data
     raw_metadata = payload.get("client_metadata")
-    if not isinstance(raw_metadata, dict):
-        return text_data
-    metadata: dict[str, JsonValue] = {}
-    for key, value in raw_metadata.items():
-        if not isinstance(key, str) or key.lower() == CODEX_INSTALLATION_ID_HEADER:
-            continue
-        if key.lower() == CODEX_TURN_METADATA_HEADER and isinstance(value, str):
-            try:
-                turn_metadata = json.loads(value)
-            except json.JSONDecodeError:
-                turn_metadata = None
-            if isinstance(turn_metadata, dict) and "installation_id" in turn_metadata:
-                turn_metadata.pop("installation_id", None)
-                value = json.dumps(turn_metadata, ensure_ascii=True, separators=(",", ":"))
-        metadata[key] = value
-    if metadata:
-        payload["client_metadata"] = metadata
-    else:
-        payload.pop("client_metadata", None)
-    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    if isinstance(raw_metadata, dict):
+        metadata: dict[str, JsonValue] = {}
+        for key, value in raw_metadata.items():
+            if not isinstance(key, str) or key.lower() == CODEX_INSTALLATION_ID_HEADER:
+                continue
+            if key.lower() == CODEX_TURN_METADATA_HEADER and isinstance(value, str):
+                try:
+                    turn_metadata = json.loads(value)
+                except json.JSONDecodeError:
+                    turn_metadata = None
+                if isinstance(turn_metadata, dict) and "installation_id" in turn_metadata:
+                    turn_metadata.pop("installation_id", None)
+                    value = json.dumps(
+                        turn_metadata,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+            metadata[key] = value
+        if metadata:
+            payload["client_metadata"] = metadata
+        else:
+            payload.pop("client_metadata", None)
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
 def _text_with_previous_response_id(text_data: str, response_id: str | None) -> str:
@@ -1083,24 +1170,40 @@ class _HTTPBridgeRequestSubmitMixin:
             ):
                 await self._retire_http_bridge_after_drain_if_ready(session)
 
-    async def _http_bridge_operation_fenced_continuity_replay_allowed(
+    async def _http_bridge_operation_fenced_continuity_replay_diagnostic(
         self: Any,
         session: "_HTTPBridgeSession",
         *,
         request_state: _WebSocketRequestState,
         text_data: str,
-    ) -> bool:
-        """Allow a cooldown bypass only for an already-fenced hard turn."""
-        if (
-            not _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
-            or request_state.previous_response_id is not None
-            or session.durable_session_id is None
-            or session.durable_owner_epoch is None
-        ):
-            return False
+    ) -> tuple[bool, str]:
+        """Explain whether a cooldown request has a durable replay fence.
+
+        The reason is intentionally coarse and contains no request payload or
+        operation fingerprint. It is used only for diagnosing why an opted-in
+        parked-recovery request remained fail-closed.
+        """
+        if not _http_bridge_operation_fence_for_hard_continuity_enabled(request_state):
+            return False, "operation_fence_disabled"
+        if request_state.previous_response_id is not None:
+            return False, "previous_response_anchor_present"
+        if session.durable_session_id is None:
+            return False, "missing_durable_session_id"
+        if session.durable_owner_epoch is None:
+            return False, "missing_durable_owner_epoch"
         get_operation_by_fingerprint = getattr(self._durable_bridge, "get_operation_by_fingerprint", None)
-        if not callable(get_operation_by_fingerprint):
-            return False
+        get_latest_parent_unknown = getattr(
+            self._durable_bridge,
+            "get_unique_unknown_operation_for_latest_parent",
+            None,
+        )
+        get_recent_unknown = getattr(self._durable_bridge, "get_recent_unknown_operations", None)
+        if (
+            not callable(get_operation_by_fingerprint)
+            and not callable(get_latest_parent_unknown)
+            and not callable(get_recent_unknown)
+        ):
+            return False, "operation_ledger_unavailable"
         api_key_scope = durable_bridge_api_key_scope(session.key.api_key_id)
         request_fingerprint = _http_bridge_operation_fingerprint(
             session_id=session.durable_session_id,
@@ -1109,10 +1212,12 @@ class _HTTPBridgeRequestSubmitMixin:
             text_data=text_data,
         )
         try:
-            operation = await _call_with_supported_optional_kwargs(
-                get_operation_by_fingerprint,
-                optional_kwargs={"api_key_scope": api_key_scope},
+            operation, fallback_kind = await self._http_bridge_lookup_fenced_operation(
+                session,
+                request_state=request_state,
                 request_fingerprint=request_fingerprint,
+                api_key_scope=api_key_scope,
+                text_data=text_data,
             )
         except Exception:
             logger.warning(
@@ -1120,13 +1225,198 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.request_id,
                 exc_info=True,
             )
-            return False
-        if operation is None or operation.session_id != session.durable_session_id:
-            return False
+            return False, "operation_lookup_failed"
+        if operation is None:
+            return False, "operation_not_found"
+        if operation.session_id != session.durable_session_id:
+            return False, "operation_session_mismatch"
         operation_state = getattr(operation.state, "value", operation.state)
-        return operation_state == "unknown" or (
-            operation_state in {"completed", "incomplete"} and bool(getattr(operation, "event_spool_complete", False))
+        if operation_state == "unknown":
+            if fallback_kind == "latest_parent":
+                return True, "operation_unknown_latest_parent"
+            if fallback_kind == "recent_parent":
+                return True, "operation_unknown_recent_parent"
+            return True, "operation_unknown"
+        if operation_state in {"completed", "incomplete"}:
+            if bool(getattr(operation, "event_spool_complete", False)):
+                return True, "operation_terminal_spool_complete"
+            return False, "operation_terminal_spool_incomplete"
+        return False, f"operation_state_not_recoverable:{operation_state or 'missing'}"
+
+    async def _http_bridge_lookup_fenced_operation(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        request_fingerprint: str,
+        api_key_scope: str,
+        text_data: str,
+    ) -> tuple[Any | None, str | None]:
+        """Look up an operation, with narrow UNKNOWN recovery fallbacks.
+
+        The fallback is deliberately limited to hard continuity requests that
+        omit ``previous_response_id``. It is not a general fuzzy match: the
+        repository requires one UNKNOWN row for the current durable session and
+        model, and the recorded request body must match after removing only
+        bridge/account-installation metadata. The recent-parent path is also
+        opt-in and bounded by age and candidate count.
+        """
+
+        def record_recent_lookup_diagnostic(
+            reason: str,
+            *,
+            candidates: int | None = None,
+            expected_shape: str | None = None,
+            candidate_shapes: list[str] | None = None,
+        ) -> None:
+            """Record why the bounded UNKNOWN candidate lookup did not match.
+
+            Keep this diagnostic separate from the admission outcome.  A
+            candidate can be present in the durable ledger while still being
+            unsafe to rebind when the retry body does not match or multiple
+            rows match.  The reason labels are intentionally finite and the
+            optional candidate count is only emitted in the structured log,
+            never as a metric label.
+            """
+            _record_http_bridge_parked_recovery(outcome="lookup", reason=reason)
+            detail = reason if candidates is None else f"{reason} candidates={candidates}"
+            if expected_shape is not None:
+                detail += f" expected={expected_shape}"
+            if candidate_shapes:
+                detail += (
+                    f" candidate_shapes={'|'.join(candidate_shapes[: _http_bridge_recent_unknown_operation_limit()])}"
+                )
+            _log_http_bridge_event(
+                "parked_recovery_lookup",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                detail=detail,
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            )
+
+        get_operation_by_fingerprint = getattr(self._durable_bridge, "get_operation_by_fingerprint", None)
+        get_latest_parent_unknown = getattr(
+            self._durable_bridge,
+            "get_unique_unknown_operation_for_latest_parent",
+            None,
         )
+        get_recent_unknown = getattr(self._durable_bridge, "get_recent_unknown_operations", None)
+        operation = None
+        if callable(get_operation_by_fingerprint):
+            operation = await _call_with_supported_optional_kwargs(
+                get_operation_by_fingerprint,
+                optional_kwargs={"api_key_scope": api_key_scope},
+                request_fingerprint=request_fingerprint,
+            )
+        if operation is not None:
+            return operation, None
+        if (
+            request_state.previous_response_id is not None
+            or not _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
+            or session.durable_session_id is None
+        ):
+            return None, None
+        if callable(get_latest_parent_unknown):
+            operation = await _call_with_supported_optional_kwargs(
+                get_latest_parent_unknown,
+                optional_kwargs={"api_key_scope": api_key_scope},
+                session_id=session.durable_session_id,
+                model=request_state.model or session.request_model,
+            )
+        operation_text = getattr(operation, "request_text", None)
+        expected_text = _text_without_account_installation_id(_text_without_operation_id(text_data))
+        if isinstance(operation_text, str) and operation_text:
+            recorded_text = _text_without_account_installation_id(_text_without_operation_id(operation_text))
+            if expected_text == recorded_text:
+                return operation, "latest_parent"
+
+        # The session may have advanced after this operation became UNKNOWN.
+        # When explicitly enabled, inspect a bounded set of recent UNKNOWN
+        # turns and accept only one exact body match.
+        if not bool(
+            getattr(
+                _service_get_settings(),
+                "http_responses_session_bridge_parked_recovery_enabled",
+                False,
+            )
+        ):
+            return None, None
+        if not callable(get_recent_unknown):
+            return None, None
+        candidates = await _call_with_supported_optional_kwargs(
+            get_recent_unknown,
+            optional_kwargs={"api_key_scope": api_key_scope},
+            session_id=session.durable_session_id,
+            model=request_state.model or session.request_model,
+            max_age_seconds=_http_bridge_recent_unknown_operation_max_age_seconds(),
+            limit=_http_bridge_recent_unknown_operation_limit() + 1,
+        )
+        if not isinstance(candidates, (list, tuple)):
+            record_recent_lookup_diagnostic("recent_candidates_invalid")
+            return None, None
+        recent_unknown_limit = _http_bridge_recent_unknown_operation_limit()
+        if len(candidates) > recent_unknown_limit:
+            record_recent_lookup_diagnostic("recent_candidates_overflow", candidates=len(candidates))
+            return None, None
+        if not candidates:
+            record_recent_lookup_diagnostic("recent_candidates_empty", candidates=0)
+            return None, None
+        matching_candidates: list[Any] = []
+        candidate_shapes: list[str] = []
+        candidates_with_parent = 0
+        candidates_with_body = 0
+        for candidate in candidates:
+            # A parent response is required for this stale-parent path;
+            # parentless UNKNOWN rows do not carry enough continuity proof
+            # to distinguish a retry from a new first turn.
+            candidate_parent = getattr(candidate, "parent_response_id", None)
+            if not isinstance(candidate_parent, str) or not candidate_parent.strip():
+                continue
+            candidates_with_parent += 1
+            candidate_text = getattr(candidate, "request_text", None)
+            if not isinstance(candidate_text, str) or not candidate_text:
+                continue
+            candidates_with_body += 1
+            normalized_candidate = _text_without_account_installation_id(_text_without_operation_id(candidate_text))
+            candidate_shapes.append(_http_bridge_request_shape(normalized_candidate))
+            if normalized_candidate == expected_text:
+                matching_candidates.append(candidate)
+        if len(matching_candidates) == 0:
+            if candidates_with_parent == 0:
+                reason = "recent_candidates_no_parent"
+            elif candidates_with_body == 0:
+                reason = "recent_candidates_no_request"
+            else:
+                reason = "recent_body_mismatch"
+            record_recent_lookup_diagnostic(
+                reason,
+                candidates=len(candidates),
+                expected_shape=_http_bridge_request_shape(expected_text),
+                candidate_shapes=candidate_shapes,
+            )
+            return None, None
+        if len(matching_candidates) > 1:
+            record_recent_lookup_diagnostic("recent_candidates_ambiguous", candidates=len(matching_candidates))
+            return None, None
+        record_recent_lookup_diagnostic("recent_match", candidates=1)
+        return matching_candidates[0], "recent_parent"
+
+    async def _http_bridge_operation_fenced_continuity_replay_allowed(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        text_data: str,
+    ) -> bool:
+        """Allow a cooldown bypass only for an already-fenced hard turn."""
+        allowed, _reason = await self._http_bridge_operation_fenced_continuity_replay_diagnostic(
+            session,
+            request_state=request_state,
+            text_data=text_data,
+        )
+        return allowed
 
     async def _submit_http_bridge_request_with_handoff(
         self: Any,
@@ -1136,7 +1426,7 @@ class _HTTPBridgeRequestSubmitMixin:
         text_data: str,
         queue_limit: int,
         request_scope_id: str,
-        owned_unanchored_handoff: bool,
+        owned_unanchored_handoff: bool = False,
         recovery_turn_state: str | None = None,
     ) -> None:
         recovery_attempt_consumed = False
@@ -1234,19 +1524,35 @@ class _HTTPBridgeRequestSubmitMixin:
             # becomes retry-safe only after the durable transcript builder has
             # produced the sanitized unanchored body.
             request_state.fresh_upstream_request_is_retry_safe = False
+        parked_recovery_eligibility_reason: str | None = None
+        retry_cooldown_seconds = 0.0
         if _http_bridge_operation_fence_for_hard_continuity_enabled(request_state):
             retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
             if retry_cooldown_seconds > 0:
-                allow_operation_fenced_continuity_replay = (
-                    await self._http_bridge_operation_fenced_continuity_replay_allowed(
-                        session,
-                        request_state=request_state,
-                        text_data=text_data,
-                    )
+                (
+                    allow_operation_fenced_continuity_replay,
+                    parked_recovery_eligibility_reason,
+                ) = await self._http_bridge_operation_fenced_continuity_replay_diagnostic(
+                    session,
+                    request_state=request_state,
+                    text_data=text_data,
                 )
         allow_operation_fenced_continuity_replay = (
             allow_operation_fenced_continuity_replay or allow_complete_transcript_root_recovery
         )
+        if (
+            retry_cooldown_seconds <= 0
+            and request_state.parked_recovery_probe_allowed
+            and getattr(
+                _service_get_settings(),
+                "http_responses_session_bridge_parked_recovery_enabled",
+                False,
+            )
+        ):
+            # The operation was durably proven before parking. Reuse that
+            # proof for the single half-open probe instead of performing
+            # another database lookup after the cooldown expires.
+            allow_operation_fenced_continuity_replay = True
         # Eventless upstream timeouts retire the current socket.  A client
         # reconnect can otherwise create a fresh socket for the same hard key
         # and submit the identical request repeatedly while the retry circuit
@@ -1262,11 +1568,24 @@ class _HTTPBridgeRequestSubmitMixin:
             and request_state.response_event_count == 0
             and request_state.replay_count == 0
         )
+        parked_recovery_opt_in = bool(
+            getattr(_service_get_settings(), "http_responses_session_bridge_parked_recovery_enabled", False)
+        )
+        parked_recovery_enabled = bool(parked_recovery_opt_in and allow_operation_fenced_continuity_replay)
+        parked_recovery_probe_allowed = bool(
+            parked_recovery_enabled and request_state.parked_recovery_probe_allowed and retry_cooldown_seconds <= 0
+        )
+        if parked_recovery_probe_allowed:
+            request_state.parked_recovery_probe_allowed = False
+            _record_http_bridge_parked_recovery(outcome="probe", reason="half_open_operation_fenced")
         admission_claimed_leases: list[float] = []
         retry_allowed = await self._http_bridge_precreated_retry_allowed(
             session,
             allow_proof_gated_continuity_replay=allow_proof_gated_continuity_replay,
-            allow_operation_fenced_continuity_replay=allow_operation_fenced_continuity_replay,
+            allow_operation_fenced_continuity_replay=(
+                allow_operation_fenced_continuity_replay
+                and (not parked_recovery_enabled or parked_recovery_probe_allowed)
+            ),
             claimed_lease_out=admission_claimed_leases,
         )
         # The exact lease this admission claimed, handed out by the claim
@@ -1277,6 +1596,38 @@ class _HTTPBridgeRequestSubmitMixin:
         claimed_half_open_until = admission_claimed_leases[-1] if admission_claimed_leases else 0.0
         request_state.claimed_half_open_until = claimed_half_open_until
         if not retry_allowed:
+            if parked_recovery_opt_in and retry_cooldown_seconds > 0 and not allow_operation_fenced_continuity_replay:
+                _record_http_bridge_parked_recovery(
+                    outcome="ineligible", reason=parked_recovery_eligibility_reason or "not_evaluated"
+                )
+                _log_http_bridge_event(
+                    "parked_recovery_ineligible",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    detail=parked_recovery_eligibility_reason or "not_evaluated",
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
+            if parked_recovery_enabled and retry_cooldown_seconds > 0:
+                request_deadline = request_state.bridge_request_deadline
+                if request_deadline is None:
+                    request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(
+                        _service_get_settings()
+                    )
+                remaining_budget_seconds = max(0.0, request_deadline - _service_time().monotonic())
+                if remaining_budget_seconds > 0:
+                    _log_http_bridge_event(
+                        "submit_retry_circuit_parked",
+                        session.key,
+                        account_id=session.account.id,
+                        model=session.request_model,
+                        detail="operation_fenced_cooldown",
+                        cache_key_family=session.key.affinity_kind,
+                        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                    )
+                    _record_http_bridge_parked_recovery(outcome="waiting", reason="operation_fenced_cooldown")
+                    raise HTTPBridgeParkedRecovery(min(retry_cooldown_seconds, remaining_budget_seconds))
             block_seconds, block_reason = await self._http_bridge_precreated_retry_block(session)
             retry_after_seconds = max(1, math.ceil(block_seconds))
             _log_http_bridge_event(
@@ -1527,17 +1878,25 @@ class _HTTPBridgeRequestSubmitMixin:
             operation_tagged_text = _text_with_operation_id(text_data, operation_id)
             _enforce_http_bridge_response_create_text_size(request_state, operation_tagged_text)
             try:
-                get_operation_by_fingerprint = getattr(self._durable_bridge, "get_operation_by_fingerprint", None)
                 get_operation = getattr(self._durable_bridge, "get_operation", None)
 
                 async def lookup_operation() -> Any:
-                    operation = None
-                    if callable(get_operation_by_fingerprint):
-                        operation = await _call_with_supported_optional_kwargs(
-                            get_operation_by_fingerprint,
-                            optional_kwargs={"api_key_scope": api_key_scope},
-                            request_fingerprint=operation_fingerprint,
-                        )
+                    nonlocal operation_fingerprint, operation_id, operation_parent_response_id
+                    operation, fallback_kind = await self._http_bridge_lookup_fenced_operation(
+                        session,
+                        request_state=request_state,
+                        request_fingerprint=operation_fingerprint,
+                        api_key_scope=api_key_scope,
+                        text_data=text_data,
+                    )
+                    if fallback_kind is not None and operation is not None:
+                        # Rebind all durable identity fields before
+                        # record_operation. Otherwise the later ledger call
+                        # would create a new operation row despite having
+                        # found the retained UNKNOWN tombstone.
+                        operation_fingerprint = operation.request_fingerprint
+                        operation_id = operation.operation_id
+                        operation_parent_response_id = operation.parent_response_id
                     if operation is None and callable(get_operation):
                         operation = await get_operation(operation_id=operation_id)
                     return operation
@@ -3890,6 +4249,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state: _WebSocketRequestState | None = None,
         restart_reader: bool = False,
         allow_complete_transcript_recovery: bool = False,
+        allow_operation_fenced_continuity_replay: bool = False,
     ) -> bool:
         # The admitted body's admission gate can claim the half-open probe;
         # any exit that never advances a send attempt past its baseline must
@@ -3904,6 +4264,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state=request_state,
                 restart_reader=restart_reader,
                 allow_complete_transcript_recovery=allow_complete_transcript_recovery,
+                allow_operation_fenced_continuity_replay=allow_operation_fenced_continuity_replay,
                 admission_claimed_leases=admission_claimed_leases,
                 retry_send_baselines=retry_send_baselines,
             )
@@ -3930,6 +4291,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state: _WebSocketRequestState | None = None,
         restart_reader: bool = False,
         allow_complete_transcript_recovery: bool = False,
+        allow_operation_fenced_continuity_replay: bool = False,
         admission_claimed_leases: list[float] | None = None,
         retry_send_baselines: list[tuple[_WebSocketRequestState, int]] | None = None,
     ) -> bool:
@@ -4067,6 +4429,7 @@ class _HTTPBridgeRequestSubmitMixin:
 
         fresh_hard_request_account_switch_candidate = False
         proof_gated_continuity_replay_candidate = False
+        server_anchored_replay_candidate = False
         if session.key.strength == "hard":
             async with session.pending_lock:
                 retryable_candidates = [
@@ -4091,10 +4454,14 @@ class _HTTPBridgeRequestSubmitMixin:
                         and candidate.response_event_count == 0
                         and candidate.replay_count == 0
                     )
+                    server_anchored_replay_candidate = _http_bridge_server_anchored_replay_enabled(candidate)
         if not await self._http_bridge_precreated_retry_allowed(
             session,
             allow_fresh_hard_account_switch=fresh_hard_request_account_switch_candidate,
-            allow_proof_gated_continuity_replay=proof_gated_continuity_replay_candidate,
+            allow_proof_gated_continuity_replay=(
+                proof_gated_continuity_replay_candidate or server_anchored_replay_candidate
+            ),
+            allow_operation_fenced_continuity_replay=allow_operation_fenced_continuity_replay,
             claimed_lease_out=admission_claimed_leases,
         ):
             return False

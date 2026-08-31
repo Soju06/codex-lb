@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 138 settings. Every setting is an environment
+codex-lb currently exposes 143 settings. Every setting is an environment
 variable with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process). All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
@@ -114,10 +114,15 @@ the env-file locations have to be known before env files are read.
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_LEDGER_ENABLED` | `bool` | `True` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_SPOOL_FORMAT` | `'rows_v1' \| 'chunks_v2'` | `'rows_v1'` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_SPOOL_RETENTION_SECONDS` | `float` | `604800` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_PARKED_RECOVERY_ENABLED` | `bool` | `False` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_PARKED_RECOVERY_RECENT_UNKNOWN_LIMIT` | `int` | `8` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_PARKED_RECOVERY_RECENT_UNKNOWN_MAX_AGE_SECONDS` | `float` | `900` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_PRE_RESPONSE_KEEPALIVE_MAX_COUNT` | `int` | `6` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_QUEUE_LIMIT` | `int` | `8` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_REQUEST_BUDGET_SECONDS` | `float` | `7200.0` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS` | `int` | `6` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS` | `float` | `300.0` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_UNSAFE_NEW_RESPONSE_RECOVERY_ENABLED` | `bool` | `False` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_UNSAFE_PARTIAL_REPLAY_ENABLED` | `bool` | `False` |
 
 ## Proxy admission & account caps

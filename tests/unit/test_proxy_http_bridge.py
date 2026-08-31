@@ -359,6 +359,85 @@ def test_http_bridge_root_operation_fingerprint_is_session_scoped() -> None:
     )
 
 
+def test_http_bridge_operation_fingerprint_is_json_order_insensitive() -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-canonical-fingerprint",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    first = http_bridge_request_submit_module._http_bridge_operation_fingerprint(
+        session_id="durable-canonical-fingerprint",
+        api_key_scope="key-scope",
+        request_state=request_state,
+        text_data=('{"type":"response.create","input":"same","client_metadata":{"caller":"stable","x":"1"}}'),
+    )
+    second = http_bridge_request_submit_module._http_bridge_operation_fingerprint(
+        session_id="durable-canonical-fingerprint",
+        api_key_scope="key-scope",
+        request_state=request_state,
+        text_data=('{"client_metadata":{"x":"1","caller":"stable"},"input":"same","type":"response.create"}'),
+    )
+    assert first == second
+
+
+def test_http_bridge_request_shape_diagnostic_excludes_request_content() -> None:
+    shape = http_bridge_request_submit_module._http_bridge_request_shape(
+        json.dumps(
+            {
+                "type": "response.create",
+                "input": "private prompt text",
+                "tools": [{"name": "private-tool"}],
+            }
+        )
+    )
+
+    assert "private prompt text" not in shape
+    assert "private-tool" not in shape
+    assert "keys=input,tools,type" in shape
+    assert "input=str:19" in shape
+    assert "hash=sha256:" in shape
+
+
+def test_http_bridge_parked_recovery_tuning_is_opt_in_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_parked_recovery_enabled=True,
+            http_responses_session_bridge_parked_recovery_recent_unknown_max_age_seconds=1800,
+            http_responses_session_bridge_parked_recovery_recent_unknown_limit=12,
+            http_responses_session_bridge_pre_response_keepalive_max_count=8,
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 6)
+
+    assert http_bridge_request_submit_module._http_bridge_recent_unknown_operation_max_age_seconds() == 1800
+    assert http_bridge_request_submit_module._http_bridge_recent_unknown_operation_limit() == 12
+    assert http_bridge_streaming_module._stream_keepalive_max_count() == 8
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="fail_closed",
+            http_responses_session_bridge_parked_recovery_enabled=True,
+            http_responses_session_bridge_parked_recovery_recent_unknown_max_age_seconds=3600,
+            http_responses_session_bridge_parked_recovery_recent_unknown_limit=32,
+            http_responses_session_bridge_pre_response_keepalive_max_count=12,
+        ),
+    )
+    assert http_bridge_request_submit_module._http_bridge_recent_unknown_operation_max_age_seconds() == 900
+    assert http_bridge_request_submit_module._http_bridge_recent_unknown_operation_limit() == 8
+    assert http_bridge_streaming_module._stream_keepalive_max_count() == 6
+
+
 @pytest.mark.asyncio
 async def test_submit_hard_turn_walks_completed_operation_chain_before_recording(
     monkeypatch: pytest.MonkeyPatch,
@@ -1158,8 +1237,255 @@ def test_http_bridge_explicit_previous_response_rejection_normalizes_error_type(
     error = proxy_service.openai_error("upstream_error", "Previous response with id 'resp_missing' not found.")
     error["error"]["type"] = "previous_response_not_found"
     error["error"].pop("code")
-
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(ProxyResponseError(400, error)) is True
+
+
+@pytest.mark.asyncio
+async def test_hard_continuity_operation_replay_falls_back_to_latest_parent_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-parent-fallback")
+    session.durable_session_id = "durable-hard-fence-parent-fallback"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-parent-fallback",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery"
+        ),
+    )
+    operation = SimpleNamespace(
+        operation_id="op-latest-parent-fallback",
+        request_fingerprint="fingerprint-latest-parent-fallback",
+        parent_response_id="resp-latest-parent",
+        session_id=session.durable_session_id,
+        state="unknown",
+        event_spool_complete=False,
+        request_text='{"type":"response.create","input":"retry"}',
+    )
+    exact_lookup = AsyncMock(return_value=None)
+    parent_lookup = AsyncMock(return_value=operation)
+    service._durable_bridge = SimpleNamespace(
+        get_operation_by_fingerprint=exact_lookup,
+        get_unique_unknown_operation_for_latest_parent=parent_lookup,
+    )
+
+    allowed, reason = await service._http_bridge_operation_fenced_continuity_replay_diagnostic(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"retry"}',
+    )
+
+    assert allowed is True
+    assert reason == "operation_unknown_latest_parent"
+    exact_lookup.assert_awaited_once()
+    parent_lookup.assert_awaited_once_with(
+        session_id=session.durable_session_id,
+        model=request_state.model,
+        api_key_scope="__anonymous__",
+    )
+
+
+@pytest.mark.asyncio
+async def test_hard_continuity_operation_replay_falls_back_to_one_recent_parent_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-recent-parent-fallback")
+    session.durable_session_id = "durable-hard-fence-recent-parent-fallback"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-recent-parent-fallback",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_parked_recovery_enabled=True,
+        ),
+    )
+    operation = SimpleNamespace(
+        operation_id="op-recent-parent-fallback",
+        request_fingerprint="fingerprint-recent-parent-fallback",
+        parent_response_id="resp-stale-parent",
+        session_id=session.durable_session_id,
+        state="unknown",
+        event_spool_complete=False,
+        request_text='{"type":"response.create","input":"retry"}',
+    )
+    service._durable_bridge = SimpleNamespace(
+        get_operation_by_fingerprint=AsyncMock(return_value=None),
+        get_unique_unknown_operation_for_latest_parent=AsyncMock(return_value=None),
+        get_recent_unknown_operations=AsyncMock(return_value=[operation]),
+    )
+
+    allowed, reason = await service._http_bridge_operation_fenced_continuity_replay_diagnostic(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"retry"}',
+    )
+
+    assert allowed is True
+    assert reason == "operation_unknown_recent_parent"
+    service._durable_bridge.get_recent_unknown_operations.assert_awaited_once_with(
+        session_id=session.durable_session_id,
+        model=request_state.model,
+        api_key_scope="__anonymous__",
+        max_age_seconds=15 * 60,
+        limit=9,
+    )
+
+    service._durable_bridge.get_recent_unknown_operations.reset_mock()
+    service._durable_bridge.get_recent_unknown_operations.return_value = [
+        operation,
+        SimpleNamespace(
+            operation_id="op-recent-parent-fallback-ambiguous",
+            parent_response_id="resp-another-stale-parent",
+            state="unknown",
+            request_text=operation.request_text,
+        ),
+    ]
+    allowed, reason = await service._http_bridge_operation_fenced_continuity_replay_diagnostic(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"retry"}',
+    )
+    assert allowed is False
+    assert reason == "operation_not_found"
+
+
+@pytest.mark.asyncio
+async def test_hard_continuity_recent_parent_fallback_stays_disabled_without_parked_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-recent-parent-disabled")
+    session.durable_session_id = "durable-hard-fence-recent-parent-disabled"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-recent-parent-disabled",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_parked_recovery_enabled=False,
+        ),
+    )
+    operation = SimpleNamespace(
+        operation_id="op-recent-parent-disabled",
+        request_fingerprint="fingerprint-recent-parent-disabled",
+        parent_response_id="resp-stale-parent",
+        session_id=session.durable_session_id,
+        state="unknown",
+        request_text='{"type":"response.create","input":"retry"}',
+    )
+    recent_lookup = AsyncMock(return_value=[operation])
+    service._durable_bridge = SimpleNamespace(
+        get_operation_by_fingerprint=AsyncMock(return_value=None),
+        get_unique_unknown_operation_for_latest_parent=AsyncMock(return_value=None),
+        get_recent_unknown_operations=recent_lookup,
+    )
+
+    allowed, reason = await service._http_bridge_operation_fenced_continuity_replay_diagnostic(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"retry"}',
+    )
+
+    assert allowed is False
+    assert reason == "operation_not_found"
+    recent_lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_submit_rebinds_latest_parent_unknown_before_recording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-submit-fallback")
+    session.durable_session_id = "durable-hard-fence-submit-fallback"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-submit-fallback",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        transport="http",
+        hard_continuity_anchor=True,
+        request_text='{"type":"response.create","input":"retry"}',
+        skip_request_log=True,
+    )
+    operation = SimpleNamespace(
+        operation_id="op-submit-latest-parent-fallback",
+        request_fingerprint="fingerprint-submit-latest-parent-fallback",
+        parent_response_id="resp-latest-parent",
+        session_id=session.durable_session_id,
+        state="unknown",
+        event_spool_complete=False,
+        request_text='{"type":"response.create","input":"retry"}',
+    )
+    recorded: dict[str, Any] = {}
+
+    async def record_operation(**kwargs: Any) -> Any:
+        recorded.update(kwargs)
+        raise RuntimeError("stop after operation identity assertion")
+
+    service._durable_bridge = SimpleNamespace(
+        get_operation_by_fingerprint=AsyncMock(return_value=None),
+        get_unique_unknown_operation_for_latest_parent=AsyncMock(return_value=operation),
+        record_operation=record_operation,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_instance_id="instance-hard-fence-submit-fallback",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-hard-fence-submit-fallback",
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
+    assert recorded["operation_id"] == operation.operation_id
+    assert recorded["request_fingerprint"] == operation.request_fingerprint
+    assert recorded["parent_response_id"] == operation.parent_response_id
 
 
 @pytest.mark.parametrize("code", ["previous_response_not_found", "bridge_previous_response_not_found"])
@@ -1171,6 +1497,76 @@ def test_http_bridge_stale_anchor_recovery_rejects_malformed_present_param(code:
 
     assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(exc) is False
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(exc) is False
+
+
+def test_http_bridge_unsafe_new_response_recovery_requires_full_history_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-unsafe-new-response",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-stale",
+        previous_response_not_found_rewritten=True,
+        fresh_upstream_request_is_retry_safe=True,
+        fresh_upstream_request_text='{"type":"response.create","input":[{"role":"user","content":"retry"}]}',
+    )
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_unsafe_new_response_recovery_enabled=True,
+        ),
+    )
+
+    assert http_bridge_streaming_module._http_bridge_unsafe_new_response_recovery_eligible(request_state) is True
+
+    request_state.response_event_count = 1
+    assert http_bridge_streaming_module._http_bridge_unsafe_new_response_recovery_eligible(request_state) is False
+
+    request_state.response_event_count = 0
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+        ),
+    )
+    assert http_bridge_streaming_module._http_bridge_unsafe_new_response_recovery_eligible(request_state) is False
+
+
+def test_http_bridge_unsafe_new_response_recovery_classifies_terse_anchor_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_unsafe_new_response_recovery_enabled=True,
+        ),
+    )
+
+    assert (
+        http_bridge_upstream_events_module._http_bridge_unsafe_new_response_anchor_error(
+            code="invalid_request_error",
+            param=None,
+            message="Invalid `previous_response_id`.",
+        )
+        is True
+    )
+    assert (
+        http_bridge_upstream_events_module._http_bridge_unsafe_new_response_anchor_error(
+            code="invalid_request_error",
+            param="input",
+            message="Invalid input.",
+        )
+        is False
+    )
 
 
 @pytest.mark.parametrize("param", ["", "   "])
@@ -28723,6 +29119,7 @@ async def test_create_http_bridge_session_does_not_classify_post_selection_failu
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_reset_db_state")
 async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_previous_response_owner_misses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

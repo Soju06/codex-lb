@@ -1018,6 +1018,38 @@ class DurableBridgeSessionCoordinator:
                 api_key_scope=api_key_scope,
             )
 
+    async def get_unique_unknown_operation_for_latest_parent(
+        self,
+        *,
+        session_id: str,
+        model: str,
+        api_key_scope: str | None = None,
+    ) -> DurableBridgeOperationSnapshot | None:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).get_unique_unknown_operation_for_latest_parent(
+                session_id=session_id,
+                model=model,
+                api_key_scope=api_key_scope,
+            )
+
+    async def get_recent_unknown_operations(
+        self,
+        *,
+        session_id: str,
+        model: str,
+        api_key_scope: str | None = None,
+        max_age_seconds: float = 15 * 60,
+        limit: int = 8,
+    ) -> list[DurableBridgeOperationSnapshot]:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).get_recent_unknown_operations(
+                session_id=session_id,
+                model=model,
+                api_key_scope=api_key_scope,
+                max_age_seconds=max_age_seconds,
+                limit=limit,
+            )
+
     async def get_latest_completed_operation(
         self,
         *,

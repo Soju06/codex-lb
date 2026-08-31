@@ -33,6 +33,7 @@ from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup, Du
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeRepository,
+    durable_bridge_api_key_scope,
     durable_bridge_hash,
     durable_bridge_operation_id,
 )
@@ -59,6 +60,68 @@ async def async_session_factory() -> AsyncIterator[Callable[[], AsyncSession]]:
 @pytest.fixture
 async def coordinator(async_session_factory: Callable[[], AsyncSession]) -> DurableBridgeSessionCoordinator:
     return DurableBridgeSessionCoordinator(async_session_factory)
+
+
+@pytest.mark.asyncio
+async def test_coordinator_forwards_unknown_operation_lookups(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-unknown-lookups",
+        api_key_id="key-unknown-lookups",
+        instance_id="instance-unknown-lookups",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=120.0,
+        account_id="acc-unknown-lookups",
+        model="gpt-5.6",
+        service_tier=None,
+        latest_turn_state="http_turn_unknown_lookups",
+        latest_response_id="resp-unknown-parent",
+        allow_takeover=True,
+    )
+    fingerprint = durable_bridge_hash("unknown-lookups")
+    operation_id = durable_bridge_operation_id(claimed.session_id, fingerprint)
+    async with async_session_factory() as session:
+        repository = DurableBridgeRepository(session)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claimed.session_id,
+            instance_id="instance-unknown-lookups",
+            owner_epoch=claimed.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="acc-unknown-lookups",
+            model="gpt-5.6",
+            parent_response_id="resp-unknown-parent",
+            request_text='{"type":"response.create","input":"retry"}',
+        )
+        assert operation is not None
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claimed.session_id,
+            instance_id="instance-unknown-lookups",
+            owner_epoch=claimed.owner_epoch,
+            state="unknown",
+        )
+
+    api_key_scope = durable_bridge_api_key_scope("key-unknown-lookups")
+    latest_parent = await coordinator.get_unique_unknown_operation_for_latest_parent(
+        session_id=claimed.session_id,
+        model="gpt-5.6",
+        api_key_scope=api_key_scope,
+    )
+    assert latest_parent is not None
+    assert latest_parent.operation_id == operation_id
+
+    recent = await coordinator.get_recent_unknown_operations(
+        session_id=claimed.session_id,
+        model="gpt-5.6",
+        api_key_scope=api_key_scope,
+        max_age_seconds=60.0,
+        limit=8,
+    )
+    assert [item.operation_id for item in recent] == [operation_id]
 
 
 def test_durable_bridge_live_claim_requires_process_epoch() -> None:

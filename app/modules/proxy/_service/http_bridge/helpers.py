@@ -59,6 +59,7 @@ from app.core.metrics.prometheus import (
     bridge_instance_mismatch_total,
     bridge_reattach_total,
     bridge_unanchored_handoff_recovery_total,
+    http_bridge_parked_recovery_total,
     http_bridge_prewarm_total,
     http_bridge_stuck_retire_total,
 )
@@ -203,6 +204,16 @@ from app.modules.proxy.ring_membership import (
 from app.modules.proxy.selection_errors import selection_failure_response
 
 logger = logging.getLogger("app.modules.proxy.service")
+
+
+def _record_http_bridge_parked_recovery(*, outcome: str, reason: str) -> None:
+    if PROMETHEUS_AVAILABLE and http_bridge_parked_recovery_total is not None:
+        http_bridge_parked_recovery_total.labels(
+            outcome=outcome,
+            reason=str(reason)[:80] or "unknown",
+        ).inc()
+
+
 _TASK_CANCEL_TIMEOUT_SECONDS = 1.0
 _TaskResultT = TypeVar("_TaskResultT")
 _HTTP_BRIDGE_PENDING_COUNT_WARNING_INTERVAL_SECONDS = 60.0
@@ -3797,6 +3808,13 @@ def _log_http_bridge_event(
         "reallocation_orphan",
         "context_overflow_rollover",
         "reader_failure",
+        "parked_recovery_ineligible",
+        # The production Compose entrypoint launches Uvicorn directly with
+        # its default WARNING threshold. Keep bounded recovery diagnostics
+        # visible there without raising global application log verbosity.
+        "parked_recovery_lookup",
+        "submit_retry_circuit_parked",
+        "parked_recovery_admitted",
     }:
         level = logging.WARNING
     logger.log(

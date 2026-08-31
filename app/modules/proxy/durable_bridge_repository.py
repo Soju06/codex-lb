@@ -2326,6 +2326,77 @@ class DurableBridgeRepository:
             expected_sequence += chunk.event_count
         return events if remaining_bytes == 0 else []
 
+    async def get_unique_unknown_operation_for_latest_parent(
+        self,
+        *,
+        session_id: str,
+        model: str | None = None,
+        api_key_scope: str | None = None,
+    ) -> DurableBridgeOperationSnapshot | None:
+        """Find one safely recoverable UNKNOWN turn for this session's latest parent."""
+        if not isinstance(model, str) or not model:
+            return None
+        latest_parent_statement = select(HttpBridgeSessionRecord.latest_response_id).where(
+            HttpBridgeSessionRecord.id == session_id,
+        )
+        if api_key_scope is not None:
+            latest_parent_statement = latest_parent_statement.where(
+                HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+            )
+        predicates = [
+            HttpBridgeOperationRecord.session_id == session_id,
+            HttpBridgeOperationRecord.parent_response_id == latest_parent_statement.scalar_subquery(),
+            HttpBridgeOperationRecord.state == "unknown",
+            HttpBridgeOperationRecord.model == model,
+        ]
+        result = await self._session.execute(
+            select(HttpBridgeOperationRecord)
+            .where(*predicates)
+            .order_by(HttpBridgeOperationRecord.updated_at.desc())
+            .limit(2)
+        )
+        rows = result.scalars().all()
+        if len(rows) != 1:
+            return None
+        return _to_operation_snapshot(rows[0])
+
+    async def get_recent_unknown_operations(
+        self,
+        *,
+        session_id: str,
+        model: str | None = None,
+        api_key_scope: str | None = None,
+        max_age_seconds: float = 15 * 60,
+        limit: int = 8,
+    ) -> list[DurableBridgeOperationSnapshot]:
+        """Return a bounded set of recent UNKNOWN turns for one session."""
+        if not isinstance(model, str) or not model:
+            return []
+        try:
+            bounded_age = max(1.0, float(max_age_seconds))
+        except (TypeError, ValueError):
+            bounded_age = 15 * 60
+        try:
+            bounded_limit = min(32, max(1, int(limit)))
+        except (TypeError, ValueError):
+            bounded_limit = 8
+        cutoff = utcnow() - timedelta(seconds=bounded_age)
+        statement = select(HttpBridgeOperationRecord).where(
+            HttpBridgeOperationRecord.session_id == session_id,
+            HttpBridgeOperationRecord.state == "unknown",
+            HttpBridgeOperationRecord.model == model,
+            HttpBridgeOperationRecord.created_at >= cutoff,
+        )
+        if api_key_scope is not None:
+            statement = statement.join(
+                HttpBridgeSessionRecord,
+                HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+            ).where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
+        result = await self._session.execute(
+            statement.order_by(HttpBridgeOperationRecord.updated_at.desc()).limit(bounded_limit)
+        )
+        return [_to_operation_snapshot(row) for row in result.scalars().all()]
+
     async def get_operation_by_response_id(self, *, response_id: str) -> DurableBridgeOperationSnapshot | None:
         operation = await self._session.scalar(
             select(HttpBridgeOperationRecord)

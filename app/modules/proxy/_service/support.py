@@ -1017,6 +1017,10 @@ class _WebSocketRequestState:
     clean_close_retry_in_progress: bool = False
     clean_close_retry_result: bool | None = None
     clean_close_retry_close_generation: int | None = None
+    # Parked recovery may consume one half-open circuit probe after the
+    # cooldown. Keep the probe permission on the request state so it cannot
+    # turn repeated ambiguous failures into an immediate replay loop.
+    parked_recovery_probe_allowed: bool = False
     auth_replay_count: int = 0
     auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
     force_refresh_account_id: str | None = None

@@ -81,7 +81,9 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # because they retain sensitive prompt/output material, increase database
 # storage proportional to conversation length, and partial replay is
 # explicitly at-least-once.
-MAX_SETTINGS_FIELDS = 138
+# 138 -> 143: parked-recovery and unsafe-new-response controls. These remain
+# explicit operator settings because they govern an at-least-once tradeoff.
+MAX_SETTINGS_FIELDS = 143
 
 
 def test_generated_settings_reference_matches_code() -> None:

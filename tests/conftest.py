@@ -90,8 +90,8 @@ class _NoopLeaderElection:
     def start_release_keeper(self) -> None:
         return None
 
-    async def release(self) -> None:
-        return None
+    async def release(self) -> bool:
+        return True
 
 
 def _drop_test_migration_tables(sync_conn) -> None:

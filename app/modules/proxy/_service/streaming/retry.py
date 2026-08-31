@@ -7,11 +7,9 @@ import logging
 import sys
 import time
 from dataclasses import replace
-from typing import Any, AsyncGenerator, AsyncIterator, Mapping, TypeVar, cast
+from typing import Any, AsyncGenerator, AsyncIterator, Mapping, cast
 
 import aiohttp
-import anyio
-from anyio.lowlevel import checkpoint_if_cancelled
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer import failover_decision
@@ -31,7 +29,7 @@ from app.core.resilience.network_recovery import (
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.retry import backoff_seconds
-from app.core.utils.shared_future import wait_on_shared_future
+from app.core.utils.shared_future import _await_task_deferring_cancellation
 from app.core.utils.sse import format_sse_event
 from app.db.models import Account, StickySessionKind
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
@@ -90,38 +88,6 @@ _HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT = "smart"
 _HTTP_DOWNSTREAM_TRANSPORT_POLICIES = frozenset({"smart", "always_http", "always_websocket", "pinned"})
 
 logger = logging.getLogger(__name__)
-_TaskResultT = TypeVar("_TaskResultT")
-
-
-async def _await_task_deferring_cancellation(
-    task: asyncio.Task[_TaskResultT],
-) -> tuple[_TaskResultT, asyncio.CancelledError | None]:
-    """Finish critical cleanup while preserving the caller's cancellation."""
-
-    cancellation: asyncio.CancelledError | None = None
-    # The anyio shield keeps a level-cancelled Starlette scope from re-raising
-    # into every ``await``, which would otherwise busy-spin this loop until the
-    # owned task completes. ``wait_on_shared_future`` keeps the loop's waits
-    # off the task's done-callback list: Python 3.14's ``asyncio.shield``
-    # leaks a callback per cancelled wait (2026-08-30 event-loop livelock).
-    with anyio.CancelScope(shield=True):
-        while True:
-            try:
-                result = await wait_on_shared_future(task)
-                break
-            except asyncio.CancelledError as exc:
-                if task.cancelled():
-                    raise
-                cancellation = cancellation or exc
-    if cancellation is None:
-        # The shield also blocks the level cancellation this helper promises
-        # to surface. Probe for it without suspending so callers still get
-        # their cancellation marker after the owned task finished.
-        try:
-            await checkpoint_if_cancelled()
-        except asyncio.CancelledError as exc:
-            cancellation = exc
-    return result, cancellation
 
 
 def _facade() -> Any:
@@ -460,7 +426,7 @@ class _StreamingRetryMixin:
                 error_message,
                 error_type=(error.type if error else None) or "server_error",
                 response_id=request_id,
-                error_param=error.param if error else None,
+                error_param=error.param_state if error else None,
             )
             _apply_error_metadata(event["response"]["error"], error)
             return format_sse_event(event)
@@ -999,7 +965,7 @@ class _StreamingRetryMixin:
                 error_message,
                 error_type=(error.type if error else None) or "invalid_request_error",
                 response_id=request_id,
-                error_param=error.param if error else None,
+                error_param=error.param_state if error else None,
             )
             _apply_error_metadata(event["response"]["error"], error)
             if not any_attempt_logged:
@@ -1784,16 +1750,14 @@ class _StreamingRetryMixin:
                         if isinstance(exc, RefreshError):
                             if exc.is_permanent:
                                 await proxy._load_balancer.mark_permanent_failure(account, exc.code)
-                                # The account is now removed from selection, but its
-                                # stream-concurrency slot is still occupied by the
-                                # lease appended at selection. Release it before the
-                                # failover ``continue`` (matching the transient
-                                # branches) so the dead account's slot is freed
-                                # immediately instead of being held for the entire
-                                # duration of the replacement stream.
+                                # Keep the warning account routable for later
+                                # requests, but do not immediately reselect it in
+                                # this request after its refresh material failed.
+                                # Release its stream slot before failover too.
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
                                 if not selected_account_model_replacement:
+                                    excluded_account_ids.add(account.id)
                                     continue
                             if is_transient_refresh_contention(exc):
                                 # Transient CROSS-REPLICA refresh contention: benign
@@ -2119,7 +2083,7 @@ class _StreamingRetryMixin:
                                     )
                                     error_message = error.message if error else "Upstream error"
                                     error_type = error.type if error else None
-                                    error_param = error.param if error else None
+                                    error_param = error.param_state if error else None
                                     event = response_failed_event(
                                         error_code or "upstream_error",
                                         error_message or "Upstream error",
@@ -2580,13 +2544,12 @@ class _StreamingRetryMixin:
                             if isinstance(refresh_exc, RefreshError):
                                 if refresh_exc.is_permanent:
                                     await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-                                    # The account is now removed from selection, but
-                                    # its stream-concurrency slot is still occupied
-                                    # by the lease appended at selection. Release it
-                                    # before the failover ``continue`` so the dead
-                                    # account's slot is freed immediately.
+                                    # Keep the warning account routable for later
+                                    # requests, but exclude it from this request's
+                                    # retry pool after upstream rejected its token.
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
+                                    excluded_account_ids.add(account.id)
                                     continue
                                 if is_transient_refresh_contention(refresh_exc):
                                     # Transient CROSS-REPLICA refresh contention on
@@ -2814,7 +2777,7 @@ class _StreamingRetryMixin:
                                     error_message or "Upstream error",
                                     error_type=(error.type if error else None) or "server_error",
                                     response_id=failed_response_id,
-                                    error_param=error.param if error else None,
+                                    error_param=error.param_state if error else None,
                                 )
                                 _apply_error_metadata(event["response"]["error"], error)
                                 _facade().logger.warning(
@@ -2999,7 +2962,7 @@ class _StreamingRetryMixin:
                                 error_message or "Upstream error",
                                 error_type=(error.type if error else None) or "server_error",
                                 response_id=request_id,
-                                error_param=error.param if error else None,
+                                error_param=error.param_state if error else None,
                             )
                             _apply_error_metadata(event["response"]["error"], error)
                             yield format_sse_event(event)
@@ -3039,7 +3002,7 @@ class _StreamingRetryMixin:
                     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
                     error_message = error.message if error else None
                     error_type = error.type if error else None
-                    error_param = error.param if error else None
+                    error_param = error.param_state if error else None
                     if _facade()._is_security_work_authorization_required_error(error_code, error_message):
                         if (
                             not account.security_work_authorized
@@ -3088,6 +3051,7 @@ class _StreamingRetryMixin:
                 except RefreshError as exc:
                     if exc.is_permanent:
                         await proxy._load_balancer.mark_permanent_failure(account, exc.code)
+                        excluded_account_ids.add(account.id)
                     continue
                 except Exception:
                     await _drain_pending_post_refresh_penalty_on_terminal(settlement)
@@ -3162,7 +3126,7 @@ class _StreamingRetryMixin:
                         error_message or "Account response-create concurrency limit reached",
                         error_type=(error.type if error else None) or "server_error",
                         response_id=request_id,
-                        error_param=error.param if error else None,
+                        error_param=error.param_state if error else None,
                     )
                     _apply_error_metadata(event["response"]["error"], error)
                     yield format_sse_event(event)

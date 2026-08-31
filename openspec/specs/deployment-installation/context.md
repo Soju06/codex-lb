@@ -10,6 +10,60 @@ fixed, and how removed settings are retired.
 See `openspec/specs/deployment-installation/spec.md` for normative
 requirements.
 
+## Nix flake workflow
+
+The root flake is an additive installation and development path for Nix users.
+It builds the same `codex-lb` distribution and CLI entry points as the Python
+package while deriving dependency versions and hashes from `uv.lock`. The
+flake inputs pin nixpkgs, uv2nix, pyproject.nix, and the shared build-system
+overlay so a dependency update is an explicit lock-file change.
+
+The package uses pyproject.nix's application wrapper rather than exposing its
+internal Python virtual environment. Runtime dependencies are limited to the
+project's default dependency set; metrics, tracing, documentation, and
+development dependencies stay out of the proxy package. Nix builds the
+dashboard from `frontend/bun.lock` and copies the compiled assets into the
+Python wheel, matching the existing container and release build. Package source
+filtering includes only the backend, frontend build inputs, configuration,
+project metadata, license, and readme, so unrelated repository files do not
+affect either source hash.
+
+The development shell uses the default runtime dependencies plus the `dev`
+dependency group. Documentation tooling and optional metrics and tracing
+integrations stay out of the default shell so its closure remains focused. Its
+project wheel is editable and points at the checkout through
+`REPO_ROOT`; `UV_NO_SYNC=1`, `UV_PYTHON_DOWNLOADS=never`, and the pinned Python
+3.13 interpreter keep uv from replacing the Nix-managed environment. Hatch's
+editable path loads `editables` dynamically, so the flake supplies that helper
+from the pinned build-system overlay as a dev-only build dependency. The
+editable derivation hashes only project metadata, package roots, and the small
+`config` package, so ordinary application source edits do not invalidate the
+development shell.
+
+Supported outputs are AArch64 Darwin, AArch64 Linux, and x86-64 Linux. The
+pinned nixpkgs revision has dropped x86-64 Darwin support, so the flake does not
+advertise an output that cannot evaluate. A missing compatible wheel or native
+library after a lock update is expected to fail during `nix build` or
+`nix flake check`, rather than falling back to an unpinned installer.
+
+For example, from a checkout:
+
+```bash
+nix run .                 # start the proxy through app.cli:main
+nix develop               # enter the editable development shell
+nix build                 # build the wrapped codex-lb application
+nix flake check           # build the default package
+```
+
+`nix run . -- --help` verifies the proxy command without starting the server.
+The packaged app reads `.env` and `.env.local` from the directory where it is
+launched: the wrapper defaults the `CODEX_LB_ENV_FILE` settings-load override
+(an `os.pathsep`-separated path list) to the launch directory because the
+packaged module root sits in the read-only Nix store where env files cannot
+exist. An operator-provided `CODEX_LB_ENV_FILE` wins, and non-Nix launch
+paths keep module-root discovery. Application state still follows the normal
+data-directory rules and is never written into the immutable Nix store.
+
 ## Timeout Invariant Linter Scope
 
 The timeout invariant linter is a startup `Settings` guardrail. Strict mode is

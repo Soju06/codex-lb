@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 _bearer = HTTPBearer(description="API key (e.g. sk-clb-…)", auto_error=False)
 _CODEX_USAGE_IDENTITY_INACTIVE_WORKSPACE_STATUSES = {
     AccountStatus.PAUSED,
-    AccountStatus.REAUTH_REQUIRED,
     AccountStatus.DEACTIVATED,
 }
 

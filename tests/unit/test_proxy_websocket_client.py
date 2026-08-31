@@ -1048,6 +1048,52 @@ async def test_connect_responses_websocket_maps_invalid_status(monkeypatch):
     assert exc_info.value.status_code == 403
     assert _proxy_error_code(exc_info.value) == "forbidden"
     assert _proxy_error_type(exc_info.value) == "permission_error"
+    assert exc_info.value.failure_detail is None
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_marks_cloudflare_challenge(monkeypatch):
+    async def fake_websocket_connect(url: str, **kwargs):
+        del url, kwargs
+        raise InvalidStatus(
+            Response(
+                403,
+                "Forbidden",
+                Headers(
+                    {
+                        "Content-Type": "text/html; charset=UTF-8",
+                        "cf-mitigated": "challenge",
+                    }
+                ),
+                b"<html><title>Just a moment...</title></html>",
+            )
+        )
+
+    monkeypatch.setattr(proxy_websocket_module, "get_http_client", lambda: _UnexpectedHttpClient(), raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_responses_websocket(
+            {"openai-beta": "responses_websockets=2026-02-06"},
+            "access-token",
+            "account-123",
+            allow_direct_egress=True,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.failure_phase == "connect"
+    assert exc_info.value.failure_detail == proxy_websocket_module.UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL
 
 
 @pytest.mark.asyncio

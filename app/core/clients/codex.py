@@ -35,6 +35,8 @@ class CodexTransportError(RuntimeError):
         retryable_same_contract: bool = False,
         failure_phase: str | None = None,
         is_tls_verification_failure: bool = False,
+        handshake_headers: Mapping[str, str] | None = None,
+        handshake_message: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -42,6 +44,13 @@ class CodexTransportError(RuntimeError):
         self.retryable_same_contract = retryable_same_contract
         self.failure_phase = failure_phase
         self.is_tls_verification_failure = is_tls_verification_failure
+        # Handshake response metadata preserved across the sanitizing
+        # boundary so callers can classify edge-level rejections (for
+        # example Cloudflare browser challenges) that the sanitized message
+        # and status alone cannot prove. In-process only; never surfaced to
+        # clients.
+        self.handshake_headers = handshake_headers
+        self.handshake_message = handshake_message
 
 
 def require_route_or_direct_egress_opt_in(
@@ -512,7 +521,31 @@ def _transport_error(
         retryable_same_contract=retryable_same_contract,
         failure_phase=failure_phase,
         is_tls_verification_failure=isinstance(exc, aiohttp.ClientSSLError),
+        handshake_headers=_transport_error_handshake_headers(exc),
+        handshake_message=_transport_error_handshake_message(exc),
     )
+
+
+def _transport_error_handshake_headers(exc: Exception) -> Mapping[str, str] | None:
+    """Handshake response headers of a wrapped upgrade rejection, else ``None``.
+
+    ``aiohttp.WSServerHandshakeError`` carries the response headers directly;
+    exceptions wrapping a response object carry them one level down.
+    """
+
+    response = getattr(exc, "response", None)
+    for source in (exc, response):
+        if source is None:
+            continue
+        headers = getattr(source, "headers", None)
+        if headers is not None:
+            return headers
+    return None
+
+
+def _transport_error_handshake_message(exc: Exception) -> str | None:
+    message = getattr(exc, "message", None)
+    return message if isinstance(message, str) else None
 
 
 def _transport_error_status_code(exc: Exception) -> int | None:

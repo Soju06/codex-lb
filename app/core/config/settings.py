@@ -21,7 +21,29 @@ from app.core.utils.proxy_env import outbound_proxy_env_configured
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parents[3]
-ENV_FILES = (BASE_DIR / ".env", BASE_DIR / ".env.local")
+
+
+def _resolve_env_files() -> tuple[Path, ...]:
+    """Resolve the env files read at settings load.
+
+    Default: ``.env`` / ``.env.local`` next to the module root (the repository
+    checkout). ``CODEX_LB_ENV_FILE`` — an ``os.pathsep``-separated list of
+    paths — overrides that discovery for installs whose module root cannot
+    contain env files: the Nix package's module root lives in the read-only
+    store, so its wrapper points this at the launch directory. It is a
+    bootstrap environment variable rather than a ``Settings`` field because
+    the env-file locations must be known before Settings can read env files.
+    Unset (every non-Nix launch path) preserves module-root discovery
+    unchanged; launch-directory env files are never loaded implicitly.
+    """
+    raw = os.getenv("CODEX_LB_ENV_FILE", "")
+    files = tuple(Path(entry.strip()).expanduser() for entry in raw.split(os.pathsep) if entry.strip())
+    if files:
+        return files
+    return (BASE_DIR / ".env", BASE_DIR / ".env.local")
+
+
+ENV_FILES = _resolve_env_files()
 
 # OAuth protocol constants. These values identify codex-lb to OpenAI's OAuth
 # endpoints exactly like the Codex CLI; they are protocol constants, not

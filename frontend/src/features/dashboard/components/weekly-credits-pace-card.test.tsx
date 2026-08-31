@@ -165,4 +165,302 @@ describe("WeeklyCreditsPaceCard", () => {
 
     expect(container).toBeEmptyDOMElement();
   });
+
+  it("falls back to the legacy layout when runwayStatus is absent (old backend)", () => {
+    render(<WeeklyCreditsPaceCard pace={BASE_PACE} />);
+
+    expect(screen.getByText("Used now")).toBeInTheDocument();
+    expect(screen.getByText("Scheduled by now")).toBeInTheDocument();
+    expect(screen.queryByTestId("weekly-runway-verdict")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("runway-timeline")).not.toBeInTheDocument();
+  });
+});
+
+const RUNWAY_PACE: WeeklyCreditPace = {
+  ...BASE_PACE,
+  actualUsedPercent: 58,
+  scheduledUsedPercent: 40,
+  deltaPercent: 18,
+  scheduleGapCredits: 0,
+  smoothedDeltaPercent: 18,
+  smoothedScheduleGapCredits: 0,
+  overPlanCredits: 0,
+  projectedShortfallCredits: 0,
+  pauseForBreakEvenHours: null,
+  paceMultiplier: null,
+  throttleToPercent: null,
+  reduceByPercent: null,
+  proAccountEquivalentToCoverOverPlan: null,
+  proAccountsToCoverOverPlan: null,
+  status: "on_track",
+  runwayStatus: "safe",
+  headroomPercent: 42,
+  headroomCredits: 420_000,
+  burnRateRecentCreditsPerHour: 6_000,
+  depletionEtaHours: 70,
+  nextReliefInHours: 26,
+  nextReliefCredits: 100_800,
+  resetEvents: [
+    { at: new Date(Date.now() + 26 * 3_600_000).toISOString(), creditsReturned: 100_800 },
+    { at: new Date(Date.now() + 50 * 3_600_000).toISOString(), creditsReturned: 50_400 },
+  ],
+  saturatedAccountCount: 0,
+  topApiKeys: [],
+  addProAccounts: null,
+};
+
+describe("WeeklyCreditsPaceCard runway layout", () => {
+  it("paints the full runway content from a single overview payload", () => {
+    render(<WeeklyCreditsPaceCard pace={RUNWAY_PACE} />);
+
+    const verdict = screen.getByTestId("weekly-runway-verdict");
+    expect(verdict).toHaveTextContent("Safe");
+    expect(screen.getByText("42%")).toBeInTheDocument();
+    expect(screen.getByText("420K credits left")).toBeInTheDocument();
+    expect(screen.getByText("runs out in ~2d 22h")).toBeInTheDocument();
+    expect(screen.getByText("next reset in 1d 2h · returns ~100.8K credits")).toBeInTheDocument();
+    expect(screen.getByTestId("runway-timeline")).toBeInTheDocument();
+    expect(screen.getByTestId("runway-eta-marker")).toBeInTheDocument();
+    expect(screen.getAllByTestId("runway-reset-tick")).toHaveLength(2);
+    expect(screen.getByText("now")).toBeInTheDocument();
+  });
+
+  it("renders a neutral verdict badge without warning emphasis when safe", () => {
+    render(<WeeklyCreditsPaceCard pace={RUNWAY_PACE} />);
+
+    const verdict = screen.getByTestId("weekly-runway-verdict");
+    expect(verdict).toHaveTextContent("Safe");
+    expect(verdict.className).toContain("text-muted-foreground");
+    expect(verdict.className).not.toContain("amber");
+    expect(verdict.className).not.toContain("red");
+    expect(screen.queryByTestId("runway-recommendations")).not.toBeInTheDocument();
+    expect(screen.queryByText("Recommendations")).not.toBeInTheDocument();
+  });
+
+  it("renders an amber verdict badge when tight", () => {
+    render(<WeeklyCreditsPaceCard pace={{ ...RUNWAY_PACE, runwayStatus: "tight" }} />);
+
+    const verdict = screen.getByTestId("weekly-runway-verdict");
+    expect(verdict).toHaveTextContent("Tight");
+    expect(verdict.className).toContain("amber");
+  });
+
+  it("pairs depletion and missed relief times with warning emphasis when runs dry", () => {
+    render(
+      <WeeklyCreditsPaceCard
+        pace={{
+          ...RUNWAY_PACE,
+          runwayStatus: "runs_dry",
+          headroomPercent: 8,
+          headroomCredits: 48_000,
+          depletionEtaHours: 8,
+          nextReliefInHours: 26,
+        }}
+      />,
+    );
+
+    const verdict = screen.getByTestId("weekly-runway-verdict");
+    expect(verdict).toHaveTextContent("Runs dry");
+    expect(verdict.className).toContain("red");
+    expect(screen.getByText("relief in 1d 2h — arrives after depletion")).toBeInTheDocument();
+    expect(screen.queryByText("next reset in 1d 2h · returns ~100.8K credits")).not.toBeInTheDocument();
+    expect(screen.getByText("8.0%")).toBeInTheDocument();
+  });
+
+  it("shows throttle guidance before add-capacity when runs dry", () => {
+    render(
+      <WeeklyCreditsPaceCard
+        pace={{
+          ...RUNWAY_PACE,
+          runwayStatus: "runs_dry",
+          depletionEtaHours: 8,
+          throttleToPercent: 28,
+          addProAccounts: 2,
+        }}
+      />,
+    );
+
+    const recommendations = screen.getByTestId("runway-recommendations");
+    const text = recommendations.textContent ?? "";
+    expect(text).toContain("~28% of current load");
+    expect(text).toContain("Add 2 Pro accounts");
+    expect(text.indexOf("~28% of current load")).toBeLessThan(text.indexOf("Add 2 Pro accounts"));
+  });
+
+  it("hides throttle guidance outside runs_dry but keeps a gated add-capacity line", () => {
+    render(
+      <WeeklyCreditsPaceCard
+        pace={{
+          ...RUNWAY_PACE,
+          runwayStatus: "tight",
+          throttleToPercent: 28,
+          addProAccounts: 1,
+        }}
+      />,
+    );
+
+    const recommendations = screen.getByTestId("runway-recommendations");
+    expect(recommendations.textContent).not.toContain("Throttle");
+    expect(recommendations.textContent).toContain("Add 1 Pro account");
+  });
+
+  it("renders the per-key attribution list when present", () => {
+    render(
+      <WeeklyCreditsPaceCard
+        pace={{
+          ...RUNWAY_PACE,
+          topApiKeys: [
+            {
+              apiKeyId: "key_hermes_prod",
+              name: "hermes-prod",
+              requests: 12_400,
+              billableTokens: 9_800_000,
+              cachedTokens: 4_000_000,
+              dominantModel: "gpt-5.2-codex",
+            },
+            {
+              apiKeyId: "key_batch_eval",
+              name: "batch-eval",
+              requests: 800,
+              billableTokens: 14_200_000,
+              cachedTokens: 0,
+              dominantModel: "gpt-5.2",
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("runway-attribution")).toBeInTheDocument();
+    expect(screen.getByText("hermes-prod")).toBeInTheDocument();
+    expect(screen.getByText("12.4K req")).toBeInTheDocument();
+    expect(screen.getByText("9.8M tok")).toBeInTheDocument();
+    expect(screen.getByText("gpt-5.2-codex")).toBeInTheDocument();
+    expect(screen.getByText("batch-eval")).toBeInTheDocument();
+  });
+
+  it("hides the attribution list when no keys are reported", () => {
+    render(<WeeklyCreditsPaceCard pace={{ ...RUNWAY_PACE, topApiKeys: [] }} />);
+
+    expect(screen.queryByTestId("runway-attribution")).not.toBeInTheDocument();
+  });
+
+  it("renders attribution rows with colliding key names", () => {
+    render(
+      <WeeklyCreditsPaceCard
+        pace={{
+          ...RUNWAY_PACE,
+          topApiKeys: [
+            { name: "(unnamed)", requests: 500, billableTokens: 1_000_000, cachedTokens: 0, dominantModel: "gpt-5.2" },
+            { name: "(unnamed)", requests: 300, billableTokens: 2_000_000, cachedTokens: 0, dominantModel: "gpt-5.2-codex" },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getAllByText("(unnamed)")).toHaveLength(2);
+    expect(screen.getByText("500 req")).toBeInTheDocument();
+    expect(screen.getByText("300 req")).toBeInTheDocument();
+  });
+
+  it("stretches the timeline horizon so reset events past 48h are not dropped", () => {
+    render(
+      <WeeklyCreditsPaceCard
+        pace={{
+          ...RUNWAY_PACE,
+          depletionEtaHours: 8,
+          nextReliefInHours: 12,
+          resetEvents: [
+            { at: new Date(Date.now() + 12 * 3_600_000).toISOString(), creditsReturned: 100_800 },
+            { at: new Date(Date.now() + 72 * 3_600_000).toISOString(), creditsReturned: 50_400 },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getAllByTestId("runway-reset-tick")).toHaveLength(2);
+    expect(screen.getByText("3d")).toBeInTheDocument();
+  });
+
+  it("does not crash on an ETA beyond the representable Date range", () => {
+    render(<WeeklyCreditsPaceCard pace={{ ...RUNWAY_PACE, depletionEtaHours: 3e9 }} />);
+
+    expect(screen.getByTestId("runway-timeline")).toBeInTheDocument();
+    expect(screen.getByTestId("runway-eta-marker")).not.toHaveAttribute("title");
+    expect(screen.getByText(/runs out in/)).toBeInTheDocument();
+  });
+
+  it("shows steady-state copy instead of an ETA when a measured burn is zero", () => {
+    render(
+      <WeeklyCreditsPaceCard
+        pace={{
+          ...RUNWAY_PACE,
+          burnRateRecentCreditsPerHour: 0,
+          depletionEtaHours: null,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("no recent burn — holding steady")).toBeInTheDocument();
+    expect(screen.queryByText("not enough recent samples to measure burn")).not.toBeInTheDocument();
+    expect(screen.queryByText(/runs out in/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("runway-eta-marker")).not.toBeInTheDocument();
+  });
+
+  it("explains an unmeasured burn instead of claiming the pool is holding steady", () => {
+    render(
+      <WeeklyCreditsPaceCard
+        pace={{
+          ...RUNWAY_PACE,
+          burnRateRecentCreditsPerHour: null,
+          depletionEtaHours: null,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("not enough recent samples to measure burn")).toBeInTheDocument();
+    expect(screen.queryByText("no recent burn — holding steady")).not.toBeInTheDocument();
+    expect(screen.queryByText(/runs out in/)).not.toBeInTheDocument();
+  });
+
+  it("falls back to the legacy layout when a headroom companion is missing", () => {
+    const { unmount } = render(
+      <WeeklyCreditsPaceCard pace={{ ...RUNWAY_PACE, headroomPercent: undefined }} />,
+    );
+
+    expect(screen.queryByTestId("weekly-runway-verdict")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("runway-timeline")).not.toBeInTheDocument();
+    expect(screen.getByText("Used now")).toBeInTheDocument();
+    unmount();
+
+    render(<WeeklyCreditsPaceCard pace={{ ...RUNWAY_PACE, headroomCredits: undefined }} />);
+
+    expect(screen.queryByTestId("weekly-runway-verdict")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("runway-timeline")).not.toBeInTheDocument();
+    expect(screen.getByText("Used now")).toBeInTheDocument();
+  });
+
+  it("labels demand figures as floors when every account is saturated", () => {
+    render(
+      <WeeklyCreditsPaceCard
+        pace={{ ...RUNWAY_PACE, accountCount: 2, saturatedAccountCount: 2 }}
+      />,
+    );
+
+    expect(screen.getByText("All accounts saturated — demand figures are at-least floors")).toBeInTheDocument();
+    expect(screen.getByText(/at ≥6K\/h/)).toBeInTheDocument();
+  });
+
+  it("does not label floors while unsaturated accounts remain", () => {
+    render(
+      <WeeklyCreditsPaceCard
+        pace={{ ...RUNWAY_PACE, accountCount: 2, saturatedAccountCount: 1 }}
+      />,
+    );
+
+    expect(
+      screen.queryByText("All accounts saturated — demand figures are at-least floors"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/at ~6K\/h/)).toBeInTheDocument();
+  });
 });

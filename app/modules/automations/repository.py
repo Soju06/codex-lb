@@ -1250,7 +1250,7 @@ class AutomationsRepository:
             .where(
                 or_(
                     AutomationRun.id.is_not(None),
-                    Account.status == AccountStatus.ACTIVE,
+                    Account.status.in_((AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)),
                     and_(
                         Account.status == AccountStatus.PAUSED,
                         AutomationRunCycle.include_paused_accounts.is_(True),
@@ -1270,7 +1270,7 @@ class AutomationsRepository:
             cycle_runs.c.account_id.is_not(None),
             or_(
                 cycle_runs.c.status != "running",
-                cycle_runs.c.account_status == AccountStatus.ACTIVE,
+                cycle_runs.c.account_status.in_((AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)),
                 and_(
                     cycle_runs.c.account_status == AccountStatus.PAUSED,
                     cycle_runs.c.include_paused_accounts.is_(True),

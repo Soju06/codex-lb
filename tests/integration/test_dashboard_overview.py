@@ -8,7 +8,7 @@ import pytest
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import naive_utc_to_epoch, utcnow
-from app.db.models import Account, AccountStatus, RequestLog
+from app.db.models import Account, AccountStatus, ApiKey, RequestLog
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import AccountSummary
@@ -151,6 +151,96 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
     assert any(v > 0 for v in request_values)
     conversation_values = [p["v"] for p in trends["conversations"]]
     assert any(v > 0 for v in conversation_values)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_carries_weekly_runway_fields_and_attribution(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixed_now = datetime(2026, 8, 17, 12, 0, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: fixed_now)
+    reset_at = int(naive_utc_to_epoch(fixed_now + timedelta(hours=4)))
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc-runway", "runway@example.com", plan_type="pro"))
+        for minutes_ago, used_percent in (
+            (170, 70.0),
+            (130, 80.0),
+            (110, 80.0),
+            (70, 90.0),
+            (50, 90.0),
+            (1, 95.0),
+        ):
+            await usage_repo.add_entry(
+                "acc-runway",
+                used_percent,
+                window="secondary",
+                window_minutes=10_080,
+                reset_at=reset_at,
+                recorded_at=fixed_now - timedelta(minutes=minutes_ago),
+            )
+        session.add(ApiKey(id="key-runway", name="Runway key", key_hash="hash-runway", key_prefix="run"))
+        session.add(
+            RequestLog(
+                account_id="acc-runway",
+                api_key_id="key-runway",
+                request_id="runway-request",
+                requested_at=fixed_now - timedelta(minutes=10),
+                model="gpt-5.1",
+                status="success",
+                input_tokens=100,
+                output_tokens=25,
+                reasoning_tokens=10,
+                cached_input_tokens=20,
+            )
+        )
+        await session.commit()
+
+    response = await async_client.get("/api/dashboard/overview")
+
+    assert response.status_code == 200
+    pace = response.json()["weeklyCreditPace"]
+    assert pace is not None
+    assert pace["headroomPercent"] == pytest.approx(5.0)
+    assert pace["headroomCredits"] == pytest.approx(2_520.0)
+    assert pace["burnRateRecentCreditsPerHour"] == pytest.approx(4_473.3727810651)
+    assert pace["depletionEtaHours"] == pytest.approx(0.5633333333)
+    assert pace["nextReliefInHours"] == pytest.approx(4.0)
+    assert pace["nextReliefCredits"] == pytest.approx(47_880.0)
+    assert pace["runwayStatus"] == "runs_dry"
+    assert pace["status"] == "danger"
+    assert pace["saturatedAccountCount"] == 0
+    assert pace["addProAccounts"] is None
+    assert len(pace["resetEvents"]) == 1
+    assert pace["topApiKeys"] == [
+        {
+            "apiKeyId": "key-runway",
+            "name": "Runway key",
+            "requests": 1,
+            "billableTokens": 125,
+            "cachedTokens": 20,
+            "dominantModel": "gpt-5.1",
+        }
+    ]
+    assert pace["scheduledUsedPercent"] == pytest.approx(97.619, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_omits_weekly_pace_value_without_weekly_data(
+    async_client,
+    db_setup,
+):
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc-no-weekly", "no-weekly@example.com"))
+
+    response = await async_client.get("/api/dashboard/overview")
+
+    assert response.status_code == 200
+    assert response.json()["weeklyCreditPace"] is None
 
 
 @pytest.mark.asyncio
@@ -662,14 +752,17 @@ async def test_dashboard_projections_weekly_credit_pace_excludes_inactive_and_st
     payload = response.json()
 
     pace = payload["weeklyCreditPace"]
-    assert pace["accountCount"] == 2
+    assert pace["accountCount"] == 3
     assert pace["staleAccountCount"] == 1
-    assert pace["inactiveAccountCount"] == 2
-    assert pace["totalFullCredits"] == pytest.approx(100_800.0)
-    assert pace["actualUsedPercent"] == pytest.approx(60.0)
+    assert pace["inactiveAccountCount"] == 1
+    assert pace["totalFullCredits"] == pytest.approx(151_200.0)
+    assert pace["actualUsedPercent"] == pytest.approx(73.333, abs=0.01)
     assert pace["scheduledUsedPercent"] == pytest.approx(42.857, abs=0.01)
-    assert pace["scheduleGapCredits"] == pytest.approx(17_280.0, abs=1.0)
-    assert pace["status"] == "ahead"
+    assert pace["scheduleGapCredits"] == pytest.approx(46_080.0, abs=1.0)
+    # No account has two fresh samples, so burn is unmeasured and headroom is
+    # ~26.7%: the runway verdict is safe, which maps to legacy on_track.
+    assert pace["runwayStatus"] == "safe"
+    assert pace["status"] == "on_track"
 
 
 @pytest.mark.asyncio
@@ -725,7 +818,7 @@ async def test_dashboard_projections_weekly_credit_pace_forecast_uses_recent_slo
     assert pace["forecastBurnRateCreditsPerHour"] == pytest.approx(0.0)
     assert pace["paceMultiplier"] == pytest.approx(0.0)
     assert pace["pauseForBreakEvenHours"] is None
-    assert pace["status"] == "ahead"
+    assert pace["status"] == "on_track"
 
 
 @pytest.mark.asyncio
@@ -859,7 +952,7 @@ async def test_dashboard_projections_weekly_credit_pace_uses_configured_working_
     assert pace["actualUsedPercent"] == pytest.approx(80.0)
     assert pace["scheduledUsedPercent"] == pytest.approx(100.0)
     assert pace["scheduleGapCredits"] == 0
-    assert pace["status"] == "behind"
+    assert pace["status"] == "on_track"
 
 
 @pytest.mark.asyncio

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from collections.abc import Mapping
+from typing import Iterable, cast
 
 from pydantic import ValidationError
 
 from app.core import usage as usage_core
 from app.core.balancer.types import ClassifiedFailure, FailureClass, FailurePhase, UpstreamError
-from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope
+from app.core.errors import OpenAIErrorDetail, OpenAIErrorParam
 from app.core.openai.models import OpenAIError
 from app.core.plan_types import normalize_rate_limit_plan_type
 from app.core.types import JsonValue
@@ -125,11 +126,7 @@ def _header_account_id(account_id: str | None) -> str | None:
 
 
 def _select_accounts_for_limits(accounts: Iterable[Account]) -> list[Account]:
-    return [
-        account
-        for account in accounts
-        if account.status not in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
-    ]
+    return [account for account in accounts if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)]
 
 
 def _summarize_window(
@@ -313,24 +310,30 @@ def _normalize_error_code(code: str | None, error_type: str | None) -> str:
     return value.lower()
 
 
-def _parse_openai_error(payload: OpenAIErrorEnvelope) -> OpenAIError | None:
+def _parse_openai_error(payload: Mapping[str, object]) -> OpenAIError | None:
     error = payload.get("error")
-    if not error:
+    if not isinstance(error, Mapping) or not error:
         return None
+    error_mapping = cast(Mapping[str, JsonValue], error)
+    param_state = OpenAIErrorParam.from_mapping(error_mapping)
     try:
-        return OpenAIError.model_validate(error)
+        parsed = OpenAIError.model_validate(error_mapping)
     except ValidationError:
-        if not isinstance(error, dict):
-            return None
-        return OpenAIError(
-            message=_coerce_str(error.get("message")),
-            type=_coerce_str(error.get("type")),
-            code=_coerce_str(error.get("code")),
-            param=_coerce_str(error.get("param")),
-            plan_type=_coerce_str(error.get("plan_type")),
-            resets_at=_coerce_number(error.get("resets_at")),
-            resets_in_seconds=_coerce_number(error.get("resets_in_seconds")),
+        parsed = OpenAIError(
+            message=_coerce_str(error_mapping.get("message")),
+            type=_coerce_str(error_mapping.get("type")),
+            code=_coerce_str(error_mapping.get("code")),
+            param=_coerce_str(error_mapping.get("param")),
+            plan_type=_coerce_str(error_mapping.get("plan_type")),
+            resets_at=_coerce_number(error_mapping.get("resets_at")),
+            resets_in_seconds=_coerce_number(error_mapping.get("resets_in_seconds")),
         )
+    parsed.set_param_state(param_state)
+    return parsed
+
+
+def _openai_error_param(error: OpenAIError | None) -> OpenAIErrorParam:
+    return error.param_state if error is not None else OpenAIErrorParam.absent()
 
 
 def _coerce_str(value: JsonValue) -> str | None:

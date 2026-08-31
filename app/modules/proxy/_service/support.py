@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, NoReturn, Protocol
+from typing import Any, Literal, NoReturn, Protocol, cast
 
 import anyio
 
@@ -22,7 +22,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocket,
 )
 from app.core.config.settings import get_settings
-from app.core.errors import OpenAIErrorEnvelope, openai_error
+from app.core.errors import OpenAIErrorEnvelope, OpenAIErrorParam, openai_error
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import classify_event_type
@@ -902,6 +902,11 @@ class _HTTPBridgeResponseCreateAttempt:
     ordinal: int
     disarmed: bool = False
     response_observed: bool = False
+    # A non-terminal response event (a deferred-reasoning prelude, for
+    # example) proves the attempt was answered midstream even when ordinary
+    # event accounting was deliberately skipped. A later terminal failure
+    # frame must then not be charged as a pre-response strike.
+    non_terminal_response_observed: bool = False
     retry_circuit_failure_recorded: bool = False
     retry_circuit_failure_settled: anyio.Event | None = None
 
@@ -1063,6 +1068,10 @@ class _WebSocketRequestState:
     verified_stale_anchor_retry_circuit_key: _HTTPBridgeSessionKey | None = None
     verified_stale_anchor_retry_circuit_generation: tuple[int, float, int, float, int, float, float] | None = None
     verified_stale_anchor_quarantine_generation: int | None = None
+    # The exact half-open lease this request's admission claimed (0.0 when
+    # it claimed none); released by the submit finalizer whenever the probe
+    # was never dispatched, so no pre-dispatch exit can strand the lease.
+    claimed_half_open_until: float = 0.0
     # Stable fingerprint used by the durable recovery-attempt journal. It is
     # populated only for a proof-gated fresh replay candidate.
     recovery_attempt_fingerprint: str | None = None
@@ -1125,7 +1134,7 @@ class _WebSocketRequestState:
     error_code_override: str | None = None
     error_message_override: str | None = None
     error_type_override: str | None = None
-    error_param_override: str | None = None
+    error_param_override: OpenAIErrorParam | JsonValue | None = None
     failure_phase_override: str | None = None
     failure_detail_override: str | None = None
     upstream_error_code_override: str | None = None
@@ -1133,7 +1142,14 @@ class _WebSocketRequestState:
     response_event_count: int = 0
     last_upstream_activity_at: float | None = None
     upstream_model_output_seen: bool = False
+    # Terminal WebSocket error sanitization records continuity telemetry once;
+    # later serializers preserve the normalized fields without recording it a
+    # second time.
+    websocket_terminal_error_fields_sanitized: bool = False
     previous_response_not_found_rewritten: bool = False
+    # A canonical stale-anchor code with malformed present ``param`` may be
+    # matched for masking, but must never authorize replay.
+    previous_response_not_found_recovery_blocked: bool = False
     previous_response_owner_lookup_source: str | None = None
     previous_response_owner_lookup_outcome: str | None = None
     previous_response_owner_requested_at: datetime | None = None
@@ -1261,6 +1277,7 @@ class _HTTPBridgeSession:
     api_key: ApiKeyData | None = None
     codex_session: bool = False
     prewarmed: bool = False
+    access_token_expires_at: float | None = None
     prewarm_lock: anyio.Lock | None = None
     upstream_turn_state: str | None = None
     downstream_turn_state: str | None = None
@@ -1330,6 +1347,19 @@ class _HTTPBridgeSession:
     # counter a pre-response bridge timeout cannot tell "upstream said nothing"
     # apart from "upstream spoke and our matching lost the frame".
     unmatched_upstream_liveness_count: int = 0
+
+    def replace_connection(
+        self,
+        account: Account,
+        headers: dict[str, str],
+        upstream: UpstreamWebSocket,
+        access_token_expires_at: float | None,
+    ) -> None:
+        """Replace account-bound transport state as one in-memory operation."""
+        self.account = account
+        self.headers = headers
+        self.upstream = upstream
+        self.access_token_expires_at = access_token_expires_at
 
     def claim_liveness_settlement(self) -> bool:
         """Claim whole-deque settlement for a liveness-failed submitter.
@@ -1556,6 +1586,8 @@ def _mark_response_create_attempt_observed(
     attempt = request_state.response_create_attempt
     if attempt is not None:
         attempt.response_observed = True
+        if event_type not in {"response.failed", "response.incomplete"}:
+            attempt.non_terminal_response_observed = True
 
 
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
@@ -1806,9 +1838,9 @@ def _openai_error_envelope_from_response_failed_payload(
     error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else "server_error"
 
     envelope = openai_error(code, message, error_type)
-    param_value = error_payload.get("param")
     if "param" in error_payload:
-        envelope["error"]["param"] = param_value.strip() if isinstance(param_value, str) else ""
+        param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error_payload))
+        envelope["error"]["param"] = param_state.raw
     error_detail = envelope["error"]
     plan_type = error_payload.get("plan_type")
     if plan_type is not None:

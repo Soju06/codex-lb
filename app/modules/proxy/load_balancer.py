@@ -42,6 +42,7 @@ from app.core.balancer.types import UpstreamError
 from app.core.config import settings as config_settings
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
+from app.core.crypto import TokenEncryptor
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     account_cap_rejections_total,
@@ -133,6 +134,10 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     run_unbound_selection_path,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.account_eligibility import (
+    account_access_token_expires_at,
+    all_accounts_require_reauthentication,
+)
 from app.modules.proxy.affinity import _CodexSessionSource
 from app.modules.proxy.cap_partitioning import (
     configured_account_concurrency_caps,
@@ -284,8 +289,9 @@ SelectionInputs = _SelectionInputs
 
 
 class LoadBalancer:
-    def __init__(self, repo_factory: ProxyRepoFactory) -> None:
+    def __init__(self, repo_factory: ProxyRepoFactory, *, encryptor: TokenEncryptor | None = None) -> None:
         self._repo_factory = repo_factory
+        self._encryptor = encryptor or TokenEncryptor()
         self._runtime: dict[str, RuntimeState] = {}
         self._runtime_lock = asyncio.Lock()
         self._account_locks: dict[str, asyncio.Lock] = {}
@@ -1191,7 +1197,7 @@ class LoadBalancer:
             else:
                 # Administrative/runtime status affects routability, not who
                 # may own account-scoped upstream state. Capture this pool
-                # before PAUSED/REAUTH_REQUIRED/etc. can manufacture uniqueness.
+                # before PAUSED/DEACTIVATED/etc. can manufacture uniqueness.
                 continuity_owner_candidates = scoped_accounts
             if model and not accounts:
                 if not all_accounts:
@@ -1265,8 +1271,9 @@ class LoadBalancer:
                 return selection_inputs
 
             if effective_limit_name:
+                additional_quota_candidates = accounts
                 additional_filter = await self._filter_accounts_for_additional_limit(
-                    accounts,
+                    additional_quota_candidates,
                     model=model,
                     limit_name=effective_limit_name,
                     explicit_limit=additional_limit_name is not None,
@@ -1274,7 +1281,12 @@ class LoadBalancer:
                     require_fresh_evidence_account_ids=model_catalog_omitted_account_ids,
                 )
                 accounts = additional_filter.accounts
-                if not accounts:
+                if not accounts and all_accounts_require_reauthentication(
+                    additional_quota_candidates,
+                    self._encryptor,
+                ):
+                    accounts = additional_quota_candidates
+                elif not accounts:
                     selection_inputs = _SelectionInputs(
                         accounts=[],
                         latest_primary={},
@@ -1411,6 +1423,7 @@ class LoadBalancer:
                 runtime=self._runtime,
                 routing_policy_override=selection_inputs.routing_policy_override,
                 ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
+                encryptor=self._encryptor,
             )
             selection_states = _filter_states_for_account_caps(
                 states,
@@ -1614,6 +1627,7 @@ class LoadBalancer:
             runtime=self._runtime,
             routing_policy_override=selection_inputs.routing_policy_override,
             ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
+            encryptor=self._encryptor,
         )
         if required_account_id is None:
             return states, account_map
@@ -1727,18 +1741,15 @@ class LoadBalancer:
             self._selection_inputs_cache.invalidate()
 
     async def mark_permanent_failure(self, account: Account, error_code: str) -> bool:
-        """Downgrade *account* to its permanent-failure status and, when that
-        downgrade actually lands, exclude it from local routing.
+        """Downgrade *account* to its permanent-failure status.
 
         Returns whether the permanent downgrade applied (or was already in
         effect). When the guarded status write MISSES because a peer replica
         concurrently re-authed/imported and rotated ``refresh_token_encrypted``
-        (the DB row was repaired and left ACTIVE), the account is NOT marked
-        routing-unavailable in this replica's local overlay -- excluding a
-        freshly repaired healthy account would be a self-inflicted routing loss
-        that undermines the CAS guard. Only a real downgrade (CAS applied, or no
-        write needed because the primary refresh authority already CAS-wrote it)
-        both persists the failure status and applies the local exclusion.
+        (the DB row was repaired and left ACTIVE), the account keeps its
+        repaired state. A landed DEACTIVATED downgrade is excluded from local
+        routing; REAUTH_REQUIRED remains request-routable with its stored access
+        token while still blocking future refresh-token exchange.
         """
         lock = await self._get_account_lock(account.id)
         async with lock:
@@ -1768,11 +1779,7 @@ class LoadBalancer:
                     state,
                     expected_refresh_token_encrypted=account.refresh_token_encrypted,
                 )
-            # Honor the guarded-CAS result: only exclude the account from local
-            # routing when the permanent downgrade actually applied. A CAS miss
-            # means a peer replica repaired/rotated the row (still ACTIVE), so
-            # keep the healthy account selectable here.
-            if downgraded:
+            if downgraded and state.status == AccountStatus.DEACTIVATED:
                 mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
             return downgraded
@@ -1887,7 +1894,7 @@ class LoadBalancer:
                 runtime=replace(runtime),
             )
             account_status = normalized_state.status
-            if account_status != AccountStatus.ACTIVE:
+            if account_status not in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED):
                 return
 
             settings = get_settings()
@@ -2097,6 +2104,7 @@ def _build_states(
     runtime: dict[str, RuntimeState],
     routing_policy_override: str | None = None,
     ignore_standard_quota_account_ids: frozenset[str] = frozenset(),
+    encryptor: TokenEncryptor | None = None,
 ) -> tuple[list[AccountState], dict[str, Account]]:
     states: list[AccountState] = []
     account_map: dict[str, Account] = {}
@@ -2114,6 +2122,11 @@ def _build_states(
             primary_entry=latest_primary.get(account.id),
             secondary_entry=secondary_entry,
             runtime=runtime.setdefault(account.id, RuntimeState()),
+            access_token_expires_at=(
+                account_access_token_expires_at(account, encryptor)
+                if account.status == AccountStatus.REAUTH_REQUIRED and encryptor is not None
+                else None
+            ),
         )
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
             state.routing_policy = routing_policy_override
@@ -2257,6 +2270,7 @@ def _state_from_account(
     primary_entry: UsageHistory | AdditionalUsageHistory | None,
     secondary_entry: UsageHistory | AdditionalUsageHistory | None,
     runtime: RuntimeState,
+    access_token_expires_at: float | None = None,
 ) -> AccountState:
     routing_policy = _normalize_account_routing_policy(getattr(account, "routing_policy", None))
     normalized_usage = _normalize_usage_inputs(
@@ -2581,6 +2595,7 @@ def _state_from_account(
         health_tier=new_tier,
         priority_used_percent=used_percent if usage_exhaustion_evidence_status else None,
         priority_secondary_used_percent=secondary_used if usage_exhaustion_evidence_status else None,
+        access_token_expires_at=access_token_expires_at,
         inflight_response_creates=runtime.inflight_response_creates,
         inflight_streams=runtime.inflight_streams,
         leased_tokens=runtime.leased_tokens,
@@ -2917,11 +2932,7 @@ def _filter_accounts_for_model_with_catalog_evidence(
 
 
 def _selectable_accounts(accounts: list[Account]) -> list[Account]:
-    return [
-        account
-        for account in accounts
-        if account.status not in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
-    ]
+    return [account for account in accounts if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)]
 
 
 def _mapped_model_has_registry_entry(model: str | None) -> bool:

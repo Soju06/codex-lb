@@ -14,6 +14,9 @@ docker run -d --name codex-lb \
 
 # or uvx
 uvx codex-lb
+
+# or Nix
+nix run github:Soju06/codex-lb
 ```
 
 Open [localhost:2455](http://localhost:2455) → Add account → Done.

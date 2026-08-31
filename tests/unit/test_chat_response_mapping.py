@@ -74,6 +74,38 @@ def test_error_event_emits_done_chunk():
     assert chunks[-1].strip() == "data: [DONE]"
 
 
+def test_typeless_previous_response_error_is_masked_in_chat_chunks():
+    raw_response_id = "resp_chat_typeless_stale"
+    lines = [
+        (
+            'data: {"error":{"type":"invalid_request_error",'
+            '"code":"previous_response_not_found",'
+            f'"message":"Previous response with id \'{raw_response_id}\' not found.",'
+            '"param":"previous_response_id"}}\n\n'
+        )
+    ]
+
+    chunks = list(iter_chat_chunks(lines, model="gpt-5.2"))
+
+    assert raw_response_id not in "".join(chunks)
+    error_payload = json.loads(chunks[-2][5:].strip())
+    assert error_payload["error"] == {
+        "message": "Upstream websocket closed before response.completed",
+        "type": "server_error",
+        "code": "stream_incomplete",
+    }
+    assert chunks[-1].strip() == "data: [DONE]"
+
+
+def test_malformed_chat_error_param_is_omitted_from_public_chunk():
+    lines = ['data: {"type":"error","error":{"code":"upstream_error","param":[]}}\n\n']
+
+    chunks = list(iter_chat_chunks(lines, model="gpt-5.2"))
+
+    error_payload = json.loads(chunks[-2][5:].strip())
+    assert "param" not in error_payload["error"]
+
+
 @pytest.mark.parametrize(
     "event_line",
     [
@@ -483,6 +515,39 @@ async def test_collect_completion_returns_error_event():
     assert isinstance(result, OpenAIErrorEnvelope)
     assert result.error is not None
     assert result.error.code == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_masks_typeless_previous_response_error():
+    raw_response_id = "resp_chat_collect_stale"
+
+    async def _stream():
+        yield (
+            'data: {"error":{"type":"invalid_request_error",'
+            '"code":"previous_response_not_found",'
+            f'"message":"Previous response with id \'{raw_response_id}\' not found.",'
+            '"param":"previous_response_id"}}\n\n'
+        )
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+
+    assert isinstance(result, OpenAIErrorEnvelope)
+    assert result.error is not None
+    assert result.error.code == "stream_incomplete"
+    assert result.error.message == "Upstream websocket closed before response.completed"
+    assert result.error.param is None
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_omits_malformed_error_param():
+    async def _stream():
+        yield 'data: {"type":"error","error":{"code":"upstream_error","param":[]}}\n\n'
+
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+
+    assert isinstance(result, OpenAIErrorEnvelope)
+    assert result.error is not None
+    assert result.error.param is None
 
 
 @pytest.mark.asyncio

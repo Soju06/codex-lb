@@ -16,6 +16,7 @@ from app.db.session import close_session
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
     DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE,
+    REBIND_ANCHOR_UNFENCED,
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
     DurableBridgeOperationEventInput,
@@ -234,6 +235,7 @@ class DurableBridgeSessionCoordinator:
         updated_at_epoch: float,
         base_updated_at_epoch: float = 0.0,
         failure_threshold: int = 1,
+        poison_sticky_threshold: int | None = None,
         conflict_cooldown_until_epoch: float | None = None,
         base_backoff_seconds: float = 60.0,
         max_backoff_seconds: float = 600.0,
@@ -251,6 +253,7 @@ class DurableBridgeSessionCoordinator:
                 updated_at_epoch=updated_at_epoch,
                 base_updated_at_epoch=base_updated_at_epoch,
                 failure_threshold=failure_threshold,
+                poison_sticky_threshold=poison_sticky_threshold,
                 conflict_cooldown_until_epoch=conflict_cooldown_until_epoch,
                 base_backoff_seconds=base_backoff_seconds,
                 max_backoff_seconds=max_backoff_seconds,
@@ -269,13 +272,41 @@ class DurableBridgeSessionCoordinator:
         session_key_value: str,
         api_key_id: str | None,
         expected_updated_at_epoch: float | None = None,
-    ) -> None:
+        expected_admission_generation: int | None = None,
+        expected_consecutive_failures: int | None = None,
+        reset_detail: str | None = None,
+    ) -> bool:
         async with self._session() as session:
-            await DurableBridgeRepository(session).delete_retry_circuit(
+            return await DurableBridgeRepository(session).delete_retry_circuit(
+                session_key_kind=session_key_kind,
+                session_key_value=session_key_value,
+                api_key_scope=durable_bridge_api_key_scope(api_key_id),
+                expected_consecutive_failures=expected_consecutive_failures,
+                expected_updated_at_epoch=expected_updated_at_epoch,
+                expected_admission_generation=expected_admission_generation,
+                reset_detail=reset_detail,
+            )
+
+    async def supersede_retry_circuit_detail(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_id: str | None,
+        expected_updated_at_epoch: float,
+        expected_consecutive_failures: int,
+        expected_last_detail: str | None,
+        last_detail: str | None,
+    ) -> bool:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).supersede_retry_circuit_detail(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,
                 api_key_scope=durable_bridge_api_key_scope(api_key_id),
                 expected_updated_at_epoch=expected_updated_at_epoch,
+                expected_consecutive_failures=expected_consecutive_failures,
+                expected_last_detail=expected_last_detail,
+                last_detail=last_detail,
             )
 
     async def claim_retry_circuit_generation(
@@ -307,13 +338,21 @@ class DurableBridgeSessionCoordinator:
         session_key_value: str,
         api_key_id: str | None,
         expected_updated_at_epoch: float | None = None,
-    ) -> None:
+        expected_admission_generation: int | None = None,
+        expected_consecutive_failures: int | None = None,
+        fence_last_detail: bool = False,
+        expected_last_detail: str | None = None,
+    ) -> bool:
         async with self._session() as session:
-            await DurableBridgeRepository(session).purge_retry_circuit(
+            return await DurableBridgeRepository(session).purge_retry_circuit(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,
                 api_key_scope=durable_bridge_api_key_scope(api_key_id),
                 expected_updated_at_epoch=expected_updated_at_epoch,
+                expected_admission_generation=expected_admission_generation,
+                expected_consecutive_failures=expected_consecutive_failures,
+                fence_last_detail=fence_last_detail,
+                expected_last_detail=expected_last_detail,
             )
 
     async def claim_live_session(
@@ -394,6 +433,8 @@ class DurableBridgeSessionCoordinator:
         owner_epoch: int,
         account_id: str,
         clear_continuity: bool = False,
+        expected_latest_response_id: object = REBIND_ANCHOR_UNFENCED,
+        expected_latest_turn_state: object = REBIND_ANCHOR_UNFENCED,
     ) -> bool:
         del api_key_id
         async with self._session() as session:
@@ -403,7 +444,14 @@ class DurableBridgeSessionCoordinator:
                 owner_epoch=owner_epoch,
                 account_id=account_id,
                 clear_continuity=clear_continuity,
+                expected_latest_response_id=expected_latest_response_id,
+                expected_latest_turn_state=expected_latest_turn_state,
             )
+
+    async def session_latest_continuity(self, *, session_id: str) -> tuple[str | None, str | None] | None:
+        """Read the session's current continuity anchors for a fenced clear."""
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).latest_session_continuity(session_id=session_id)
 
     async def release_live_session(
         self,

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -128,8 +129,8 @@ async def _commit_peer_reauth(account_id: str, *, refresh_token: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_invalid_refresh_token_payload_requires_reauth_and_excludes_routing(db_setup, monkeypatch):
-    """Exercise the OAuth payload, guarded DB downgrade, and routing exclusion together."""
+async def test_invalid_refresh_token_payload_requires_reauth_and_gates_routing_on_expiry(db_setup, monkeypatch):
+    """Exercise the OAuth payload, guarded DB downgrade, and expiry-gated routing together."""
     account_id = "acc_invalid_refresh_token"
     await _create_account(account_id)
 
@@ -178,8 +179,15 @@ async def test_invalid_refresh_token_payload_requires_reauth_and_excludes_routin
     status, stored_refresh_token, sticky_present = await _account_snapshot(account_id)
     assert status == AccountStatus.REAUTH_REQUIRED
     assert stored_refresh_token == "refresh-old"
-    assert sticky_present is False
-    assert select_account([AccountState(account_id=account_id, status=status)]).account is None
+    # Reauth-required accounts keep request-routable continuity until the
+    # stored access token's derived expiry passes (see keep-reauth-required-
+    # access-routable): sticky pins survive and routing only excludes the
+    # account once its access token is known-expired.
+    assert sticky_present is True
+    unexpired = AccountState(account_id=account_id, status=status)
+    assert select_account([unexpired]).account is not None
+    expired = AccountState(account_id=account_id, status=status, access_token_expires_at=time.time() - 1.0)
+    assert select_account([expired]).account is None
 
 
 @pytest.mark.asyncio
@@ -1083,10 +1091,10 @@ async def test_permanent_failure_cas_retries_when_same_plaintext_re_encrypted(db
 
     assert exc_info.value.code == "refresh_token_reused"
     status, stored_refresh_token, sticky_present = await _account_snapshot(account_id)
-    # The downgrade landed on retry: same (dead) plaintext, account de-routed.
+    # The downgrade lands on retry while request-routable continuity remains.
     assert status == AccountStatus.REAUTH_REQUIRED
     assert stored_refresh_token == "refresh-old"
-    assert sticky_present is False
+    assert sticky_present is True
 
 
 def _encode_jwt(payload: dict) -> str:

@@ -261,7 +261,7 @@ class AccountsService:
         account = await self._get_visible_account(account_id)
         if account is None:
             return None
-        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+        if account.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
             raise AccountUsageResetCreditsUnavailableError(
                 f"Account is {account.status.value} and cannot fetch usage reset credits",
             )
@@ -324,7 +324,7 @@ class AccountsService:
         account = await self._get_visible_account(account_id)
         if account is None:
             return None
-        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+        if account.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
             raise AccountUsageResetConsumeUnavailableError(
                 f"Account is {account.status.value} and cannot consume usage reset credits",
             )
@@ -750,7 +750,7 @@ class AccountsService:
         account = await self._get_visible_account(account_id)
         if account is None:
             return None
-        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+        if account.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
             raise AccountNotProbableError(f"Account is {account.status.value} and cannot be probed")
 
         primary_before, secondary_before = await self._latest_usage_percents(account_id)

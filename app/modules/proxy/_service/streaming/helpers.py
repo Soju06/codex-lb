@@ -38,16 +38,18 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocket,
 )
 from app.core.errors import (
+    PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
+    PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+    OpenAIErrorParam,
+    response_failed_event,
+)
+from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE,
 )
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
-from app.core.errors import (
-    PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
-    response_failed_event,
-)
-from app.core.openai.models import OpenAIEvent
+from app.core.openai.models import OpenAIError, OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
@@ -519,7 +521,7 @@ def _rewrite_previous_response_stream_error(
     error_code: str | None,
     error_type: str | None,
     error_message: str | None,
-    error_param: str | None,
+    error_param: OpenAIErrorParam | JsonValue,
 ) -> tuple[str, str, str | None] | None:
     if previous_response_id is None:
         return None
@@ -555,6 +557,25 @@ def _rewrite_previous_response_stream_error(
             PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
             None,
         )
+    if _facade()._is_previous_response_not_found_public_shape(
+        code=error_code,
+        param=error_param,
+        message=error_message,
+    ):
+        # Preserve masking when malformed ``param`` metadata makes the
+        # recovery classifier fail closed. This branch never authorizes
+        # replay or account switching.
+        _record_continuity_fail_closed(
+            surface="http_stream",
+            reason=PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
+            previous_response_id=previous_response_id,
+            upstream_error_code=error_code,
+        )
+        return (
+            "stream_incomplete",
+            PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+            None,
+        )
     normalized_code = _normalize_error_code(error_code, error_type)
     if preferred_account_id is not None and normalized_code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES:
         _record_continuity_fail_closed(
@@ -574,7 +595,7 @@ def _rewrite_previous_response_stream_error(
 def _raw_stream_error_fields(
     event_type: str | None,
     event_payload: dict[str, JsonValue] | None,
-) -> tuple[str | None, str | None, str | None, str]:
+) -> tuple[str | None, str | None, OpenAIErrorParam | None, str]:
     raw_error_type = _websocket_event_error_type(event_type, event_payload)
     raw_error_message = _websocket_event_error_message(event_type, event_payload)
     raw_error_param = _websocket_event_error_param(event_type, event_payload)
@@ -584,6 +605,14 @@ def _raw_stream_error_fields(
         raw_error_param,
         _normalize_error_code(_websocket_event_error_code(event_type, event_payload), raw_error_type),
     )
+
+
+def _openai_error_fields(
+    error: OpenAIError | None,
+) -> tuple[str | None, str | None, OpenAIErrorParam | None]:
+    if error is None:
+        return None, None, None
+    return error.type, error.message, error.param_state
 
 
 def _raw_stream_error_code_or_upstream(

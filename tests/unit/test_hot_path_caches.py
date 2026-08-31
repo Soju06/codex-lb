@@ -18,6 +18,7 @@ from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.crypto import TokenEncryptor
 from app.core.middleware.api_firewall import add_api_firewall_middleware
 from app.core.middleware.firewall_cache import get_firewall_ip_cache, reset_firewall_ip_cache_for_testing
+from app.core.middleware.trusted_proxy_headers import add_trusted_proxy_headers_middleware
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.api_keys.service import ApiKeyData, ApiKeysRepositoryProtocol
 from app.modules.proxy.account_cache import get_account_selection_cache
@@ -114,6 +115,7 @@ async def test_firewall_middleware_uses_cache_for_repeated_ip(monkeypatch: pytes
 
     app = FastAPI()
     add_api_firewall_middleware(app)
+    add_trusted_proxy_headers_middleware(app)
 
     @app.get("/v1/test")
     async def _v1_test() -> dict[str, str]:

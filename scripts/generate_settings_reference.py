@@ -222,6 +222,15 @@ def render_settings_reference() -> str:
         "(uvx/local) runs only — env files map only prefixed variables. In Docker the",
         "container always listens on 2455 (the entrypoint pins `--port 2455`); change",
         "the host side of the compose `ports` mapping instead.",
+        "",
+        f"## `{ENV_PREFIX}ENV_FILE` (special case, bootstrap only)",
+        "",
+        "`.env` / `.env.local` are discovered next to the installed module root (the",
+        f"repository checkout). `{ENV_PREFIX}ENV_FILE` — an `os.pathsep`-separated list",
+        "of paths — overrides that discovery for installs whose module root cannot",
+        "contain env files (the Nix package wrapper points it at the launch",
+        "directory). It must be set in the process environment, not in an env file:",
+        "the env-file locations have to be known before env files are read.",
     ]
 
     for section in _SECTION_ORDER:

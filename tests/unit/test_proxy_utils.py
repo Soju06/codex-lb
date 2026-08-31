@@ -16278,6 +16278,226 @@ async def test_stream_with_retry_keyed_cancel_mid_deferred_health_flush_does_not
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "upstream_path",
+    ["first_event", "later_event", "proxy_response_error"],
+)
+async def test_stream_responses_route_keyed_owner_rewrite_settles_before_original_health(
+    monkeypatch,
+    upstream_path: str,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account(f"acc_keyed_owner_rewrite_{upstream_path}")
+    api_key = _make_api_key_data(f"key_keyed_owner_rewrite_{upstream_path}")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id=f"resv_keyed_owner_rewrite_{upstream_path}",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    order: list[str] = []
+
+    async def skip_limits(*_args: object, **_kwargs: object) -> proxy_service.ApiKeyUsageReservationData:
+        return reservation
+
+    async def no_rate_limit_headers(*_args: object, **_kwargs: object) -> dict[str, str]:
+        return {}
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        assert kwargs.get("wait_for_settlement") is True
+        settlement.usage_settlement_transferred = True
+        order.append("settle")
+        return True
+
+    async def handle_stream_error(
+        failed_account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, http_status
+        assert failed_account is account
+        order.append(f"health:{code}")
+        return {"failure_class": "rate_limit"}
+
+    async def core_stream(*_args: object, **_kwargs: object):
+        if upstream_path == "proxy_response_error":
+            raise proxy_module.ProxyResponseError(
+                429,
+                proxy_module.openai_error("usage_limit_reached", "owner quota exhausted"),
+            )
+        if upstream_path == "later_event":
+            yield 'data: {"type":"response.created","response":{"id":"resp_owner_rewrite"}}\n\n'
+        yield (
+            'data: {"type":"response.failed","response":{"id":"resp_owner_rewrite","status":"failed",'
+            '"error":{"code":"usage_limit_reached","message":"owner quota exhausted"}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", no_rate_limit_headers)
+    monkeypatch.setattr(proxy_service, "core_stream_responses", core_stream)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(
+        service,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value=account.id),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": "continue",
+            "previous_response_id": "resp_owner_anchor",
+            "stream": True,
+        }
+    )
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=api_key,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    chunks = [chunk async for chunk in response.body_iterator]
+    body = "".join(chunk.decode() if isinstance(chunk, bytes) else str(chunk) for chunk in chunks)
+    assert '"code":"previous_response_owner_unavailable"' in body
+    assert request_logs.calls[-1]["error_code"] == "previous_response_owner_unavailable"
+    assert order == ["settle", "health:usage_limit_reached"]
+    service._load_balancer.record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("settlement_confirmed", "expected_order"),
+    [(True, ["settle", "health:rate_limit_exceeded"]), (False, ["settle"])],
+    ids=["confirmed", "unconfirmed_drop"],
+)
+async def test_stream_with_retry_keyed_empty_terminal_queue_settles_before_health(
+    monkeypatch,
+    settlement_confirmed: bool,
+    expected_order: list[str],
+):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_keyed_empty_terminal_queue")
+    api_key = _make_api_key_data("key_keyed_empty_terminal_queue")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_keyed_empty_terminal_queue",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    order: list[str] = []
+    stream_calls = 0
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        assert kwargs.get("wait_for_settlement") is True
+        settlement.usage_settlement_transferred = True
+        order.append("settle")
+        return settlement_confirmed
+
+    async def handle_stream_error(
+        failed_account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, http_status
+        assert failed_account is account
+        if code != "invalid_api_key":
+            order.append(f"health:{code}")
+        return {"failure_class": "rate_limit"}
+
+    async def fake_stream_once(
+        _account: Account,
+        *_args: object,
+        **kwargs: object,
+    ):
+        nonlocal stream_calls
+        stream_calls += 1
+        if stream_calls == 1:
+            raise proxy_module.ProxyResponseError(
+                401,
+                proxy_module.openai_error("invalid_api_key", "expired"),
+            )
+        settlement = cast(proxy_service._StreamSettlement, kwargs["settlement"])
+        settlement.status = "error"
+        settlement.record_success = False
+        settlement.account_health_error = True
+        settlement.error_code = "rate_limit_exceeded"
+        settlement.error_message = "rate limited"
+        settlement.error = {"message": "rate limited"}
+        yield proxy_service.format_sse_event(
+            proxy_service.response_failed_event(
+                "rate_limit_exceeded",
+                "rate limited",
+                response_id="resp_empty_terminal_queue",
+            )
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-keyed-empty-terminal-queue"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    assert "rate_limit_exceeded" in chunks[-1]
+    assert order == expected_order
+    service._load_balancer.record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_route_keyed_refresh_connect_settles_before_account_health(
     monkeypatch,
 ):

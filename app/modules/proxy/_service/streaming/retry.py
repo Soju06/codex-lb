@@ -536,7 +536,11 @@ class _StreamingRetryMixin:
             apply_pending_penalty = post_refresh_transient_replacement_selected and bool(
                 pending_post_refresh_transient_penalties
             )
-            wait_for_health_write = apply_pending_penalty or bool(deferred_account_error_backoffs)
+            wait_for_health_write = (
+                current_settlement.account_health_error
+                or apply_pending_penalty
+                or bool(deferred_account_error_backoffs)
+            )
             settle_kwargs = {"wait_for_settlement": True} if wait_for_health_write else {}
             settled_result = await proxy._settle_stream_api_key_usage(
                 api_key,
@@ -2518,10 +2522,14 @@ class _StreamingRetryMixin:
                         outcome="owner_previsible_retryable_failure",
                     )
                     continue
-                except _TerminalStreamError as exc:
-                    health_write_allowed = await _drain_pending_post_refresh_penalty_on_terminal(settlement)
-                    if health_write_allowed and _facade()._should_penalize_stream_error(exc.code):
-                        await proxy._handle_stream_error(account, exc.error, exc.code)
+                except _TerminalStreamError:
+                    health_write_allowed = await _settle_stream_usage_before_pending_penalty(settlement)
+                    if health_write_allowed and settlement.account_health_error:
+                        await proxy._handle_stream_error(
+                            account,
+                            _stream_settlement_error_payload(settlement),
+                            settlement.error_code or "upstream_error",
+                        )
                     return
                 except ProxyResponseError as exc:
                     if _facade()._is_proxy_budget_exhausted_error(exc):
@@ -3011,27 +3019,22 @@ class _StreamingRetryMixin:
                         ordered_settlement_required = bool(
                             pending_post_refresh_transient_penalties or deferred_account_error_backoffs
                         )
-                        health_write_allowed = True
                         if ordered_settlement_required:
                             health_write_allowed = await _drain_pending_post_refresh_penalty_on_terminal(settlement)
-                        if (
-                            health_write_allowed
-                            and settlement.account_health_error
-                            and not current_account_penalty_queued
-                        ):
-                            await proxy._handle_stream_error(
-                                account,
-                                _stream_settlement_error_payload(settlement),
-                                settlement.error_code or "upstream_error",
-                            )
-                        elif health_write_allowed and settlement.record_success:
-                            await proxy._load_balancer.record_success(account)
-                        if (
-                            not settled
-                            and not ordered_settlement_required
-                            and not settlement.usage_settlement_transferred
-                        ):
-                            settled = await _settle_stream_usage_before_pending_penalty(settlement)
+                            if (
+                                health_write_allowed
+                                and settlement.account_health_error
+                                and not current_account_penalty_queued
+                            ):
+                                await proxy._handle_stream_error(
+                                    account,
+                                    _stream_settlement_error_payload(settlement),
+                                    settlement.error_code or "upstream_error",
+                                )
+                            elif health_write_allowed and settlement.record_success:
+                                await proxy._load_balancer.record_success(account)
+                        else:
+                            await _finalize_terminal_settlement_after_downstream_close(settlement, account)
                         upstream_transport_metric_status = settlement.status
                         _record_upstream_transport_metric_once(settlement.status)
                         return

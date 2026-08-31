@@ -247,6 +247,7 @@ def _http_bridge_precreated_retry_recovery_kwargs(retry_method: Any) -> dict[str
         return {"allow_complete_transcript_recovery": True}
     return {}
 
+
 _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (
     0.25,
     0.5,

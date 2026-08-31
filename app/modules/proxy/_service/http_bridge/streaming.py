@@ -275,6 +275,8 @@ T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
 
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
+
+
 def _http_bridge_request_text_without_previous_response_id(text_data: str) -> str:
     """Remove a retained response alias from a serialized fresh-retry body."""
     try:
@@ -285,6 +287,7 @@ def _http_bridge_request_text_without_previous_response_id(text_data: str) -> st
         return text_data
     payload.pop("previous_response_id", None)
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
 
 def _http_bridge_durable_recovery_predecessor_proven(request_state: _WebSocketRequestState) -> bool:
     """Return whether the operation has a durable predecessor anchor."""

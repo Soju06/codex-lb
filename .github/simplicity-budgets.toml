@@ -38,6 +38,7 @@ allowed = [
   ".claude",
   ".dockerignore",
   ".env.example",
+  ".gitattributes",
   ".github",
   ".gitignore",
   ".pre-commit-config.yaml",

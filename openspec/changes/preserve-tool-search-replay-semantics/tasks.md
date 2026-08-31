@@ -21,5 +21,5 @@
 
 - [x] 3.1 Run focused proxy replay and compact-trigger tests.
 - [ ] 3.2 Run strict OpenSpec validation for this change. (Blocked locally:
-  neither `openspec` nor `uv` is installed in this shell, and
-  `@openspec/cli` is not published on npm.)
+  `uv run openspec validate preserve-tool-search-replay-semantics --strict`
+  cannot spawn `openspec`; the CLI is unavailable in this shell.)

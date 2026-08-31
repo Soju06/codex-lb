@@ -387,6 +387,27 @@ def test_account_neutral_fresh_replay_accepts_tool_search_string_output() -> Non
     assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is True
 
 
+def test_account_neutral_fresh_replay_rejects_failed_tool_search_output() -> None:
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "execution": "client",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "output": "failed",
+            "status": "failed",
+        },
+    ]
+
+    assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is False
+
+
 def test_account_neutral_replay_projection_preserves_completed_tool_search_output_without_id() -> None:
     input_items: list[JsonValue] = [
         {"role": "user", "content": "old question"},

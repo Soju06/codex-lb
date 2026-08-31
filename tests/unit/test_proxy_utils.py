@@ -26198,6 +26198,37 @@ async def test_prepare_websocket_response_create_request_captures_client_full_re
 
     full_resend_input: list[JsonValue] = [
         {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
+        {
+            "type": "tool_search_call",
+            "id": "tsc_replay",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "id": "tso_replay",
+            "call_id": "call_search",
+            "output": "completed",
+            "status": "completed",
+        },
+        {"role": "assistant", "content": [{"type": "output_text", "text": "old answer"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "next question"}]},
+    ]
+    replay_safe_full_resend_input: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "output": "completed",
+            "status": "completed",
+        },
         {"role": "assistant", "content": [{"type": "output_text", "text": "old answer"}]},
         {"role": "user", "content": [{"type": "input_text", "text": "next question"}]},
     ]
@@ -26232,13 +26263,13 @@ async def test_prepare_websocket_response_create_request_captures_client_full_re
 
     upstream_payload = json.loads(prepared.text_data)
     assert upstream_payload["previous_response_id"] == "resp_client_anchor"
-    assert upstream_payload["input"] == full_resend_input
+    assert upstream_payload["input"] == replay_safe_full_resend_input
     assert prepared.request_state.previous_response_id == "resp_client_anchor"
     assert prepared.request_state.fresh_upstream_request_is_retry_safe is True
     assert prepared.request_state.fresh_upstream_request_text is not None
     fresh_payload = json.loads(prepared.request_state.fresh_upstream_request_text)
     assert "previous_response_id" not in fresh_payload
-    assert fresh_payload["input"] == full_resend_input
+    assert fresh_payload["input"] == replay_safe_full_resend_input
 
 
 @pytest.mark.asyncio
@@ -47351,6 +47382,7 @@ def test_trim_http_bridge_previous_response_input_items_handles_tool_search_repl
         },
         {
             "type": "tool_search_output",
+            "id": "tso_replay",
             "call_id": "call_search_1",
             "output": [{"title": "result"}],
         },
@@ -47359,7 +47391,38 @@ def test_trim_http_bridge_previous_response_input_items_handles_tool_search_repl
 
     trimmed = proxy_service._trim_http_bridge_previous_response_input_items(input_items)
 
-    assert trimmed == input_items[1:]
+    assert trimmed == [
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search_1",
+            "output": [{"title": "result"}],
+        },
+        input_items[2],
+    ]
+
+
+def test_trim_http_bridge_previous_response_input_items_strips_output_first_tool_search_id():
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_output",
+            "id": "tso_replay",
+            "call_id": "call_search_1",
+            "output": "completed",
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    trimmed = proxy_service._trim_http_bridge_previous_response_input_items(input_items)
+
+    assert len(trimmed) == len(input_items)
+    assert trimmed == [
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search_1",
+            "output": "completed",
+        },
+        input_items[1],
+    ]
 
 
 def test_trim_websocket_previous_response_input_items_handles_tool_search_replay():
@@ -47372,6 +47435,7 @@ def test_trim_websocket_previous_response_input_items_handles_tool_search_replay
         },
         {
             "type": "tool_search_output",
+            "id": "tso_replay",
             "call_id": "call_search_1",
             "output": [{"title": "result"}],
         },
@@ -47380,7 +47444,38 @@ def test_trim_websocket_previous_response_input_items_handles_tool_search_replay
 
     trimmed = proxy_service._trim_websocket_previous_response_input_items(input_items)
 
-    assert trimmed == input_items[1:]
+    assert trimmed == [
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search_1",
+            "output": [{"title": "result"}],
+        },
+        input_items[2],
+    ]
+
+
+def test_trim_websocket_previous_response_input_items_strips_output_first_tool_search_id():
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_output",
+            "id": "tso_replay",
+            "call_id": "call_search_1",
+            "output": "completed",
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    trimmed = proxy_service._trim_websocket_previous_response_input_items(input_items)
+
+    assert len(trimmed) == len(input_items)
+    assert trimmed == [
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search_1",
+            "output": "completed",
+        },
+        input_items[1],
+    ]
 
 
 def test_prepare_response_bridge_request_state_keeps_unconfirmed_missing_tool_output_history():

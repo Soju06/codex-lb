@@ -1091,6 +1091,7 @@ def _http_bridge_precreated_retry_failure_error(
 
 
 def _trim_http_bridge_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
+    replay_safe_input_items = [_strip_http_bridge_replayed_tool_search_id(item) for item in input_items]
     first_output_index = next(
         (
             index
@@ -1101,13 +1102,13 @@ def _trim_http_bridge_previous_response_input_items(input_items: list[JsonValue]
         None,
     )
     if first_output_index is None:
-        return input_items
+        return replay_safe_input_items
     if first_output_index == 0:
-        return [_strip_http_bridge_replayed_tool_search_output_id(item) for item in input_items]
+        return replay_safe_input_items
     prefix = input_items[:first_output_index]
     if not all(_is_http_bridge_previous_response_output_item(item) for item in prefix):
-        return input_items
-    return [_strip_http_bridge_replayed_tool_search_output_id(item) for item in input_items[first_output_index:]]
+        return replay_safe_input_items
+    return replay_safe_input_items[first_output_index:]
 
 
 def _is_http_bridge_previous_response_output_item(item: JsonValue) -> bool:
@@ -1120,8 +1121,12 @@ def _is_http_bridge_previous_response_output_item(item: JsonValue) -> bool:
     return role == "assistant" and _has_http_bridge_response_output_marker(item)
 
 
-def _strip_http_bridge_replayed_tool_search_output_id(item: JsonValue) -> JsonValue:
-    if not isinstance(item, dict) or _http_bridge_input_item_type(item) != "tool_search_output" or "id" not in item:
+def _strip_http_bridge_replayed_tool_search_id(item: JsonValue) -> JsonValue:
+    if (
+        not isinstance(item, dict)
+        or _http_bridge_input_item_type(item) not in {"tool_search_call", "tool_search_output"}
+        or "id" not in item
+    ):
         return item
     stripped = dict(item)
     stripped.pop("id", None)

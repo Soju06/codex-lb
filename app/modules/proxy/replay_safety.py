@@ -698,6 +698,8 @@ def _tool_output_is_self_contained(item_type: str, item: Mapping[str, JsonValue]
     if item.get("status") not in (None, "completed", "failed"):
         return False
     if item_type == "tool_search_output":
+        if item.get("status") == "failed":
+            return False
         has_tools = isinstance(item.get("tools"), list)
         has_output = isinstance(item.get("output"), str)
         return item.get("execution") in (None, "client") and has_tools != has_output

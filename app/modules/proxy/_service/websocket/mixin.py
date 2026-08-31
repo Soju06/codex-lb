@@ -3144,12 +3144,13 @@ class _WebSocketMixin:
                 continuity_state=continuity_state,
             )
             trimmed_input_items = _trim_websocket_previous_response_input_items(previous_response_input_items)
-            if len(trimmed_input_items) != len(previous_response_input_items):
+            if trimmed_input_items != previous_response_input_items:
                 previous_response_trimmed_input_count = len(previous_response_input_items)
                 previous_response_trimmed_input_fingerprint = _facade()._fingerprint_input_items(
                     previous_response_input_items
                 )
                 responses_payload = responses_payload.model_copy(update={"input": trimmed_input_items})
+                client_full_resend_input_items = trimmed_input_items
         full_resend_client_metadata = client_metadata
         if client_full_resend_retry_safe and client_full_resend_input_items is not None:
             if trusted_incremental_responses_lite and client_metadata is not None:

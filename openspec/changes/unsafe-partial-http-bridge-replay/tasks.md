@@ -19,4 +19,4 @@
 - [x] 3.1 Cover the default-off setting and the successful partial replay path.
 - [x] 3.2 Cover tool-call rejection, missing transcript, rebind failure, and
       authorization consumption.
-- [ ] 3.3 Run focused tests, lint/type checks, and strict OpenSpec validation.
+- [x] 3.3 Run focused tests, lint/type checks, and strict OpenSpec validation.

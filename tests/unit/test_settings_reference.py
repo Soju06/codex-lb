@@ -77,15 +77,11 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # bound-eventless-server-recovery spec called it "configured"; the maintainer
 # asked for it to be promoted to a setting on PR #1633 (2026-08-20/08-26),
 # consistent with that PR's budget-from-settings principle.
-# 131 -> 135: complete durable transcript recovery controls. These remain
-# opt-in because they retain sensitive prompt/output material and increase
-# database storage proportional to conversation length.
-# 135 -> 136: unsafe partial HTTP bridge replay. This remains opt-in because
-# regenerating an interrupted model response is explicitly at-least-once and
-# can repeat already-visible output; the safe default must stay fail-closed.
-# 136 -> 137: HTTP bridge complete-transcript maximum bytes. This remains
-# operator-selectable so deployments can bound persisted replay material.
-MAX_SETTINGS_FIELDS = 137
+# 133 -> 138: complete transcript recovery controls. These remain opt-in
+# because they retain sensitive prompt/output material, increase database
+# storage proportional to conversation length, and partial replay is
+# explicitly at-least-once.
+MAX_SETTINGS_FIELDS = 138
 
 
 def test_generated_settings_reference_matches_code() -> None:

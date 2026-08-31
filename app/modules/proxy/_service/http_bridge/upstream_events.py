@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -232,6 +233,19 @@ from app.modules.proxy.tool_call_dedupe import (
 )
 
 logger = logging.getLogger("app.modules.proxy.service")
+
+
+def _http_bridge_precreated_retry_recovery_kwargs(retry_method: Any) -> dict[str, bool]:
+    """Pass the recovery gate only to retry hooks that expose it."""
+    try:
+        parameters = inspect.signature(retry_method).parameters
+    except (TypeError, ValueError):
+        return {"allow_complete_transcript_recovery": True}
+    if "allow_complete_transcript_recovery" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    ):
+        return {"allow_complete_transcript_recovery": True}
+    return {}
 
 _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (
     0.25,
@@ -3159,10 +3173,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                 cleanup_tasks=self._background_cleanup_tasks,
             )
             wakeup_task = None
-            return await self._retry_http_bridge_precreated_request(
-                session,
-                allow_complete_transcript_recovery=True,
-            )
+            retry_method = self._retry_http_bridge_precreated_request
+            return await retry_method(session, **_http_bridge_precreated_retry_recovery_kwargs(retry_method))
 
         try:
             while True:
@@ -3380,9 +3392,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                             # its retry gate would reject the request as
                             # already retired. Continuity-bound requests still
                             # fail closed in _retry_http_bridge_precreated_request.
-                            retried = await self._retry_http_bridge_precreated_request(
+                            retry_method = self._retry_http_bridge_precreated_request
+                            retried = await retry_method(
                                 session,
-                                allow_complete_transcript_recovery=True,
+                                **_http_bridge_precreated_retry_recovery_kwargs(retry_method),
                             )
                             if retried:
                                 continue
@@ -3415,9 +3428,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                             raise RuntimeError("HTTP bridge upstream receive did not cancel after timeout")
                         receive_task = None
                         receive_operation_attempt_generations = None
-                    retried = await self._retry_http_bridge_precreated_request(
+                    retry_method = self._retry_http_bridge_precreated_request
+                    retried = await retry_method(
                         session,
-                        allow_complete_transcript_recovery=True,
+                        **_http_bridge_precreated_retry_recovery_kwargs(retry_method),
                     )
                     if retried:
                         continue

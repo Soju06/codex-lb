@@ -23,6 +23,10 @@ def _normalize_path(path: str) -> str:
         return "/health/..."
     if path == "/health":
         return path
+    if path.startswith("/backend-api/"):
+        return "/backend-api/..."
+    if path.startswith("/internal/"):
+        return "/internal/..."
     return "/other"
 
 

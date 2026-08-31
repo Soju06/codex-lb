@@ -13,11 +13,11 @@ A cancelled subscription-backed transcription request can leave its committed AP
 
 ### New Capabilities
 
-None.
+- `api-keys`: Require immediate, exactly-once release of an owned subscription-backed transcription reservation when request cancellation interrupts upstream forwarding.
 
 ### Modified Capabilities
 
-- `api-keys`: Require immediate, exactly-once release of an owned subscription-backed transcription reservation when request cancellation interrupts upstream forwarding.
+None.
 
 ## Impact
 

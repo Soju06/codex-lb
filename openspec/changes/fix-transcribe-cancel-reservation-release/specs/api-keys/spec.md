@@ -1,4 +1,4 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Subscription-backed transcription reservations survive cancellation safely
 

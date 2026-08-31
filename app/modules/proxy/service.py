@@ -63,21 +63,24 @@ from app.core.clients.proxy_websocket import (
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
-from app.core.errors import (
-    PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE,
-)
+from app.core.errors import PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
 from app.core.errors import (
     OpenAIErrorEnvelope,
+    OpenAIErrorParam,
     ResponseFailedEvent,
+    coerce_error_param,
     is_previous_response_not_found_error,
     is_previous_response_not_found_message,
     openai_error,
     previous_response_id_from_not_found_message,
     previous_response_stream_incomplete_error,
     response_failed_event,
+)
+from app.core.errors import (
+    is_previous_response_not_found_public_shape as _is_previous_response_not_found_public_shape,  # noqa: F401
 )
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
@@ -935,6 +938,7 @@ class ProxyService(
         self._websocket_previous_response_account_index: dict[tuple[str, str | None, str | None], str] = {}
         self._websocket_continuity_index: dict[tuple[str, str | None], _WebSocketContinuityState] = {}
         self._background_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._http_bridge_background_cleanup_failed = False
         self._stream_api_key_release_retry_semaphore = asyncio.Semaphore(_STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY)
         self._file_pin_session_factory = SessionLocal
         self._http_bridge_lock = anyio.Lock()
@@ -2143,10 +2147,11 @@ def _is_missing_tool_output_message(message: str | None) -> bool:
 def _is_missing_tool_output_error(
     *,
     code: str | None,
-    param: str | None,
+    param: OpenAIErrorParam | JsonValue,
     message: str | None,
 ) -> bool:
-    if code != "invalid_request_error" or param != "input":
+    param_state = coerce_error_param(param)
+    if code != "invalid_request_error" or param_state.normalized != "input" or param_state.malformed:
         return False
     return _is_missing_tool_output_message(message)
 
@@ -2154,7 +2159,7 @@ def _is_missing_tool_output_error(
 def _is_previous_response_not_found_error(
     *,
     code: str | None,
-    param: str | None,
+    param: OpenAIErrorParam | JsonValue,
     message: str | None,
 ) -> bool:
     return is_previous_response_not_found_error(code=code, param=param, message=message)
@@ -2167,7 +2172,7 @@ def _compact_previous_response_not_found_error(exc: ProxyResponseError) -> Proxy
     code = _normalize_error_code(error.code, error.type)
     if not _is_previous_response_not_found_error(
         code=code,
-        param=error.param,
+        param=error.param_state,
         message=error.message,
     ):
         return None
@@ -2269,7 +2274,7 @@ def _partial_output_proxy_error_event_block(
         error_code=error_code,
         error_type=error.type if error else None,
         error_message=error_message,
-        error_param=error.param if error else None,
+        error_param=error.param_state if error else None,
     )
     if rewritten_error is not None:
         rewritten_code, rewritten_message, upstream_error_code = rewritten_error
@@ -2286,7 +2291,7 @@ def _partial_output_proxy_error_event_block(
         error_message or default_message,
         error_type=(error.type if error and error.type else "server_error"),
         response_id=response_id,
-        error_param=error.param if error else None,
+        error_param=error.param_state if error else None,
     )
     _apply_error_metadata(event["response"]["error"], error)
     return format_sse_event(event)
@@ -2535,7 +2540,7 @@ def _mark_request_state_previous_response_not_found(
     request_state.error_code_override = error.get("code")
     request_state.error_message_override = error.get("message")
     request_state.error_type_override = error.get("type")
-    request_state.error_param_override = error.get("param")
+    request_state.error_param_override = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
 
 
 def _header_value_case_insensitive(headers: Mapping[str, str], name: str) -> str | None:

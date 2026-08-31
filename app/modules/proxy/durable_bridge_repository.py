@@ -55,6 +55,9 @@ REQUIRED_DURABLE_BRIDGE_TABLES = (
     "http_bridge_operation_event_chunks",
 )
 DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
+# Mirrors the HTTP bridge retry circuit's abandonment tombstone detail; the
+# scheduled purge preserves such rows until the bridge-retention cutoff.
+_RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL = "anchor_abandoned"
 DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE = 50
 _PURGE_CLOSED_BATCH_SIZE = 500
 # Claim retry budget: insert races and epoch-CAS losses re-read and retry;
@@ -62,6 +65,10 @@ _PURGE_CLOSED_BATCH_SIZE = 500
 # same-row claim contention.
 _CLAIM_CAS_ATTEMPTS = 5
 _SESSION_ID_LOOKUP_CHUNK_SIZE = 500
+
+
+# Sentinel: rebind continuity clears without an anchor fence (legacy callers).
+REBIND_ANCHOR_UNFENCED: object = object()
 
 
 class DurableBridgeAliasRegistration(StrEnum):
@@ -419,11 +426,13 @@ class DurableBridgeRepository:
         updated_at_epoch: float,
         base_updated_at_epoch: float = 0.0,
         failure_threshold: int = 1,
+        poison_sticky_threshold: int | None = None,
         conflict_cooldown_until_epoch: float | None = None,
         base_backoff_seconds: float = 60.0,
         max_backoff_seconds: float = 600.0,
         clean_close_max_backoff_seconds: float = 30.0,
     ) -> None:
+        sticky_threshold = poison_sticky_threshold if poison_sticky_threshold is not None else failure_threshold
         values = {
             "session_key_kind": session_key_kind,
             "session_key_hash": durable_bridge_hash(session_key_value),
@@ -441,7 +450,6 @@ class DurableBridgeRepository:
         )
         # A reset starts a new failure lineage. Never carry the incoming
         # cooldown into that fresh lineage, even when the threshold is one.
-        reset_failure_cooldown = 0.0
         base_backoff = max(0.001, base_backoff_seconds)
         max_backoff = max(base_backoff, max_backoff_seconds)
         clean_close_max_backoff = max(0.001, clean_close_max_backoff_seconds)
@@ -464,29 +472,61 @@ class DurableBridgeRepository:
         if dialect == "postgresql":
             insert_statement = pg_insert(HttpBridgeRetryCircuit).values(**values)
             excluded = insert_statement.excluded
-            reset_lineage = and_(
-                HttpBridgeRetryCircuit.consecutive_failures == 0,
-                HttpBridgeRetryCircuit.cooldown_until_epoch <= 0,
-                HttpBridgeRetryCircuit.last_detail.is_(None),
-                HttpBridgeRetryCircuit.updated_at_epoch > base_updated_at_epoch,
-            )
             # ``updated_at_epoch`` is an observation timestamp, not a
-            # concurrency version. Treat an unchanged loaded row as a CAS
-            # match, even when a replica's wall clock lags it. The failure
-            # count guard still rejects an older snapshot that was loaded from
-            # the same row after a newer failure had already been merged.
-            failure_from_loaded_row = and_(
+            # concurrency version. Equality with the loaded base is the CAS
+            # match, even when a replica's wall clock lags it; the failure
+            # count guard still rejects an older snapshot that was loaded
+            # from the same row after a newer failure had already been
+            # merged. Every base-mismatched write is stale — its episode was
+            # settled, replaced, or outrun while the write waited — and
+            # drops, leaving the row byte-identical so in-flight fences and
+            # bases stay valid; the writer reconciles from the returned row.
+            # Wall-clock recency cannot stand in for lineage: a delayed
+            # write always carries a newer timestamp than the base it
+            # loaded, so admitting "newer than base" writes would merge a
+            # finished episode's count into whatever lineage owns the row
+            # now, including a reset row another replica has already
+            # re-struck. A concurrent same-lineage strike that loses this
+            # race undercounts by exactly its own strike, which is the
+            # accepted direction: the circuit opens at most one failure
+            # later, and a stale count can never reopen a settled episode's
+            # cooldown against a fresh lineage.
+            failure_from_current_row = and_(
                 HttpBridgeRetryCircuit.updated_at_epoch == base_updated_at_epoch,
                 excluded.consecutive_failures >= HttpBridgeRetryCircuit.consecutive_failures,
             )
-            failure_is_newer_than_base = or_(
-                excluded.updated_at_epoch > base_updated_at_epoch,
-                failure_from_loaded_row,
+            # An at-threshold poison detail is sticky against non-poison
+            # strikes: the row is the cross-replica record that a poisoned
+            # anchor's clear is still owed, and letting a clean probe
+            # failure overwrite it would strand that debt for every worker.
+            # Only a reset/settle (which rewrites the row wholesale) or
+            # another poison-class strike may change it.
+            sticky_poison_detail = and_(
+                HttpBridgeRetryCircuit.last_detail.in_(
+                    ("stream_incomplete", "stream_idle_timeout", "bridge_eventless_timeout")
+                ),
+                # The effective anchor-poison threshold, not the circuit
+                # threshold: a configured threshold of one authorizes the
+                # abandonment at the first poison strike, and its failed
+                # clear leaves a one-failure debt this predicate must keep.
+                HttpBridgeRetryCircuit.consecutive_failures >= sticky_threshold,
+                excluded.last_detail.notin_(("stream_incomplete", "stream_idle_timeout", "bridge_eventless_timeout")),
+            )
+            # An abandonment tombstone is sticky against every strike
+            # detail: continuity is already gone, the tombstone is what
+            # fails anchorless deltas closed on every replica, and only the
+            # fenced settle/supersede paths — a completion establishing
+            # fresh continuity — may rewrite it.
+            # NULL-safe: a NULL detail must make this term FALSE (so its
+            # negation stays TRUE), not NULL — three-valued logic would
+            # otherwise freeze the detail of every reset row.
+            sticky_tombstone = and_(
+                HttpBridgeRetryCircuit.last_detail.is_not(None),
+                HttpBridgeRetryCircuit.last_detail == _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL,
             )
             conflict_failures = case(
-                (reset_lineage, 1),
                 (
-                    failure_is_newer_than_base,
+                    failure_from_current_row,
                     func.greatest(
                         HttpBridgeRetryCircuit.consecutive_failures + 1,
                         excluded.consecutive_failures,
@@ -499,7 +539,6 @@ class DurableBridgeRepository:
                 excluded.updated_at_epoch,
             )
             merged_cooldown = case(
-                (reset_lineage, reset_failure_cooldown),
                 (
                     conflict_failures >= threshold,
                     func.greatest(
@@ -518,51 +557,87 @@ class DurableBridgeRepository:
                 set_={
                     "consecutive_failures": conflict_failures,
                     "cooldown_until_epoch": case(
-                        (reset_lineage, reset_failure_cooldown),
-                        else_=func.greatest(
-                            HttpBridgeRetryCircuit.cooldown_until_epoch,
-                            excluded.cooldown_until_epoch,
-                            merged_cooldown,
+                        (
+                            failure_from_current_row,
+                            func.greatest(
+                                HttpBridgeRetryCircuit.cooldown_until_epoch,
+                                excluded.cooldown_until_epoch,
+                                merged_cooldown,
+                            ),
                         ),
+                        else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
                     ),
                     "last_detail": case(
-                        (reset_lineage, excluded.last_detail),
                         (
-                            excluded.updated_at_epoch >= HttpBridgeRetryCircuit.updated_at_epoch,
+                            and_(failure_from_current_row, ~sticky_poison_detail, ~sticky_tombstone),
                             excluded.last_detail,
                         ),
                         else_=HttpBridgeRetryCircuit.last_detail,
                     ),
                     "updated_at_epoch": case(
-                        (reset_lineage, excluded.updated_at_epoch),
-                        else_=func.greatest(
-                            HttpBridgeRetryCircuit.updated_at_epoch,
-                            excluded.updated_at_epoch,
-                        ),
+                        (failure_from_current_row, merged_updated_at),
+                        else_=HttpBridgeRetryCircuit.updated_at_epoch,
                     ),
                 },
             )
         elif dialect == "sqlite":
             insert_statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values)
             excluded = insert_statement.excluded
-            reset_lineage = and_(
-                HttpBridgeRetryCircuit.consecutive_failures == 0,
-                HttpBridgeRetryCircuit.cooldown_until_epoch <= 0,
-                HttpBridgeRetryCircuit.last_detail.is_(None),
-                HttpBridgeRetryCircuit.updated_at_epoch > base_updated_at_epoch,
-            )
-            failure_from_loaded_row = and_(
+            # ``updated_at_epoch`` is an observation timestamp, not a
+            # concurrency version. Equality with the loaded base is the CAS
+            # match, even when a replica's wall clock lags it; the failure
+            # count guard still rejects an older snapshot that was loaded
+            # from the same row after a newer failure had already been
+            # merged. Every base-mismatched write is stale — its episode was
+            # settled, replaced, or outrun while the write waited — and
+            # drops, leaving the row byte-identical so in-flight fences and
+            # bases stay valid; the writer reconciles from the returned row.
+            # Wall-clock recency cannot stand in for lineage: a delayed
+            # write always carries a newer timestamp than the base it
+            # loaded, so admitting "newer than base" writes would merge a
+            # finished episode's count into whatever lineage owns the row
+            # now, including a reset row another replica has already
+            # re-struck. A concurrent same-lineage strike that loses this
+            # race undercounts by exactly its own strike, which is the
+            # accepted direction: the circuit opens at most one failure
+            # later, and a stale count can never reopen a settled episode's
+            # cooldown against a fresh lineage.
+            failure_from_current_row = and_(
                 HttpBridgeRetryCircuit.updated_at_epoch == base_updated_at_epoch,
                 excluded.consecutive_failures >= HttpBridgeRetryCircuit.consecutive_failures,
             )
-            failure_is_newer_than_base = or_(
-                excluded.updated_at_epoch > base_updated_at_epoch,
-                failure_from_loaded_row,
+            # An at-threshold poison detail is sticky against non-poison
+            # strikes: the row is the cross-replica record that a poisoned
+            # anchor's clear is still owed, and letting a clean probe
+            # failure overwrite it would strand that debt for every worker.
+            # Only a reset/settle (which rewrites the row wholesale) or
+            # another poison-class strike may change it.
+            sticky_poison_detail = and_(
+                HttpBridgeRetryCircuit.last_detail.in_(
+                    ("stream_incomplete", "stream_idle_timeout", "bridge_eventless_timeout")
+                ),
+                # The effective anchor-poison threshold, not the circuit
+                # threshold: a configured threshold of one authorizes the
+                # abandonment at the first poison strike, and its failed
+                # clear leaves a one-failure debt this predicate must keep.
+                HttpBridgeRetryCircuit.consecutive_failures >= sticky_threshold,
+                excluded.last_detail.notin_(("stream_incomplete", "stream_idle_timeout", "bridge_eventless_timeout")),
+            )
+            # An abandonment tombstone is sticky against every strike
+            # detail: continuity is already gone, the tombstone is what
+            # fails anchorless deltas closed on every replica, and only the
+            # fenced settle/supersede paths — a completion establishing
+            # fresh continuity — may rewrite it.
+            # NULL-safe: a NULL detail must make this term FALSE (so its
+            # negation stays TRUE), not NULL — three-valued logic would
+            # otherwise freeze the detail of every reset row.
+            sticky_tombstone = and_(
+                HttpBridgeRetryCircuit.last_detail.is_not(None),
+                HttpBridgeRetryCircuit.last_detail == _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL,
             )
             conflict_failures = case(
-                (reset_lineage, 1),
                 (
-                    failure_is_newer_than_base,
+                    failure_from_current_row,
                     func.max(
                         HttpBridgeRetryCircuit.consecutive_failures + 1,
                         excluded.consecutive_failures,
@@ -575,7 +650,6 @@ class DurableBridgeRepository:
                 excluded.updated_at_epoch,
             )
             merged_cooldown = case(
-                (reset_lineage, reset_failure_cooldown),
                 (
                     conflict_failures >= threshold,
                     func.max(
@@ -594,27 +668,26 @@ class DurableBridgeRepository:
                 set_={
                     "consecutive_failures": conflict_failures,
                     "cooldown_until_epoch": case(
-                        (reset_lineage, reset_failure_cooldown),
-                        else_=func.max(
-                            HttpBridgeRetryCircuit.cooldown_until_epoch,
-                            excluded.cooldown_until_epoch,
-                            merged_cooldown,
+                        (
+                            failure_from_current_row,
+                            func.max(
+                                HttpBridgeRetryCircuit.cooldown_until_epoch,
+                                excluded.cooldown_until_epoch,
+                                merged_cooldown,
+                            ),
                         ),
+                        else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
                     ),
                     "last_detail": case(
-                        (reset_lineage, excluded.last_detail),
                         (
-                            excluded.updated_at_epoch >= HttpBridgeRetryCircuit.updated_at_epoch,
+                            and_(failure_from_current_row, ~sticky_poison_detail, ~sticky_tombstone),
                             excluded.last_detail,
                         ),
                         else_=HttpBridgeRetryCircuit.last_detail,
                     ),
                     "updated_at_epoch": case(
-                        (reset_lineage, excluded.updated_at_epoch),
-                        else_=func.max(
-                            HttpBridgeRetryCircuit.updated_at_epoch,
-                            excluded.updated_at_epoch,
-                        ),
+                        (failure_from_current_row, merged_updated_at),
+                        else_=HttpBridgeRetryCircuit.updated_at_epoch,
                     ),
                 },
             )
@@ -690,6 +763,50 @@ class DurableBridgeRepository:
             api_key_scope=api_key_scope,
         )
 
+    async def supersede_retry_circuit_detail(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_scope: str,
+        expected_updated_at_epoch: float,
+        expected_consecutive_failures: int,
+        expected_last_detail: str | None,
+        last_detail: str | None,
+    ) -> bool:
+        """Rewrite a surviving row's failure detail under its version fence.
+
+        Detail-only by design: the strike upsert increments the merged count,
+        so persisting an anchor supersession through it would charge a
+        phantom failure. The version is deliberately left unchanged so a
+        concurrent strike still merges onto the row and its failure class
+        overwrites this one. The count is part of the fence because a
+        lagging-clock strike can merge without moving the version — every
+        landed merge increments the count, so a strike that slipped in
+        ahead of this rewrite makes it miss instead of being overwritten.
+        """
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(HttpBridgeRetryCircuit)
+                .where(
+                    HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
+                    HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
+                    HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+                    HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch,
+                    HttpBridgeRetryCircuit.consecutive_failures == expected_consecutive_failures,
+                    # The prior detail is part of the fence: two completions
+                    # can otherwise both believe they own the supersession of
+                    # one shared row, and the loser's rollback would destroy
+                    # the winner's — re-poisoning a freshly registered
+                    # anchor. With this fence exactly one write owns each
+                    # transition, forward and back.
+                    HttpBridgeRetryCircuit.last_detail == expected_last_detail,
+                )
+                .values(last_detail=last_detail)
+            )
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
+
     async def delete_retry_circuit(
         self,
         *,
@@ -697,26 +814,47 @@ class DurableBridgeRepository:
         session_key_value: str,
         api_key_scope: str,
         expected_updated_at_epoch: float | None = None,
-    ) -> None:
+        expected_admission_generation: int | None = None,
+        expected_consecutive_failures: int | None = None,
+        reset_detail: str | None = None,
+    ) -> bool:
         conditions = [
             HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
             HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
         ]
+        if expected_consecutive_failures is not None:
+            # A lagging-clock strike merges a higher count without moving
+            # the epoch; the count keeps this reset from zeroing a newer
+            # episode's cooldown the caller never observed.
+            conditions.append(HttpBridgeRetryCircuit.consecutive_failures == expected_consecutive_failures)
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
+            if expected_admission_generation is not None:
+                # A replay claim bumps only ``admission_generation``, leaving
+                # the failure-observation epoch untouched; without this fence
+                # a reset authorized before the claim would clear the circuit
+                # beneath the admitted replay that depends on it.
+                conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
         async with sqlite_writer_section():
-            await self._session.execute(
+            result = await self._session.execute(
                 update(HttpBridgeRetryCircuit)
                 .where(*conditions)
                 .values(
                     consecutive_failures=0,
                     cooldown_until_epoch=0.0,
-                    last_detail=None,
+                    # An abandonment-driven settle leaves a durable tombstone
+                    # so restarted workers and other replicas fail
+                    # delta-only follow-ups closed; a completion's settle
+                    # writes None, erasing it on real recovery.
+                    last_detail=reset_detail,
                     updated_at_epoch=time.time(),
                 )
             )
             await self._session.commit()
+        # A fenced reset that matched no row is a CAS miss, not a settlement:
+        # another writer moved the row after the caller's lookup.
+        return bool(getattr(result, "rowcount", 0))
 
     async def purge_retry_circuit(
         self,
@@ -725,17 +863,45 @@ class DurableBridgeRepository:
         session_key_value: str,
         api_key_scope: str,
         expected_updated_at_epoch: float | None = None,
-    ) -> None:
+        expected_admission_generation: int | None = None,
+        expected_consecutive_failures: int | None = None,
+        fence_last_detail: bool = False,
+        expected_last_detail: str | None = None,
+        reset_detail: str | None = None,
+    ) -> bool:
         conditions = [
             HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
             HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
         ]
+        if expected_consecutive_failures is not None:
+            conditions.append(HttpBridgeRetryCircuit.consecutive_failures == expected_consecutive_failures)
+        if fence_last_detail:
+            # A detail-only rewrite — the transitional tombstone supersede —
+            # deliberately moves neither the timestamp nor the admission
+            # generation, so the observed detail is the only fence that can
+            # see it. NULL-safe: an expected NULL matches only NULL.
+            conditions.append(
+                HttpBridgeRetryCircuit.last_detail.is_(None)
+                if expected_last_detail is None
+                else HttpBridgeRetryCircuit.last_detail == expected_last_detail
+            )
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
+            if expected_admission_generation is not None:
+                # A replay claim advances only the admission generation and
+                # leaves the timestamp untouched; without this fence a
+                # stale-row purge racing the claim would delete the active
+                # claimed generation and a later recovery could dispatch a
+                # second replay beside the first.
+                conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
         async with sqlite_writer_section():
-            await self._session.execute(delete(HttpBridgeRetryCircuit).where(*conditions))
+            result = await self._session.execute(delete(HttpBridgeRetryCircuit).where(*conditions))
             await self._session.commit()
+        # A fenced purge that matched nothing is a CAS miss: another replica
+        # moved the row after this worker's lookup, and the caller must
+        # reconcile against the surviving row instead of assuming deletion.
+        return bool(getattr(result, "rowcount", 0)) or expected_updated_at_epoch is None
 
     async def get_session_by_id(self, session_id: str) -> DurableBridgeSessionSnapshot | None:
         row = await self._session.get(HttpBridgeSessionRecord, session_id)
@@ -1073,6 +1239,25 @@ class DurableBridgeRepository:
             values=values,
         )
 
+    async def latest_session_continuity(self, *, session_id: str) -> tuple[str | None, str | None] | None:
+        """Read the durable session's current continuity anchors.
+
+        Returns ``(latest_response_id, latest_turn_state)``, or ``None`` when
+        the session row does not exist. Both anchors are read together because
+        a continuity clear removes both: fencing on the response id alone
+        would let the clear match while a concurrently registered turn state
+        still occupies the row, deleting continuity the caller never proved
+        dead.
+        """
+        result = await self._session.execute(
+            select(
+                HttpBridgeSessionRecord.latest_response_id,
+                HttpBridgeSessionRecord.latest_turn_state,
+            ).where(HttpBridgeSessionRecord.id == session_id)
+        )
+        row = result.first()
+        return None if row is None else (row[0], row[1])
+
     async def rebind_session_account(
         self,
         *,
@@ -1081,11 +1266,26 @@ class DurableBridgeRepository:
         owner_epoch: int,
         account_id: str,
         clear_continuity: bool = False,
+        expected_latest_response_id: object = REBIND_ANCHOR_UNFENCED,
+        expected_latest_turn_state: object = REBIND_ANCHOR_UNFENCED,
     ) -> bool:
-        """Persist a replacement account only while this worker owns the lease."""
+        """Persist a replacement account only while this worker owns the lease.
+
+        ``expected_latest_response_id`` and ``expected_latest_turn_state``
+        fence a continuity clear on the anchors the caller validated: fresh
+        continuity registered by a concurrent completion or turn-state write
+        changes a column, the fenced UPDATE matches zero rows, and the caller
+        observes a failed clear instead of deleting continuity its episode
+        never proved dead.
+        """
 
         async with sqlite_writer_section():
             values: dict[str, object] = {"account_id": account_id}
+            conditions = [
+                HttpBridgeSessionRecord.id == session_id,
+                HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+            ]
             if clear_continuity:
                 values.update(
                     latest_turn_state=None,
@@ -1094,15 +1294,17 @@ class DurableBridgeRepository:
                     latest_input_full_fingerprint=None,
                     latest_pending_tool_calls_json=None,
                 )
-            result = await self._session.execute(
-                update(HttpBridgeSessionRecord)
-                .where(
-                    HttpBridgeSessionRecord.id == session_id,
-                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
-                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
-                )
-                .values(**values)
-            )
+                if expected_latest_response_id is not REBIND_ANCHOR_UNFENCED:
+                    if expected_latest_response_id is None:
+                        conditions.append(HttpBridgeSessionRecord.latest_response_id.is_(None))
+                    else:
+                        conditions.append(HttpBridgeSessionRecord.latest_response_id == expected_latest_response_id)
+                if expected_latest_turn_state is not REBIND_ANCHOR_UNFENCED:
+                    if expected_latest_turn_state is None:
+                        conditions.append(HttpBridgeSessionRecord.latest_turn_state.is_(None))
+                    else:
+                        conditions.append(HttpBridgeSessionRecord.latest_turn_state == expected_latest_turn_state)
+            result = await self._session.execute(update(HttpBridgeSessionRecord).where(*conditions).values(**values))
             if clear_continuity and bool(getattr(result, "rowcount", 0)):
                 await self._clear_aliases_for_session(session_id)
             await self._session.commit()
@@ -3065,8 +3267,73 @@ class DurableBridgeRepository:
         self,
         cutoff_epoch: float,
         *,
+        tombstone_cutoff_epoch: float | None = None,
         batch_size: int = _PURGE_CLOSED_BATCH_SIZE,
     ) -> int:
+        # An anchor_abandoned tombstone guards continuity that outlives the
+        # circuit TTL: reaping it on the circuit schedule would let the
+        # unanchored-delta gate dispatch a context-free request. Tombstones
+        # are purged only past the caller's bridge-retention cutoff, and
+        # preserved entirely when no cutoff is given.
+        non_tombstone = HttpBridgeRetryCircuit.last_detail.is_(None) | (
+            HttpBridgeRetryCircuit.last_detail != _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL
+        )
+        # A replay claim advances only the admission generation and
+        # deliberately leaves the timestamp unchanged, so a claimed
+        # generation near the TTL could be reaped while its replay
+        # is still in flight. Ever-claimed rows get one extra TTL of
+        # grace before the scheduled purge takes them.
+        stale_predicate = (
+            non_tombstone
+            & (HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
+            & (
+                (HttpBridgeRetryCircuit.admission_generation == 0)
+                | (
+                    HttpBridgeRetryCircuit.updated_at_epoch
+                    < cutoff_epoch - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+                )
+            )
+        )
+        if tombstone_cutoff_epoch is not None:
+            # A crash between a poison settle and its registration leaves a
+            # live session storing the poisoned continuity while delta-only
+            # requests keep refreshing its lease; the tombstone's own
+            # updated_at_epoch stays fixed, so an age cutoff alone would
+            # reap the fail-closed fence out from under that live session.
+            # The tombstone falls only when no session still resolves the
+            # key with continuity to protect.
+            session_continuity_exists = (
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.session_key_kind == HttpBridgeRetryCircuit.session_key_kind,
+                    HttpBridgeSessionRecord.session_key_hash == HttpBridgeRetryCircuit.session_key_hash,
+                    HttpBridgeSessionRecord.api_key_scope == HttpBridgeRetryCircuit.api_key_scope,
+                    (HttpBridgeSessionRecord.latest_response_id.is_not(None))
+                    | (HttpBridgeSessionRecord.latest_turn_state.is_not(None)),
+                )
+                .exists()
+            )
+            alias_continuity_exists = (
+                select(HttpBridgeSessionAlias.id)
+                .join(
+                    HttpBridgeSessionRecord,
+                    HttpBridgeSessionAlias.session_id == HttpBridgeSessionRecord.id,
+                )
+                .where(
+                    HttpBridgeSessionAlias.alias_kind == HttpBridgeRetryCircuit.session_key_kind,
+                    HttpBridgeSessionAlias.alias_hash == HttpBridgeRetryCircuit.session_key_hash,
+                    HttpBridgeSessionAlias.api_key_scope == HttpBridgeRetryCircuit.api_key_scope,
+                    (HttpBridgeSessionRecord.latest_response_id.is_not(None))
+                    | (HttpBridgeSessionRecord.latest_turn_state.is_not(None)),
+                )
+                .exists()
+            )
+            live_continuity_exists = session_continuity_exists | alias_continuity_exists
+            stale_predicate = stale_predicate | (
+                (HttpBridgeRetryCircuit.last_detail == _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL)
+                & (HttpBridgeRetryCircuit.updated_at_epoch < tombstone_cutoff_epoch)
+                & ~live_continuity_exists
+            )
         deleted_count = 0
         while True:
             result = await self._session.execute(
@@ -3075,7 +3342,7 @@ class DurableBridgeRepository:
                     HttpBridgeRetryCircuit.session_key_hash,
                     HttpBridgeRetryCircuit.api_key_scope,
                 )
-                .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
+                .where(stale_predicate)
                 .limit(batch_size)
             )
             keys = [tuple(row) for row in result.fetchall()]
@@ -3089,7 +3356,7 @@ class DurableBridgeRepository:
                         .where(HttpBridgeRetryCircuit.session_key_kind == session_key_kind)
                         .where(HttpBridgeRetryCircuit.session_key_hash == session_key_hash)
                         .where(HttpBridgeRetryCircuit.api_key_scope == api_key_scope)
-                        .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
+                        .where(stale_predicate)
                         .returning(HttpBridgeRetryCircuit.session_key_hash)
                     )
                     batch_deleted_count += len(deleted.scalars().all())

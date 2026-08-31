@@ -147,7 +147,7 @@ config:
   # (failure threshold and recovery timeout are fixed application constants)
   circuitBreakerEnabled: true
   # @param config.backpressureMaxConcurrentRequests Max concurrent in-flight requests
-  backpressureMaxConcurrentRequests: 200
+  backpressureMaxConcurrentRequests: 0
   # @param config.shutdownDrainTimeoutSeconds Shared application drain timeout in seconds
   shutdownDrainTimeoutSeconds: 30
   # @param config.httpConnectorLimit Global HTTP connection pool limit

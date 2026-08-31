@@ -3,11 +3,18 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from app.core.errors import (
+    OpenAIErrorParam,
+    is_previous_response_not_found_public_shape,
+    previous_response_stream_incomplete_error,
+    sanitize_public_error_detail,
+)
 from app.core.openai.models import OpenAIError, OpenAIErrorEnvelope, ResponseUsage
+from app.core.openai.parsing import classify_event_type
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.sse import format_sse_data, parse_sse_data_json
@@ -289,7 +296,7 @@ def iter_chat_chunks(
         payload = _parse_data(line)
         if not payload:
             continue
-        event_type = payload.get("type")
+        event_type = classify_event_type(payload)
         if event_type in ("response.output_text.delta", "response.refusal.delta"):
             delta_text = payload.get("delta")
             role = None
@@ -360,9 +367,21 @@ def iter_chat_chunks(
                 if isinstance(maybe_error, dict) and maybe_error:
                     error = maybe_error
             if error is not None:
-                error_payload: dict[str, JsonValue] = {"error": error}
+                error_mapping = cast(Mapping[str, JsonValue], error)
+                parsed_error = _parse_error_mapping(error_mapping)
+                if parsed_error is not None and is_previous_response_not_found_public_shape(
+                    code=parsed_error.code,
+                    param=parsed_error.param_state,
+                    message=parsed_error.message,
+                ):
+                    error_payload = {"error": cast(JsonValue, previous_response_stream_incomplete_error()["error"])}
+                else:
+                    error_payload = {"error": sanitize_public_error_detail(error_mapping)}
             else:
-                error_payload = _default_error_envelope().model_dump(mode="json", exclude_none=True)
+                error_payload = cast(
+                    dict[str, JsonValue],
+                    _default_error_envelope().model_dump(mode="json", exclude_none=True),
+                )
             yield _dump_sse(error_payload)
             yield "data: [DONE]\n\n"
             return
@@ -471,7 +490,7 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> Cha
         payload = _parse_data(line)
         if not payload:
             continue
-        event_type = payload.get("type")
+        event_type = classify_event_type(payload)
         if event_type == "response.output_text.delta":
             delta = payload.get("delta")
             if isinstance(delta, str):
@@ -497,7 +516,21 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> Cha
                 maybe_error = payload.get("error")
                 if isinstance(maybe_error, dict):
                     error = maybe_error
-            terminal_error = _error_envelope_from_payload(error) if error is not None else _default_error_envelope()
+            if error is None:
+                terminal_error = _default_error_envelope()
+            else:
+                error_mapping = cast(Mapping[str, JsonValue], error)
+                parsed_error = _parse_error_mapping(error_mapping)
+                if parsed_error is not None and is_previous_response_not_found_public_shape(
+                    code=parsed_error.code,
+                    param=parsed_error.param_state,
+                    message=parsed_error.message,
+                ):
+                    terminal_error = OpenAIErrorEnvelope(
+                        error=OpenAIError.model_validate(previous_response_stream_incomplete_error()["error"])
+                    )
+                else:
+                    terminal_error = _error_envelope_from_payload(error_mapping)
             continue
         if terminal_error is not None:
             continue
@@ -587,7 +620,7 @@ def _dump_chunk(chunk: ChatCompletionChunk, *, include_usage: bool = False) -> s
     return _dump_sse(payload)
 
 
-def _dump_sse(payload: dict[str, JsonValue]) -> str:
+def _dump_sse(payload: Mapping[str, JsonValue]) -> str:
     return format_sse_data(payload)
 
 
@@ -630,14 +663,38 @@ def _default_error_envelope() -> OpenAIErrorEnvelope:
 
 
 def _error_envelope_from_payload(payload: Mapping[str, JsonValue]) -> OpenAIErrorEnvelope:
-    normalized = _normalize_error_payload(payload)
-    if not normalized:
+    error = _parse_error_mapping(sanitize_public_error_detail(payload))
+    if error is None:
         return _default_error_envelope()
+    return OpenAIErrorEnvelope(error=error)
+
+
+def _parse_error_mapping(payload: Mapping[str, JsonValue]) -> OpenAIError | None:
+    """Parse an upstream error while retaining explicit ``param`` presence."""
+
+    normalized = _normalize_error_payload(payload)
+    if not normalized and "param" not in payload:
+        return None
+    param_state = OpenAIErrorParam.from_mapping(payload)
     try:
         error = OpenAIError.model_validate(normalized)
     except ValidationError:
-        return _default_error_envelope()
-    return OpenAIErrorEnvelope(error=error)
+        message = payload.get("message")
+        error_type = payload.get("type")
+        code = payload.get("code")
+        param = payload.get("param")
+        plan_type = payload.get("plan_type")
+        error = OpenAIError(
+            message=message if isinstance(message, str) else None,
+            type=error_type if isinstance(error_type, str) else None,
+            code=code if isinstance(code, str) else None,
+            param=param if isinstance(param, str) else None,
+            plan_type=plan_type if isinstance(plan_type, str) else None,
+            resets_at=_coerce_number(payload.get("resets_at")),
+            resets_in_seconds=_coerce_number(payload.get("resets_in_seconds")),
+        )
+    error.set_param_state(param_state)
+    return error
 
 
 def _normalize_error_payload(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue]:

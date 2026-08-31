@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import errno
+import json
+import os
+import selectors
 import sqlite3
+import subprocess
+import sys
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,6 +16,51 @@ import pytest
 import app.db.recover as recover_module
 import app.db.sqlite_utils as sqlite_utils_module
 from app.db.backup import create_sqlite_pre_migration_backup
+
+
+def _start_subprocess_lock_holder(db_path: Path) -> subprocess.Popen[str]:
+    script = """
+import sys
+from pathlib import Path
+
+from app.db.sqlite_utils import acquire_sqlite_runstate_lock
+
+connection = acquire_sqlite_runstate_lock(Path(sys.argv[1]))
+print("ready", flush=True)
+sys.stdin.readline()
+connection.rollback()
+connection.close()
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(db_path)],
+        cwd=Path(__file__).resolve().parents[2],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    with selectors.DefaultSelector() as ready_selector:
+        ready_selector.register(process.stdout, selectors.EVENT_READ)
+        assert ready_selector.select(timeout=5), "lock holder did not become ready"
+    assert process.stdout.readline().strip() == "ready"
+    return process
+
+
+def _stop_subprocess(process: subprocess.Popen[str]) -> None:
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+    if process.stdin is not None:
+        process.stdin.close()
+    if process.stdout is not None:
+        process.stdout.close()
+    if process.stderr is not None:
+        process.stderr.close()
 
 
 class _TrackedConnection(sqlite3.Connection):
@@ -472,3 +523,386 @@ def test_recover_rejects_symlink_sidecar_before_cleanup(tmp_path: Path, replace:
     assert source.resolve() == real_source
     assert not output.exists()
     assert not list(tmp_path.glob("store.db.corrupt-*"))
+
+
+def test_runstate_round_trips(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is True
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.RUNNING
+
+    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN) is True
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.CLEAN
+
+
+def test_runstate_lifetime_lock_is_exclusive_and_reusable(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    first = sqlite_utils_module.acquire_sqlite_runstate_lock(db_path)
+    try:
+        with pytest.raises(sqlite_utils_module.SqliteRunStateLockError, match="lifetime lock"):
+            sqlite_utils_module.acquire_sqlite_runstate_lock(db_path)
+    finally:
+        sqlite_utils_module.release_sqlite_runstate_lock(first)
+
+    second = sqlite_utils_module.acquire_sqlite_runstate_lock(db_path)
+    sqlite_utils_module.release_sqlite_runstate_lock(second)
+    assert sqlite_utils_module.sqlite_runstate_lock_path(db_path).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="subprocess lock semantics are exercised on POSIX")
+def test_runstate_lifetime_lock_contends_across_processes(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    holder = _start_subprocess_lock_holder(db_path)
+    try:
+        with pytest.raises(sqlite_utils_module.SqliteRunStateLockError, match="lifetime lock"):
+            sqlite_utils_module.acquire_sqlite_runstate_lock(db_path)
+
+        assert holder.stdin is not None
+        holder.stdin.write("release\n")
+        holder.stdin.flush()
+        assert holder.wait(timeout=5) == 0
+
+        replacement = sqlite_utils_module.acquire_sqlite_runstate_lock(db_path)
+        sqlite_utils_module.release_sqlite_runstate_lock(replacement)
+    finally:
+        _stop_subprocess(holder)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="subprocess lock semantics are exercised on POSIX")
+def test_runstate_lifetime_lock_releases_after_process_death(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    holder = _start_subprocess_lock_holder(db_path)
+    try:
+        holder.kill()
+        assert holder.wait(timeout=5) is not None
+
+        replacement = sqlite_utils_module.acquire_sqlite_runstate_lock(db_path)
+        sqlite_utils_module.release_sqlite_runstate_lock(replacement)
+    finally:
+        _stop_subprocess(holder)
+
+
+def test_runstate_reads_unrecognized_content_as_unknown(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    sqlite_utils_module.sqlite_runstate_path(db_path).write_text("half-written", encoding="utf-8")
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
+@pytest.mark.parametrize("db_exists", [True, False], ids=["database-present", "database-missing"])
+def test_runstate_clean_with_null_identity_is_unknown(tmp_path: Path, db_exists: bool) -> None:
+    """A legacy or hand-written null identity must never certify a clean close."""
+    db_path = tmp_path / "store.db"
+    if db_exists:
+        db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.sqlite_runstate_path(db_path).write_text(
+        '{"state": "clean", "identity": null}', encoding="utf-8"
+    )
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        pytest.param("not-an-object", id="scalar"),
+        pytest.param({"dev": 1}, id="missing-fields"),
+        pytest.param(
+            {"dev": True, "ino": 1, "size": 1, "mtime_ns": 1, "ctime_ns": 1},
+            id="bool-is-not-an-integer",
+        ),
+    ],
+)
+def test_runstate_running_with_malformed_identity_remains_untrusted(tmp_path: Path, identity: object) -> None:
+    """A malformed identity cannot become a clean-skip input."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.sqlite_runstate_path(db_path).write_text(
+        json.dumps({"state": "running", "identity": identity}),
+        encoding="utf-8",
+    )
+
+    record = sqlite_utils_module.read_sqlite_runstate_record(db_path)
+    assert record is not None
+    assert record.state is sqlite_utils_module.SqliteRunState.RUNNING
+    assert record.identity is None
+
+
+def test_runstate_recursive_json_is_unknown(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.sqlite_runstate_path(db_path).write_text("{}", encoding="utf-8")
+
+    def _raise_recursion_error(_raw: str) -> object:
+        raise RecursionError("run-state JSON nesting is too deep")
+
+    monkeypatch.setattr(sqlite_utils_module.json, "loads", _raise_recursion_error)
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
+def test_runstate_write_failure_clears_a_stale_clean_marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A store left mid-write must never read back as cleanly closed."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.CLEAN
+
+    def _explode(*_args: object, **_kwargs: object) -> None:
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(os, "replace", _explode)
+
+    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is False
+
+    monkeypatch.undo()
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+    assert not sqlite_utils_module.sqlite_runstate_path(db_path).exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_runstate_write_syncs_directory_after_replace_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Cleanup of an old clean marker is durable even when replace fails."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+    directory_syncs: list[Path] = []
+
+    def _replace_failure(*_args: object, **_kwargs: object) -> None:
+        raise OSError("replace failed")
+
+    def _record_directory_sync(directory: Path) -> bool:
+        directory_syncs.append(directory)
+        return True
+
+    monkeypatch.setattr(os, "replace", _replace_failure)
+    monkeypatch.setattr(sqlite_utils_module, "_fsync_directory", _record_directory_sync)
+
+    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is False
+    assert directory_syncs == [db_path.parent]
+    assert not sqlite_utils_module.sqlite_runstate_path(db_path).exists()
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation is not available on all Windows test runners")
+def test_runstate_write_does_not_follow_predictable_temp_symlink(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    victim = tmp_path / "victim"
+    victim.write_text("keep me", encoding="utf-8")
+    predictable_tmp = sqlite_utils_module.sqlite_runstate_path(db_path).with_name(
+        f"{sqlite_utils_module.sqlite_runstate_path(db_path).name}.{os.getpid()}.tmp"
+    )
+    predictable_tmp.symlink_to(victim)
+    try:
+        assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is True
+        assert victim.read_text(encoding="utf-8") == "keep me"
+    finally:
+        predictable_tmp.unlink(missing_ok=True)
+
+
+def test_runstate_clean_is_ignored_after_the_database_file_changes(tmp_path: Path) -> None:
+    """Restoring a backup must not inherit the previous file's clean record."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite-original")
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.CLEAN
+
+    db_path.write_bytes(b"sqlite-restored-from-a-backup")
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
+def test_runstate_running_survives_database_writes(tmp_path: Path) -> None:
+    """Only the clean record is fenced; a running record stays readable."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING)
+
+    db_path.write_bytes(b"sqlite-after-a-few-writes")
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.RUNNING
+
+
+def test_runstate_reads_invalid_utf8_as_unknown(tmp_path: Path) -> None:
+    """A corrupt sidecar must not abort startup before the integrity check."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.sqlite_runstate_path(db_path).write_bytes(b'{"state": "clean", "\xff\xfe": 1}')
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
+def test_runstate_clean_is_ignored_after_a_timestamp_preserving_restore(tmp_path: Path) -> None:
+    """`tar -x` and `cp -p` reproduce size and mtime; the inode still moves."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"A" * 4096)
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+    original = db_path.stat()
+
+    db_path.unlink()
+    db_path.write_bytes(b"B" * 4096)
+    os.utime(db_path, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+    restored = db_path.stat()
+    assert restored.st_size == original.st_size
+    assert restored.st_mtime_ns == original.st_mtime_ns
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
+def test_runstate_write_syncs_the_payload_and_the_directory_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A lost run-state transition would let the next startup skip the scan."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    payload_syncs: list[int] = []
+    directory_syncs: list[Path] = []
+    real_fsync = os.fsync
+
+    def _record_payload(fd: int) -> None:
+        payload_syncs.append(fd)
+        real_fsync(fd)
+
+    def _record_directory(directory: Path) -> bool:
+        directory_syncs.append(directory)
+        return True
+
+    monkeypatch.setattr(os, "fsync", _record_payload)
+    monkeypatch.setattr(sqlite_utils_module, "_fsync_directory", _record_directory)
+
+    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN) is True
+
+    assert len(payload_syncs) == 1
+    assert directory_syncs == [sqlite_utils_module.sqlite_runstate_path(db_path).parent]
+
+
+def test_runstate_write_fails_closed_when_the_directory_sync_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Storage that cannot confirm durability must not leave a trusted record."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+
+    monkeypatch.setattr(sqlite_utils_module, "_fsync_directory", lambda _directory: False)
+
+    with pytest.raises(sqlite_utils_module.SqliteRunStateDurabilityError, match="persist removal"):
+        sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING)
+
+    monkeypatch.undo()
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+    assert not sqlite_utils_module.sqlite_runstate_path(db_path).exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_runstate_write_syncs_directory_again_after_cleanup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A failed post-replace sync must durably fence the cleanup unlink."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+    directory_syncs: list[Path] = []
+    outcomes = iter([False, True])
+
+    def _sync(directory: Path) -> bool:
+        directory_syncs.append(directory)
+        return next(outcomes)
+
+    monkeypatch.setattr(sqlite_utils_module, "_fsync_directory", _sync)
+
+    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is False
+    assert directory_syncs == [db_path.parent, db_path.parent]
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_runstate_write_aborts_when_failed_marker_cannot_be_removed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unremovable stale marker must stop startup rather than stay trusted."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+    target = sqlite_utils_module.sqlite_runstate_path(db_path)
+    real_unlink = Path.unlink
+
+    def _fail_target_unlink(path: Path, *, missing_ok: bool = False) -> None:
+        if path == target:
+            raise OSError("sidecar is locked")
+        real_unlink(path, missing_ok=missing_ok)
+
+    def _fail_replace(*_args: object, **_kwargs: object) -> None:
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(os, "replace", _fail_replace)
+    monkeypatch.setattr(Path, "unlink", _fail_target_unlink)
+
+    with pytest.raises(sqlite_utils_module.SqliteRunStateDurabilityError, match="remove failed SQLite run-state files"):
+        sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING)
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.CLEAN
+
+
+def test_fsync_directory_reports_success_where_directory_handles_do_not_exist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Windows has no directory handle to sync, and that is not a failure."""
+    attempts: list[object] = []
+
+    def _record(*args: object, **_kwargs: object) -> int:
+        attempts.append(args)
+        raise AssertionError("the open must not be attempted on such a platform")
+
+    monkeypatch.setattr(sqlite_utils_module, "_DIRECTORY_FSYNC_SUPPORTED", False)
+    monkeypatch.setattr(os, "open", _record)
+
+    assert sqlite_utils_module._fsync_directory(tmp_path) is True
+    assert attempts == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PermissionError(errno.EACCES, "permission denied"),
+        FileNotFoundError(errno.ENOENT, "no such directory"),
+        OSError(errno.EMFILE, "too many open files"),
+        OSError(errno.EIO, "input/output error"),
+    ],
+    ids=["eacces", "enoent", "emfile", "eio"],
+)
+def test_fsync_directory_reports_failure_when_the_directory_cannot_be_opened(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error: OSError
+) -> None:
+    """A real open failure means the rename is unproven and must fail closed."""
+
+    def _fail(*_args: object, **_kwargs: object) -> int:
+        raise error
+
+    monkeypatch.setattr(sqlite_utils_module, "_DIRECTORY_FSYNC_SUPPORTED", True)
+    monkeypatch.setattr(os, "open", _fail)
+
+    assert sqlite_utils_module._fsync_directory(tmp_path) is False
+
+
+def test_fsync_directory_reports_failure_when_the_sync_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The sync path is exercised on every platform, not only where it runs."""
+    placeholder = tmp_path / "placeholder"
+    placeholder.write_bytes(b"")
+    real_open = os.open
+
+    def _open_placeholder(*_args: object, **_kwargs: object) -> int:
+        return real_open(placeholder, os.O_RDONLY)
+
+    def _fail(_fd: int) -> None:
+        raise OSError(errno.EIO, "input/output error")
+
+    monkeypatch.setattr(sqlite_utils_module, "_DIRECTORY_FSYNC_SUPPORTED", True)
+    monkeypatch.setattr(os, "open", _open_placeholder)
+    monkeypatch.setattr(os, "fsync", _fail)
+
+    assert sqlite_utils_module._fsync_directory(tmp_path) is False

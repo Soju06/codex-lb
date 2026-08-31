@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -366,6 +367,31 @@ async def test_normalize_reasoning_summary_stream_cleans_complete_marker_inside_
     assert payload["delta"] == "Plan\nNext"
 
 
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_flushes_before_typeless_error() -> None:
+    pending = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "Plan\n\n<!-- -->",
+        }
+    )
+    typeless_error = "data: " + json.dumps({"error": {"code": "upstream_error"}}) + "\n\n"
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_reasoning_summary_stream(_iter_blocks(pending, typeless_error))
+    ]
+
+    assert blocks[0] != typeless_error
+    first_payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert first_payload is not None
+    assert first_payload["delta"] == "Plan"
+    assert blocks[1] == typeless_error
+
+
 def test_normalize_reasoning_summary_part_removes_only_standalone_placeholder() -> None:
     payload, violation = proxy_api_module._normalize_public_stream_payload(
         {
@@ -707,6 +733,177 @@ async def test_normalize_public_responses_stream_masks_initial_previous_response
     assert error["code"] == "stream_incomplete"
     assert error["message"] == "Upstream websocket closed before response.completed"
     assert "param" not in error
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_masks_typeless_previous_response_not_found() -> None:
+    raw_response_id = "resp_typeless_stale"
+    source = (
+        "data: "
+        + json.dumps(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "previous_response_not_found",
+                    "message": f"Previous response with id '{raw_response_id}' not found.",
+                    "param": "previous_response_id",
+                }
+            }
+        )
+        + "\n\n"
+    )
+
+    blocks = [block async for block in proxy_api_module._normalize_public_responses_stream(_iter_blocks(source))]
+
+    joined = "".join(blocks)
+    assert "previous_response_not_found" not in joined
+    assert raw_response_id not in joined
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    payloads = [payload for payload in payloads if payload is not None]
+    assert [payload["type"] for payload in payloads] == ["response.created", "response.failed"]
+    response = payloads[1]["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "stream_incomplete"
+    assert "param" not in error
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_masks_nested_stale_error_but_keeps_response_id() -> None:
+    raw_response_id = "resp_nested_stale"
+    source = (
+        "data: "
+        + json.dumps(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": raw_response_id,
+                    "status": "failed",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "previous_response_not_found",
+                        "message": f"Previous response with id '{raw_response_id}' not found.",
+                        "param": "previous_response_id",
+                    },
+                },
+            }
+        )
+        + "\n\n"
+    )
+
+    blocks = [block async for block in proxy_api_module._normalize_public_responses_stream(_iter_blocks(source))]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    payloads = [payload for payload in payloads if payload is not None]
+    response = payloads[-1]["response"]
+    assert isinstance(response, dict)
+    assert response["id"] == raw_response_id
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error == {
+        "message": "Upstream websocket closed before response.completed",
+        "type": "server_error",
+        "code": "stream_incomplete",
+    }
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_payload_recognizes_typeless_error_event() -> None:
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks('data: {"error":{"code":"rate_limit_exceeded","type":"rate_limit_error"}}\n\n')
+    )
+
+    assert result.error is not None
+    assert result.error.code == "rate_limit_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_sanitizes_native_malformed_error_param() -> None:
+    source = 'event: error\ndata: {"type":"error","error":{"code":"upstream_error","message":"bad","param":{}}}\n\n'
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(source),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert blocks[-1] == "data: [DONE]\n\n"
+    payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert payload is not None
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert "param" not in error
+    assert payload["type"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_sanitizes_top_level_and_nested_error_params() -> None:
+    source = (
+        'data: {"type":"error","param":[],"status":400,'
+        '"error":{"code":"upstream_error","message":"bad","param":" model "}}\n\n'
+    )
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(source),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert payload is not None
+    assert payload["type"] == "error"
+    assert payload["status"] == 400
+    assert "param" not in payload
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["param"] == "model"
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_sanitizes_response_failed_top_level_param() -> None:
+    source = (
+        'data: {"type":"response.failed","param":{},"response":{"id":"resp_1",'
+        '"error":{"code":"upstream_error","message":"bad","param":[]}}}\n\n'
+    )
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(source),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert payload is not None
+    assert payload["type"] == "response.failed"
+    assert "param" not in payload
+    response = payload["response"]
+    assert isinstance(response, dict)
+    assert response["id"] == "resp_1"
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert "param" not in error
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_keeps_native_valid_error_frame_byte_identical() -> None:
+    source = 'data: {"type":"error","error":{"code":"upstream_error","message":"bad","param":"model"}}\n\n'
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(source),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert blocks == [source, "data: [DONE]\n\n"]
 
 
 @pytest.mark.asyncio

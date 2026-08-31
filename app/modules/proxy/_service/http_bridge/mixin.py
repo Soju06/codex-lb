@@ -261,21 +261,20 @@ class _HTTPBridgeMixin(
                 request_id=_hash_identifier(session.key.affinity_key),
             )
 
-    async def _drain_http_bridge_background_cleanup_tasks(self, *, reason: str) -> None:
+    async def _drain_http_bridge_background_cleanup_tasks(self, *, reason: str) -> bool:
         tasks = [
             task
             for task in self._background_cleanup_tasks
-            if not task.done()
-            and (
+            if (
                 task.get_name().startswith("proxy-http_bridge_session_close-")
                 or task.get_name().startswith("http-bridge-close-")
                 or task.get_name().startswith("cancelled-task-cleanup-")
             )
         ]
         if not tasks:
-            return
+            return not self._http_bridge_background_cleanup_failed
         try:
-            await asyncio.wait_for(
+            results = await asyncio.wait_for(
                 asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True),
                 timeout=_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
             )
@@ -286,6 +285,9 @@ class _HTTPBridgeMixin(
                 len(tasks),
                 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
             )
+            return False
+        self._http_bridge_background_cleanup_failed |= any(isinstance(result, BaseException) for result in results)
+        return not self._http_bridge_background_cleanup_failed
 
     async def _fail_http_bridge_inflight_session_creation(
         self,
@@ -1623,13 +1625,15 @@ class _HTTPBridgeMixin(
                 )
             return created_session
 
-    async def mark_http_bridge_draining(self) -> None:
+    async def mark_http_bridge_draining(self) -> bool:
         try:
             await self._durable_bridge.mark_instance_draining(
                 instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
             )
         except Exception:
             logger.warning("Failed to mark durable HTTP bridge sessions draining", exc_info=True)
+            return False
+        return True
 
     def _prune_http_bridge_sessions_locked(self) -> list["_HTTPBridgeSession"]:
         now = _service_time().monotonic()

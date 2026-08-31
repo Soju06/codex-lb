@@ -57,6 +57,50 @@ class TestSqlitePathFromUrlWindows:
     def test_memory_database_returns_none(self) -> None:
         assert sqlite_db_path_from_url("sqlite+aiosqlite:///:memory:") is None
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "sqlite+aiosqlite:///file:shared?mode=memory&cache=shared&uri=true",
+            "sqlite:///file:shared?uri=true&cache=shared&mode=memory",
+            "sqlite+aiosqlite:///file::memory:?cache=shared&uri=true",
+        ],
+    )
+    def test_uri_memory_database_returns_none(self, url: str) -> None:
+        """URI-mode memory databases must not receive file sidecars."""
+        assert sqlite_db_path_from_url(url) is None
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            (
+                "sqlite+aiosqlite:///file:shared?mode=rwc&uri=true",
+                Path("shared"),
+            ),
+            (
+                "sqlite+aiosqlite:///file:/tmp/store.db?mode=rwc&uri=true",
+                Path("/tmp/store.db"),
+            ),
+            (
+                "sqlite+aiosqlite:///file:/tmp/codex%20lb/store.db?mode=rwc&uri=true",
+                Path("/tmp/codex lb/store.db"),
+            ),
+        ],
+    )
+    def test_uri_file_database_resolves_actual_filesystem_path(self, url: str, expected: Path) -> None:
+        """URI-mode file databases need sidecars beside SQLite's real file."""
+        assert sqlite_db_path_from_url(url) == expected
+
+    def test_file_uri_without_uri_mode_keeps_literal_path(self) -> None:
+        assert sqlite_db_path_from_url("sqlite+aiosqlite:///file:shared?mode=memory&cache=shared") == Path(
+            "file:shared"
+        )
+
+    def test_file_uri_tilde_is_not_expanded(self) -> None:
+        assert sqlite_db_path_from_url("sqlite+aiosqlite:///file:~/store.db?uri=true") == Path("~/store.db")
+
+    def test_file_uri_unsupported_authority_is_not_a_lifecycle_path(self) -> None:
+        assert sqlite_db_path_from_url("sqlite+aiosqlite:///file://remote/store.db?uri=true") is None
+
     def test_normalize_decodes_percent_encoded_file_path(self) -> None:
         assert normalize_sqlite_url(ENCODED_WINDOWS_URL) == f"sqlite:///{DECODED_WINDOWS_PATH}"
 

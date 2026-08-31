@@ -98,7 +98,7 @@ class _HTTPBridgeSessionRegistryMixin:
         self._http_bridge_sessions = {}
         self._http_bridge_detached_sessions = {}
 
-    async def close_all_http_bridge_sessions(self: _HTTPBridgeServiceProtocol) -> None:
+    async def close_all_http_bridge_sessions(self: _HTTPBridgeServiceProtocol) -> bool:
         async with self._http_bridge_lock:
             sessions_to_close, inflight_futures = self._take_all_http_bridge_sessions_locked()
         shutdown_error = ProxyResponseError(
@@ -110,7 +110,7 @@ class _HTTPBridgeSessionRegistryMixin:
             ),
         )
 
-        async def finish_shutdown() -> None:
+        async def finish_shutdown() -> bool:
             for inflight_future in inflight_futures:
                 if inflight_future.done():
                     continue
@@ -123,7 +123,7 @@ class _HTTPBridgeSessionRegistryMixin:
                 *(self._close_http_bridge_session(session) for session in sessions_to_close),
                 return_exceptions=True,
             )
-            await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
+            background_cleanup_drained = await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
             # Session/background cleanup may still enqueue durable operation
             # events, so the spooler must outlive both. Close it before
             # propagating an individual session-close failure: the batcher's
@@ -136,11 +136,13 @@ class _HTTPBridgeSessionRegistryMixin:
             for result in close_results:
                 if isinstance(result, BaseException):
                     raise result
+            return background_cleanup_drained
 
         shutdown_task = asyncio.create_task(finish_shutdown(), name="http-bridge-shutdown-close-all")
-        _, cancellation = await _await_task_deferring_cancellation(shutdown_task)
+        result, cancellation = await _await_task_deferring_cancellation(shutdown_task)
         if cancellation is not None:
             raise cancellation
+        return result
 
     async def _register_http_bridge_turn_state(
         self: _HTTPBridgeServiceProtocol,
@@ -377,7 +379,12 @@ class _HTTPBridgeSessionRegistryMixin:
             local_alias_was_published=not defer_durable_publication,
         )
         if not defer_durable_publication:
-            return True
+            # The in-memory alias stands either way, but the caller's
+            # quarantine clear and supersession are gated on the durable
+            # anchor actually advancing: a swallowed durable failure here
+            # left the old poisoned anchor stored for other replicas while
+            # this worker cleared its only protection.
+            return durable_result == DurableBridgeAliasRegistration.REGISTERED
         if durable_result != DurableBridgeAliasRegistration.REGISTERED:
             return False
         async with self._http_bridge_lock:

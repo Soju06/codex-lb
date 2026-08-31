@@ -748,7 +748,7 @@ async def test_release_deletes_own_row_and_demotes(monkeypatch: pytest.MonkeyPat
     election = leader_election_module.LeaderElection(leader_id="node-a")
     assert await election.try_acquire() is True
 
-    await election.release()
+    assert await election.release() is True
 
     assert election.is_leader is False
     assert isinstance(session.statements[1], Delete)
@@ -768,7 +768,7 @@ async def test_release_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     election = leader_election_module.LeaderElection(leader_id="node-a")
     election._is_leader = True
 
-    await election.release()
+    assert await election.release() is False
 
     assert election.is_leader is False
 
@@ -845,7 +845,7 @@ async def test_release_swallows_database_locked_at_debug(
     election = leader_election_module.LeaderElection(leader_id="node-a")
     election._is_leader = True
     with caplog.at_level(logging.DEBUG, logger="app.core.scheduling.leader_election"):
-        await election.release()
+        assert await election.release() is False
 
     assert election.is_leader is False
     assert not any("Failed to release scheduler leader lease" in r.getMessage() for r in caplog.records)
@@ -1152,7 +1152,7 @@ async def test_release_waits_for_detached_body_then_deletes_lease(monkeypatch: p
     election, release, body_finished = await _detach_shielded_body(monkeypatch, session)
 
     asyncio.get_running_loop().call_later(0.1, release.set)
-    await election.release()
+    assert await election.release() is True
 
     assert body_finished.is_set()
     assert election.is_leader is False
@@ -1174,7 +1174,7 @@ async def test_release_skips_delete_while_detached_body_still_draining(monkeypat
     monkeypatch.setattr(leader_election_module, "_RELEASE_DRAIN_GRACE_SECONDS", 0.2)
     statements_before_release = len(session.statements)
 
-    await election.release()
+    assert await election.release() is False
 
     assert not body_finished.is_set()
     assert election.is_leader is False
@@ -1528,7 +1528,7 @@ async def test_release_renews_lease_while_detached_body_drains(monkeypatch: pyte
     assert not body_done.is_set()
 
     # Release runs concurrently with the still-draining detached body.
-    release_task: asyncio.Task[None] = asyncio.ensure_future(election.release())
+    release_task: asyncio.Task[bool] = asyncio.ensure_future(election.release())
 
     # Let release wait through several renew intervals (renew_interval = 1s)
     # while the body is still draining. On the pre-fix code release waits without
@@ -1542,7 +1542,7 @@ async def test_release_renews_lease_while_detached_body_drains(monkeypatch: pyte
 
     # The body finishes draining; release then deletes the row it still owns.
     release_body.set()
-    await release_task
+    assert await release_task is True
 
     assert body_done.is_set()
     assert election.is_leader is False
@@ -1618,9 +1618,9 @@ async def test_release_keeper_renews_across_cross_scheduler_stop_gap(monkeypatch
     # The final release runs: it stops the keeper (handing renewal to its own
     # drain), drains the body — here we let it finish — then deletes the row it
     # still owns.
-    release_task: asyncio.Task[None] = asyncio.ensure_future(election.release())
+    release_task: asyncio.Task[bool] = asyncio.ensure_future(election.release())
     release_body.set()
-    await release_task
+    assert await release_task is True
 
     assert body_done.is_set()
     assert election.is_leader is False

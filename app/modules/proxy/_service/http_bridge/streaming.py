@@ -80,9 +80,12 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
     _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR,
     _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR,
+    _await_task_deferring_cancellation,
     _bind_http_bridge_proxy_injected_anchor,
     _capture_http_bridge_denied_anchor_fence,
     _effective_http_bridge_idle_ttl_seconds,
+    _http_bridge_abandonment_may_settle_circuit,
+    _http_bridge_continuity_bound_without_safe_replay,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_eventless_budget_seconds,
@@ -124,8 +127,14 @@ from app.modules.proxy._service.http_bridge.owner_forwarding import (
     _owner_forward_failure_allows_local_recovery,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
-    _http_bridge_quarantine_generation,
+    _http_bridge_quarantine_clear_fence,
+    _http_bridge_session_key_poison_quarantined,
     _http_bridge_session_key_quarantined,
+)
+from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
+    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
+    _http_bridge_retry_circuit_suppression_message,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _build_rewritten_stream_response_failed_event,
@@ -264,16 +273,8 @@ from app.modules.proxy.replay_safety import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
+
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
-
-
-def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketRequestState) -> bool:
-    """Return whether retrying would require replaying an unsafe continuation."""
-    if request_state.previous_response_id is not None:
-        return not (request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text)
-    return request_state.hard_continuity_anchor and not (
-        request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
-    )
 
 
 def _http_bridge_durable_recovery_predecessor_proven(request_state: _WebSocketRequestState) -> bool:
@@ -1500,6 +1501,15 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_fresh_bridge_proof: _VerifiedDurableFullResend | None = None
         force_local_recovery_creation = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
+        # First-touch circuit load before any anchor planning: an expired
+        # at-threshold poison row recorded by another replica arms this
+        # worker's quarantine here, so the suppression checks below see it
+        # instead of planning the poisoned anchor into the probe's payload.
+        await self._ensure_http_bridge_retry_circuit_loaded_for_key(
+            bridge_session_key,
+            request_model=payload.model,
+        )
+        first_touch_circuit_key = bridge_session_key
         # Set when the quarantine check below suppresses the durable-anchor
         # injection for a full-resend payload; the session hydration and the
         # session-level anchor injection further down must honor it so the
@@ -1661,6 +1671,16 @@ class _HTTPBridgeStreamingMixin:
                 durable_lookup.canonical_key,
                 bridge_session_key.api_key_id,
             )
+            if bridge_session_key != first_touch_circuit_key:
+                # Continuity resolved through a turn-state, previous-response,
+                # or session alias whose canonical key differs from the
+                # incoming one: the poison row lives under the canonical key,
+                # so the pre-planning load runs again for it before the
+                # suppression checks below consult its quarantine.
+                await self._ensure_http_bridge_retry_circuit_loaded_for_key(
+                    bridge_session_key,
+                    request_model=payload.model,
+                )
             live_local_session_exists = await self._http_bridge_has_live_local_session(
                 key=bridge_session_key,
                 incoming_turn_state=incoming_turn_state_header,
@@ -1677,7 +1697,23 @@ class _HTTPBridgeStreamingMixin:
                 and durable_lookup.latest_response_id is not None
                 and (not payload_looks_like_full_resend or durable_anchor_trimmable)
             )
-            if payload_looks_like_full_resend and _http_bridge_session_key_quarantined(self, bridge_session_key):
+            fresh_reattach_anchor_tombstoned = False
+            if payload_looks_like_full_resend and not _http_bridge_session_key_quarantined(self, bridge_session_key):
+                # A transitional abandonment tombstone fences the stored
+                # anchor the same way a quarantine does: a crash between a
+                # poison settle and its registration leaves the old
+                # poisoned anchor stored behind a zero-count tombstone that
+                # arms no quarantine, and injecting it here would defeat
+                # the crash-safe settle-to-registration transition.
+                async with self._http_bridge_retry_circuit_lock:
+                    tombstone_state = self._http_bridge_retry_circuits.get(bridge_session_key)
+                fresh_reattach_anchor_tombstoned = bool(
+                    tombstone_state is not None
+                    and tombstone_state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                )
+            if payload_looks_like_full_resend and (
+                _http_bridge_session_key_quarantined(self, bridge_session_key) or fresh_reattach_anchor_tombstoned
+            ):
                 # The previous attach on this key proved silent/wedged
                 # (#1534). The client's own payload already carries the full
                 # conversation, so send it unanchored on the fresh path
@@ -2896,6 +2932,51 @@ class _HTTPBridgeStreamingMixin:
         has_previous_response_id = (
             proxy_injected_previous_response_id or effective_payload.previous_response_id is not None
         )
+        if not has_previous_response_id and not _http_bridge_payload_looks_like_full_resend(effective_payload):
+            # A delta-only payload with no anchor anywhere relies on server
+            # memory this proxy may have just abandoned. When the key's
+            # poison quarantine is active — or the durable circuit row still
+            # records the poison episode, which is what another replica or a
+            # restarted worker sees — dispatching it unanchored would start a
+            # new conversation and silently drop the prior context, which
+            # the delta-only contract forbids. Fail closed instead so the
+            # client resends its full history.
+            unanchored_delta_poisoned = _http_bridge_session_key_poison_quarantined(self, bridge_session_key)
+            if not unanchored_delta_poisoned:
+                await self._load_http_bridge_retry_circuit(session)
+                unanchored_delta_poisoned = _http_bridge_session_key_poison_quarantined(self, bridge_session_key)
+            if not unanchored_delta_poisoned:
+                # A settled abandonment leaves neither a quarantine nor a
+                # poison row; the tombstone detail on the zeroed circuit row
+                # is the durable record a restarted worker or another
+                # replica reads before dispatching a delta as a brand-new
+                # conversation.
+                async with self._http_bridge_retry_circuit_lock:
+                    tombstone_state = self._http_bridge_retry_circuits.get(bridge_session_key)
+                unanchored_delta_poisoned = bool(
+                    tombstone_state is not None
+                    and tombstone_state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                )
+            if unanchored_delta_poisoned:
+                _log_http_bridge_event(
+                    "previous_response_poisoned_anchor_fail_fast",
+                    bridge_session_key,
+                    account_id=None,
+                    model=effective_payload.model,
+                    detail="outcome=unanchored_delta_fail_closed",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                    owner_check_applied=True,
+                )
+                raise ProxyResponseError(
+                    404,
+                    openai_error(
+                        "bridge_previous_response_not_found",
+                        "The conversation state this request relies on was abandoned "
+                        "after repeated upstream failures; resend the full "
+                        "conversation history or start a new conversation.",
+                    ),
+                )
         incoming_input = effective_payload.input
         stored_count = session.last_completed_input_count
         stored_fingerprint = session.last_completed_input_prefix_fingerprint
@@ -3055,6 +3136,16 @@ class _HTTPBridgeStreamingMixin:
                             "HTTP response recovery operation fence is unavailable; retry the request.",
                         ),
                     )
+
+                def spool_reset_failure() -> ProxyResponseError:
+                    return ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "HTTP response recovery spool could not be reset; retry the request.",
+                        ),
+                    )
+
                 reset_operation_event_spool = getattr(self._durable_bridge, "reset_operation_event_spool", None)
                 if not callable(reset_operation_event_spool):
                     if not required:
@@ -3069,20 +3160,43 @@ class _HTTPBridgeStreamingMixin:
                 assert recovery_request_state.operation_id is not None
                 assert recovery_session.durable_session_id is not None
                 assert recovery_session.durable_owner_epoch is not None
-                reset_ok = await reset_operation_event_spool(
-                    operation_id=recovery_request_state.operation_id,
-                    session_id=recovery_session.durable_session_id,
-                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                    owner_epoch=recovery_session.durable_owner_epoch,
-                )
-                if not reset_ok:
-                    raise ProxyResponseError(
-                        502,
-                        openai_error(
-                            "bridge_continuity_persistence_failed",
-                            "HTTP response recovery spool could not be reset; retry the request.",
-                        ),
+                try:
+                    reset_ok = await reset_operation_event_spool(
+                        operation_id=recovery_request_state.operation_id,
+                        session_id=recovery_session.durable_session_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=recovery_session.durable_owner_epoch,
                     )
+                except Exception as reset_exc:
+                    if not required:
+                        logger.warning(
+                            "Best-effort HTTP bridge recovery spool reset failed request_id=%s operation_id=%s",
+                            recovery_request_state.request_id,
+                            recovery_request_state.operation_id,
+                            exc_info=True,
+                        )
+                        return
+                    logger.warning(
+                        "Required HTTP bridge recovery spool reset failed request_id=%s operation_id=%s",
+                        recovery_request_state.request_id,
+                        recovery_request_state.operation_id,
+                        exc_info=True,
+                    )
+                    raise spool_reset_failure() from reset_exc
+                if not reset_ok:
+                    if not required:
+                        logger.warning(
+                            "Best-effort HTTP bridge recovery spool reset declined request_id=%s operation_id=%s",
+                            recovery_request_state.request_id,
+                            recovery_request_state.operation_id,
+                        )
+                        return
+                    logger.warning(
+                        "Required HTTP bridge recovery spool reset declined request_id=%s operation_id=%s",
+                        recovery_request_state.request_id,
+                        recovery_request_state.operation_id,
+                    )
+                    raise spool_reset_failure()
 
             async def capture_verified_stale_anchor_circuit_generation(
                 recovery_session: "_HTTPBridgeSession",
@@ -3109,7 +3223,12 @@ class _HTTPBridgeStreamingMixin:
             ) -> None:
                 nonlocal verified_stale_anchor_quarantine_generation
 
-                verified_stale_anchor_quarantine_generation = _http_bridge_quarantine_generation(
+                # Provenance-aware capture: the completion's clear fences a
+                # poison entry on its poison provenance, so capturing the raw
+                # generation here would mismatch whenever a weaker fence
+                # bumped it before this replay began, refusing the clear for
+                # a source the replay just recovered.
+                verified_stale_anchor_quarantine_generation = _http_bridge_quarantine_clear_fence(
                     self,
                     recovery_session.key,
                 )
@@ -3548,6 +3667,11 @@ class _HTTPBridgeStreamingMixin:
             else:
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
                     bridge_durable_recover_total.labels(path="local_previous_response_error").inc()
+                await reset_previous_response_recovery_operation_spool(
+                    session,
+                    request_state,
+                    required=False,
+                )
                 _log_http_bridge_event(
                     "previous_response_recover_local",
                     bridge_session_key,
@@ -3578,6 +3702,58 @@ class _HTTPBridgeStreamingMixin:
                 )
                 if retry_injected_input is not None:
                     retry_payload = retry_payload.model_copy(update={"input": retry_injected_input})
+                if explicit_previous_response_rejection and _http_bridge_session_key_poison_quarantined(
+                    self, bridge_session_key
+                ):
+                    # An explicit rejection alone does not prove the anchor is
+                    # dead: it can mean this session simply was not its owner,
+                    # which is why #1830's recovery rebinds and deliberately
+                    # retries the SAME anchor on the fresh session. Only once
+                    # the retry circuit has opened on repeated eventless
+                    # poison-class failures and quarantined the key is the
+                    # anchor proven dead rather than merely mis-bound. The
+                    # quarantine registry is shared with the wedged-reattach
+                    # and repeated-eventless fences, which say nothing about
+                    # the anchor, so this asks for the poison reason and not
+                    # merely for an active window.
+                    #
+                    # At that point re-attaching guarantees the retry repeats
+                    # the rejection — live, a reattach loop against a dead
+                    # anchor and a burst of client-visible 503s. But every
+                    # request shape that reaches this fallthrough has already
+                    # failed the proven full-resend and operation-fence
+                    # checks of the branches above, so its payload does not
+                    # retain the anchor's context: stripping the anchor here
+                    # would replay a delta-only continuation as a
+                    # context-free request, which the responses-api-compat
+                    # spec forbids ("a genuine delta-only continuation MUST
+                    # still receive the durable anchor"), and the durable
+                    # layer stores input fingerprints, not items, so the
+                    # proxy cannot rebuild the context either. The only
+                    # honest terminal is the upstream's own explicit
+                    # rejection: surface it, let the funnels settle the
+                    # circuit (an explicit rejection is not poison-class, so
+                    # this cannot re-open it), and leave recovery to the
+                    # client, which is the only party holding the history.
+                    _log_http_bridge_event(
+                        "previous_response_poisoned_anchor_fail_fast",
+                        bridge_session_key,
+                        account_id=None,
+                        model=effective_payload.model,
+                        detail="outcome=explicit_rejection_propagated",
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                        owner_check_applied=True,
+                    )
+                    raise ProxyResponseError(
+                        exc.status_code if 400 <= exc.status_code < 500 else 404,
+                        openai_error(
+                            "bridge_previous_response_not_found",
+                            "The previous response referenced by this request no longer "
+                            "exists upstream; resend the full conversation history or "
+                            "start a new conversation.",
+                        ),
+                    ) from exc
                 retry_previous_response_id = request_state.previous_response_id
                 retry_request_stage = "reattach"
                 retry_preferred_account_id = request_state.preferred_account_id
@@ -3686,12 +3862,6 @@ class _HTTPBridgeStreamingMixin:
                     "local_previous_response_fresh_replay",
                     "local_previous_response_same_owner_fresh_replay",
                 }
-                if recovery_path == "local_previous_response_error":
-                    await reset_previous_response_recovery_operation_spool(
-                        session,
-                        request_state,
-                        required=False,
-                    )
                 # A recovery request is the one bounded server-side replay;
                 # prevent a second cooldown bypass if this fresh socket also
                 # fails before response.created.
@@ -4157,20 +4327,69 @@ class _HTTPBridgeStreamingMixin:
                     or request_state.downstream_visible
                 ),
             )
-            if (
-                observed_response_events > 0
-                or consecutive_failures is None
-                or consecutive_failures
-                < _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-            ):
+            if observed_response_events > 0 or consecutive_failures is None:
                 return
-            if await _abandon_durable_http_bridge_continuity(self, session):
-                await self._retire_stale_pending_http_bridge_session(
-                    session,
-                    detail="repeated_zero_event_idle_timeout",
-                    response_events_seen=0,
-                    retired_request_count=0,
+
+            # Same capped, fenced flow as the idle-recovery exhaustion: the
+            # consult applies the effective (circuit-capped) threshold and
+            # captures the continuity the abandonment fences on, so this
+            # retry-transport funnel can neither wait past the opened
+            # circuit for the raw configured threshold nor erase continuity
+            # a sibling registered during the window. Only the strike above
+            # runs before publication; the consult and abandonment run as
+            # an owned settlement task the stream finalizer awaits, so a
+            # slow durable store never delays the client-visible terminal
+            # and a cancellation cannot skip the cleanup.
+            async def _transport_consult_and_clear() -> None:
+                poison_detail = await self._http_bridge_effective_anchor_poison_detail(
+                    session, _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL
                 )
+                if poison_detail is None:
+                    return
+                (
+                    poison_episode,
+                    poison_expected_anchor,
+                ) = await self._http_bridge_poison_anchor_clear_owed(
+                    session,
+                    consecutive_failures=consecutive_failures,
+                    configured_threshold=getattr(
+                        _service_get_settings(),
+                        "http_responses_session_bridge_anchor_poison_failure_threshold",
+                        _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
+                    ),
+                )
+                if poison_episode is None:
+                    return
+                async with session.pending_lock:
+                    eventless_pending_states = list(session.pending_requests)
+                durable_cleared = await _abandon_durable_http_bridge_continuity(
+                    self,
+                    session,
+                    detail=poison_detail,
+                    settle_circuit=_http_bridge_abandonment_may_settle_circuit(
+                        [request_state, *eventless_pending_states]
+                    ),
+                    expected_continuity=poison_expected_anchor,
+                    authorized_episode=poison_episode,
+                )
+                if durable_cleared:
+                    await self._http_bridge_mark_poison_anchor_cleared(session, episode=poison_episode)
+                    await self._retire_stale_pending_http_bridge_session(
+                        session,
+                        detail="repeated_zero_event_idle_timeout",
+                        response_events_seen=0,
+                        retired_request_count=0,
+                    )
+
+            nonlocal idle_settlement_task
+            idle_settlement_task = asyncio.create_task(
+                _transport_consult_and_clear(),
+                name=f"http-bridge-eventless-poison-settlement-{session.durable_session_id}",
+            )
+            transport_cleanup_tasks = getattr(self, "_background_cleanup_tasks", None)
+            if transport_cleanup_tasks is not None:
+                transport_cleanup_tasks.add(idle_settlement_task)
+                idle_settlement_task.add_done_callback(transport_cleanup_tasks.discard)
 
         async def startup_continuity_cooldown_terminal_event() -> str | None:
             if (
@@ -4215,14 +4434,19 @@ class _HTTPBridgeStreamingMixin:
                     raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
                         previous_response_id=_http_bridge_dead_owner_previous_response_id(request_state),
                     )
+                block_seconds, block_reason = await self._http_bridge_precreated_retry_block(session)
+                suppressed_retry_after = max(1, math.ceil(max(block_seconds, retry_cooldown_seconds)))
                 raise ProxyResponseError(
                     503,
                     openai_error(
                         _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
-                        _HTTP_BRIDGE_EVENTLESS_COOLDOWN_MESSAGE,
+                        # Upstream's honest eventless detail, with the
+                        # truthful suppression message naming the timer that
+                        # actually refuses the submission.
+                        _http_bridge_retry_circuit_suppression_message(block_reason, suppressed_retry_after),
                         error_type="server_error",
                     ),
-                    retry_after_seconds=max(1, math.ceil(retry_cooldown_seconds)),
+                    retry_after_seconds=suppressed_retry_after,
                 )
             return format_sse_event(
                 cast(
@@ -4393,17 +4617,23 @@ class _HTTPBridgeStreamingMixin:
                     raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
                         previous_response_id=_http_bridge_dead_owner_previous_response_id(request_state),
                     )
+                block_seconds, block_reason = await self._http_bridge_precreated_retry_block(session)
+                suppressed_retry_after = max(1, math.ceil(max(block_seconds, initial_retry_cooldown_seconds)))
                 raise ProxyResponseError(
                     503,
                     openai_error(
                         _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
-                        _HTTP_BRIDGE_EVENTLESS_COOLDOWN_MESSAGE,
+                        # Upstream's honest eventless detail, with the
+                        # truthful suppression message naming the timer that
+                        # actually refuses the submission.
+                        _http_bridge_retry_circuit_suppression_message(block_reason, suppressed_retry_after),
                         error_type="server_error",
                     ),
-                    retry_after_seconds=max(1, math.ceil(initial_retry_cooldown_seconds)),
+                    retry_after_seconds=suppressed_retry_after,
                 )
             yield terminal_event
             return
+        idle_settlement_task: asyncio.Task[None] | None = None
         try:
             if downstream_turn_state is not None and not account_neutral_recovery:
                 await self._register_http_bridge_turn_state(session, downstream_turn_state)
@@ -4767,8 +4997,23 @@ class _HTTPBridgeStreamingMixin:
                                             if keepalive_event is not None:
                                                 yield keepalive_event
                                             continue
-                                        await record_bridge_eventless_timeout_failure(
-                                            timed_out_retry_circuit_attempt_selection
+                                        idle_selection = timed_out_retry_circuit_attempt_selection
+                                        # The strike precedes the terminal frame (its
+                                        # quarantine must cover an immediate resend), but
+                                        # the durable clear follows it: publishing first
+                                        # keeps a slow durable store from delaying the
+                                        # client-visible terminal. The recorded class is
+                                        # upstream's distinguishable pre-response
+                                        # eventless detail; the fenced consult flow below
+                                        # replaces the legacy helper's unfenced
+                                        # abandonment at this site.
+                                        record_failure = (
+                                            self._record_http_bridge_retry_circuit_failure_for_attempt_selection
+                                        )
+                                        idle_consecutive_failures = await record_failure(
+                                            session,
+                                            detail=_HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                                            selection=idle_selection,
                                         )
                                         if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
                                             stream_idle_timeout_total.labels(surface="http_bridge_eventless").inc()
@@ -4786,6 +5031,66 @@ class _HTTPBridgeStreamingMixin:
                                         eventless_message = _http_bridge_eventless_timeout_message(
                                             session.unmatched_upstream_liveness_count
                                         )
+
+                                        async def _idle_consult_and_clear() -> None:
+                                            from app.modules.proxy._service.http_bridge.upstream_events import (
+                                                _abandon_durable_http_bridge_continuity,
+                                            )
+
+                                            poison_detail = await self._http_bridge_effective_anchor_poison_detail(
+                                                session, _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL
+                                            )
+                                            if poison_detail is None:
+                                                return
+                                            (
+                                                poison_episode,
+                                                poison_expected_anchor,
+                                            ) = await self._http_bridge_poison_anchor_clear_owed(
+                                                session,
+                                                consecutive_failures=idle_consecutive_failures,
+                                                configured_threshold=getattr(
+                                                    _service_get_settings(),
+                                                    "http_responses_session_bridge_anchor_poison_failure_threshold",
+                                                    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
+                                                ),
+                                            )
+                                            if poison_episode is None:
+                                                return
+                                            async with session.pending_lock:
+                                                idle_pending_states = list(session.pending_requests)
+                                            durable_cleared = await _abandon_durable_http_bridge_continuity(
+                                                self,
+                                                session,
+                                                detail=poison_detail,
+                                                settle_circuit=_http_bridge_abandonment_may_settle_circuit(
+                                                    [request_state, *idle_pending_states]
+                                                ),
+                                                expected_continuity=poison_expected_anchor,
+                                                authorized_episode=poison_episode,
+                                            )
+                                            if durable_cleared:
+                                                await self._http_bridge_mark_poison_anchor_cleared(
+                                                    session, episode=poison_episode
+                                                )
+
+                                        # Created and registered as an owned cleanup task
+                                        # BEFORE the yield: a consumer that closes the
+                                        # generator after receiving the terminal frame
+                                        # injects GeneratorExit at that yield, and any
+                                        # cleanup only started afterwards would never run —
+                                        # while the detached request leaves no lifecycle to
+                                        # retry the abandonment. The task runs concurrently
+                                        # (the frame is not delayed behind the durable
+                                        # store) and survives the generator through the
+                                        # cleanup registry.
+                                        idle_settlement_task = asyncio.create_task(
+                                            _idle_consult_and_clear(),
+                                            name=f"http-bridge-idle-poison-settlement-{session.durable_session_id}",
+                                        )
+                                        idle_cleanup_tasks = getattr(self, "_background_cleanup_tasks", None)
+                                        if idle_cleanup_tasks is not None:
+                                            idle_cleanup_tasks.add(idle_settlement_task)
+                                            idle_settlement_task.add_done_callback(idle_cleanup_tasks.discard)
                                         yield format_sse_event(
                                             cast(
                                                 Mapping[str, JsonValue],
@@ -4796,6 +5101,11 @@ class _HTTPBridgeStreamingMixin:
                                                 ),
                                             )
                                         )
+                                        _idle_result, idle_cancellation = await _await_task_deferring_cancellation(
+                                            idle_settlement_task
+                                        )
+                                        if idle_cancellation is not None:
+                                            raise idle_cancellation
                                         break
                             elif response_started:
                                 if await completed_delivery_suppresses_idle_timeout(
@@ -4900,6 +5210,20 @@ class _HTTPBridgeStreamingMixin:
                 yielded_any = True
         finally:
             with anyio.CancelScope(shield=True):
+                if idle_settlement_task is not None and not idle_settlement_task.done():
+                    # A consumer closing the generator right after the
+                    # terminal idle frame lands here while the settlement is
+                    # still consulting. The task survives through the cleanup
+                    # registry, but the retirement below releases the durable
+                    # owner epoch its abandonment fences on — so the owner
+                    # must outlive the settlement, not merely the task.
+                    try:
+                        await idle_settlement_task
+                    except (Exception, asyncio.CancelledError):
+                        logger.warning(
+                            "HTTP bridge idle poison settlement failed during stream finalization",
+                            exc_info=True,
+                        )
                 await self._detach_http_bridge_request(session, request_state=request_state)
                 session.last_used_at = _service_time().monotonic()
                 await self._maybe_release_idle_http_bridge_session_lease(session)

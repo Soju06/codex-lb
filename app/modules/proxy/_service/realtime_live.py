@@ -24,14 +24,12 @@ from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import ensure_request_id, get_request_id
+from app.core.utils.shared_future import _await_task_deferring_cancellation
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import detach_session_objects
 from app.modules.api_keys.service import ApiKeyData
-from app.modules.proxy._service.support import (
-    _await_task_deferring_cancellation,
-    _request_log_client_fields,
-)
+from app.modules.proxy._service.support import _request_log_client_fields
 from app.modules.proxy.helpers import _header_account_id
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
 from app.modules.proxy.repo_bundle import ProxyRepoFactory

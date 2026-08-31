@@ -42,6 +42,14 @@ miss instead of a restricted-owner miss.
   required-owner misses still fail closed with the existing envelope after
   bounded recovery; this change only types the selection call and maps the
   already-typed owner miss immediately.
+- Add `preferred_account_overrides_single_account_routing` (default false).
+  Honor it only together with required preferred ownership, and then skip the
+  single-account narrowing branch. API-key assignment scope, security
+  authorization, and typed continuity miss/policy-conflict handling stay on
+  the existing continuity path.
+- Reconnect sets that override only from `request_state.file_required_preferred_account`.
+  Previous-response and account-neutral required owners remain typed continuity
+  owners without the override, so they still intersect single-account policy.
 
 **Alternative considered:** also type `hard_close_account_bound` sessions.
 Rejected because hard `1011` already fail-closes through the hard-key path
@@ -49,6 +57,11 @@ and is out of this provenance seam.
 
 **Alternative considered:** change create-path provenance in the same PR.
 Rejected to keep the review on reconnect selection only.
+
+**Alternative considered:** stop typing file-pin reconnect as a continuity
+owner so single-account policy is unchanged. Rejected because the miss must
+stay typed `continuity_owner_unavailable`; the override splits policy from
+provenance instead.
 
 ## Risks / Trade-offs
 

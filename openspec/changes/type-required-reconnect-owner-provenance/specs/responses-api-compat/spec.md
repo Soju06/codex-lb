@@ -18,6 +18,7 @@ mark the preferred account as a continuity owner.
 - **WHEN** the proxy reconnects that session
 - **THEN** account selection MUST receive `account_a` as the preferred account
 - **AND** it MUST mark that preferred account as a continuity owner
+- **AND** it MUST request a single-account routing override for that file pin
 - **AND** it MUST NOT enable preferred-account fallback to another account
 
 #### Scenario: Soft 1011 reconnect without a required owner remains untyped
@@ -26,6 +27,7 @@ mark the preferred account as a continuity owner.
 - **AND** the still-unsubmitted request has no live file pin and no other required owner
 - **WHEN** the proxy reconnects that session
 - **THEN** account selection MUST NOT mark a preferred account as a continuity owner
+- **AND** it MUST NOT request a single-account routing override
 - **AND** it MAY exclude `account_a` and choose another eligible account
 
 #### Scenario: Required-owner reconnect maps typed continuity_owner_unavailable immediately

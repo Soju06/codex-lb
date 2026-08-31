@@ -11,6 +11,8 @@ required-owner mapping never fires.
 
 - Pass `preferred_account_is_continuity_owner` from `_reconnect_http_bridge_session`
   whenever `required_preferred_account_id` is set.
+- Pass `preferred_account_overrides_single_account_routing` only for a live
+  file pin so typed file-pin continuity does not inherit single-account narrowing.
 - Map typed `continuity_owner_unavailable` to the existing required-owner
   unavailable envelope whenever that required reconnect owner exists, not only
   for account-neutral recovery.
@@ -30,12 +32,15 @@ required-owner mapping never fires.
   continuity provenance and map a typed owner miss immediately.
 - `sticky-session-operations`: required reconnect owners (file-pin,
   require-preferred, account-neutral) MUST use continuity-owner selection
-  provenance; movable soft reconnect MUST NOT.
+  provenance; movable soft reconnect MUST NOT. File-pin continuity MUST
+  bypass only single-account routing.
 
 ## Impact
 
+- `app/modules/proxy/service.py` single-account narrowing gate.
 - `app/modules/proxy/_service/http_bridge/mixin.py` reconnect selection kwargs
   and early typed-unavailable mapping.
+- Stream selection optional-kwarg compatibility.
 - Existing unit coverage next to the soft-`1011` reconnect tests.
 - No API, schema, dashboard, settings, create-path, affinity, or sticky-write
   changes.

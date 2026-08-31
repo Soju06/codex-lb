@@ -2159,6 +2159,7 @@ class _HTTPBridgeMixin(
                     exclude_account_ids=excluded_account_ids,
                     preferred_account_id=preferred_candidate_id,
                     preferred_account_is_continuity_owner=required_preferred_account_id is not None,
+                    preferred_account_overrides_single_account_routing=request_state.file_required_preferred_account,
                     require_security_work_authorized=require_security_work_authorized,
                     lease_kind=None if reuse_current_account_lease else "stream",
                     estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(

@@ -9698,6 +9698,59 @@ async def test_select_account_with_budget_classifies_continuity_owner_outside_as
 
 
 @pytest.mark.asyncio
+async def test_select_account_with_budget_file_pin_continuity_override_keeps_assignment_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # given
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    select_account = AsyncMock(
+        return_value=proxy_service.AccountSelection(
+            account=None,
+            error_message="Required continuity owner is outside the effective account policy",
+            error_code="continuity_owner_policy_conflict",
+        )
+    )
+    service._load_balancer = cast(Any, SimpleNamespace(select_account=select_account))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    routing_strategy="single_account",
+                    single_account_id="acc-dashboard-selected",
+                    sticky_reallocation_budget_threshold_pct=95.0,
+                )
+            )
+        ),
+    )
+
+    # when
+    selection = await service._select_account_with_budget(
+        time.monotonic() + 60.0,
+        request_id="req-file-pin-continuity-scope",
+        kind="http_bridge",
+        request_stage="reattach",
+        api_key=_make_api_key(key_id="key-1", assigned_account_ids=["acc-allowed"]),
+        prefer_earlier_reset_window="primary",
+        preferred_account_id="acc-file-owner",
+        preferred_account_is_continuity_owner=True,
+        preferred_account_overrides_single_account_routing=True,
+        fallback_on_preferred_account_unavailable=False,
+    )
+
+    # then
+    assert selection.error_code == "continuity_owner_policy_conflict"
+    select_account.assert_awaited_once()
+    selection_call = select_account.await_args
+    assert selection_call is not None
+    assert selection_call.kwargs["account_ids"] == {"acc-allowed"}
+    assert selection_call.kwargs["account_ids"] != {"acc-dashboard-selected"}
+    assert selection_call.kwargs["required_account_id"] == "acc-file-owner"
+    assert selection_call.kwargs["required_continuity_owner"] is True
+
+
+@pytest.mark.asyncio
 async def test_create_http_bridge_session_passes_dashboard_reset_window_to_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -10141,6 +10194,7 @@ async def test_reconnect_account_neutral_recovery_requires_typed_owner_without_c
     assert selection_kwargs[0]["preferred_account_id"] == session.account.id
     assert selection_kwargs[0]["preferred_account_is_continuity_owner"] is True
     assert selection_kwargs[0]["fallback_on_preferred_account_unavailable"] is False
+    assert selection_kwargs[0]["preferred_account_overrides_single_account_routing"] is False
 
 
 @pytest.mark.asyncio
@@ -10831,6 +10885,7 @@ async def test_reconnect_http_bridge_session_keeps_soft_file_pin_owner_after_101
     assert "acc-bridge" not in exclude_account_ids
     assert selection_kwargs[0]["fallback_on_preferred_account_unavailable"] is False
     assert selection_kwargs[0]["preferred_account_is_continuity_owner"] is True
+    assert selection_kwargs[0]["preferred_account_overrides_single_account_routing"] is True
     assert session.account.id == "acc-bridge"
 
 
@@ -10892,6 +10947,7 @@ async def test_reconnect_http_bridge_session_skips_soft_account_after_1011_witho
     assert selection_kwargs[0]["preferred_account_id"] is None
     assert selection_kwargs[0]["fallback_on_preferred_account_unavailable"] is True
     assert selection_kwargs[0]["preferred_account_is_continuity_owner"] is False
+    assert selection_kwargs[0]["preferred_account_overrides_single_account_routing"] is False
 
 
 @pytest.mark.asyncio
@@ -10955,6 +11011,71 @@ async def test_reconnect_http_bridge_session_fails_closed_when_file_pin_owner_ca
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
     assert exc_info.value.payload["error"]["type"] == "server_error"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_maps_typed_file_pin_owner_unavailable_without_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # given
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "sid-soft-file-1011-typed-miss", None),
+        key_value="sid-soft-file-1011-typed-miss",
+    )
+    session.last_upstream_close_code = 1011
+    selection_kwargs: list[dict[str, object]] = []
+    sleep_calls = 0
+
+    async def select_account(_deadline: float, **kwargs: object) -> proxy_service.AccountSelection:
+        selection_kwargs.append(kwargs)
+        return proxy_service.AccountSelection(
+            account=None,
+            error_message="Required continuity owner account no longer exists",
+            error_code=CONTINUITY_OWNER_UNAVAILABLE,
+        )
+
+    async def sleep_for_recovery(*_args: object, **_kwargs: object) -> bool:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        return False
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-soft-file-1011-typed-miss",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        preferred_account_id="acc-bridge",
+        file_required_preferred_account=True,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(http_bridge_mixin_module, "_sleep_for_account_selection_recovery", sleep_for_recovery)
+
+    # when
+    with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
+        await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    # then
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    assert sleep_calls == 0
+    assert selection_kwargs[0]["preferred_account_is_continuity_owner"] is True
+    assert selection_kwargs[0]["preferred_account_overrides_single_account_routing"] is True
 
 
 @pytest.mark.asyncio
@@ -11475,6 +11596,61 @@ async def test_select_account_with_budget_required_file_pin_overrides_single_acc
     assert first_call.kwargs["required_account_id"] == "acc-file-owner"
     assert first_call.kwargs["required_account_is_ownership_constraint"] is True
     assert first_call.kwargs["routing_strategy"] == "capacity_weighted"
+
+
+@pytest.mark.asyncio
+async def test_select_account_with_budget_file_pin_continuity_overrides_single_account_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # given
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    select_account = AsyncMock(
+        return_value=proxy_service.AccountSelection(
+            account=cast(Any, SimpleNamespace(id="acc-file-owner")),
+            error_message=None,
+            error_code=None,
+        )
+    )
+    service._load_balancer = cast(Any, SimpleNamespace(select_account=select_account))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    routing_strategy="single_account",
+                    single_account_id="acc-dashboard-selected",
+                    sticky_reallocation_budget_threshold_pct=95.0,
+                )
+            )
+        ),
+    )
+
+    # when
+    selection = await service._select_account_with_budget(
+        time.monotonic() + 60.0,
+        request_id="req-file-pin-continuity-single-account",
+        kind="stream",
+        request_stage="reattach",
+        prefer_earlier_reset_window="secondary",
+        preferred_account_id="acc-file-owner",
+        preferred_account_is_continuity_owner=True,
+        preferred_account_overrides_single_account_routing=True,
+        lease_kind="stream",
+        fallback_on_preferred_account_unavailable=False,
+    )
+
+    # then
+    assert selection.account is not None
+    assert selection.account.id == "acc-file-owner"
+    select_account.assert_awaited_once()
+    first_call = select_account.await_args_list[0]
+    assert first_call.kwargs["account_ids"] is None
+    assert first_call.kwargs["required_account_id"] == "acc-file-owner"
+    assert first_call.kwargs["required_account_is_ownership_constraint"] is True
+    assert first_call.kwargs["required_continuity_owner"] is True
+    assert first_call.kwargs["routing_strategy"] == "capacity_weighted"
+    assert first_call.kwargs["account_ids"] != {"acc-dashboard-selected"}
 
 
 @pytest.mark.asyncio

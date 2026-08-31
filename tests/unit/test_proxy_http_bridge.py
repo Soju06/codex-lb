@@ -10830,6 +10830,7 @@ async def test_reconnect_http_bridge_session_keeps_soft_file_pin_owner_after_101
     exclude_account_ids = cast(set[str], selection_kwargs[0]["exclude_account_ids"])
     assert "acc-bridge" not in exclude_account_ids
     assert selection_kwargs[0]["fallback_on_preferred_account_unavailable"] is False
+    assert selection_kwargs[0]["preferred_account_is_continuity_owner"] is True
     assert session.account.id == "acc-bridge"
 
 
@@ -10890,6 +10891,7 @@ async def test_reconnect_http_bridge_session_skips_soft_account_after_1011_witho
     assert "acc-bridge" in exclude_account_ids
     assert selection_kwargs[0]["preferred_account_id"] is None
     assert selection_kwargs[0]["fallback_on_preferred_account_unavailable"] is True
+    assert selection_kwargs[0]["preferred_account_is_continuity_owner"] is False
 
 
 @pytest.mark.asyncio

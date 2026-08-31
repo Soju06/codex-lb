@@ -11,20 +11,20 @@ depends_on = None
 
 def upgrade() -> None:
     bind = op.get_bind()
-    inspector = sa.inspect(bind)
-    if not inspector.has_table("scheduler_leader"):
-        op.create_table(
-            "scheduler_leader",
-            sa.Column("id", sa.Integer(), nullable=False),
-            sa.Column("leader_id", sa.String(length=100), nullable=False),
-            sa.Column("acquired_at", sa.DateTime(timezone=True), nullable=False),
-            sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
-            sa.PrimaryKeyConstraint("id"),
-        )
+    # For SQLite, use a short busy timeout to avoid long locks during DDL.
+    if bind.dialect.name == "sqlite":
+        bind.execute(sa.text("PRAGMA busy_timeout=1000"))
 
-    index_names = {index["name"] for index in inspector.get_indexes("scheduler_leader")}
-    if "ix_scheduler_leader_expires_at" not in index_names:
-        op.create_index("ix_scheduler_leader_expires_at", "scheduler_leader", ["expires_at"], unique=False)
+    # Create table with IF NOT EXISTS to avoid schema inspection and reduce lock scope.
+    op.execute("CREATE TABLE IF NOT EXISTS scheduler_leader ("
+               "id INTEGER NOT NULL PRIMARY KEY, "
+               "leader_id VARCHAR(100) NOT NULL, "
+               "acquired_at DATETIME NOT NULL, "
+               "expires_at DATETIME NOT NULL)")
+
+    # Create index with IF NOT EXISTS (supported in SQLite 3.8+).
+    op.execute("CREATE INDEX IF NOT EXISTS ix_scheduler_leader_expires_at "
+               "ON scheduler_leader (expires_at)")
 
 
 def downgrade() -> None:

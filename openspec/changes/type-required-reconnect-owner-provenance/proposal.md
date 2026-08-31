@@ -1,24 +1,26 @@
 ## Why
 
-HTTP-bridge reconnect already resolves a live file pin, `require_preferred_account`,
-and account-neutral recovery into `required_preferred_account_id`, but it only
-marks account-neutral recovery as continuity-owner provenance. Selection then
-treats a required file-pin or require-preferred owner as an ordinary preferred
-account, so a miss is not typed `continuity_owner_unavailable` and the early
-required-owner mapping never fires.
+HTTP-bridge reconnect already fails closed for every required preferred owner,
+but a live file-pin owner is not marked as continuity provenance. Selection
+therefore cannot distinguish the genuine "owner account no longer exists"
+case from ordinary required-owner misses. The useful observable improvement is
+an immediate existing 502 only for confirmed owner disappearance; transient
+capacity misses must retain bounded recovery, and non-file required owners must
+retain their existing routing eligibility.
 
 ## What Changes
 
-- Pass `preferred_account_is_continuity_owner` from `_reconnect_http_bridge_session`
-  whenever `required_preferred_account_id` is set.
-- Pass `preferred_account_overrides_single_account_routing` only for a live
-  file pin so typed file-pin continuity does not inherit single-account narrowing.
-- Map typed `continuity_owner_unavailable` to the existing required-owner
-  unavailable envelope whenever that required reconnect owner exists, not only
-  for account-neutral recovery.
-- Keep movable soft `1011` reconnect without a required owner untyped so it
-  can still skip the closed account.
-- Pin the existing soft-`1011` reconnect tests to that provenance split.
+- Mark only a live file-pin reconnect owner as new continuity-owner provenance;
+  preserve the existing account-neutral provenance and leave other
+  require-preferred owners unchanged.
+- Map `continuity_owner_unavailable` early only when selection confirms that
+  the owner account no longer exists.
+- Preserve `hard_affinity_saturated` for transient continuity-owner misses so
+  reconnect can wait and retry within its existing deadline.
+- Keep file-pin owners outside dashboard single-account narrowing while still
+  enforcing API-key assignment scope.
+- Add regressions for transient recovery, deleted-owner mapping, and non-file
+  previous-response owner routing semantics.
 
 ## Capabilities
 
@@ -28,19 +30,15 @@ required-owner mapping never fires.
 
 ### Modified Capabilities
 
-- `responses-api-compat`: HTTP-bridge reconnect must type a required owner as
-  continuity provenance and map a typed owner miss immediately.
-- `sticky-session-operations`: required reconnect owners (file-pin,
-  require-preferred, account-neutral) MUST use continuity-owner selection
-  provenance; movable soft reconnect MUST NOT. File-pin continuity MUST
-  bypass only single-account routing.
+- `responses-api-compat`: HTTP-bridge file-pin reconnect immediately maps only
+  confirmed owner disappearance and preserves bounded transient recovery.
+- `sticky-session-operations`: file-pin provenance is typed without changing
+  previous-response required-owner single-account or assignment-scope policy.
 
 ## Impact
 
-- `app/modules/proxy/service.py` single-account narrowing gate.
-- `app/modules/proxy/_service/http_bridge/mixin.py` reconnect selection kwargs
-  and early typed-unavailable mapping.
-- Stream selection optional-kwarg compatibility.
-- Existing unit coverage next to the soft-`1011` reconnect tests.
-- No API, schema, dashboard, settings, create-path, affinity, or sticky-write
-  changes.
+- HTTP-bridge reconnect selection provenance and its early failure gate.
+- Required continuity-owner transient error classification.
+- File-pin single-account compatibility and assignment-scope eligibility.
+- Focused unit coverage and OpenSpec only; no API, schema, dashboard, setting,
+  create-path, affinity-write, or security-scope changes.

@@ -181,6 +181,7 @@ _ADDITIONAL_QUOTA_ROUTING_POLICIES = _ACCOUNT_ROUTING_POLICIES | frozenset({"inh
 OPPORTUNISTIC_BURN_WINDOW_CLOSED = "opportunistic_burn_window_closed"
 CONTINUITY_OWNER_UNAVAILABLE = "continuity_owner_unavailable"
 CONTINUITY_OWNER_POLICY_CONFLICT = "continuity_owner_policy_conflict"
+_CONTINUITY_OWNER_NO_LONGER_EXISTS_MESSAGE = "Required continuity owner account no longer exists"
 _AMBIGUOUS_CONVERSATION_OWNER_CODE = "conversation_owner_unavailable"
 _AMBIGUOUS_CONVERSATION_OWNER_MESSAGE = "Conversation owner cannot be determined from the eligible account pool"
 
@@ -203,6 +204,13 @@ class AccountSelection:
     resets_at: int | None = None
     lease: AccountLease | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
+
+    @property
+    def continuity_owner_no_longer_exists(self) -> bool:
+        return (
+            self.error_code == CONTINUITY_OWNER_UNAVAILABLE
+            and self.error_message == _CONTINUITY_OWNER_NO_LONGER_EXISTS_MESSAGE
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,7 +276,7 @@ def _required_continuity_owner_failure(
         selection_inputs.accounts if selection_inputs.runtime_accounts is None else selection_inputs.runtime_accounts
     )
     if required_account_id not in {account.id for account in runtime_accounts}:
-        return CONTINUITY_OWNER_UNAVAILABLE, "Required continuity owner account no longer exists"
+        return CONTINUITY_OWNER_UNAVAILABLE, _CONTINUITY_OWNER_NO_LONGER_EXISTS_MESSAGE
     return CONTINUITY_OWNER_POLICY_CONFLICT, "Required continuity owner is outside the eligible account policy"
 
 
@@ -951,7 +959,7 @@ class LoadBalancer:
                     error_message=error_message,
                     error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
                 )
-            if required_continuity_owner and selection_error_code in (None, "hard_affinity_saturated"):
+            if required_continuity_owner and selection_error_code is None:
                 selection_error_code = CONTINUITY_OWNER_UNAVAILABLE
             if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and error_message and selection_error_code is None:
                 return AccountSelection(

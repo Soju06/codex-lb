@@ -1,79 +1,86 @@
 ## Context
 
-`_reconnect_http_bridge_session` already collapses a live file pin,
-`require_preferred_account`, and account-neutral recovery into
-`required_preferred_account_id`. That value already disables preferred-account
-fallback and fail-closes generic selection misses. Continuity-owner
-provenance is still separate: selection receives
-`preferred_account_is_continuity_owner=account_neutral_recovery`, and the
-early typed `continuity_owner_unavailable` mapping is gated on the same
-account-neutral flag.
+`_reconnect_http_bridge_session` resolves live file pins,
+`require_preferred_account`, and account-neutral replay into a required
+preferred account. Required ownership already disables fallback, rejects owner
+substitution, and maps every terminal miss to the same external 502. On main,
+non-file require-preferred owners are intentionally ordinary required accounts:
+they bypass dashboard single-account narrowing and remain subject to API-key
+assignment scope.
 
-A required file-pin or require-preferred owner therefore looks like an
-ordinary preferred account inside selection. A miss is not typed
-`continuity_owner_unavailable`, so it can be classified as a generic pool
-miss instead of a restricted-owner miss.
+Only account-neutral replay currently carries continuity-owner provenance. A
+file-pin owner therefore cannot produce the selection layer's confirmed
+"account no longer exists" classification. Typing every required owner would
+also change non-file single-account and assignment-scope eligibility, while
+mapping every typed unavailable result immediately would remove transient
+capacity recovery.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Reconnect selection types a required owner as continuity provenance.
-- Typed `continuity_owner_unavailable` maps to the existing required-owner
-  unavailable envelope whenever that required owner exists.
-- Movable soft `1011` reconnect without a required owner stays untyped.
+- Type a live file-pin reconnect owner sufficiently to recognize confirmed
+  account disappearance.
+- Return the existing required-owner 502 immediately only for that confirmed
+  disappearance.
+- Preserve bounded sleep/retry for transient owner saturation.
+- Preserve main's non-file require-preferred single-account and API-key scope
+  semantics.
 
 **Non-Goals:**
 
-- Create-path provenance, `affinity.py`, sticky writes, or fallback policy.
-- Hard-session `1011` keep-owner behavior (`hard_close_account_bound`).
-- Global owner rewrite, health-degraded semantics outside this reconnect
-  selection call, or a new public error code.
+- A product-policy change for previous-response or other require-preferred
+  owners.
+- Create-path provenance, affinity or sticky writes, fallback policy, API-key
+  security scope, or hard-session reconnect behavior.
+- A new public error code or envelope.
 
 ## Decisions
 
-- Set `preferred_account_is_continuity_owner` from
-  `required_preferred_account_id is not None`. The three required-owner
-  sources already collapse into that value; OR-ing the source flags again
-  would drift from reconnect owner resolution.
-- Gate the early `continuity_owner_unavailable` mapping on the same
-  required-owner value instead of `account_neutral_recovery`.
-- Leave `_http_bridge_reconnect_selection_failure` unchanged. Generic
-  required-owner misses still fail closed with the existing envelope after
-  bounded recovery; this change only types the selection call and maps the
-  already-typed owner miss immediately.
-- Add `preferred_account_overrides_single_account_routing` (default false).
-  Honor it only together with required preferred ownership, and then skip the
-  single-account narrowing branch. API-key assignment scope, security
-  authorization, and typed continuity miss/policy-conflict handling stay on
-  the existing continuity path.
-- Reconnect sets that override only from `request_state.file_required_preferred_account`.
-  Previous-response and account-neutral required owners remain typed continuity
-  owners without the override, so they still intersect single-account policy.
+### Scope new provenance to file-pin ownership
 
-**Alternative considered:** also type `hard_close_account_bound` sessions.
-Rejected because hard `1011` already fail-closes through the hard-key path
-and is out of this provenance seam.
+Reconnect sets `preferred_account_is_continuity_owner` for a live file pin or
+the already-typed account-neutral replay path. A previous-response or other
+`require_preferred_account` owner remains untyped. This preserves main's
+existing service-layer behavior for those owners: required preferred selection
+bypasses dashboard single-account narrowing and does not become eligible
+outside API-key assignment scope.
 
-**Alternative considered:** change create-path provenance in the same PR.
-Rejected to keep the review on reconnect selection only.
+### Preserve file-pin routing policy while adding provenance
 
-**Alternative considered:** stop typing file-pin reconnect as a continuity
-owner so single-account policy is unchanged. Rejected because the miss must
-stay typed `continuity_owner_unavailable`; the override splits policy from
-provenance instead.
+Continuity typing normally enters single-account narrowing and may admit the
+owner outside assignment scope. The file-pin-only override skips the
+single-account branch, matching main's required-preferred behavior. That
+override does not bypass assignment scope: an out-of-scope owner remains
+ineligible before load-balancer selection.
+
+### Distinguish confirmed disappearance from transient unavailability
+
+`continuity_owner_unavailable` is also used for generic continuity misses.
+Early reconnect mapping therefore checks the typed code together with the
+selection-layer "Required continuity owner account no longer exists" reason.
+Only `_required_continuity_owner_failure` emits that pair after checking the
+runtime account catalog.
+
+A `hard_affinity_saturated` miss remains `hard_affinity_saturated` instead of
+being rewritten to `continuity_owner_unavailable`. The existing recovery helper
+recognizes that transient code, waits within the reconnect deadline, and
+retries the same required owner. Terminal misses still use
+`_http_bridge_reconnect_selection_failure`, so the external fail-closed 502 is
+unchanged.
 
 ## Risks / Trade-offs
 
-- [Risk] Require-preferred reconnects that are not file-pin or
-  account-neutral start sending continuity-owner provenance.
-  → Mitigation: that is the intended contract; those callers already populate
-  `required_preferred_account_id` and disable fallback.
-- [Risk] Existing soft-`1011` tests do not yet assert the flag.
-  → Mitigation: add the True/False assertions on the existing file-pin and
-  movable tests before changing production code.
+- The genuine-disappearance discriminator includes the internal selection
+  reason as well as its typed code. A shared predicate centralizes that pair so
+  producers and consumers cannot drift independently.
+- File-pin continuity still reaches existing continuity-owner policy-conflict
+  handling when the owner is otherwise ineligible. The file-pin override is
+  deliberately limited to preserving pre-existing single-account behavior and
+  does not weaken assignment or security scope.
 
 ## Migration Plan
 
-No migration. The change is reconnect-selection behavior only and can be
-reverted by restoring the account-neutral-only flag and mapping gate.
+No migration. Reverting the file-pin provenance flag, scoped routing override,
+and early confirmed-disappearance predicate restores main's prior delayed
+terminal mapping.

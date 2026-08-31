@@ -1,39 +1,35 @@
 ## ADDED Requirements
 
-### Requirement: HTTP-bridge reconnect types a required owner as continuity provenance
+### Requirement: HTTP-bridge reconnect distinguishes deleted file owners from transient misses
 
-HTTP-bridge reconnect MUST type a required preferred account as a continuity
-owner. A live file pin, `require_preferred_account`, or account-neutral
-recovery populates that required owner. If selection then returns typed
-`continuity_owner_unavailable`, reconnect MUST fail closed immediately with
-the existing required-owner unavailable error and MUST NOT wait for generic
-selection recovery. A soft `1011` reconnect with no required owner MUST NOT
-mark the preferred account as a continuity owner.
+HTTP-bridge reconnect MUST mark a live required file-pin owner as continuity
+provenance. It MUST map a selection miss immediately to the existing 502
+`previous_response_owner_unavailable` response only when selection confirms
+that the required owner account no longer exists. A transient required-owner
+saturation MUST retain bounded recovery within the reconnect deadline and MUST
+retry the same owner. If recovery does not succeed, reconnect MUST retain the
+existing terminal fail-closed response.
 
-#### Scenario: Soft 1011 file-pin reconnect types the pin account as continuity owner
+#### Scenario: Deleted required file owner maps immediately
 
-- **GIVEN** a live in-memory pin `file_xyz -> account_a`
-- **AND** a soft prompt-cache HTTP-bridge session on `account_a` closed with `1011`
-- **AND** the next still-unsubmitted `/v1/responses` request references `file_xyz`
-- **WHEN** the proxy reconnects that session
-- **THEN** account selection MUST receive `account_a` as the preferred account
-- **AND** it MUST mark that preferred account as a continuity owner
-- **AND** it MUST request a single-account routing override for that file pin
-- **AND** it MUST NOT enable preferred-account fallback to another account
+- **GIVEN** a reconnect request has a live file pin to `account_a`
+- **AND** `account_a` no longer exists in the runtime account catalog
+- **WHEN** continuity-owner selection confirms that disappearance
+- **THEN** reconnect MUST return 502 `previous_response_owner_unavailable`
+- **AND** it MUST NOT wait for generic account-selection recovery
 
-#### Scenario: Soft 1011 reconnect without a required owner remains untyped
+#### Scenario: Transient required file-owner saturation recovers
 
-- **GIVEN** a soft prompt-cache HTTP-bridge session on `account_a` closed with `1011`
-- **AND** the still-unsubmitted request has no live file pin and no other required owner
-- **WHEN** the proxy reconnects that session
-- **THEN** account selection MUST NOT mark a preferred account as a continuity owner
-- **AND** it MUST NOT request a single-account routing override
-- **AND** it MAY exclude `account_a` and choose another eligible account
+- **GIVEN** a reconnect request has a live file pin to `account_a`
+- **AND** selection reports that `account_a` is transiently saturated
+- **WHEN** the existing bounded recovery wait permits another attempt
+- **THEN** reconnect MUST wait within its existing deadline
+- **AND** it MUST retry `account_a` without enabling fallback
+- **AND** it MUST continue successfully if `account_a` recovers
 
-#### Scenario: Required-owner reconnect maps typed continuity_owner_unavailable immediately
+#### Scenario: Terminal transient miss remains fail closed
 
-- **GIVEN** HTTP-bridge reconnect has a required preferred account
-- **AND** account selection returns typed `continuity_owner_unavailable`
-- **WHEN** the proxy reconnects that session
-- **THEN** the proxy MUST fail closed with the existing required-owner unavailable error
-- **AND** it MUST NOT wait for generic account-selection recovery before returning that envelope
+- **GIVEN** reconnect has any required preferred owner
+- **AND** bounded recovery cannot select that owner before termination
+- **WHEN** reconnect returns the terminal selection failure
+- **THEN** it MUST return the existing 502 `previous_response_owner_unavailable`

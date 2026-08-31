@@ -2158,7 +2158,9 @@ class _HTTPBridgeMixin(
                     service_tier=session.request_service_tier,
                     exclude_account_ids=excluded_account_ids,
                     preferred_account_id=preferred_candidate_id,
-                    preferred_account_is_continuity_owner=required_preferred_account_id is not None,
+                    preferred_account_is_continuity_owner=(
+                        account_neutral_recovery or request_state.file_required_preferred_account
+                    ),
                     preferred_account_overrides_single_account_routing=request_state.file_required_preferred_account,
                     require_security_work_authorized=require_security_work_authorized,
                     lease_kind=None if reuse_current_account_lease else "stream",
@@ -2181,7 +2183,7 @@ class _HTTPBridgeMixin(
                 except BaseException:
                     complete_failed_handoff()
                     raise
-                if required_preferred_account_id is not None and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE:
+                if required_preferred_account_id is not None and selection.continuity_owner_no_longer_exists:
                     complete_failed_handoff()
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 if (

@@ -2106,7 +2106,7 @@ class _StreamingRetryMixin:
                                 except BaseException as exc:
                                     if register_payload_owner and not (
                                         isinstance(exc, ProxyResponseError)
-                                        and is_confirmed_pre_dispatch_transport_error(exc)
+                                        and (is_confirmed_pre_dispatch_transport_error(exc) or exc.status_code == 429)
                                     ):
                                         payload_replay_required_account_id = account.id
                                     raise

@@ -186,7 +186,6 @@ _ADDITIONAL_QUOTA_ROUTING_POLICIES = _ACCOUNT_ROUTING_POLICIES | frozenset({"inh
 OPPORTUNISTIC_BURN_WINDOW_CLOSED = "opportunistic_burn_window_closed"
 CONTINUITY_OWNER_UNAVAILABLE = "continuity_owner_unavailable"
 CONTINUITY_OWNER_POLICY_CONFLICT = "continuity_owner_policy_conflict"
-_CONTINUITY_OWNER_NO_LONGER_EXISTS_MESSAGE = "Required continuity owner account no longer exists"
 _AMBIGUOUS_CONVERSATION_OWNER_CODE = "conversation_owner_unavailable"
 _AMBIGUOUS_CONVERSATION_OWNER_MESSAGE = "Conversation owner cannot be determined from the eligible account pool"
 
@@ -209,13 +208,7 @@ class AccountSelection:
     resets_at: int | None = None
     lease: AccountLease | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
-
-    @property
-    def continuity_owner_no_longer_exists(self) -> bool:
-        return (
-            self.error_code == CONTINUITY_OWNER_UNAVAILABLE
-            and self.error_message == _CONTINUITY_OWNER_NO_LONGER_EXISTS_MESSAGE
-        )
+    continuity_owner_no_longer_exists: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,14 +226,12 @@ class _SelectionInputs(SelectionInputsProtocol):
     latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_monthly: dict[str, UsageHistory]
-    # Ownership ambiguity is resolved before transient additional-quota,
-    # exclusion, runtime-health, budget, and account-cap filters. Keep that
-    # stronger candidate pool alongside the effective routing pool.
+    # Resolve ownership before transient routing filters; keep that stronger
+    # candidate pool alongside the effective routing pool.
     continuity_owner_candidates: list[Account] | None = None
-    # Sticky-row mutation is authorized by account assignment and security
-    # policy, before model/service-tier eligibility. Keep this separate from
-    # continuity ambiguity: a model-ineligible account can still own the raw
-    # row that this authenticated request is allowed to retire.
+    # Sticky mutation authority precedes model/service-tier eligibility; keep
+    # it separate because a model-ineligible account can still own the raw row
+    # this authenticated request may retire.
     sticky_mutation_authority_account_ids: frozenset[str] | None = None
     quota_planner_settings: PlannerSettings = PlannerSettings()
     runtime_accounts: list[Account] | None = None
@@ -281,7 +272,7 @@ def _required_continuity_owner_failure(
         selection_inputs.accounts if selection_inputs.runtime_accounts is None else selection_inputs.runtime_accounts
     )
     if required_account_id not in {account.id for account in runtime_accounts}:
-        return CONTINUITY_OWNER_UNAVAILABLE, _CONTINUITY_OWNER_NO_LONGER_EXISTS_MESSAGE
+        return CONTINUITY_OWNER_UNAVAILABLE, "Required continuity owner account no longer exists"
     return CONTINUITY_OWNER_POLICY_CONFLICT, "Required continuity owner is outside the eligible account policy"
 
 
@@ -725,6 +716,7 @@ class LoadBalancer:
                 account=None,
                 error_message=selection_inputs.error_message,
                 error_code=selection_inputs.error_code,
+                continuity_owner_no_longer_exists=selection_inputs.error_code == CONTINUITY_OWNER_UNAVAILABLE,
             )
 
         selected_snapshot: Account | None = None

@@ -10204,6 +10204,7 @@ async def test_reconnect_account_neutral_recovery_requires_typed_owner_without_c
             account=None,
             error_message="Required continuity owner account no longer exists",
             error_code=CONTINUITY_OWNER_UNAVAILABLE,
+            continuity_owner_no_longer_exists=True,
         )
 
     request_state = proxy_service._WebSocketRequestState(
@@ -11174,6 +11175,7 @@ async def test_reconnect_http_bridge_session_maps_nonexistent_file_pin_owner_wit
             account=None,
             error_message="Required continuity owner account no longer exists",
             error_code=CONTINUITY_OWNER_UNAVAILABLE,
+            continuity_owner_no_longer_exists=True,
         )
 
     async def sleep_for_recovery(*_args: object, **_kwargs: object) -> bool:

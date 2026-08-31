@@ -57,10 +57,10 @@ ineligible before load-balancer selection.
 ### Distinguish confirmed disappearance from transient unavailability
 
 `continuity_owner_unavailable` is also used for generic continuity misses.
-Early reconnect mapping therefore checks the typed code together with the
-selection-layer "Required continuity owner account no longer exists" reason.
-Only `_required_continuity_owner_failure` emits that pair after checking the
-runtime account catalog.
+After checking the runtime account catalog, the selection layer therefore sets
+`continuity_owner_no_longer_exists` only for confirmed disappearance. Early
+reconnect mapping checks that typed provenance rather than the broader error
+code.
 
 A `hard_affinity_saturated` miss remains `hard_affinity_saturated` instead of
 being rewritten to `continuity_owner_unavailable`. The existing recovery helper
@@ -71,9 +71,8 @@ unchanged.
 
 ## Risks / Trade-offs
 
-- The genuine-disappearance discriminator includes the internal selection
-  reason as well as its typed code. A shared predicate centralizes that pair so
-  producers and consumers cannot drift independently.
+- `AccountSelection` carries one boolean discriminator so reconnect does not
+  infer confirmed disappearance from a broader error code or message.
 - File-pin continuity still reaches existing continuity-owner policy-conflict
   handling when the owner is otherwise ineligible. The file-pin override is
   deliberately limited to preserving pre-existing single-account behavior and
@@ -82,5 +81,5 @@ unchanged.
 ## Migration Plan
 
 No migration. Reverting the file-pin provenance flag, scoped routing override,
-and early confirmed-disappearance predicate restores main's prior delayed
+and early confirmed-disappearance discriminator restores main's prior delayed
 terminal mapping.

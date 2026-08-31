@@ -370,6 +370,7 @@ async def test_deleted_required_continuity_owner_returns_typed_miss_without_glob
     assert selection.account is None
     assert selection.error_message == "Required continuity owner account no longer exists"
     assert selection.error_code == load_balancer_module.CONTINUITY_OWNER_UNAVAILABLE
+    assert selection.continuity_owner_no_longer_exists is True
     assert degraded_reasons == []
     assert normal_calls == []
 

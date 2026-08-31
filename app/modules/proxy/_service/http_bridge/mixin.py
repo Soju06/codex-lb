@@ -1999,7 +1999,6 @@ class _HTTPBridgeMixin(
         request_state.response_create_sent_at = None
         goal_restart = request_state.affinity_policy.abandon_unavailable_legacy_owner
         if selection_affinity is None and goal_restart:
-            # Storage drops this bit; its request retains reconnect and account-switch authority.
             selection_affinity = request_state.affinity_policy
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind, key=session.key.affinity_key
@@ -2087,6 +2086,7 @@ class _HTTPBridgeMixin(
             preferred_candidate_id = None
         selected_account_lease: AccountLease | None = None
         selected_account_model_replacement = False
+        file_owner = request_state.file_required_preferred_account
 
         def record_selected_account_takeover(
             selected_account_id: str | None, preferred_account_id: str | None = session.account.id
@@ -2098,8 +2098,7 @@ class _HTTPBridgeMixin(
 
         async def release_selected_account_lease() -> None:
             nonlocal selected_account_lease
-            lease = selected_account_lease
-            selected_account_lease = None
+            lease, selected_account_lease = selected_account_lease, None
             if lease is None:
                 return
             async with session.pending_lock:
@@ -2164,10 +2163,8 @@ class _HTTPBridgeMixin(
                     service_tier=session.request_service_tier,
                     exclude_account_ids=excluded_account_ids,
                     preferred_account_id=preferred_candidate_id,
-                    preferred_account_is_continuity_owner=(
-                        account_neutral_recovery or request_state.file_required_preferred_account
-                    ),
-                    preferred_account_overrides_single_account_routing=request_state.file_required_preferred_account,
+                    preferred_account_is_continuity_owner=account_neutral_recovery or file_owner,
+                    preferred_account_overrides_single_account_routing=file_owner,
                     require_security_work_authorized=require_security_work_authorized,
                     lease_kind=None if reuse_current_account_lease else "stream",
                     estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(

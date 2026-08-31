@@ -536,6 +536,16 @@ class _StreamingMixin(_StreamingRetryMixin):
                 surface="stream",
             )
 
+        async def _record_or_defer_owner_recovery_health(error: UpstreamError, code: str | None) -> None:
+            if code is None:
+                return
+            if api_key_reservation is None:
+                await proxy._handle_stream_error(account, error, code)
+                return
+            settlement.error_code = code
+            settlement.account_health_error = True
+            settlement.settlement_order_required = True
+
         api_key_reservation_heartbeat_stop = asyncio.Event()
         api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None
         if api_key_reservation is not None:
@@ -693,12 +703,10 @@ class _StreamingMixin(_StreamingRetryMixin):
                     )
                     error_code = rewritten_code
                     error_message = rewritten_message
+                    await _record_or_defer_owner_recovery_health(upstream_error, upstream_error_code)
                     upstream_error = cast(
                         UpstreamError, {"message": rewritten_message, "type": "upstream_error", "code": rewritten_code}
                     )
-                    if upstream_error_code is not None:
-                        settlement.error_code = upstream_error_code
-                        settlement.account_health_error = True
                 else:
                     error_code = code
                     error_message = raw_error_message
@@ -866,9 +874,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                             error_message = rewritten_message
                             settlement.error = _upstream_error_from_openai(error)
                             settlement.record_success = False
-                            if upstream_error_code is not None:
-                                settlement.error_code = upstream_error_code
-                                settlement.account_health_error = True
+                            await _record_or_defer_owner_recovery_health(
+                                _upstream_error_from_openai(error), upstream_error_code
+                            )
                         else:
                             error_code = raw_error_code
                             error_message = raw_error_message
@@ -964,9 +972,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 error_message = rewritten_message
                 settlement.record_success = False
                 settlement.error = _upstream_error_from_openai(error)
-                if upstream_error_code is not None:
-                    settlement.error_code = upstream_error_code
-                    settlement.account_health_error = True
+                await _record_or_defer_owner_recovery_health(_upstream_error_from_openai(error), upstream_error_code)
                 yield _facade()._build_rewritten_stream_response_failed_event(
                     response_id=request_id,
                     error_code=rewritten_code,

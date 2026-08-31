@@ -28,15 +28,16 @@ its `finally` can release the reservation.
 
 ## Decisions
 
-1. Owner-unavailable rewrite branches retain the original error code, mark the
-   existing settlement as ordering-sensitive, and settle through
-   `_settle_stream_usage_before_pending_penalty` before invoking health.
+1. Owner-unavailable rewrite branches retain the original error code, set an
+   explicit ordering marker on the existing settlement state, and settle
+   through `_settle_stream_usage_before_pending_penalty` before invoking health.
    Reusing the existing helper preserves fallback-release and transfer
    semantics; an inline release would create a second cleanup owner.
-2. The empty-queue terminal branch uses
+2. The empty-queue terminal branch passes explicit ordering ownership to
    `_finalize_terminal_settlement_after_downstream_close` before terminal
    health/success. This keeps one terminal path responsible for usage and
-   cleanup and avoids duplicating finalization logic.
+   cleanup, including successful terminals, without making unrelated stream
+   errors wait synchronously.
 3. Health is conditional on a confirmed helper result. The client and request
    log continue to use `previous_response_owner_unavailable`; only account
    recovery receives the original upstream code.

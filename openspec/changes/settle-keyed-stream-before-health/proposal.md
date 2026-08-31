@@ -33,8 +33,9 @@ recovery state cannot become observably inconsistent.
 
 ## Impact
 
-The change is limited to HTTP SSE Responses streaming settlement order in
-`streaming/mixin.py` and `streaming/retry.py`, focused helper and
+The change is limited to HTTP SSE Responses streaming settlement order in the
+existing stream settlement state, `streaming/mixin.py`, and
+`streaming/retry.py`, focused helper and
 `/v1/responses` regressions, and the three supporting OpenSpec deltas. It does
 not change usage-missing policy, unary routes, WebSocket/compact behavior, or
 client-visible error shapes.

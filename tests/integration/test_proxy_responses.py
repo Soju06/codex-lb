@@ -2620,7 +2620,7 @@ async def test_backend_responses_post_refresh_terminal_disconnect_finalizes_sett
             "request_id": request_id,
             "input_tokens": 1,
             "output_tokens": 1,
-            "wait_for_settlement": False,
+            "wait_for_settlement": True,
         }
     ]
     assert success_account_ids == [expected_account_id]

@@ -531,13 +531,16 @@ class _StreamingRetryMixin:
 
         async def _settle_stream_usage_before_pending_penalty(
             current_settlement: _StreamSettlement,
+            *,
+            settlement_order_required: bool = False,
         ) -> bool:
             nonlocal settled
             apply_pending_penalty = post_refresh_transient_replacement_selected and bool(
                 pending_post_refresh_transient_penalties
             )
             wait_for_health_write = (
-                current_settlement.account_health_error
+                settlement_order_required
+                or current_settlement.settlement_order_required
                 or apply_pending_penalty
                 or bool(deferred_account_error_backoffs)
             )
@@ -633,13 +636,18 @@ class _StreamingRetryMixin:
         async def _finalize_terminal_settlement_after_downstream_close(
             current_settlement: _StreamSettlement,
             account: Account,
+            *,
+            settlement_order_required: bool = False,
         ) -> None:
             nonlocal settled
 
             async def _finalize() -> None:
                 nonlocal settled
                 if not settled:
-                    settled = await _settle_stream_usage_before_pending_penalty(current_settlement)
+                    settled = await _settle_stream_usage_before_pending_penalty(
+                        current_settlement,
+                        settlement_order_required=settlement_order_required,
+                    )
                 if not settled:
                     return
                 if current_settlement.account_health_error:
@@ -848,7 +856,11 @@ class _StreamingRetryMixin:
                         # health result before propagating cancellation so the
                         # reservation is not released as abandoned.
                         if settlement.status in {"success", "error"} and not settled:
-                            await _finalize_terminal_settlement_after_downstream_close(settlement, account)
+                            await _finalize_terminal_settlement_after_downstream_close(
+                                settlement,
+                                account,
+                                settlement_order_required=True,
+                            )
                         raise
                     network_recovery.log_recovered()
                     return
@@ -3034,7 +3046,11 @@ class _StreamingRetryMixin:
                             elif health_write_allowed and settlement.record_success:
                                 await proxy._load_balancer.record_success(account)
                         else:
-                            await _finalize_terminal_settlement_after_downstream_close(settlement, account)
+                            await _finalize_terminal_settlement_after_downstream_close(
+                                settlement,
+                                account,
+                                settlement_order_required=True,
+                            )
                         upstream_transport_metric_status = settlement.status
                         _record_upstream_transport_metric_once(settlement.status)
                         return

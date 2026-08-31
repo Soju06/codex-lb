@@ -59,6 +59,15 @@ FILTERS = {
         "uv.lock",
         ".github/workflows/ci.yml",
     ],
+    "nix": [
+        "flake.nix",
+        "flake.lock",
+        "frontend/bun.nix",
+        "frontend/bun.lock",
+        "pyproject.toml",
+        "uv.lock",
+        ".github/workflows/ci.yml",
+    ],
 }
 
 
@@ -92,6 +101,7 @@ def _pull_request_files(event: dict[str, Any]) -> list[str]:
                 "deploy/helm/__github_api_unavailable__",
                 "Dockerfile",
                 "app/db/alembic/__github_api_unavailable__",
+                "flake.nix",
             ]
         if not isinstance(payload, list):
             raise SystemExit(f"GitHub PR files request returned {type(payload).__name__}, expected list")

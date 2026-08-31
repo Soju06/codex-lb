@@ -1776,12 +1776,11 @@ class ProxyService(
                 required_continuity_preferred_account = (
                     required_preferred_account and preferred_account_is_continuity_owner
                 )
-                overrides_single_account_routing = (
-                    required_preferred_account and preferred_account_overrides_single_account_routing
-                )
                 single_account_routing_id: str | None = None
-                if _routing_strategy(settings) == "single_account" and not overrides_single_account_routing and (
-                    not required_preferred_account or required_continuity_preferred_account
+                if (
+                    _routing_strategy(settings) == "single_account"
+                    and not (required_preferred_account and preferred_account_overrides_single_account_routing)
+                    and (not required_preferred_account or required_continuity_preferred_account)
                 ):
                     selected_account_id = (settings.single_account_id or "").strip()
                     if not selected_account_id:

@@ -1483,6 +1483,23 @@ async def test_durable_bridge_previous_response_alias_lookup_returns_replacement
 
 
 @pytest.mark.asyncio
+async def test_retained_response_alias_requires_replacement_target(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    result = await coordinator.register_previous_response_id(
+        session_id="missing-session",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=1,
+        response_id="resp-retained",
+        lease_ttl_seconds=120.0,
+        retained_replay=True,
+    )
+
+    assert result == DurableBridgeAliasRegistration.ALIAS_PROTECTED
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_turn_state_proof_does_not_accept_latest_state_without_alias(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

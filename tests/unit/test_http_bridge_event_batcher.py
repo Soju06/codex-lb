@@ -14,6 +14,7 @@ class _FakeDurableBridge:
         self.update_result = update_result
         self.batches: list[list[str]] = []
         self.chunk_batches: list[list[str]] = []
+        self.terminal_rows: list[str] = []
         self.terminal_chunks: list[str] = []
         self.finalized: list[str] = []
         self.updated: list[dict[str, object]] = []
@@ -29,7 +30,7 @@ class _FakeDurableBridge:
         return self.append_result
 
     async def append_terminal_operation_event(self, **kwargs) -> bool:
-        self.terminal_chunks.append(kwargs["event_text"])
+        self.terminal_rows.append(kwargs["event_text"])
         return self.append_result
 
     async def append_terminal_operation_chunk(self, **kwargs) -> bool:
@@ -174,6 +175,7 @@ async def test_chunk_mode_routes_batch_and_terminal_without_legacy_writes() -> N
 
         assert result.persisted is True
         assert durable.chunk_batches == [["one", "two"]]
+        assert durable.terminal_rows == []
         assert durable.terminal_chunks == ["terminal"]
         assert durable.batches == []
     finally:

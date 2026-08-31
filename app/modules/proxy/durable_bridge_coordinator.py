@@ -1133,6 +1133,11 @@ class DurableBridgeSessionCoordinator:
         pending_tool_calls: Mapping[str, str] | None = None,
         retained_replay: bool = False,
     ) -> DurableBridgeAliasRegistration:
+        if retained_replay and not latest_response_id:
+            # A retained client-visible alias must always point at the
+            # replacement response durably; never persist an unresolvable
+            # alias with a missing target.
+            return DurableBridgeAliasRegistration.ALIAS_PROTECTED
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
             return await DurableBridgeRepository(session).register_owned_alias(

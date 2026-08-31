@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from types import SimpleNamespace
 from typing import cast
 
@@ -17,6 +17,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings import Settings
 from app.core.openai.models import CompactResponsePayload
+from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.time import utcnow
 from app.db.models import Account, DashboardSettings, RequestLog, StickySessionKind
@@ -2924,6 +2925,98 @@ async def test_backend_responses_preserves_non_streaming_json_contract(async_cli
     assert resp.headers["content-type"].startswith("application/json")
     assert resp.json()["id"] == "resp_1"
     assert observed_stream["value"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "output", "accepted"),
+    [
+        pytest.param("queued", [], True, id="queued"),
+        pytest.param("in_progress", [], True, id="in-progress"),
+        pytest.param("queued", ["not-an-object"], False, id="malformed-output"),
+    ],
+)
+async def test_background_json_completion_is_not_truncated(
+    async_client,
+    monkeypatch,
+    status: str,
+    output: list[JsonValue],
+    accepted: bool,
+) -> None:
+    email = f"background-json-{status}@example.com"
+    raw_account_id = f"acc_background_json_{status}"
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    imported = await async_client.post("/api/accounts/import", files=files)
+    assert imported.status_code == 200
+
+    request_log_calls: list[dict[str, object]] = []
+    error_account_ids: list[str] = []
+    success_account_ids: list[str] = []
+
+    async def fake_stream(
+        payload: ResponsesRequest,
+        *_args: object,
+        **_kwargs: object,
+    ) -> AsyncIterator[str]:
+        assert payload.stream is False
+        event_payload: dict[str, JsonValue] = {
+            "type": f"response.{status}",
+            "response": {
+                "id": f"resp_background_json_{status}",
+                "object": "response",
+                "status": status,
+                "output": output,
+            },
+        }
+        yield proxy_module.format_sse_event(event_payload)
+
+    async def fake_write_request_log(
+        _self: object,
+        **kwargs: object,
+    ) -> None:
+        request_log_calls.append(dict(kwargs))
+
+    async def fake_record_error(_self: object, account: Account) -> None:
+        error_account_ids.append(account.id)
+
+    async def fake_record_success(_self: object, account: Account) -> None:
+        success_account_ids.append(account.id)
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "record_error", fake_record_error)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "record_success", fake_record_success)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [],
+            "stream": False,
+            "background": True,
+        },
+    )
+
+    assert response.headers["content-type"].startswith("application/json")
+    assert len(request_log_calls) == 1
+    if accepted:
+        assert response.status_code == 200
+        assert response.json()["id"] == f"resp_background_json_{status}"
+        assert response.json()["status"] == status
+        assert request_log_calls[0]["status"] == "success"
+        assert request_log_calls[0]["error_code"] is None
+        assert error_account_ids == []
+        assert success_account_ids == [expected_account_id]
+    else:
+        assert response.status_code == 502
+        assert response.json()["error"]["code"] == "invalid_output_item"
+        assert request_log_calls[0]["status"] == "error"
+        assert request_log_calls[0]["error_code"] == "stream_incomplete"
+        assert error_account_ids == [expected_account_id]
+        assert success_account_ids == []
 
 
 @pytest.mark.asyncio

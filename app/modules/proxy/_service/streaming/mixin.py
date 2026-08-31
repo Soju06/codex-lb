@@ -622,7 +622,6 @@ class _StreamingMixin(_StreamingRetryMixin):
             first_payload = parse_sse_data_json(first)
             event_type = classify_event_type(first_payload)
             event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
-            terminal_event_seen = False
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
             malformed_error_rewrite = _rewrite_malformed_stream_error_event(
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -633,6 +632,17 @@ class _StreamingMixin(_StreamingRetryMixin):
             )
             if malformed_error_rewrite is not None:
                 first, event, first_payload, event_type = malformed_error_rewrite
+            response = first_payload.get("response") if first_payload is not None else None
+            terminal_event_seen = (
+                payload.stream is False
+                and event_type in {"response.queued", "response.in_progress"}
+                and isinstance(response, dict)
+                and response.get("object") == "response"
+                and isinstance(response.get("id"), str)
+                and bool(response["id"])
+                and response.get("status") == event_type.removeprefix("response.")
+                and response.get("output") == []
+            )
             if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
                 await _touch_api_key_reservation()
             event_service_tier = _facade()._service_tier_from_event_payload(first_payload)

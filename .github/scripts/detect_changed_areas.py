@@ -43,6 +43,7 @@ FILTERS = {
         "crates/**",
         "app/core/clients/codex.py",
         "app/core/clients/native_egress.py",
+        "app/core/clients/proxy.py",
         "app/core/clients/proxy_websocket.py",
         "app/core/upstream_proxy/**",
         "tests/unit/test_native_egress.py",

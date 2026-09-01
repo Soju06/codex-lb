@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,7 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper() -> Non
     helper = Path(helper_value)
     if not helper.is_file():
         pytest.skip(f"native helper is unavailable: {helper}")
+    access_token = secrets.token_urlsafe(32)
 
     proxy_hits: list[str] = []
     http_bodies: list[bytes] = []
@@ -140,7 +142,7 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper() -> Non
 
             websocket = await _connect_upstream_websocket(
                 {},
-                "test-token",
+                access_token,
                 "account-1",
                 url=f"ws://127.0.0.1:{websocket_port}/v1/responses",
                 route=route,

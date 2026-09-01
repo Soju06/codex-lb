@@ -91,6 +91,7 @@ def test_detect_changed_areas_falls_back_to_full_suite_after_github_outage(monke
     "path",
     [
         "app/core/clients/codex.py",
+        "app/core/clients/proxy.py",
         "app/core/clients/proxy_websocket.py",
         "app/core/upstream_proxy/router.py",
     ],

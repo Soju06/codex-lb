@@ -46,6 +46,7 @@ FILTERS = {
         "app/core/clients/native_egress.py",
         "app/core/clients/proxy.py",
         "app/core/clients/proxy_websocket.py",
+        "app/core/config/settings.py",
         "app/core/openai/**",
         "app/core/upstream_proxy/**",
         "pyproject.toml",

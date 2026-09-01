@@ -94,6 +94,7 @@ def test_detect_changed_areas_falls_back_to_full_suite_after_github_outage(monke
         "app/core/clients/http.py",
         "app/core/clients/proxy.py",
         "app/core/clients/proxy_websocket.py",
+        "app/core/config/settings.py",
         "app/core/openai/requests.py",
         "app/core/upstream_proxy/router.py",
         "pyproject.toml",

@@ -75,3 +75,18 @@ def test_dashboard_browser_smoke_covers_both_contract_sides_and_is_required() ->
     assert "bun run playwright install --with-deps chromium" in browser_job
     assert "run: make test-dashboard-browser-smoke" in browser_job
     assert "- dashboard-browser-smoke" in required_job
+
+
+def test_openspec_validation_is_required_for_spec_only_changes() -> None:
+    workflow = _ci_workflow_text()
+    trigger_block = workflow.split("concurrency:", maxsplit=1)[0]
+
+    openspec_job = _job_block(workflow, "openspec")
+    required_job = _job_block(workflow, "ci-required")
+
+    assert "pull_request:" in trigger_block
+    assert "paths:" not in trigger_block
+    assert "\n    needs:" not in openspec_job
+    assert "\n    if:" not in openspec_job
+    assert "npx --yes @fission-ai/openspec@1.4.1 validate --specs --strict" in openspec_job
+    assert "- openspec" in required_job

@@ -169,8 +169,7 @@ When serving `GET /v1/models`, the system SHALL preserve upstream speed-tier met
 
 ### Requirement: GPT-5.6 bootstrap metadata matches the upstream bundled catalog
 
-The GPT-5.6 bootstrap catalog entries (`gpt-5.6-sol`, `gpt-5.6-terra`,
-`gpt-5.6-luna`) MUST mirror the upstream bundled catalog
+The GPT-5.6 bootstrap catalog entries (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`) MUST mirror the upstream bundled catalog
 (`codex-rs/models-manager/models.json` at Codex release `rust-v0.145.0`)
 field-for-field for every metadata field codex-lb serves, with one tracked
 exception: `max_context_window`, which upstream raised from `272000` to
@@ -927,8 +926,7 @@ At startup every replica SHALL load the persisted model-registry snapshot into i
 
 ### Requirement: Every Codex-native catalog entry is wire-parseable
 
-Every model entry returned by `GET /backend-api/codex/models` or the equivalent
-`GET /v1/models?client_version=<version>` route MUST include the non-defaulted
+Every model entry returned by `GET /backend-api/codex/models` or the equivalent `GET /v1/models?client_version=<version>` route MUST include the non-defaulted
 Codex wire fields `truncation_policy` and `experimental_supported_tools`, even
 when the entry comes from hidden retained bootstrap metadata or a persisted
 legacy registry snapshot. When either field is absent from stored raw metadata,

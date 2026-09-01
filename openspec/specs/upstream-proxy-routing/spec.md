@@ -48,8 +48,7 @@ Request logs for migrated upstream calls MUST record route mode, proxy pool id, 
 
 ### Requirement: Codex installation metadata must be account-owned
 
-Codex `response.create` requests sent through account-scoped HTTP/SSE, bridge,
-or WebSocket transports MUST use the selected local account's stored
+Codex `response.create` requests sent through account-scoped HTTP/SSE, bridge, or WebSocket transports MUST use the selected local account's stored
 `x-codex-installation-id` value in `client_metadata`. For the observed Codex CLI
 0.150.1 Responses wire profile, the same value MUST NOT be synthesized as a
 standalone upstream HTTP request or WebSocket handshake header. Header location

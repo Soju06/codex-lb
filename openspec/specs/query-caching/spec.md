@@ -711,8 +711,7 @@ The dashboard conversation activity metrics (`conversation_count`, `conversation
 - **THEN** the legacy full-raw query is used unchanged
 
 ### Requirement: Projection history bulk reads are index-covered on PostgreSQL
-The columns selected by the dashboard projections bulk usage-history fetch
-MUST be fully covered by an index matching each of its predicate shapes on
+The columns selected by the dashboard projections bulk usage-history fetch MUST be fully covered by an index matching each of its predicate shapes on
 PostgreSQL — the coalesced-primary window shape and the explicit raw-window
 shape — so the read can be planned as an index-only scan without per-row
 heap fetches. Non-PostgreSQL backends MUST keep the same-named indexes for
@@ -744,7 +743,7 @@ schema parity but MAY omit the covering payload.
 - **THEN** it MUST report the missing index by name
 
 ### Requirement: Append-heavy usage-history visibility is maintained for the covering path
-Covering indexes alone do not keep the bulk read heap-free: `usage_history`
+Covering indexes alone MUST NOT be treated as sufficient to keep the bulk read heap-free: `usage_history`
 is append-heavy (high-frequency inserts, no updates or deletes), and with
 PostgreSQL's default insert-driven autovacuum trigger the freshly appended
 pages stay outside the visibility map long enough that "index-only" scans

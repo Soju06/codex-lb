@@ -135,7 +135,9 @@ dependencies = [
 name = "codex-lb-egress-worker"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "codex-lb-egress",
+ "codex-lb-protocol",
  "futures-util",
  "serde_json",
  "tokio",

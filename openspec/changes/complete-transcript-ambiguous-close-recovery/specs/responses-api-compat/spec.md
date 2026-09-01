@@ -22,7 +22,7 @@ any condition is not proven, it MUST preserve the existing fail-closed error.
 
 ### Requirement: Duplicate replay echoes remain fail-closed unless identical
 
-The proxy MAY remove an exact duplicate tool call or tool-output echo when the
+The proxy MUST remove an exact duplicate tool call or tool-output echo when the
 same call ID and canonical item occur more than once in a replay payload. It
 MUST reject conflicting duplicate call IDs, unsettled calls, unknown fields,
 and account-scoped items.

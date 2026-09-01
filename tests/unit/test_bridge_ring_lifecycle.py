@@ -344,6 +344,15 @@ async def test_lookup_request_targets_preserves_retained_response_alias_target(
         lease_ttl_seconds=120.0,
     )
     assert ordinary_registration is DurableBridgeAliasRegistration.REGISTERED
+    turn_registration = await coordinator.register_turn_state(
+        session_id=claimed.id,
+        api_key_id=None,
+        instance_id="retained-owner",
+        owner_epoch=claimed.owner_epoch,
+        turn_state="turn-retained-alias",
+        lease_ttl_seconds=120.0,
+    )
+    assert turn_registration is DurableBridgeAliasRegistration.REGISTERED
     registration = await coordinator.register_previous_response_id(
         session_id=claimed.id,
         api_key_id=None,
@@ -374,7 +383,7 @@ async def test_lookup_request_targets_preserves_retained_response_alias_target(
         session_key_kind="session_header",
         session_key_value="sid-retained-target",
         api_key_id=None,
-        turn_state=None,
+        turn_state="turn-retained-alias",
         session_header=None,
         previous_response_id="resp-client-alias",
     )

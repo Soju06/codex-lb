@@ -87,11 +87,11 @@ class DurableBridgeSessionCoordinator:
             resolved_aliases: list[tuple[str, DurableBridgeSessionSnapshot]] = []
             retained_alias_identity: tuple[str, str | None] | None = None
             for alias_kind, alias_value in (
-                (_DURABLE_TURN_STATE_ALIAS, turn_state),
-                # Resolve retained aliases before ordinary response aliases so
-                # a same-session pair preserves the immutable replacement
+                # Resolve retained aliases before every other alias so a
+                # same-session pair preserves the immutable replacement
                 # target carried by the retained entry.
                 (_DURABLE_RETAINED_PREVIOUS_RESPONSE_ALIAS, previous_response_id),
+                (_DURABLE_TURN_STATE_ALIAS, turn_state),
                 (_DURABLE_PREVIOUS_RESPONSE_ALIAS, previous_response_id),
                 (_DURABLE_SESSION_HEADER_ALIAS, session_header),
             ):
@@ -122,8 +122,8 @@ class DurableBridgeSessionCoordinator:
                     identity = (snapshot.id, snapshot.account_id)
                     if alias_kind == _DURABLE_RETAINED_PREVIOUS_RESPONSE_ALIAS:
                         retained_alias_identity = identity
-                    elif alias_kind == _DURABLE_PREVIOUS_RESPONSE_ALIAS and identity == retained_alias_identity:
-                        # The ordinary alias points at the same durable row;
+                    elif retained_alias_identity == identity:
+                        # Another alias points at the same durable row;
                         # retaining it would let the mutable session anchor
                         # shadow the retained alias's immutable target.
                         continue

@@ -52,8 +52,12 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
             if type(output_index) is not int or output_index < 0 or not isinstance(item, dict):
                 return None
             if event_type == "response.output_item.added":
+                if output_index in added_indexes:
+                    return None
                 added_indexes.add(output_index)
                 continue
+            if output_index in done_indexes:
+                return None
             existing = output_items.get(output_index)
             if existing is not None and _canonical_item(existing) != _canonical_item(item):
                 return None

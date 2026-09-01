@@ -997,3 +997,38 @@ def test_materialize_output_items_rejects_boolean_indexes() -> None:
     ]
 
     assert materialize_output_items_from_events(events) is None
+
+
+def test_materialize_output_items_rejects_duplicate_added_indexes() -> None:
+    item = '{"type":"message"}'
+    events = [
+        (
+            f"event: response.output_item.added\ndata: "
+            f'{{"type":"response.output_item.added","output_index":0,"item":{item}}}\n\n'
+        ),
+        (
+            f"event: response.output_item.added\ndata: "
+            f'{{"type":"response.output_item.added","output_index":0,"item":{item}}}\n\n'
+        ),
+        (
+            "event: response.output_item.done\ndata: "
+            '{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}\n\n'
+        ),
+        'event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n',
+    ]
+
+    assert materialize_output_items_from_events(events) is None
+
+
+def test_materialize_output_items_rejects_duplicate_done_indexes() -> None:
+    done = (
+        "event: response.output_item.done\ndata: "
+        '{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}\n\n'
+    )
+    events = [
+        done,
+        done,
+        'event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n',
+    ]
+
+    assert materialize_output_items_from_events(events) is None

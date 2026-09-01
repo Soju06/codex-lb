@@ -59,6 +59,38 @@ async def test_backpressure_returns_429_when_at_capacity():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1", "/backend-api"])
+async def test_backpressure_exact_openai_roots_use_openai_error_envelope(path: str):
+    app = FastAPI()
+    app.add_middleware(cast(Any, BackpressureMiddleware), max_concurrent=1)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    @app.get("/work")
+    async def work():
+        entered.set()
+        await release.wait()
+        return {"ok": True}
+
+    @app.get(path)
+    async def exact_root():
+        return {"ok": True}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        first_request = asyncio.create_task(client.get("/work"))
+        await entered.wait()
+
+        overloaded = await client.get(path)
+        release.set()
+        await first_request
+
+    assert overloaded.status_code == 429
+    assert overloaded.json()["error"]["code"] == "proxy_overloaded"
+    assert overloaded.headers["retry-after"] == "5"
+
+
+@pytest.mark.asyncio
 async def test_backpressure_exempts_health_live_even_at_capacity():
     app = FastAPI()
     app.add_middleware(cast(Any, BackpressureMiddleware), max_concurrent=1)

@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from httpx import AsyncClient
 
 import app.core.auth.dependencies as auth_dependencies
-from app.core.auth.dashboard_access import guest_principal
+from app.core.auth.dashboard_access import DashboardAuthMode, admin_principal, guest_principal
 from app.db.models import AuditLog
 from app.db.session import SessionLocal
 
@@ -62,10 +62,20 @@ async def test_guest_security_audit_identity_is_denied(
 
 
 @pytest.mark.asyncio
-async def test_guest_security_audit_identity_preserves_operator_detail(
+async def test_admin_security_audit_identity_preserves_operator_detail(
     async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await _insert_sensitive_audit_log()
+    monkeypatch.setattr(
+        auth_dependencies,
+        "validate_dashboard_session",
+        AsyncMock(
+            return_value=admin_principal(
+                auth_mode=DashboardAuthMode.STANDARD,
+            )
+        ),
+    )
     response = await async_client.get("/api/audit-logs", params={"action": ACTION})
 
     assert response.status_code == 200

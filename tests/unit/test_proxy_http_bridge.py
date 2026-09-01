@@ -7271,8 +7271,10 @@ async def test_completed_bridge_operation_skips_overbound_replay_snapshot(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_replay_turn_count", [-1, 0])
 async def test_completed_bridge_operation_skips_unknown_root_replay_snapshot(
     monkeypatch: pytest.MonkeyPatch,
+    recovery_replay_turn_count: int,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = SimpleNamespace(
@@ -7290,7 +7292,7 @@ async def test_completed_bridge_operation_skips_unknown_root_replay_snapshot(
         operation_parent_response_id=None,
         response_output_items=[{"type": "message", "role": "assistant", "content": []}],
         response_output_items_complete=True,
-        recovery_replay_turn_count=-1,
+        recovery_replay_turn_count=recovery_replay_turn_count,
     )
     session = _make_bridge_session(key_value="unknown-root-snapshot")
     session.durable_session_id = "durable-unknown-root-snapshot"

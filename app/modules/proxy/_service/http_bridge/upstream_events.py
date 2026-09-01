@@ -531,7 +531,10 @@ async def _update_http_bridge_operation_state(
                             )
                         if snapshot is not None:
                             recovered_turn_count = int(getattr(request_state, "recovery_replay_turn_count", 0))
-                            if recovered_turn_count < 0:
+                            unknown_root_depth = (
+                                recovered_turn_count == 0 and not parent_turns and not parent_response_id
+                            )
+                            if recovered_turn_count < 0 or unknown_root_depth:
                                 # A client-supplied root history has no
                                 # trustworthy represented-turn count. Keep
                                 # the terminal output, but never persist a

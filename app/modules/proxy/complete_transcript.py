@@ -240,17 +240,6 @@ def build_complete_replay_payload(
             canonical_input if replay_input_includes_latest_output else canonical_input + latest_prior_output
         )
         if (
-            allow_unanchored_continuation
-            and continuation_previous_response_id in (None, "")
-            and _items_prefix_matches(continuation_input, canonical_input)
-        ):
-            # A full-history Codex request already contains the durable
-            # transcript, including the latest response output. Keep only its
-            # new suffix; appending ``latest_prior_output`` again would drop
-            # the assistant turn from the reconstructed ordering.
-            continuation_input = continuation_input[len(canonical_input) :]
-            include_prior_output = not replay_input_includes_latest_output
-        elif (
             canonical_with_latest_output
             and (matched_input := _strip_omitted_output_prefix(continuation_input, canonical_with_latest_output))
             is not None
@@ -261,6 +250,16 @@ def build_complete_replay_payload(
             canonical_input = list(canonical_with_latest_output)
             continuation_input = matched_input
             include_prior_output = False
+        elif (
+            allow_unanchored_continuation
+            and continuation_previous_response_id in (None, "")
+            and _items_prefix_matches(continuation_input, canonical_input)
+        ):
+            # A compacted unanchored request may omit the latest response
+            # output. Keep only its new suffix and insert that output below;
+            # the full-output branch above has already handled complete echoes.
+            continuation_input = continuation_input[len(canonical_input) :]
+            include_prior_output = not replay_input_includes_latest_output
         elif (
             latest_prior_output
             and (matched_input := _strip_omitted_output_prefix(continuation_input, latest_prior_output)) is not None

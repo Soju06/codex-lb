@@ -8,9 +8,12 @@ is unknown, pending, or fails to load.
 ## Decision
 
 The wildcard route remains under `AppLayout`. A pathname-keyed React error
-boundary surrounds only the lazy outlet. Pending chunks use the existing
-SpinnerBlock. Rejected lazy imports use full reload because React caches the
-rejected promise; Dashboard navigation remounts the boundary.
+boundary surrounds only the lazy outlet and tracks the complete React Router
+location as a reset identity. Location changes reset only an already-failed
+boundary, so healthy query/hash updates preserve outlet state and focus.
+Pending chunks use the existing SpinnerBlock. Rejected lazy imports use full
+reload because React caches the rejected promise; Dashboard navigation creates
+a new router location identity even when its URL is unchanged.
 
 ## Constraints
 

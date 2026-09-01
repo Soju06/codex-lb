@@ -7271,6 +7271,65 @@ async def test_completed_bridge_operation_skips_overbound_replay_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_completed_bridge_operation_skips_unknown_root_replay_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = SimpleNamespace(
+        operation_id="op-unknown-root-snapshot",
+        operation_attempt_generation=0,
+        operation_persisted_response_id=None,
+        response_id="resp-unknown-root-snapshot",
+        replay_downstream_response_id=None,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "input": [{"type": "message", "role": "user", "content": "question"}],
+            }
+        ),
+        operation_parent_response_id=None,
+        response_output_items=[{"type": "message", "role": "assistant", "content": []}],
+        response_output_items_complete=True,
+        recovery_replay_turn_count=-1,
+    )
+    session = _make_bridge_session(key_value="unknown-root-snapshot")
+    session.durable_session_id = "durable-unknown-root-snapshot"
+    session.durable_owner_epoch = 1
+    update_operation = AsyncMock(return_value=True)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            update_operation=update_operation,
+            get_operation=AsyncMock(return_value=SimpleNamespace(event_spool_complete=True)),
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024 * 1024,
+            http_responses_session_bridge_instance_id="instance-unknown-root-snapshot",
+        ),
+    )
+
+    await http_bridge_upstream_events_module._update_http_bridge_operation_state(
+        service,
+        session,
+        request_state,
+        state="completed",
+        response_id="resp-unknown-root-snapshot",
+    )
+
+    await_args = update_operation.await_args
+    assert await_args is not None
+    assert await_args.kwargs["response_output_items_complete"] is True
+    assert await_args.kwargs["response_replay_input_json"] is None
+    assert await_args.kwargs["response_replay_input_complete"] is False
+    assert await_args.kwargs["response_replay_input_turn_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_complete_transcript_recovery_does_not_replay_after_response_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7525,7 +7584,7 @@ async def test_unsafe_partial_transcript_recovery_rejects_continuation_at_turn_l
 
 
 @pytest.mark.asyncio
-async def test_complete_transcript_root_recovery_keeps_zero_ancestor_count(
+async def test_complete_transcript_root_recovery_marks_unknown_ancestor_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -7607,7 +7666,7 @@ async def test_complete_transcript_root_recovery_keeps_zero_ancestor_count(
     )
 
     assert recovered is True
-    assert request_state.recovery_replay_turn_count == 0
+    assert request_state.recovery_replay_turn_count == -1
     assert request_state.request_text.startswith('{"type":"response.create"')
     retry.assert_awaited_once()
 

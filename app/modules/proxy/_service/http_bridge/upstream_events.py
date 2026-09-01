@@ -530,7 +530,25 @@ async def _update_http_bridge_operation_state(
                                 exc_info=True,
                             )
                         if snapshot is not None:
-                            recovered_turn_count = max(0, int(getattr(request_state, "recovery_replay_turn_count", 0)))
+                            recovered_turn_count = int(getattr(request_state, "recovery_replay_turn_count", 0))
+                            if recovered_turn_count < 0:
+                                # A client-supplied root history has no
+                                # trustworthy represented-turn count. Keep
+                                # the terminal output, but never persist a
+                                # replay snapshot that claims it contains
+                                # only the replacement turn.
+                                snapshot = None
+                                _log_http_bridge_event(
+                                    "complete_transcript_replay_snapshot_skipped",
+                                    session.key,
+                                    account_id=session.account.id,
+                                    model=getattr(request_state, "model", None),
+                                    detail="represented_turn_count_unknown",
+                                    cache_key_family=session.key.affinity_kind,
+                                    model_class=request_model_class,
+                                )
+                        if snapshot is not None:
+                            recovered_turn_count = max(0, recovered_turn_count)
                             # A recovery replay contains the completed ancestor
                             # turns; the operation being persisted is one more
                             # represented turn. Root snapshots have no durable
@@ -1449,11 +1467,11 @@ async def _try_complete_transcript_recovery(
                     max_bytes=max_bytes,
                 )
         elif root_recovery:
-            # The client supplied a complete root snapshot; it has no
-            # durable ancestor turns to carry forward. The replacement
-            # operation itself is counted when its terminal snapshot is
-            # persisted.
-            replay_turn_count = 0
+            # The client supplied a complete root snapshot, but its
+            # historical turn depth is not durable or independently
+            # verifiable. Keep that unknown depth explicit so terminal
+            # persistence cannot record an under-counted replay snapshot.
+            replay_turn_count = -1
             # Sessions created before durable transcript persistence may have
             # no completed operation chain at all.  If the client supplied a
             # complete unanchored history, it is still a valid explicit
@@ -1743,7 +1761,7 @@ async def _try_complete_transcript_recovery(
     # preserve the original state so the ordinary retry path cannot resend
     # ambiguous work without a durable recovery claim.
     request_state.request_text = replay_text
-    request_state.recovery_replay_turn_count = max(0, replay_turn_count)
+    request_state.recovery_replay_turn_count = replay_turn_count if replay_turn_count < 0 else max(0, replay_turn_count)
     request_state.fresh_upstream_request_text = replay_text
     request_state.fresh_upstream_request_is_retry_safe = True
     request_state.complete_transcript_recovery_anchor = recovery_anchor
@@ -1942,9 +1960,10 @@ async def _try_unsafe_partial_transcript_recovery(
             # A root request can still be replayed if its body is already a
             # complete, account-neutral history. Never invent a parent for a
             # delta-only continuation with an unavailable anchor.
-            # There are no durable ancestor turns in this path; the
-            # replacement operation is counted during terminal persistence.
-            replay_turn_count = 0
+            # There are no durable ancestor turns in this path, so the
+            # client-supplied historical depth is unknown. Keep that sentinel
+            # so terminal persistence cannot under-count the replay snapshot.
+            replay_turn_count = -1
             replay_text = build_unanchored_root_replay_payload(
                 request_text,
                 max_input_items=max_input_items,
@@ -2215,7 +2234,7 @@ async def _try_unsafe_partial_transcript_recovery(
         request_state.replay_downstream_sequence_offset = None
         request_state.suppress_next_created_downstream = True
     request_state.request_text = replay_text
-    request_state.recovery_replay_turn_count = max(0, replay_turn_count)
+    request_state.recovery_replay_turn_count = replay_turn_count if replay_turn_count < 0 else max(0, replay_turn_count)
     request_state.fresh_upstream_request_text = replay_text
     request_state.fresh_upstream_request_is_retry_safe = True
     request_state.complete_transcript_recovery_anchor = recovery_anchor

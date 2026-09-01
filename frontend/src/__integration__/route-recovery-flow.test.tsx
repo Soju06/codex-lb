@@ -6,9 +6,16 @@ import App from "@/App";
 import { renderWithProviders } from "@/test/utils";
 
 vi.mock("@/features/accounts/components/accounts-page", () => {
+  throw new Error("Rejected route chunk");
+});
+
+vi.mock("@/features/settings/components/settings-page", () => {
   return {
-    AccountsPage() {
-      throw new Error("Rejected route chunk");
+    SettingsPage() {
+      if (window.location.search || window.location.hash) {
+        throw new Error("Settings route render failed");
+      }
+      return <div data-testid="settings-route-loaded">Settings route recovered</div>;
     },
   };
 });
@@ -66,6 +73,21 @@ describe("route recovery flow integration", () => {
     await user.click(dashboardLink);
 
     await waitFor(() => expect(window.location.pathname).toBe("/dashboard"));
+    expect(screen.queryByTestId("route-load-error")).not.toBeInTheDocument();
+  });
+
+  it("remounts a failed route when search and hash recover on the same path", async () => {
+    window.history.pushState({}, "", "/settings?advanced=1#firewall");
+
+    renderWithProviders(<App />);
+    expect(await screen.findByTestId("route-load-error")).toBeInTheDocument();
+
+    window.history.pushState({}, "", "/settings");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+
+    expect(await screen.findByTestId("settings-route-loaded")).toHaveTextContent(
+      "Settings route recovered",
+    );
     expect(screen.queryByTestId("route-load-error")).not.toBeInTheDocument();
   });
 });

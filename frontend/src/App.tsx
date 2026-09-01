@@ -39,7 +39,7 @@ const SettingsPage = lazy(() =>
 );
 
 function AppLayout() {
-  const { pathname } = useLocation();
+  const { hash, pathname, search } = useLocation();
   const logout = useAuthStore((state) => state.logout);
   const passwordRequired = useAuthStore((state) => state.passwordRequired);
   const role = useAuthStore((state) => state.role);
@@ -65,7 +65,7 @@ function AppLayout() {
         showLogout={(role === "admin" && passwordRequired) || (isGuest && guestPasswordRequired)}
       />
       <main className="mx-auto flex w-full max-w-[1500px] flex-1 flex-col px-4 py-8 sm:px-6">
-        <RouteErrorBoundary key={pathname}>
+        <RouteErrorBoundary key={`${pathname}${search}${hash}`}>
           <Suspense fallback={<RouteLoading />}>
             <Outlet />
           </Suspense>

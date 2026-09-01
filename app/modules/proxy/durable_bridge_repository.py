@@ -2577,26 +2577,29 @@ class DurableBridgeRepository:
                 or not snapshot.response_output_items_json
             ):
                 return None
-            if snapshot.parent_response_id is None and snapshot.response_replay_input_turn_count <= 0:
+            persisted_turn_count = int(snapshot.response_replay_input_turn_count or 0)
+            if snapshot.parent_response_id is None and persisted_turn_count <= 0:
                 # Root requests can contain an arbitrary client-supplied
                 # history. Without a persisted snapshot there is no
                 # trustworthy turn count, so representing the whole request as
                 # one turn could bypass the configured replay bound.
                 return None
+            represented_turn_count = max(1, persisted_turn_count)
             turn_bytes = len(snapshot.request_text.encode("utf-8")) + len(
                 snapshot.response_output_items_json.encode("utf-8")
             )
             total_bytes += turn_bytes
-            if total_bytes > max_bytes:
+            if total_bytes > max_bytes or represented_turns + represented_turn_count > max_turns:
                 return None
             turns.append(
                 DurableBridgeTranscriptTurn(
                     operation=snapshot,
                     events=(),
                     response_output_items_json=snapshot.response_output_items_json,
+                    represented_turn_count=represented_turn_count,
                 )
             )
-            represented_turns += 1
+            represented_turns += represented_turn_count
             current_response_id = snapshot.parent_response_id
         turns.reverse()
         return turns
@@ -3265,6 +3268,12 @@ class DurableBridgeRepository:
             if response_replay_input_json is not None:
                 values["response_replay_input_json"] = response_replay_input_json
                 values["response_replay_input_complete"] = response_replay_input_complete
+                values["response_replay_input_turn_count"] = max(0, int(response_replay_input_turn_count))
+            elif response_replay_input_turn_count > 0:
+                # Retain a positive over-bound marker even when the snapshot
+                # itself is intentionally omitted. The reader uses it to
+                # reject the unsnapshotted root instead of treating it as one
+                # represented turn and bypassing ``max_turns``.
                 values["response_replay_input_turn_count"] = max(0, int(response_replay_input_turn_count))
             conditions = [
                 HttpBridgeOperationRecord.operation_id == operation_id,

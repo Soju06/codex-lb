@@ -7271,10 +7271,15 @@ async def test_completed_bridge_operation_skips_overbound_replay_snapshot(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("recovery_replay_turn_count", [-1, 0])
+@pytest.mark.parametrize(
+    ("recovery_replay_turn_count", "snapshot_expected", "expected_turn_count"),
+    [(-1, False, 0), (0, True, 1)],
+)
 async def test_completed_bridge_operation_skips_unknown_root_replay_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     recovery_replay_turn_count: int,
+    snapshot_expected: bool,
+    expected_turn_count: int,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = SimpleNamespace(
@@ -7326,9 +7331,13 @@ async def test_completed_bridge_operation_skips_unknown_root_replay_snapshot(
     await_args = update_operation.await_args
     assert await_args is not None
     assert await_args.kwargs["response_output_items_complete"] is True
-    assert await_args.kwargs["response_replay_input_json"] is None
-    assert await_args.kwargs["response_replay_input_complete"] is False
-    assert await_args.kwargs["response_replay_input_turn_count"] == 0
+    if snapshot_expected:
+        assert await_args.kwargs["response_replay_input_json"] is not None
+        assert await_args.kwargs["response_replay_input_complete"] is True
+    else:
+        assert await_args.kwargs["response_replay_input_json"] is None
+        assert await_args.kwargs["response_replay_input_complete"] is False
+    assert await_args.kwargs["response_replay_input_turn_count"] == expected_turn_count
 
 
 @pytest.mark.asyncio

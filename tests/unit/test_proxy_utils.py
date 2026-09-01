@@ -37407,6 +37407,76 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
 
 
 @pytest.mark.asyncio
+async def test_process_upstream_websocket_text_rewrites_opted_in_terse_invalid_anchor(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    account = _make_account("acc_ws_unsafe_anchor")
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_unsafe_new_response_recovery_enabled=True,
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+        ),
+    )
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_unsafe_anchor",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "previous_response_id": "resp_anchor",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+            },
+            separators=(",", ":"),
+        ),
+        previous_response_id="resp_anchor",
+        response_id=None,
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream_text = json.dumps(
+        {
+            "type": "error",
+            "status": 400,
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_request_error",
+                "message": "Invalid previous response id",
+                "param": "previous_response_id",
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    downstream_text = await service._process_upstream_websocket_text(
+        upstream_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    downstream_payload = json.loads(downstream_text)
+    assert isinstance(downstream_payload, dict)
+    downstream_error = cast(dict[str, JsonValue], cast(dict[str, JsonValue], downstream_payload["response"])["error"])
+    assert downstream_error["code"] == "stream_incomplete"
+    assert "Invalid previous response id" not in downstream_text
+    assert "previous_response_id" not in downstream_text
+    assert finalize_request_state.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_pop_replayable_precreated_request_refreshes_fresh_replay_fingerprint():
     original_input: list[JsonValue] = [
         {"role": "user", "content": "one"},

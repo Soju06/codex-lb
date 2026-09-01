@@ -18,9 +18,10 @@ payloads.
 
 #### Scenario: One exact recent candidate is replayed
 
-- **GIVEN** parked recovery is enabled for an anchored continuation
+- **GIVEN** parked recovery is enabled for a hard-continuity request that
+  carries no `previous_response_id`
 - **AND** one recent `UNKNOWN` operation matches the same session, model,
-  canonical request body, and nonblank parent response
+  canonical request body, and has a nonblank parent response
 - **WHEN** the proxy handles the continuation
 - **THEN** it durably rebinds and owner-fences that operation before replay
 - **AND** it performs at most the configured number of recovery attempts.

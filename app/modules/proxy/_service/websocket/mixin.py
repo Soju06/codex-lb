@@ -289,6 +289,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.request_submit import (
     _text_with_account_installation_id as _text_with_account_installation_id,
 )
+from app.modules.proxy._service.http_bridge.upstream_events import (
+    _http_bridge_unsafe_new_response_anchor_error as _http_bridge_unsafe_new_response_anchor_error,
+)
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
 )
@@ -5695,6 +5698,15 @@ class _WebSocketMixin:
         if retry_safe_previous_response_not_found:
             downstream_text = text
         else:
+            unsafe_error_param = _websocket_event_error_param(event_type, payload)
+            unsafe_new_response_recovery = _http_bridge_unsafe_new_response_anchor_error(
+                code=_normalize_error_code(
+                    _websocket_event_error_code(event_type, payload),
+                    _websocket_event_error_type(event_type, payload),
+                ),
+                param=unsafe_error_param.normalized if unsafe_error_param is not None else None,
+                message=_websocket_event_error_message(event_type, payload),
+            )
             event, payload, event_type, downstream_text = _maybe_rewrite_websocket_previous_response_not_found_event(
                 request_state=request_state,
                 event=event,
@@ -5702,6 +5714,7 @@ class _WebSocketMixin:
                 event_type=event_type,
                 upstream_control=upstream_control,
                 original_text=text,
+                unsafe_new_response_recovery=unsafe_new_response_recovery,
             )
         if event_type in {"response.failed", "response.incomplete", "error"} and isinstance(payload, dict):
             public_payload = _sanitize_public_websocket_event_payload(payload, event_type=event_type)

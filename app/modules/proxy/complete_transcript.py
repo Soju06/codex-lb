@@ -431,6 +431,50 @@ def build_unanchored_root_replay_payload(
     return replay_bytes.decode("utf-8")
 
 
+def derive_replay_input_turn_count(request_text: str) -> int | None:
+    """Derive conversation turns represented by a self-contained root body.
+
+    Ordinary roots represent one user request.  A client may also submit a
+    self-contained full history without ``previous_response_id``; count user
+    messages as conversational turn boundaries.  Shapes that cannot be
+    validated as account-neutral replay remain unknown so callers fail closed
+    instead of undercounting arbitrary history.
+    """
+
+    try:
+        payload = json.loads(request_text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("previous_response_id") not in (None, ""):
+        return None
+    raw_input = payload.get("input")
+    input_items = _normalize_input(raw_input)
+    if input_items is None:
+        return None
+    input_items = _sanitize_replay_items(input_items)
+    if not input_items or not _items_are_json_values(input_items):
+        return None
+    if not responses_input_items_are_self_contained_fresh_replay(input_items):
+        return None
+    validation_payload = dict(payload)
+    validation_payload.pop("type", None)
+    validation_payload["input"] = input_items
+    if not responses_payload_is_account_neutral_fresh_replay(validation_payload):
+        return None
+    if isinstance(raw_input, str):
+        return 1
+    user_turn_count = sum(
+        1
+        for item in input_items
+        if isinstance(item, dict) and item.get("type") in (None, "message") and item.get("role") == "user"
+    )
+    if user_turn_count > 0:
+        return user_turn_count
+    # A single validated non-message item can still be the current request;
+    # multiple such items do not expose a trustworthy conversational boundary.
+    return 1 if len(input_items) == 1 else None
+
+
 def _normalize_input(value: JsonValue | None) -> list[JsonValue] | None:
     if isinstance(value, list):
         return cast(list[JsonValue], list(value))

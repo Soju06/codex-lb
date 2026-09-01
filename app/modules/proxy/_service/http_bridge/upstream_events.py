@@ -216,6 +216,7 @@ from app.modules.proxy.complete_transcript import (
     build_complete_replay_payload,
     build_replay_input_snapshot,
     build_unanchored_root_replay_payload,
+    derive_replay_input_turn_count,
     materialize_output_items_from_events,
 )
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
@@ -531,10 +532,16 @@ async def _update_http_bridge_operation_state(
                             )
                         if snapshot is not None:
                             recovered_turn_count = int(getattr(request_state, "recovery_replay_turn_count", 0))
-                            unknown_root_depth = (
-                                recovered_turn_count == 0 and not parent_turns and not parent_response_id
+                            derived_root_turn_count: int | None = None
+                            if recovered_turn_count == 0 and not parent_turns and not parent_response_id:
+                                derived_root_turn_count = derive_replay_input_turn_count(request_text)
+                            unknown_root_depth = recovered_turn_count < 0 or (
+                                recovered_turn_count == 0
+                                and not parent_turns
+                                and not parent_response_id
+                                and derived_root_turn_count is None
                             )
-                            if recovered_turn_count < 0 or unknown_root_depth:
+                            if unknown_root_depth:
                                 # A client-supplied root history has no
                                 # trustworthy represented-turn count. Keep
                                 # the terminal output, but never persist a
@@ -560,6 +567,8 @@ async def _update_http_bridge_operation_state(
                             response_replay_input_turn_count = (
                                 recovered_turn_count + 1
                                 if recovered_turn_count
+                                else derived_root_turn_count
+                                if derived_root_turn_count is not None
                                 else sum(
                                     max(1, int(getattr(turn, "represented_turn_count", 1))) for turn in parent_turns
                                 )
@@ -1474,7 +1483,8 @@ async def _try_complete_transcript_recovery(
             # historical turn depth is not durable or independently
             # verifiable. Keep that unknown depth explicit so terminal
             # persistence cannot record an under-counted replay snapshot.
-            replay_turn_count = -1
+            root_turn_count = derive_replay_input_turn_count(request_state.request_text)
+            replay_turn_count = root_turn_count - 1 if root_turn_count is not None else -1
             # Sessions created before durable transcript persistence may have
             # no completed operation chain at all.  If the client supplied a
             # complete unanchored history, it is still a valid explicit
@@ -1966,7 +1976,8 @@ async def _try_unsafe_partial_transcript_recovery(
             # There are no durable ancestor turns in this path, so the
             # client-supplied historical depth is unknown. Keep that sentinel
             # so terminal persistence cannot under-count the replay snapshot.
-            replay_turn_count = -1
+            root_turn_count = derive_replay_input_turn_count(request_text)
+            replay_turn_count = root_turn_count - 1 if root_turn_count is not None else -1
             replay_text = build_unanchored_root_replay_payload(
                 request_text,
                 max_input_items=max_input_items,

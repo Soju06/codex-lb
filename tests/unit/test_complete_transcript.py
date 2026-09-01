@@ -15,6 +15,7 @@ from app.modules.proxy.complete_transcript import (
     build_complete_replay_payload,
     build_replay_input_snapshot,
     build_unanchored_root_replay_payload,
+    derive_replay_input_turn_count,
     materialize_output_items_from_events,
 )
 from app.modules.proxy.durable_bridge_repository import (
@@ -908,8 +909,16 @@ async def test_complete_transcript_prefers_snapshot_when_parent_chain_is_missing
     )
 
 
+@pytest.mark.parametrize(
+    ("persisted_turn_count", "max_turns", "expected_turn_count"),
+    [(0, 1, None), (1, 1, 1), (2, 1, None)],
+)
 @pytest.mark.asyncio
-async def test_complete_transcript_rejects_unsnapshotted_root_with_unknown_depth() -> None:
+async def test_complete_transcript_bounds_unsnapshotted_root_by_persisted_depth(
+    persisted_turn_count: int,
+    max_turns: int,
+    expected_turn_count: int | None,
+) -> None:
     row = SimpleNamespace(
         operation_id="op_root",
         session_id="session",
@@ -939,7 +948,7 @@ async def test_complete_transcript_rejects_unsnapshotted_root_with_unknown_depth
         response_output_items_complete=True,
         response_replay_input_json=None,
         response_replay_input_complete=False,
-        response_replay_input_turn_count=0,
+        response_replay_input_turn_count=persisted_turn_count,
     )
 
     class _Session:
@@ -947,7 +956,34 @@ async def test_complete_transcript_rejects_unsnapshotted_root_with_unknown_depth
             return row
 
     repository = DurableBridgeRepository(cast(AsyncSession, _Session()))
-    assert await repository.get_complete_transcript(response_id="resp_root", max_turns=1) is None
+    turns = await repository.get_complete_transcript(response_id="resp_root", max_turns=max_turns)
+    if expected_turn_count is None:
+        assert turns is None
+    else:
+        assert turns is not None
+        assert len(turns) == 1
+        assert turns[0].represented_turn_count == expected_turn_count
+
+
+@pytest.mark.parametrize(
+    ("request_text", "expected_turn_count"),
+    [
+        ('{"input":"first"}', 1),
+        ('{"input":[{"type":"message","role":"user","content":"first"}]}', 1),
+        (
+            '{"input":[{"type":"message","role":"user","content":"first"},'
+            '{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]},'
+            '{"type":"message","role":"user","content":"second"}]}',
+            2,
+        ),
+        ('{"input":[{"type":"message"}]}', None),
+    ],
+)
+def test_derive_replay_input_turn_count_validates_root_history(
+    request_text: str,
+    expected_turn_count: int | None,
+) -> None:
+    assert derive_replay_input_turn_count(request_text) == expected_turn_count
 
 
 def test_build_complete_replay_payload_rejects_broken_parent_continuation() -> None:

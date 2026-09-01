@@ -4087,10 +4087,11 @@ class _HTTPBridgeStreamingMixin:
                 recovery_origin_owner_epoch = request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch
                 recovery_origin_api_key_id = bridge_session_key.api_key_id
                 recovery_origin_fingerprint = request_state.recovery_attempt_fingerprint
+                recovery_was_already_claimed = request_state.recovery_attempt_claimed
                 recovery_claimed_here = False
                 try:
                     await claim_recovery_attempt_for_local_replay()
-                    recovery_claimed_here = request_state.recovery_attempt_claimed
+                    recovery_claimed_here = request_state.recovery_attempt_claimed and not recovery_was_already_claimed
                     await self._reset_http_bridge_session_after_local_terminal_error(
                         session,
                         error_code="stream_incomplete",
@@ -4152,10 +4153,11 @@ class _HTTPBridgeStreamingMixin:
                 recovery_origin_owner_epoch = request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch
                 recovery_origin_api_key_id = bridge_session_key.api_key_id
                 recovery_origin_fingerprint = request_state.recovery_attempt_fingerprint
+                recovery_was_already_claimed = request_state.recovery_attempt_claimed
                 recovery_claimed_here = False
                 try:
                     await claim_recovery_attempt_for_local_replay()
-                    recovery_claimed_here = request_state.recovery_attempt_claimed
+                    recovery_claimed_here = request_state.recovery_attempt_claimed and not recovery_was_already_claimed
                     retry_preferred_account_id = request_state.preferred_account_id or session.account.id
                     bridge_session_key = _HTTPBridgeSessionKey(
                         "internal_request_parallel",

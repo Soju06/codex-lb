@@ -7661,8 +7661,9 @@ async def test_complete_transcript_recovery_rolls_back_rebind_when_dispatch_not_
             rollback_operation_before_dispatch=rollback_operation,
         ),
     )
-    service._http_bridge_operation_event_batcher = SimpleNamespace(
-        rollback_fence_operation=rollback_fence_operation,
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(rollback_fence_operation=rollback_fence_operation),
     )
     monkeypatch.setattr(
         http_bridge_upstream_events_module,
@@ -8310,8 +8311,9 @@ async def test_unsafe_partial_transcript_recovery_rolls_back_rebind_when_dispatc
             rollback_operation_before_dispatch=rollback_operation,
         ),
     )
-    service._http_bridge_operation_event_batcher = SimpleNamespace(
-        rollback_fence_operation=rollback_fence_operation,
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(rollback_fence_operation=rollback_fence_operation),
     )
     monkeypatch.setattr(
         http_bridge_upstream_events_module,
@@ -26794,8 +26796,9 @@ async def test_cleanup_http_bridge_submit_interruption_restores_recovery_event_f
         Any,
         SimpleNamespace(rollback_operation_before_dispatch=rollback_operation),
     )
-    service._http_bridge_operation_event_batcher = SimpleNamespace(
-        rollback_fence_operation=rollback_fence_operation,
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(rollback_fence_operation=rollback_fence_operation),
     )
     session = _make_bridge_session(key_value="restore-recovery-event-fence")
     session.durable_session_id = "durable-restore-recovery-event-fence"

@@ -1662,16 +1662,26 @@ async def _close_http_bridge_session(
         async with service._http_bridge_lock:
             close_task = resource_close_task()
     _, cancellation = await _await_task_deferring_cancellation(close_task)
+
     # Detached generations remain capacity owners until resource closure ends.
     # Finalize that ownership here so direct error-recovery closes and bounded
-    # background closes cannot drift into different lifecycles.
-    if turn_state_lock_held:
-        if service._http_bridge_detached_sessions.get(id(session)) is session:
-            service._http_bridge_detached_sessions.pop(id(session), None)
-    else:
-        async with service._http_bridge_lock:
+    # background closes cannot drift into different lifecycles. This update is
+    # independently owned because cancellation can begin while its lock waits.
+    async def finalize_detached_ownership() -> None:
+        if turn_state_lock_held:
             if service._http_bridge_detached_sessions.get(id(session)) is session:
                 service._http_bridge_detached_sessions.pop(id(session), None)
+        else:
+            async with service._http_bridge_lock:
+                if service._http_bridge_detached_sessions.get(id(session)) is session:
+                    service._http_bridge_detached_sessions.pop(id(session), None)
+
+    ownership_task = asyncio.create_task(
+        finalize_detached_ownership(),
+        name=f"http-bridge-detached-finalize-{_hash_identifier(session.key.affinity_key)}",
+    )
+    _, ownership_cancellation = await _await_task_deferring_cancellation(ownership_task)
+    cancellation = cancellation or ownership_cancellation
     if cancellation is not None:
         raise cancellation
 

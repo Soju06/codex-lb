@@ -16,8 +16,10 @@ from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.db.models import AccountStatus, Base
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers
 from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
+from app.modules.proxy.http_bridge_event_batcher import TerminalOperationEventAppendResult
 
 pytestmark = pytest.mark.unit
 
@@ -69,6 +71,198 @@ def _make_request_state(
         transport="http",
         skip_request_log=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_detached_ownership_finishes_when_cancellation_begins_during_lock_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()))
+    session = _make_http_bridge_session(deque(), queued_request_count=0)
+    service._http_bridge_detached_sessions[id(session)] = session
+    resources_closed = asyncio.Event()
+    release_resources = asyncio.Event()
+    cancel_scopes: list[anyio.CancelScope] = []
+
+    async def close_resources(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        resources_closed.set()
+        await release_resources.wait()
+
+    monkeypatch.setattr(http_bridge_helpers, "_close_http_bridge_session_resources", close_resources)
+
+    async def close_in_cancel_scope() -> None:
+        cancellation: asyncio.CancelledError | None = None
+        with anyio.CancelScope() as scope:
+            cancel_scopes.append(scope)
+            try:
+                await http_bridge_helpers._close_http_bridge_session(service, session)
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+        if cancellation is not None:
+            raise cancellation
+        raise AssertionError("close unexpectedly completed without cancellation")
+
+    close_task = asyncio.create_task(close_in_cancel_scope())
+    await asyncio.wait_for(resources_closed.wait(), timeout=1)
+    await service._http_bridge_lock.acquire()
+    release_resources.set()
+    for _ in range(100):
+        ownership_tasks = [
+            task for task in asyncio.all_tasks() if task.get_name().startswith("http-bridge-detached-finalize-")
+        ]
+        if ownership_tasks:
+            break
+        await asyncio.sleep(0)
+    else:
+        pytest.fail("detached ownership task did not start")
+
+    cancel_scopes[0].cancel()
+    service._http_bridge_lock.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(close_task, timeout=1)
+    assert id(session) not in service._http_bridge_detached_sessions
+
+
+@pytest.mark.asyncio
+async def test_level_cancelled_terminal_append_releases_owned_group_barriers() -> None:
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()))
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = _make_request_state(
+        "req-level-cancelled-terminal",
+        response_id="resp-level-cancelled-terminal",
+        awaiting_response_created=False,
+        event_queue=event_queue,
+    )
+    request_state.operation_id = "op-level-cancelled-terminal"
+    session = _make_http_bridge_session(deque([request_state]), queued_request_count=1)
+    session.durable_session_id = "durable-level-cancelled-terminal"
+    session.durable_owner_epoch = 3
+    append_started = asyncio.Event()
+    release_append = asyncio.Event()
+    append_barrier_started = asyncio.Event()
+    release_append_barrier = asyncio.Event()
+    delivery_barrier_released = asyncio.Event()
+    cancel_scopes: list[anyio.CancelScope] = []
+
+    async def append_terminal_event(*args: object, **kwargs: object) -> TerminalOperationEventAppendResult:
+        del args, kwargs
+        append_started.set()
+        await release_append.wait()
+        return TerminalOperationEventAppendResult(persisted=True, settlement_required=False)
+
+    async def append_barrier() -> None:
+        append_barrier_started.set()
+        await release_append_barrier.wait()
+
+    async def delivery_barrier() -> None:
+        delivery_barrier_released.set()
+
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(append_terminal_event=append_terminal_event),
+    )
+    event_block = 'data: {"type":"response.failed"}\n\n'
+
+    async def persist_in_cancel_scope() -> bool:
+        cancellation: asyncio.CancelledError | None = None
+        with anyio.CancelScope() as scope:
+            cancel_scopes.append(scope)
+            try:
+                return await http_bridge_upstream_events._persist_http_bridge_operation_event(
+                    service,
+                    session,
+                    request_state,
+                    event_block,
+                    terminal=True,
+                    terminal_state="failed",
+                    terminal_event_queue=event_queue,
+                    terminal_append_barrier=append_barrier,
+                    terminal_delivery_barrier=delivery_barrier,
+                )
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+        if cancellation is not None:
+            raise cancellation
+        raise AssertionError("terminal persistence unexpectedly completed without cancellation")
+
+    persist_task = asyncio.create_task(persist_in_cancel_scope())
+    await asyncio.wait_for(append_started.wait(), timeout=1)
+    cancel_scopes[0].cancel()
+    release_append.set()
+    await asyncio.wait_for(append_barrier_started.wait(), timeout=1)
+    assert not persist_task.done()
+    release_append_barrier.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(persist_task, timeout=1)
+    assert delivery_barrier_released.is_set()
+    assert await asyncio.wait_for(event_queue.get(), timeout=1) == event_block
+    assert await asyncio.wait_for(event_queue.get(), timeout=1) is None
+
+
+@pytest.mark.asyncio
+async def test_direct_cancellation_survives_terminal_append_failure() -> None:
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()))
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = _make_request_state(
+        "req-cancelled-terminal-error",
+        response_id="resp-cancelled-terminal-error",
+        awaiting_response_created=False,
+        event_queue=event_queue,
+    )
+    request_state.operation_id = "op-cancelled-terminal-error"
+    session = _make_http_bridge_session(deque([request_state]), queued_request_count=1)
+    session.durable_session_id = "durable-cancelled-terminal-error"
+    session.durable_owner_epoch = 4
+    append_started = asyncio.Event()
+    release_append = asyncio.Event()
+    append_barrier_calls = 0
+    delivery_barrier_calls = 0
+
+    async def append_terminal_event(*args: object, **kwargs: object) -> TerminalOperationEventAppendResult:
+        del args, kwargs
+        append_started.set()
+        await release_append.wait()
+        raise RuntimeError("terminal append failed")
+
+    async def append_barrier() -> None:
+        nonlocal append_barrier_calls
+        append_barrier_calls += 1
+
+    async def delivery_barrier() -> None:
+        nonlocal delivery_barrier_calls
+        delivery_barrier_calls += 1
+
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(append_terminal_event=append_terminal_event),
+    )
+    event_block = 'data: {"type":"response.failed"}\n\n'
+    persist_task = asyncio.create_task(
+        http_bridge_upstream_events._persist_http_bridge_operation_event(
+            service,
+            session,
+            request_state,
+            event_block,
+            terminal=True,
+            terminal_state="failed",
+            terminal_event_queue=event_queue,
+            terminal_append_barrier=append_barrier,
+            terminal_delivery_barrier=delivery_barrier,
+        )
+    )
+    await asyncio.wait_for(append_started.wait(), timeout=1)
+    persist_task.cancel()
+    release_append.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(persist_task, timeout=1)
+    assert append_barrier_calls == 1
+    assert delivery_barrier_calls == 1
+    assert await asyncio.wait_for(event_queue.get(), timeout=1) == event_block
+    assert await asyncio.wait_for(event_queue.get(), timeout=1) is None
 
 
 def _make_api_key() -> ApiKeyData:

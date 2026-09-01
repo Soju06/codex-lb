@@ -49,6 +49,7 @@ FILTERS = {
         "app/core/config/settings.py",
         "app/core/openai/**",
         "app/core/upstream_proxy/**",
+        "app/core/utils/proxy_env.py",
         "pyproject.toml",
         "uv.lock",
         "tests/unit/test_native_egress.py",

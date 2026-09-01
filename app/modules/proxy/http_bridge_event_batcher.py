@@ -163,7 +163,10 @@ class HttpBridgeOperationEventBatcher:
                     self._pending_bytes += event_bytes
         self._wake.set()
         if terminal:
-            await self.flush_operation(operation_id=operation_id)
+            await self.flush_operation(
+                operation_id=operation_id,
+                expected_recovery_dispatch_count=recovery_dispatch_count,
+            )
 
     def _ensure_task(self) -> None:
         if self._task is None or self._task.done():
@@ -248,11 +251,25 @@ class HttpBridgeOperationEventBatcher:
                     exc_info=True,
                 )
 
-    async def flush_operation(self, *, operation_id: str) -> None:
+    async def flush_operation(
+        self,
+        *,
+        operation_id: str,
+        expected_recovery_dispatch_count: int | None = None,
+    ) -> None:
         await self.flush_pending_operation(operation_id=operation_id)
         async with self._lock:
-            dropped = operation_id in self._dropped_operations
             context = self._contexts.get(operation_id)
+            expected_generation = (
+                max(0, int(expected_recovery_dispatch_count))
+                if expected_recovery_dispatch_count is not None
+                else (context.recovery_dispatch_count if context is not None else 0)
+            )
+            if self._operation_generations.get(operation_id, 0) != expected_generation:
+                return
+            if context is not None and context.recovery_dispatch_count != expected_generation:
+                return
+            dropped = operation_id in self._dropped_operations
             self._closing_operations.discard(operation_id)
             self._contexts.pop(operation_id, None)
             self._operation_generations.pop(operation_id, None)
@@ -320,16 +337,20 @@ class HttpBridgeOperationEventBatcher:
             self._closing_operations.add(operation_id)
         await self.flush_pending_operation(operation_id=operation_id)
         async with self._lock:
+            current_generation = self._operation_generations.get(operation_id, 0)
             context = self._contexts.get(operation_id)
             dropped = operation_id in self._dropped_operations
+        if current_generation != expected_recovery_dispatch_count:
+            return TerminalOperationEventAppendResult(persisted=False)
         if context is None:
             return TerminalOperationEventAppendResult(persisted=False)
         if dropped:
             async with self._lock:
-                self._closing_operations.discard(operation_id)
-                self._contexts.pop(operation_id, None)
-                self._operation_generations.pop(operation_id, None)
-                self._dropped_operations.discard(operation_id)
+                if self._operation_generations.get(operation_id, 0) == expected_recovery_dispatch_count:
+                    self._closing_operations.discard(operation_id)
+                    self._contexts.pop(operation_id, None)
+                    self._operation_generations.pop(operation_id, None)
+                    self._dropped_operations.discard(operation_id)
             return TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
         try:
             if self._spool_format == HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2:
@@ -373,10 +394,11 @@ class HttpBridgeOperationEventBatcher:
             )
         finally:
             async with self._lock:
-                self._closing_operations.discard(operation_id)
-                self._contexts.pop(operation_id, None)
-                self._operation_generations.pop(operation_id, None)
-                self._dropped_operations.discard(operation_id)
+                if self._operation_generations.get(operation_id, 0) == expected_recovery_dispatch_count:
+                    self._closing_operations.discard(operation_id)
+                    self._contexts.pop(operation_id, None)
+                    self._operation_generations.pop(operation_id, None)
+                    self._dropped_operations.discard(operation_id)
 
     async def settle_terminal_event(
         self,
@@ -431,6 +453,10 @@ class HttpBridgeOperationEventBatcher:
         """Drop an abandoned nonterminal context without finalizing its spool."""
         async with self._flush_lock:
             async with self._lock:
+                context = self._contexts.get(operation_id)
+                expected_generation = context.recovery_dispatch_count if context is not None else 0
+                if self._operation_generations.get(operation_id, 0) != expected_generation:
+                    return
                 pending = self._pending.pop(operation_id, [])
                 self._pending_count -= len(pending)
                 self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in pending)

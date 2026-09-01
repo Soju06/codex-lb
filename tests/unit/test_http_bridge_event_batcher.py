@@ -68,6 +68,20 @@ class _TerminalAppendFailingDurableBridge(_FakeDurableBridge):
         return result
 
 
+class _BlockingTerminalAppendDurableBridge(_FakeDurableBridge):
+    def __init__(self) -> None:
+        super().__init__()
+        self.terminal_started = asyncio.Event()
+        self.release_terminal = asyncio.Event()
+
+    async def append_terminal_operation_event(self, **kwargs) -> bool:
+        self.terminal_rows.append(kwargs["event_text"])
+        self.terminal_kwargs.append(dict(kwargs))
+        self.terminal_started.set()
+        await self.release_terminal.wait()
+        return True
+
+
 async def _enqueue(
     batcher: HttpBridgeOperationEventBatcher,
     text: str,
@@ -431,6 +445,48 @@ async def test_terminal_append_refreshes_context_for_new_recovery_generation() -
         assert durable.terminal_kwargs[0]["owner_epoch"] == 9
         assert durable.terminal_kwargs[0]["expected_recovery_dispatch_count"] == 1
     finally:
+        await batcher.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_cleanup_preserves_newer_recovery_fence() -> None:
+    durable = _BlockingTerminalAppendDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    try:
+        terminal_task = asyncio.create_task(
+            batcher.append_terminal_event(
+                operation_id="op-1",
+                session_id="session-1",
+                instance_id="instance-1",
+                owner_epoch=1,
+                event_text="old-terminal",
+                max_bytes=1024,
+                state="completed",
+                expected_recovery_dispatch_count=0,
+            )
+        )
+        await durable.terminal_started.wait()
+
+        await batcher.fence_operation(operation_id="op-1", recovery_dispatch_count=1)
+        await _enqueue(batcher, "replacement", recovery_dispatch_count=1)
+        durable.release_terminal.set()
+
+        result = await terminal_task
+
+        assert result.persisted is True
+        assert batcher._operation_generations == {"op-1": 1}
+        assert batcher._contexts["op-1"].event_text == "replacement"
+        assert durable.batches == [["replacement"]] or [
+            item.event_text for item in batcher._pending.get("op-1", [])
+        ] == ["replacement"]
+    finally:
+        await batcher.discard_operation(operation_id="op-1")
         await batcher.close()
 
 

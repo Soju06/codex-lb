@@ -96,6 +96,68 @@ def test_build_complete_replay_payload_inserts_prior_assistant_output() -> None:
     assert all("id" not in item for item in parsed["input"])
 
 
+def test_build_complete_replay_payload_preserves_latest_output_from_full_history() -> None:
+    turns = [
+        _turn(
+            1,
+            parent_response_id=None,
+            response_id="resp_1",
+            request_input=[{"type": "message", "role": "user", "content": "first"}],
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "one"}],
+                }
+            ],
+        ),
+        _turn(
+            2,
+            parent_response_id="resp_1",
+            response_id="resp_2",
+            request_input=[{"type": "message", "role": "user", "content": "second"}],
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "two"}],
+                }
+            ],
+        ),
+    ]
+
+    payload = build_complete_replay_payload(
+        turns,
+        continuation_request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-test",
+                "previous_response_id": "resp_2",
+                "input": [
+                    {"type": "message", "role": "user", "content": "first"},
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "one"}],
+                    },
+                    {"type": "message", "role": "user", "content": "second"},
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "two"}],
+                    },
+                    {"type": "message", "role": "user", "content": "third"},
+                ],
+            }
+        ),
+    )
+
+    assert payload is not None
+    input_items = json.loads(payload)["input"]
+    assert [item["content"] for item in input_items if item.get("role") == "user"] == ["first", "second", "third"]
+    assert [item["content"][0]["text"] for item in input_items if item.get("role") == "assistant"] == ["one", "two"]
+
+
 def test_build_unanchored_root_replay_payload_sanitizes_legacy_history() -> None:
     payload = build_unanchored_root_replay_payload(
         json.dumps(

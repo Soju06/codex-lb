@@ -788,15 +788,17 @@ async def _iter_http_bridge_parked_recovery_sse(
         max(0.0, sleep_seconds),
         max(0.0, request_deadline - _service_time().monotonic()),
     )
-    keepalive_interval = max(
-        0.1,
-        float(getattr(_service_get_settings(), "sse_keepalive_interval_seconds", 10.0)),
-    )
+    configured_keepalive_interval = float(getattr(_service_get_settings(), "sse_keepalive_interval_seconds", 10.0))
+    emit_keepalives = configured_keepalive_interval > 0
+    # Keep sleeping in bounded chunks even when keepalives are disabled so a
+    # cooldown cannot busy-loop and still respects cancellation/deadlines.
+    keepalive_interval = max(1.0, configured_keepalive_interval)
     while remaining_sleep_seconds > 0:
         # This path is intentionally allowed to emit a pre-response keepalive
         # even when HTTP error propagation is enabled: it is the explicit
         # server-side parked-recovery contract, not an unbounded normal wait.
-        yield _codex_keepalive_frame()
+        if emit_keepalives:
+            yield _codex_keepalive_frame()
         chunk_seconds = min(remaining_sleep_seconds, keepalive_interval)
         await asyncio.sleep(chunk_seconds)
         remaining_sleep_seconds -= chunk_seconds

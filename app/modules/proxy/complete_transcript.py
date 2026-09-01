@@ -255,6 +255,10 @@ def build_complete_replay_payload(
             and (matched_input := _strip_omitted_output_prefix(continuation_input, canonical_with_latest_output))
             is not None
         ):
+            # The matched prefix includes the latest persisted response
+            # output. Keep it in the canonical transcript while retaining only
+            # the new suffix from the full-history continuation.
+            canonical_input = list(canonical_with_latest_output)
             continuation_input = matched_input
             include_prior_output = False
         elif (

@@ -440,6 +440,32 @@ def test_http_bridge_parked_recovery_tuning_is_opt_in_and_bounded(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_parked_recovery_disabled_keepalive_emits_no_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(sse_keepalive_interval_seconds=0.0),
+    )
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", no_sleep)
+
+    frames = [
+        frame
+        async for frame in http_bridge_streaming_module._iter_http_bridge_parked_recovery_sse(
+            request_deadline=100.0,
+            sleep_seconds=0.001,
+        )
+    ]
+
+    assert frames == []
+
+
+@pytest.mark.asyncio
 async def test_submit_hard_turn_walks_completed_operation_chain_before_recording(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

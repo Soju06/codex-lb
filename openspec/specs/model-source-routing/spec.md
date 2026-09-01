@@ -1,10 +1,5 @@
 # Model Source Routing Specification
 
-## Purpose
-
-Define capability-aware routing and accounting for embeddings requests while
-preserving the existing model-source contracts.
-
 ## Requirements
 
 ### Requirement: Model sources declare an embeddings capability

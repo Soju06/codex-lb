@@ -140,7 +140,10 @@ async fn gzip_response_relay_crosses_native_helper_boundary() {
         }
     }
 
-    let accept_encodings = server.await.expect("gzip origin task");
+    let accept_encodings = tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .expect("gzip origin task timeout")
+        .expect("gzip origin task");
     drop(stdin);
     let exit = tokio::time::timeout(Duration::from_secs(2), helper.wait())
         .await

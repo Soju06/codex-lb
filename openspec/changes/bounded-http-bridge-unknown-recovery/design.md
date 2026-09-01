@@ -25,6 +25,8 @@ feature-disabled cases continue to return the existing continuity failure.
 
 The bounded lookup also emits finite-cardinality outcome diagnostics for
 candidate absence, missing parents/request bodies, body mismatch, ambiguity,
-and a single match. These diagnostics contain only candidate counts and
-hashed bridge identity fields already used by the structured logger; request
-payloads are never logged, and no diagnostic outcome changes admission.
+and a single match. These diagnostics contain only candidate counts, a hashed
+body digest, the body byte length, top-level JSON key names, an input
+container summary, and the hashed bridge identity fields already used by the
+structured logger; request payload values are never logged, and no diagnostic
+outcome changes admission.

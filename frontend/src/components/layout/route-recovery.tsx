@@ -1,7 +1,7 @@
 import { Component, type ReactNode, useEffect, useRef } from "react";
 import { ArrowLeft, FileQuestion, RefreshCw, TriangleAlert } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { SpinnerBlock } from "@/components/ui/spinner";
@@ -78,6 +78,14 @@ export function NotFoundPage() {
 
 export function RouteLoadError() {
   const { t } = useTranslation();
+  const { pathname } = useLocation();
+  const isDashboardPath = pathname.replace(/\/+$/, "").toLowerCase() === "/dashboard";
+  const dashboardLabel = (
+    <>
+      <ArrowLeft aria-hidden="true" />
+      {t("routeRecovery.goToDashboard")}
+    </>
+  );
 
   return (
     <RecoverySurface
@@ -93,10 +101,15 @@ export function RouteLoadError() {
             {t("routeRecovery.reload")}
           </Button>
           <Button asChild className="press-scale" variant="outline">
-            <Link data-testid="route-dashboard-link" to="/dashboard">
-              <ArrowLeft aria-hidden="true" />
-              {t("routeRecovery.goToDashboard")}
-            </Link>
+            {isDashboardPath ? (
+              <a data-testid="route-dashboard-link" href="/dashboard">
+                {dashboardLabel}
+              </a>
+            ) : (
+              <Link data-testid="route-dashboard-link" to="/dashboard">
+                {dashboardLabel}
+              </Link>
+            )}
           </Button>
         </>
       }

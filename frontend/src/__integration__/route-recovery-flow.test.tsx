@@ -1,12 +1,38 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
+import { RouteErrorBoundary } from "@/components/layout/route-recovery";
 import { renderWithProviders } from "@/test/utils";
 
 const dashboardMockState = vi.hoisted(() => ({ failed: false }));
+const sameUrlBoundaryState = { failed: false };
+
+function SameUrlBoundaryHarness() {
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  return (
+    <>
+      <button onClick={() => void navigate(location.pathname)} type="button">
+        Navigate same URL
+      </button>
+      <RouteErrorBoundary resetKey={location.key}>
+        {sameUrlBoundaryState.failed ? (
+          <SameUrlFailure />
+        ) : (
+          <div data-testid="same-url-route-loaded">Same URL route recovered</div>
+        )}
+      </RouteErrorBoundary>
+    </>
+  );
+}
+
+function SameUrlFailure(): never {
+  throw new Error("Same URL route failed");
+}
 
 vi.mock("@/features/dashboard/components/dashboard-page", async (importOriginal) => {
   const actual =
@@ -47,6 +73,7 @@ describe("route recovery flow integration", () => {
 
   afterEach(() => {
     dashboardMockState.failed = false;
+    sameUrlBoundaryState.failed = false;
     vi.restoreAllMocks();
     window.history.pushState({}, "", "/");
   });
@@ -127,18 +154,35 @@ describe("route recovery flow integration", () => {
     expect(screen.queryByTestId("route-load-error")).not.toBeInTheDocument();
   });
 
-  it("recovers a failed Dashboard route through same-URL navigation", async () => {
-    const user = userEvent.setup({ delay: null });
+  it.each(["/dashboard", "/dashboard/", "/Dashboard"])(
+    "offers a document reload when the failed route is %s",
+    async (pathname) => {
     dashboardMockState.failed = true;
-    window.history.pushState({}, "", "/dashboard");
+    window.history.pushState({}, "", pathname);
 
     renderWithProviders(<App />);
     const recovery = await screen.findByTestId("route-load-error");
+    const dashboardLink = within(recovery).getByRole("link", {
+      name: "Go to Dashboard",
+    });
 
-    dashboardMockState.failed = false;
-    await user.click(within(recovery).getByRole("link", { name: "Go to Dashboard" }));
+    expect(dashboardLink).toHaveAttribute("href", "/dashboard");
+    expect(dashboardLink).not.toHaveAttribute("data-discover");
+    },
+  );
 
-    expect(await screen.findByRole("textbox")).toBeVisible();
+  it("resets the route boundary when navigation changes only location.key", async () => {
+    const user = userEvent.setup({ delay: null });
+    sameUrlBoundaryState.failed = true;
+    window.history.pushState({}, "", "/same-url");
+
+    renderWithProviders(<SameUrlBoundaryHarness />);
+    expect(await screen.findByTestId("route-load-error")).toBeVisible();
+
+    sameUrlBoundaryState.failed = false;
+    await user.click(screen.getByRole("button", { name: "Navigate same URL" }));
+
+    expect(await screen.findByTestId("same-url-route-loaded")).toBeVisible();
     expect(screen.queryByTestId("route-load-error")).not.toBeInTheDocument();
   });
 

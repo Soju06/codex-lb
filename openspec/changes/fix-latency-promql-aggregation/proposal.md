@@ -24,5 +24,7 @@ None.
 
 ## Impact
 
-Grafana JSON, PrometheusRule, artifact tests, and OpenSpec only. No metric,
-label, threshold, window, setting, dependency, or runtime code change.
+Grafana JSON, PrometheusRule, artifact tests, and OpenSpec only. No metric
+schema or instrumentation-label change; only query aggregation changes output
+series cardinality. Thresholds, windows, settings, dependencies, and runtime
+code remain unchanged.

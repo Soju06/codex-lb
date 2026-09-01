@@ -88,6 +88,8 @@ the env-file locations have to be known before env files are read.
 
 ## HTTP Responses session bridge
 
+*Spec: [responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat)*
+
 | Environment variable | Type | Default |
 | --- | --- | --- |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL` | `str \| None` | `None` |

@@ -2310,6 +2310,11 @@ class _HTTPBridgeStreamingMixin:
             prior_operation_persisted_response_id = (
                 request_state.operation_persisted_response_id if preserve_operation_identity else None
             )
+            prior_recovery_attempt_fingerprint = request_state.recovery_attempt_fingerprint
+            prior_recovery_attempt_session_id = request_state.recovery_attempt_session_id
+            prior_recovery_attempt_owner_epoch = request_state.recovery_attempt_owner_epoch
+            prior_recovery_attempt_claimed = request_state.recovery_attempt_claimed
+            prior_recovery_attempt_dispatched = request_state.recovery_attempt_dispatched
             failed_owner_id = request_state.preferred_account_id
             _log_http_bridge_event(
                 event,
@@ -2342,6 +2347,11 @@ class _HTTPBridgeStreamingMixin:
                 request_state.operation_attempt_generation = prior_operation_attempt_generation
                 request_state.operation_persisted_response_id = prior_operation_persisted_response_id
                 request_state.operation_rebind_required = True
+            request_state.recovery_attempt_fingerprint = prior_recovery_attempt_fingerprint
+            request_state.recovery_attempt_session_id = prior_recovery_attempt_session_id
+            request_state.recovery_attempt_owner_epoch = prior_recovery_attempt_owner_epoch
+            request_state.recovery_attempt_claimed = prior_recovery_attempt_claimed
+            request_state.recovery_attempt_dispatched = prior_recovery_attempt_dispatched
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
             request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
@@ -3354,6 +3364,7 @@ class _HTTPBridgeStreamingMixin:
             async def rollback_claimed_recovery_attempt(
                 *,
                 session_id: str | None,
+                api_key_id: str | None,
                 owner_epoch: int | None,
                 request_fingerprint: str | None,
             ) -> bool:
@@ -3377,6 +3388,7 @@ class _HTTPBridgeStreamingMixin:
                         return bool(
                             await rollback_recovery_attempt(
                                 session_id=session_id,
+                                api_key_id=api_key_id,
                                 instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
                                 owner_epoch=owner_epoch,
                                 request_fingerprint=request_fingerprint,
@@ -3848,6 +3860,7 @@ class _HTTPBridgeStreamingMixin:
                     except BaseException:
                         rolled_back = await rollback_claimed_recovery_attempt(
                             session_id=recovery_origin_session_id,
+                            api_key_id=bridge_session_key.api_key_id,
                             owner_epoch=recovery_origin_owner_epoch,
                             request_fingerprint=durable_recovery_attempt_fingerprint,
                         )

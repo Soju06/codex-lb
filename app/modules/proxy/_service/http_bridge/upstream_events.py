@@ -1486,16 +1486,18 @@ async def _try_complete_transcript_recovery(
             root_turn_count = derive_replay_input_turn_count(request_state.request_text)
             replay_turn_count = root_turn_count - 1 if root_turn_count is not None else -1
             # Sessions created before durable transcript persistence may have
-            # no completed operation chain at all.  If the client supplied a
-            # complete unanchored history, it is still a valid explicit
-            # recovery source; sanitize and validate it under the same flag
-            # rather than failing solely because the historical spool is
-            # absent.
-            replay_text = build_unanchored_root_replay_payload(
-                request_state.request_text,
-                max_input_items=max_input_items,
-                max_bytes=max_bytes,
-            )
+            # no completed operation chain at all.  A client-supplied root is
+            # usable only when its complete history has a trustworthy depth
+            # within the configured bound; otherwise fail closed before
+            # constructing or dispatching the replay.
+            if root_turn_count is not None and root_turn_count <= max_turns:
+                replay_text = build_unanchored_root_replay_payload(
+                    request_state.request_text,
+                    max_input_items=max_input_items,
+                    max_bytes=max_bytes,
+                )
+            else:
+                replay_text = None
             if replay_text is not None:
                 _log_http_bridge_event(
                     "complete_transcript_recovery_client_snapshot",
@@ -1978,11 +1980,15 @@ async def _try_unsafe_partial_transcript_recovery(
             # so terminal persistence cannot under-count the replay snapshot.
             root_turn_count = derive_replay_input_turn_count(request_text)
             replay_turn_count = root_turn_count - 1 if root_turn_count is not None else -1
-            replay_text = build_unanchored_root_replay_payload(
-                request_text,
-                max_input_items=max_input_items,
-                max_bytes=max_bytes,
-            )
+            max_turns = int(getattr(settings, "http_responses_session_bridge_complete_transcript_max_turns", 256))
+            if root_turn_count is not None and root_turn_count <= max_turns:
+                replay_text = build_unanchored_root_replay_payload(
+                    request_text,
+                    max_input_items=max_input_items,
+                    max_bytes=max_bytes,
+                )
+            else:
+                replay_text = None
     except Exception:
         logger.warning(
             "Unsafe HTTP bridge partial transcript recovery lookup failed request_id=%s",

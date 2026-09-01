@@ -7595,7 +7595,7 @@ async def test_unsafe_partial_transcript_recovery_rejects_continuation_at_turn_l
 
 
 @pytest.mark.asyncio
-async def test_complete_transcript_root_recovery_marks_unknown_ancestor_count(
+async def test_complete_transcript_root_recovery_rejects_unknown_history_depth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -7676,10 +7676,82 @@ async def test_complete_transcript_root_recovery_marks_unknown_ancestor_count(
         request_state,
     )
 
-    assert recovered is True
-    assert request_state.recovery_replay_turn_count == -1
-    assert request_state.request_text.startswith('{"type":"response.create"')
-    retry.assert_awaited_once()
+    assert recovered is False
+    rebind_operation.assert_not_awaited()
+    retry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_complete_transcript_root_recovery_rejects_history_over_turn_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-root-overbound")
+    session.durable_session_id = "durable-recovery-root-overbound"
+    session.durable_owner_epoch = 1
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-recovery-root-overbound",
+            model="gpt-test",
+            request_text=json.dumps(
+                {
+                    "type": "response.create",
+                    "input": [
+                        {"type": "message", "role": "user", "content": "first"},
+                        {"type": "message", "role": "user", "content": "second"},
+                    ],
+                }
+            ),
+            previous_response_id=None,
+            complete_transcript_recovery_anchor="resp-root-overbound",
+            operation_id="op-root-overbound",
+            operation_fingerprint="fingerprint-root-overbound",
+            operation_parent_response_id=None,
+            operation_registered=True,
+            operation_created=True,
+            operation_recovery_claimed=False,
+            operation_dispatched=True,
+            operation_attempt_generation=0,
+            response_event_count=0,
+            replay_count=0,
+            upstream_model_output_seen=False,
+            downstream_visible=False,
+            last_downstream_sequence_number=None,
+        ),
+    )
+    rebind_operation = AsyncMock()
+    build_root_replay = Mock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(http_bridge_upstream_events_module, "build_unanchored_root_replay_payload", build_root_replay)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=1,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-recovery-root-overbound",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_retry_circuit_generation", AsyncMock(return_value=(True, None)))
+
+    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    build_root_replay.assert_not_called()
+    rebind_operation.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -8331,6 +8403,71 @@ async def test_unsafe_partial_transcript_recovery_rebinds_one_new_root(
     assert rebind_operation.await_args.kwargs["expected_recovery_dispatch_count"] == 0
     assert rebind_operation.await_args.kwargs["request_text"].startswith('{"type":"response.create"')
     retry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_partial_root_recovery_rejects_history_over_turn_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="unsafe-root-overbound")
+    session.durable_session_id = "durable-unsafe-root-overbound"
+    session.durable_owner_epoch = 1
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-unsafe-root-overbound",
+            model="gpt-test",
+            request_text=json.dumps(
+                {
+                    "type": "response.create",
+                    "input": [
+                        {"type": "message", "role": "user", "content": "first"},
+                        {"type": "message", "role": "user", "content": "second"},
+                    ],
+                }
+            ),
+            previous_response_id=None,
+            operation_parent_response_id=None,
+            complete_transcript_recovery_anchor=None,
+            operation_id="op-unsafe-root-overbound",
+            operation_registered=True,
+            operation_dispatched=True,
+            operation_attempt_generation=0,
+            response_event_count=1,
+            unsafe_partial_replay_count=0,
+        ),
+    )
+    rebind_operation = AsyncMock()
+    build_root_replay = Mock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(http_bridge_upstream_events_module, "build_unanchored_root_replay_payload", build_root_replay)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_unsafe_partial_replay_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=1,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-unsafe-root-overbound",
+        ),
+    )
+
+    recovered = await http_bridge_upstream_events_module._try_unsafe_partial_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    build_root_replay.assert_not_called()
+    rebind_operation.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -4083,24 +4083,45 @@ class _HTTPBridgeStreamingMixin:
                 await capture_verified_stale_anchor_circuit_generation(session)
                 capture_verified_stale_anchor_quarantine_generation(session)
                 await reset_previous_response_recovery_operation_spool(session, request_state)
-                await claim_recovery_attempt_for_local_replay()
-                await self._reset_http_bridge_session_after_local_terminal_error(
-                    session,
-                    error_code="stream_incomplete",
-                    error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
-                    preserve_durable_lease=True,
-                )
-                switch_to_account_neutral_replay(
-                    event="previous_response_recover_fresh_resend",
-                    detail="outcome=stale_anchor_rejected_account_neutral_replay",
-                    preserve_operation=True,
-                )
-                recovery_path = "local_previous_response_fresh_replay"
-                retry_payload = effective_payload
-                retry_previous_response_id = None
-                retry_request_stage = "stale_anchor_recover"
-                retry_preferred_account_id = None
-                allow_previous_response_recovery_rebind = False
+                recovery_origin_session_id = request_state.recovery_attempt_session_id or session.durable_session_id
+                recovery_origin_owner_epoch = request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch
+                recovery_origin_api_key_id = bridge_session_key.api_key_id
+                recovery_origin_fingerprint = request_state.recovery_attempt_fingerprint
+                recovery_claimed_here = False
+                try:
+                    await claim_recovery_attempt_for_local_replay()
+                    recovery_claimed_here = request_state.recovery_attempt_claimed
+                    await self._reset_http_bridge_session_after_local_terminal_error(
+                        session,
+                        error_code="stream_incomplete",
+                        error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
+                        preserve_durable_lease=True,
+                    )
+                    switch_to_account_neutral_replay(
+                        event="previous_response_recover_fresh_resend",
+                        detail="outcome=stale_anchor_rejected_account_neutral_replay",
+                        preserve_operation=True,
+                    )
+                    recovery_path = "local_previous_response_fresh_replay"
+                    retry_payload = effective_payload
+                    retry_previous_response_id = None
+                    retry_request_stage = "stale_anchor_recover"
+                    retry_preferred_account_id = None
+                    allow_previous_response_recovery_rebind = False
+                except BaseException:
+                    if recovery_claimed_here:
+                        rolled_back = await rollback_claimed_recovery_attempt(
+                            session_id=recovery_origin_session_id,
+                            api_key_id=recovery_origin_api_key_id,
+                            owner_epoch=recovery_origin_owner_epoch,
+                            request_fingerprint=recovery_origin_fingerprint,
+                        )
+                        if rolled_back:
+                            request_state.recovery_attempt_claimed = False
+                            request_state.recovery_attempt_fingerprint = None
+                            request_state.recovery_attempt_session_id = None
+                            request_state.recovery_attempt_owner_epoch = None
+                    raise
             elif previous_response_rejected_same_owner_full_resend:
                 # The owner-pinned replacement does not bypass the source
                 # circuit: its unique internal key avoids that admission path.
@@ -4127,24 +4148,45 @@ class _HTTPBridgeStreamingMixin:
                 )
                 if retry_injected_input is not None:
                     retry_payload = retry_payload.model_copy(update={"input": retry_injected_input})
-                await claim_recovery_attempt_for_local_replay()
-                retry_preferred_account_id = request_state.preferred_account_id or session.account.id
-                bridge_session_key = _HTTPBridgeSessionKey(
-                    "internal_request_parallel",
-                    f"stale-owner-replay:{uuid4().hex}",
-                    bridge_session_key.api_key_id,
-                )
-                await reset_previous_response_recovery_operation_spool(session, request_state)
-                await self._reset_http_bridge_session_after_local_terminal_error(
-                    session,
-                    error_code="stream_incomplete",
-                    error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
-                    preserve_durable_lease=True,
-                )
-                recovery_path = "local_previous_response_same_owner_fresh_replay"
-                retry_previous_response_id = None
-                retry_request_stage = "stale_anchor_recover"
-                allow_previous_response_recovery_rebind = False
+                recovery_origin_session_id = request_state.recovery_attempt_session_id or session.durable_session_id
+                recovery_origin_owner_epoch = request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch
+                recovery_origin_api_key_id = bridge_session_key.api_key_id
+                recovery_origin_fingerprint = request_state.recovery_attempt_fingerprint
+                recovery_claimed_here = False
+                try:
+                    await claim_recovery_attempt_for_local_replay()
+                    recovery_claimed_here = request_state.recovery_attempt_claimed
+                    retry_preferred_account_id = request_state.preferred_account_id or session.account.id
+                    bridge_session_key = _HTTPBridgeSessionKey(
+                        "internal_request_parallel",
+                        f"stale-owner-replay:{uuid4().hex}",
+                        recovery_origin_api_key_id,
+                    )
+                    await reset_previous_response_recovery_operation_spool(session, request_state)
+                    await self._reset_http_bridge_session_after_local_terminal_error(
+                        session,
+                        error_code="stream_incomplete",
+                        error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
+                        preserve_durable_lease=True,
+                    )
+                    recovery_path = "local_previous_response_same_owner_fresh_replay"
+                    retry_previous_response_id = None
+                    retry_request_stage = "stale_anchor_recover"
+                    allow_previous_response_recovery_rebind = False
+                except BaseException:
+                    if recovery_claimed_here:
+                        rolled_back = await rollback_claimed_recovery_attempt(
+                            session_id=recovery_origin_session_id,
+                            api_key_id=recovery_origin_api_key_id,
+                            owner_epoch=recovery_origin_owner_epoch,
+                            request_fingerprint=recovery_origin_fingerprint,
+                        )
+                        if rolled_back:
+                            request_state.recovery_attempt_claimed = False
+                            request_state.recovery_attempt_fingerprint = None
+                            request_state.recovery_attempt_session_id = None
+                            request_state.recovery_attempt_owner_epoch = None
+                    raise
             else:
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
                     bridge_durable_recover_total.labels(path="local_previous_response_error").inc()

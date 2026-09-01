@@ -1277,6 +1277,9 @@ def _record_http_bridge_response_output(
         if type(output_index) is not int or output_index < 0 or not isinstance(item, dict):
             request_state.response_output_items_event_invalid = True
             return
+        if output_index in request_state.response_output_item_added_indexes:
+            request_state.response_output_items_event_invalid = True
+            return
         request_state.response_output_item_added_indexes.add(output_index)
         return
     if event_type == "response.output_item.done":
@@ -1285,12 +1288,7 @@ def _record_http_bridge_response_output(
         if type(output_index) is not int or output_index < 0 or not isinstance(item, dict):
             request_state.response_output_items_event_invalid = True
             return
-        existing = request_state.response_output_items_by_index.get(output_index)
-        if existing is not None and json.dumps(existing, sort_keys=True, separators=(",", ":")) != json.dumps(
-            item,
-            sort_keys=True,
-            separators=(",", ":"),
-        ):
+        if output_index in request_state.response_output_items_by_index:
             request_state.response_output_items_event_invalid = True
             return
         request_state.response_output_items_by_index[output_index] = cast(JsonValue, item)

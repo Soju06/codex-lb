@@ -897,6 +897,16 @@ async def test_complete_transcript_prefers_snapshot_when_parent_chain_is_missing
     assert replay is not None
     assert [item["role"] for item in json.loads(replay)["input"]] == ["user", "assistant", "user"]
 
+    # Rows created before the turn-count migration carry the zero sentinel;
+    # their historical depth is unknown and must not be replayed.
+    row.response_replay_input_turn_count = 0
+    assert (
+        await DurableBridgeRepository(cast(AsyncSession, _Session())).get_complete_transcript(
+            response_id="resp_snapshot",
+        )
+        is None
+    )
+
 
 def test_build_complete_replay_payload_rejects_broken_parent_continuation() -> None:
     turns = [

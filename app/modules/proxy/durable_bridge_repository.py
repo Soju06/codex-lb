@@ -2508,6 +2508,13 @@ class DurableBridgeRepository:
             operation = await self._session.scalar(statement)
             snapshot = _to_operation_snapshot(operation) if operation is not None else None
             if snapshot is not None and snapshot.response_replay_input_complete and snapshot.response_replay_input_json:
+                # The turn-count migration uses zero for pre-existing rows.  A
+                # complete snapshot with that sentinel has unknown historical
+                # depth, so treating it as one could bypass the configured
+                # max-turns bound.  Fail closed until a trustworthy count is
+                # available.
+                if snapshot.response_replay_input_turn_count <= 0:
+                    return None
                 # A complete replay snapshot replaces the oldest retained
                 # ancestor, but the newer turns already collected still carry
                 # the continuation that led to the requested response. Keep

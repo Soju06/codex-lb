@@ -140,6 +140,7 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper() -> Non
                 route=route,
                 timeout=2,
                 max_msg_size=1024,
+                compress=15,
             )
             assert websocket_result.native is True
             await websocket_result.websocket.send_text("probe")

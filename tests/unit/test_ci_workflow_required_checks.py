@@ -75,3 +75,21 @@ def test_dashboard_browser_smoke_covers_both_contract_sides_and_is_required() ->
     assert "bun run playwright install --with-deps chromium" in browser_job
     assert "run: make test-dashboard-browser-smoke" in browser_job
     assert "- dashboard-browser-smoke" in required_job
+
+
+def test_rust_job_runs_native_routed_wire_probe_with_built_helper() -> None:
+    workflow = _ci_workflow_text()
+    rust_job = _job_block(workflow, "rust")
+    required_job = _job_block(workflow, "ci-required")
+
+    build = "cargo build --locked -p codex-lb-egress-worker --bin codex-lb-native-egress"
+    probe = "uv run pytest -q -ra tests/integration/test_native_routed_egress.py"
+    assert build in rust_job
+    assert probe in rust_job
+    assert rust_job.index(build) < rust_job.index(probe)
+    assert "uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d" in rust_job
+    assert "uv sync --dev --frozen" in rust_job
+    assert (
+        "CODEX_LB_NATIVE_EGRESS_TEST_BINARY: ${{ github.workspace }}/target/debug/codex-lb-native-egress"
+    ) in rust_job
+    assert "- rust" in required_job

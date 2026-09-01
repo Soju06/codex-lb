@@ -4,7 +4,10 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
-import { RouteErrorBoundary } from "@/components/layout/route-recovery";
+import {
+  RouteErrorBoundary,
+  RouteLoadError,
+} from "@/components/layout/route-recovery";
 import { renderWithProviders } from "@/test/utils";
 
 const dashboardMockState = vi.hoisted(() => ({ failed: false }));
@@ -154,7 +157,7 @@ describe("route recovery flow integration", () => {
     expect(screen.queryByTestId("route-load-error")).not.toBeInTheDocument();
   });
 
-  it.each(["/dashboard", "/dashboard/", "/Dashboard"])(
+  it.each(["/dashboard", "/dashboard/", "/Dashboard", "/%64ashboard"])(
     "offers a document reload when the failed route is %s",
     async (pathname) => {
     dashboardMockState.failed = true;
@@ -168,6 +171,21 @@ describe("route recovery flow integration", () => {
 
     expect(dashboardLink).toHaveAttribute("href", "/dashboard");
     expect(dashboardLink).not.toHaveAttribute("data-discover");
+    },
+  );
+
+  it.each(["/dashboard%2F", "/%64ashboard%2F"])(
+    "does not treat encoded segment separators as Dashboard at %s",
+    async (pathname) => {
+      window.history.pushState({}, "", pathname);
+
+      renderWithProviders(<RouteLoadError />);
+      const recovery = await screen.findByTestId("route-load-error");
+      const dashboardLink = within(recovery).getByRole("link", {
+        name: "Go to Dashboard",
+      });
+
+      expect(dashboardLink).toHaveAttribute("data-discover", "true");
     },
   );
 

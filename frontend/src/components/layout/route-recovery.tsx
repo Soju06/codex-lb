@@ -15,6 +15,14 @@ type RecoverySurfaceProps = {
   title: string;
 };
 
+function decodePathname(pathname: string): string {
+  try {
+    return decodeURI(pathname);
+  } catch {
+    return pathname;
+  }
+}
+
 function RecoverySurface({
   actions,
   description,
@@ -79,7 +87,8 @@ export function NotFoundPage() {
 export function RouteLoadError() {
   const { t } = useTranslation();
   const { pathname } = useLocation();
-  const isDashboardPath = pathname.replace(/\/+$/, "").toLowerCase() === "/dashboard";
+  const isDashboardPath =
+    decodePathname(pathname).replace(/\/+$/, "").toLowerCase() === "/dashboard";
   const dashboardLabel = (
     <>
       <ArrowLeft aria-hidden="true" />

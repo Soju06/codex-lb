@@ -455,6 +455,7 @@ class HttpBridgeOperationEventBatcher:
                 pending = self._pending.pop(operation_id, [])
                 self._pending_count -= len(pending)
                 self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in pending)
+                self._closing_operations.discard(operation_id)
                 self._dropped_operations.discard(operation_id)
 
     async def rollback_fence_operation(self, *, operation_id: str, recovery_dispatch_count: int) -> bool:

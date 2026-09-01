@@ -5723,10 +5723,19 @@ class _WebSocketMixin:
             if unsafe_new_response_recovery:
                 # The terse invalid-anchor shape is intentionally normalized
                 # by the rewrite above, but it must also enter the verified
-                # fresh-replay branch below. The strict classifier cannot
-                # recognize this provider variant on its own.
-                retry_is_previous_response_not_found = True
-                retry_error_code = "stream_incomplete"
+                # fresh-replay branch below. Reuse the pre-created admission
+                # checks so a sequenced or unanchored request cannot be
+                # upgraded into a fresh replay by this opt-in classifier.
+                unsafe_retry_error_code = _websocket_precreated_retry_error_code(
+                    request_state,
+                    event_type=event_type,
+                    payload=payload,
+                    has_other_pending_requests=has_other_pending_requests,
+                    allow_unsafe_previous_response_recovery=True,
+                )
+                if unsafe_retry_error_code is not None:
+                    retry_is_previous_response_not_found = True
+                    retry_error_code = unsafe_retry_error_code
         if event_type in {"response.failed", "response.incomplete", "error"} and isinstance(payload, dict):
             public_payload = _sanitize_public_websocket_event_payload(payload, event_type=event_type)
             if public_payload is not payload:

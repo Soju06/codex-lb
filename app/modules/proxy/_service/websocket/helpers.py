@@ -797,6 +797,7 @@ def _websocket_precreated_retry_error_code(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
     has_other_pending_requests: bool,
+    allow_unsafe_previous_response_recovery: bool = False,
 ) -> str | None:
     if request_state is None:
         return None
@@ -818,6 +819,14 @@ def _websocket_precreated_retry_error_code(
         return None
     if event_type not in {"error", "response.failed"}:
         return None
+
+    if allow_unsafe_previous_response_recovery:
+        if request_state.previous_response_id is None:
+            return None
+        # The caller has already classified the provider's terse invalid-anchor
+        # shape. Reuse this helper's pre-created admission checks, but do not
+        # require the strict error classifier to recognize that shape.
+        return "stream_incomplete"
 
     error_code = _normalize_error_code(
         _websocket_event_error_code(event_type, payload),

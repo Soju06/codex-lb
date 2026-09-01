@@ -363,7 +363,9 @@ async def test_fence_operation_drops_late_events_from_interrupted_generation() -
     )
     try:
         await _enqueue(batcher, "old-before-rebind")
+        batcher._closing_operations.add("op-1")
         await batcher.fence_operation(operation_id="op-1", recovery_dispatch_count=1)
+        assert "op-1" not in batcher._closing_operations
         await _enqueue(batcher, "old-after-rebind")
         await _enqueue(batcher, "replacement", recovery_dispatch_count=1)
         assert await batcher.flush_pending_operation(operation_id="op-1") is True

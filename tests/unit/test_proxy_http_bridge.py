@@ -45,6 +45,7 @@ from app.core.config.settings import Settings
 from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, OpenAIErrorParam, openai_error
 from app.core.openai.models import OpenAIError
 from app.core.openai.requests import ResponsesRequest
+from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
 from app.db.models import AccountStatus, Base, HttpBridgeSessionState
 from app.modules.proxy import affinity as proxy_affinity
@@ -1577,6 +1578,73 @@ def test_http_bridge_unsafe_new_response_recovery_classifies_terse_anchor_error(
             )
             is False
         )
+
+
+def test_http_bridge_unsafe_new_response_recovery_keeps_precreated_admission_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_unsafe_new_response_recovery_enabled=True,
+        ),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-unsafe-admission",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-stale",
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","input":[{"role":"user","content":"retry"}]}',
+    )
+    payload = {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "Invalid `previous_response_id`.",
+        },
+    }
+
+    assert (
+        websocket_helpers_module._websocket_precreated_retry_error_code(
+            request_state,
+            event_type="error",
+            payload=cast(dict[str, JsonValue], payload),
+            has_other_pending_requests=False,
+            allow_unsafe_previous_response_recovery=True,
+        )
+        == "stream_incomplete"
+    )
+
+    request_state.response_event_count = 1
+    assert (
+        websocket_helpers_module._websocket_precreated_retry_error_code(
+            request_state,
+            event_type="error",
+            payload=cast(dict[str, JsonValue], payload),
+            has_other_pending_requests=False,
+            allow_unsafe_previous_response_recovery=True,
+        )
+        is None
+    )
+
+    request_state.response_event_count = 0
+    request_state.previous_response_id = None
+    assert (
+        websocket_helpers_module._websocket_precreated_retry_error_code(
+            request_state,
+            event_type="error",
+            payload=cast(dict[str, JsonValue], payload),
+            has_other_pending_requests=False,
+            allow_unsafe_previous_response_recovery=True,
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("param", ["", "   "])

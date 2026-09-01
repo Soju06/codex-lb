@@ -304,17 +304,19 @@ class HttpBridgeOperationEventBatcher:
                 return TerminalOperationEventAppendResult(persisted=False)
             if expected_recovery_dispatch_count > current_generation:
                 self._operation_generations[operation_id] = expected_recovery_dispatch_count
-            self._contexts.setdefault(
-                operation_id,
-                _PendingOperationEvent(
+            current_context = self._contexts.get(operation_id)
+            if current_context is None or current_context.recovery_dispatch_count < expected_recovery_dispatch_count:
+                # A terminal event may arrive before the replacement's first
+                # enqueue. Refresh the owner identity when this generation is
+                # newer so durable append is not fenced by stale context.
+                self._contexts[operation_id] = _PendingOperationEvent(
                     operation_id=operation_id,
                     session_id=session_id,
                     instance_id=instance_id,
                     owner_epoch=owner_epoch,
                     event_text=event_text,
                     recovery_dispatch_count=expected_recovery_dispatch_count,
-                ),
-            )
+                )
             self._closing_operations.add(operation_id)
         await self.flush_pending_operation(operation_id=operation_id)
         async with self._lock:

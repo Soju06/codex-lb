@@ -16,6 +16,7 @@ class _FakeDurableBridge:
         self.chunk_batches: list[list[str]] = []
         self.terminal_rows: list[str] = []
         self.terminal_chunks: list[str] = []
+        self.terminal_kwargs: list[dict[str, object]] = []
         self.finalized: list[str] = []
         self.updated: list[dict[str, object]] = []
 
@@ -31,10 +32,12 @@ class _FakeDurableBridge:
 
     async def append_terminal_operation_event(self, **kwargs) -> bool:
         self.terminal_rows.append(kwargs["event_text"])
+        self.terminal_kwargs.append(dict(kwargs))
         return self.append_result
 
     async def append_terminal_operation_chunk(self, **kwargs) -> bool:
         self.terminal_chunks.append(kwargs["event_text"])
+        self.terminal_kwargs.append(dict(kwargs))
         return self.append_result
 
     async def finalize_operation_event_spool(self, **kwargs) -> bool:
@@ -387,6 +390,41 @@ async def test_rollback_fence_operation_restores_generation_after_rebind_rollbac
         await _enqueue(batcher, "replacement-after-rollback")
         assert await batcher.flush_pending_operation(operation_id="op-1") is True
         assert durable.batches == [["replacement-after-rollback"]]
+    finally:
+        await batcher.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_append_refreshes_context_for_new_recovery_generation() -> None:
+    durable = _FakeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    try:
+        await _enqueue(batcher, "old-before-rebind")
+        await batcher.fence_operation(operation_id="op-1", recovery_dispatch_count=1)
+
+        result = await batcher.append_terminal_event(
+            operation_id="op-1",
+            session_id="replacement-session",
+            instance_id="replacement-instance",
+            owner_epoch=9,
+            event_text="replacement-terminal",
+            max_bytes=1024,
+            state="completed",
+            expected_recovery_dispatch_count=1,
+            response_id="resp-replacement",
+        )
+
+        assert result.persisted is True
+        assert durable.terminal_kwargs[0]["session_id"] == "replacement-session"
+        assert durable.terminal_kwargs[0]["instance_id"] == "replacement-instance"
+        assert durable.terminal_kwargs[0]["owner_epoch"] == 9
+        assert durable.terminal_kwargs[0]["expected_recovery_dispatch_count"] == 1
     finally:
         await batcher.close()
 

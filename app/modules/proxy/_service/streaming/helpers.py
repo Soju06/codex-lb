@@ -410,6 +410,24 @@ def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
 
+def _is_background_json_ack(
+    stream: bool | None,
+    event_payload: dict[str, JsonValue] | None,
+    event_type: str | None,
+) -> bool:
+    if stream is not False or event_type not in {"response.queued", "response.in_progress"}:
+        return False
+    response = event_payload.get("response") if event_payload is not None else None
+    return (
+        isinstance(response, dict)
+        and response.get("object") == "response"
+        and isinstance(response.get("id"), str)
+        and bool(response["id"])
+        and response.get("status") == event_type.removeprefix("response.")
+        and response.get("output") == []
+    )
+
+
 def _stream_iterator_after_capacity_admission(
     stream: AsyncIterator[str],
 ) -> AsyncIterator[str]:

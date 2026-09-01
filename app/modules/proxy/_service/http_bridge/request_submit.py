@@ -3392,6 +3392,26 @@ class _HTTPBridgeRequestSubmitMixin:
                         exc_info=True,
                     )
                 if rolled_back:
+                    rollback_fence_operation = getattr(
+                        getattr(self, "_http_bridge_operation_event_batcher", None),
+                        "rollback_fence_operation",
+                        None,
+                    )
+                    if (
+                        callable(rollback_fence_operation)
+                        and request_state.operation_recovery_expected_generation is not None
+                    ):
+                        try:
+                            await rollback_fence_operation(
+                                operation_id=request_state.operation_id,
+                                recovery_dispatch_count=request_state.operation_recovery_expected_generation,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to restore pre-dispatch HTTP bridge operation event fence operation_id=%s",
+                                request_state.operation_id,
+                                exc_info=True,
+                            )
                     request_state.operation_registered = False
                     request_state.operation_created = False
                     if request_state.operation_rebound:

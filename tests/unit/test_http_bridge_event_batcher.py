@@ -370,6 +370,28 @@ async def test_fence_operation_drops_late_events_from_interrupted_generation() -
 
 
 @pytest.mark.asyncio
+async def test_rollback_fence_operation_restores_generation_after_rebind_rollback() -> None:
+    durable = _FakeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    try:
+        await _enqueue(batcher, "old-before-rebind")
+        await batcher.fence_operation(operation_id="op-1", recovery_dispatch_count=1)
+        assert await batcher.rollback_fence_operation(operation_id="op-1", recovery_dispatch_count=0) is True
+        assert await batcher.rollback_fence_operation(operation_id="op-1", recovery_dispatch_count=0) is False
+        await _enqueue(batcher, "replacement-after-rollback")
+        assert await batcher.flush_pending_operation(operation_id="op-1") is True
+        assert durable.batches == [["replacement-after-rollback"]]
+    finally:
+        await batcher.close()
+
+
+@pytest.mark.asyncio
 async def test_close_cancels_background_flusher() -> None:
     durable = _FakeDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(

@@ -455,6 +455,23 @@ class HttpBridgeOperationEventBatcher:
                 self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in pending)
                 self._dropped_operations.discard(operation_id)
 
+    async def rollback_fence_operation(self, *, operation_id: str, recovery_dispatch_count: int) -> bool:
+        """Restore a generation fence after a durable recovery rollback.
+
+        The durable rollback uses the previous generation as a compare-and-set
+        guard. Mirror that guard in memory so a concurrent replacement cannot
+        be unfenced by stale cleanup from an older recovery attempt.
+        """
+        recovery_dispatch_count = max(0, int(recovery_dispatch_count))
+        fenced_generation = recovery_dispatch_count + 1
+        async with self._flush_lock:
+            async with self._lock:
+                current_generation = self._operation_generations.get(operation_id)
+                if current_generation != fenced_generation:
+                    return False
+                self._operation_generations[operation_id] = recovery_dispatch_count
+                return True
+
     async def close(self) -> None:
         task = self._task
         self._task = None

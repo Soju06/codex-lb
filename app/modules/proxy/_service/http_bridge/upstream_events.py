@@ -1525,7 +1525,9 @@ async def _try_complete_transcript_recovery(
     ):
         return False
 
-    fence_operation = getattr(getattr(service, "_http_bridge_operation_event_batcher", None), "fence_operation", None)
+    operation_event_batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
+    fence_operation = getattr(operation_event_batcher, "fence_operation", None)
+    rollback_fence_operation = getattr(operation_event_batcher, "rollback_fence_operation", None)
 
     async def fence_rebound_operation() -> bool:
         if not callable(fence_operation):
@@ -1558,7 +1560,7 @@ async def _try_complete_transcript_recovery(
             )
             return False
         try:
-            return bool(
+            rolled_back = bool(
                 await rollback_operation(
                     operation_id=operation_id,
                     session_id=session.durable_session_id,
@@ -1572,6 +1574,12 @@ async def _try_complete_transcript_recovery(
                     expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                 )
             )
+            if rolled_back and callable(rollback_fence_operation):
+                await rollback_fence_operation(
+                    operation_id=operation_id,
+                    recovery_dispatch_count=expected_recovery_dispatch_count,
+                )
+            return rolled_back
         except Exception:
             logger.warning(
                 "Complete HTTP bridge transcript recovery rollback failed request_id=%s",
@@ -1638,6 +1646,13 @@ async def _try_complete_transcript_recovery(
             request_text=replay_text,
             expected_recovery_dispatch_count=expected_recovery_dispatch_count,
         )
+    except asyncio.CancelledError:
+        # The rebind may have committed before cancellation was delivered.
+        # Reconcile it under a shield before propagating cancellation so the
+        # durable row and in-memory event fence cannot be stranded.
+        with anyio.CancelScope(shield=True):
+            await rollback_rebound_operation(None)
+        raise
     except Exception:
         if await recovery_claimed_by_concurrent_call(include_durable_lookup=False):
             if not await fence_rebound_operation():
@@ -1972,7 +1987,9 @@ async def _try_unsafe_partial_transcript_recovery(
         )
         return False
 
-    fence_operation = getattr(getattr(service, "_http_bridge_operation_event_batcher", None), "fence_operation", None)
+    operation_event_batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
+    fence_operation = getattr(operation_event_batcher, "fence_operation", None)
+    rollback_fence_operation = getattr(operation_event_batcher, "rollback_fence_operation", None)
 
     async def fence_rebound_operation() -> bool:
         if not callable(fence_operation):
@@ -2005,7 +2022,7 @@ async def _try_unsafe_partial_transcript_recovery(
             )
             return False
         try:
-            return bool(
+            rolled_back = bool(
                 await rollback_operation(
                     operation_id=operation_id,
                     session_id=session.durable_session_id,
@@ -2019,6 +2036,12 @@ async def _try_unsafe_partial_transcript_recovery(
                     expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                 )
             )
+            if rolled_back and callable(rollback_fence_operation):
+                await rollback_fence_operation(
+                    operation_id=operation_id,
+                    recovery_dispatch_count=expected_recovery_dispatch_count,
+                )
+            return rolled_back
         except Exception:
             logger.warning(
                 "Unsafe HTTP bridge partial transcript recovery rollback failed request_id=%s",
@@ -2081,6 +2104,13 @@ async def _try_unsafe_partial_transcript_recovery(
             allow_acknowledged=True,
             expected_recovery_dispatch_count=expected_recovery_dispatch_count,
         )
+    except asyncio.CancelledError:
+        # The rebind may have committed before cancellation was delivered.
+        # Reconcile it under a shield before propagating cancellation so the
+        # durable row and in-memory event fence cannot be stranded.
+        with anyio.CancelScope(shield=True):
+            await rollback_rebound_operation(None)
+        raise
     except Exception:
         if await recovery_claimed_by_concurrent_call(include_durable_lookup=False):
             if not await fence_rebound_operation():

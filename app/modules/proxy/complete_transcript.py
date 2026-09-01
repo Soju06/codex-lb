@@ -249,7 +249,7 @@ def build_complete_replay_payload(
             # new suffix; appending ``latest_prior_output`` again would drop
             # the assistant turn from the reconstructed ordering.
             continuation_input = continuation_input[len(canonical_input) :]
-            include_prior_output = False
+            include_prior_output = not replay_input_includes_latest_output
         elif (
             canonical_with_latest_output
             and (matched_input := _strip_omitted_output_prefix(continuation_input, canonical_with_latest_output))

@@ -158,6 +158,43 @@ def test_build_complete_replay_payload_preserves_latest_output_from_full_history
     assert [item["content"][0]["text"] for item in input_items if item.get("role") == "assistant"] == ["one", "two"]
 
 
+def test_build_complete_replay_payload_restores_latest_output_for_compacted_prefix() -> None:
+    payload = build_complete_replay_payload(
+        [
+            _turn(
+                1,
+                parent_response_id=None,
+                response_id="resp_1",
+                request_input=[{"type": "message", "role": "user", "content": "first"}],
+                output=[
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "answer"}],
+                    }
+                ],
+            )
+        ],
+        continuation_request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-test",
+                "previous_response_id": None,
+                "input": [
+                    {"type": "message", "role": "user", "content": "first"},
+                    {"type": "message", "role": "user", "content": "follow up"},
+                ],
+            }
+        ),
+        allow_unanchored_continuation=True,
+    )
+
+    assert payload is not None
+    input_items = json.loads(payload)["input"]
+    assert [item.get("role") for item in input_items] == ["user", "assistant", "user"]
+    assert input_items[1]["content"][0]["text"] == "answer"
+
+
 def test_build_unanchored_root_replay_payload_sanitizes_legacy_history() -> None:
     payload = build_unanchored_root_replay_payload(
         json.dumps(

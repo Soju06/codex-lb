@@ -90,4 +90,19 @@ describe("route recovery flow integration", () => {
     );
     expect(screen.queryByTestId("route-load-error")).not.toBeInTheDocument();
   });
+
+  it("preserves dashboard search input across healthy same-path URL updates", async () => {
+    const user = userEvent.setup({ delay: null });
+    window.history.pushState({}, "", "/dashboard");
+
+    renderWithProviders(<App />);
+    const search = await screen.findByRole("textbox");
+    await user.click(search);
+    await user.type(search, "abc");
+
+    expect(search).toHaveValue("abc");
+    expect(search).toHaveFocus();
+    expect(window.location.search).toContain("search=abc");
+    expect(screen.queryByTestId("route-load-error")).not.toBeInTheDocument();
+  });
 });

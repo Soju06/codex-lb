@@ -119,6 +119,7 @@ export function RouteLoading() {
 
 type RouteErrorBoundaryProps = {
   children: ReactNode;
+  resetKey: string;
 };
 
 type RouteErrorBoundaryState = {
@@ -133,6 +134,12 @@ export class RouteErrorBoundary extends Component<
 
   static getDerivedStateFromError(): RouteErrorBoundaryState {
     return { failed: true };
+  }
+
+  componentDidUpdate(previousProps: RouteErrorBoundaryProps): void {
+    if (this.state.failed && previousProps.resetKey !== this.props.resetKey) {
+      this.setState({ failed: false });
+    }
   }
 
   render(): ReactNode {

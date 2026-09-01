@@ -65,7 +65,7 @@ function AppLayout() {
         showLogout={(role === "admin" && passwordRequired) || (isGuest && guestPasswordRequired)}
       />
       <main className="mx-auto flex w-full max-w-[1500px] flex-1 flex-col px-4 py-8 sm:px-6">
-        <RouteErrorBoundary key={`${pathname}${search}${hash}`}>
+        <RouteErrorBoundary key={pathname} resetKey={`${pathname}${search}${hash}`}>
           <Suspense fallback={<RouteLoading />}>
             <Outlet />
           </Suspense>

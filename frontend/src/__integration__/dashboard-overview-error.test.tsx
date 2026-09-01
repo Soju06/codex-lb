@@ -86,4 +86,151 @@ describe("dashboard overview error integration", () => {
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
     expect(overviewCalls).toBeGreaterThan(2);
   });
+
+  it("does not carry an unresolved Retry into a new timeframe", async () => {
+    const user = userEvent.setup({ delay: null });
+    let retryPreviousTimeframe = false;
+    let signalPreviousRetry = () => {};
+    const previousRetryStarted = new Promise<void>((resolve) => {
+      signalPreviousRetry = resolve;
+    });
+    let releasePreviousRetry = () => {};
+    const previousRetryGate = new Promise<void>((resolve) => {
+      releasePreviousRetry = resolve;
+    });
+    let signalNextTimeframeRequest = () => {};
+    const nextTimeframeRequestStarted = new Promise<void>((resolve) => {
+      signalNextTimeframeRequest = resolve;
+    });
+    let releaseNextTimeframeRequest = () => {};
+    const nextTimeframeRequestGate = new Promise<void>((resolve) => {
+      releaseNextTimeframeRequest = resolve;
+    });
+
+    server.use(
+      http.get("/api/dashboard/overview", async ({ request }) => {
+        const timeframe = new URL(request.url).searchParams.get("timeframe");
+        if (timeframe === "30d") {
+          signalNextTimeframeRequest();
+          await nextTimeframeRequestGate;
+          return HttpResponse.json(
+            createDashboardOverview({
+              accounts: [
+                createAccountSummary({
+                  accountId: "acc_thirty_day",
+                  chatgptAccountId: "chatgpt_acc_thirty_day",
+                  displayName: "Thirty Day Overview Account",
+                  email: "thirty-day@example.com",
+                }),
+              ],
+            }),
+          );
+        }
+        if (!retryPreviousTimeframe) {
+          return HttpResponse.json(
+            { error: { code: "forced_outage", message: OUTAGE } },
+            { status: 503 },
+          );
+        }
+        signalPreviousRetry();
+        await previousRetryGate;
+        return HttpResponse.json(createDashboardOverview());
+      }),
+    );
+
+    window.history.pushState({}, "", "/dashboard");
+    const { container, queryClient } = renderWithProviders(<App />);
+
+    expect(await screen.findByText(OUTAGE)).toBeInTheDocument();
+    retryPreviousTimeframe = true;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await previousRetryStarted;
+
+    await user.click(screen.getByRole("combobox", { name: /timeframe/i }));
+    await user.click(screen.getByRole("option", { name: "30d" }));
+    await nextTimeframeRequestStarted;
+
+    expect(screen.queryByText(OUTAGE)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(container.querySelectorAll('[data-slot="skeleton"]').length).toBeGreaterThan(0);
+
+    const previousRetrySettled = new Promise<void>((resolve) => {
+      const unsubscribe = queryClient.getQueryCache().subscribe((event) => {
+        const queryKey = event.query.queryKey;
+        if (
+          queryKey[0] === "dashboard" &&
+          queryKey[1] === "overview" &&
+          queryKey[2] === "7d" &&
+          event.query.state.fetchStatus === "idle"
+        ) {
+          unsubscribe();
+          resolve();
+        }
+      });
+    });
+    releasePreviousRetry();
+    await previousRetrySettled;
+    expect(screen.queryByText(OUTAGE)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+
+    releaseNextTimeframeRequest();
+    expect((await screen.findAllByText("Thirty Day Overview Account")).length).toBeGreaterThan(0);
+  });
+
+  it("retains terminal no-data error during an invalidation refetch", async () => {
+    const user = userEvent.setup({ delay: null });
+    let recoverOnRefresh = false;
+    let signalRefresh = () => {};
+    const refreshStarted = new Promise<void>((resolve) => {
+      signalRefresh = resolve;
+    });
+    let releaseRefresh = () => {};
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+
+    server.use(
+      http.get("/api/dashboard/overview", async () => {
+        if (!recoverOnRefresh) {
+          return HttpResponse.json(
+            { error: { code: "forced_outage", message: OUTAGE } },
+            { status: 503 },
+          );
+        }
+        signalRefresh();
+        await refreshGate;
+        return HttpResponse.json(
+          createDashboardOverview({
+            accounts: [
+              createAccountSummary({
+                accountId: "acc_refreshed",
+                chatgptAccountId: "chatgpt_acc_refreshed",
+                displayName: RECOVERED,
+                email: "refreshed@example.com",
+              }),
+            ],
+          }),
+        );
+      }),
+    );
+
+    window.history.pushState({}, "", "/dashboard");
+    const { container } = renderWithProviders(<App />);
+
+    expect(await screen.findByText(OUTAGE)).toBeInTheDocument();
+    recoverOnRefresh = true;
+    await user.click(screen.getByRole("button", { name: "Refresh dashboard" }));
+    await refreshStarted;
+
+    const alert = screen.getByRole("alert");
+    const terminalState = alert.parentElement ?? alert;
+    const retry = within(terminalState).getByRole("button", { name: "Retry" });
+    expect(alert).toHaveTextContent(OUTAGE);
+    expect(container.querySelectorAll('[data-slot="skeleton"]')).toHaveLength(0);
+    expect(retry).toBeDisabled();
+    expect(retry).toHaveAttribute("aria-busy", "true");
+
+    releaseRefresh();
+    expect((await screen.findAllByText(RECOVERED)).length).toBeGreaterThan(0);
+  });
 });

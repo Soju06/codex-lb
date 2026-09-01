@@ -57,6 +57,11 @@ import { usePrivacyStore } from "@/hooks/use-privacy";
 
 const MODEL_OPTION_DELIMITER = ":::";
 
+type RetainedDashboardLoadError = {
+  timeframe: OverviewTimeframe;
+  message: string;
+};
+
 export function DashboardPage() {
   const { t, i18n } = useTranslation();
   const {
@@ -106,7 +111,10 @@ export function DashboardPage() {
   const dashboardTimeframe =
     dashboardView === "conversations" ? conversationTimeframe : overviewTimeframe;
   const dashboardQuery = useDashboard(dashboardTimeframe);
-  const [initialOverviewRetryError, setInitialOverviewRetryError] = useState<string | null>(null);
+  const [retainedDashboardLoadError, setRetainedDashboardLoadError] =
+    useState<RetainedDashboardLoadError | null>(null);
+  const [overviewRetryTimeframe, setOverviewRetryTimeframe] =
+    useState<OverviewTimeframe | null>(null);
   const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
   const conversationsState = useConversations({
     enabled: isAdmin && dashboardView === "conversations",
@@ -354,8 +362,29 @@ export function DashboardPage() {
   );
 
   const dashboardLoadError = getErrorMessageOrNull(dashboardQuery.error);
-  const displayedDashboardLoadError = dashboardLoadError ?? initialOverviewRetryError;
-  const overviewRetryBusy = dashboardQuery.isFetching || initialOverviewRetryError !== null;
+  if (
+    retainedDashboardLoadError !== null &&
+    (overview || retainedDashboardLoadError.timeframe !== dashboardTimeframe)
+  ) {
+    setRetainedDashboardLoadError(null);
+  } else if (
+    !overview &&
+    dashboardLoadError !== null &&
+    (retainedDashboardLoadError === null ||
+      retainedDashboardLoadError.message !== dashboardLoadError)
+  ) {
+    setRetainedDashboardLoadError({
+      timeframe: dashboardTimeframe,
+      message: dashboardLoadError,
+    });
+  }
+  const displayedDashboardLoadError =
+    dashboardLoadError ??
+    (retainedDashboardLoadError?.timeframe === dashboardTimeframe
+      ? retainedDashboardLoadError.message
+      : null);
+  const overviewRetryBusy =
+    dashboardQuery.isFetching || overviewRetryTimeframe === dashboardTimeframe;
   const errorMessage =
     (overview ? dashboardLoadError : null) ||
     (dashboardView === "request-logs" && optionsQuery.error instanceof Error && optionsQuery.error.message) ||
@@ -415,9 +444,16 @@ export function DashboardPage() {
             aria-busy={overviewRetryBusy}
             disabled={overviewRetryBusy}
             onClick={() => {
-              setInitialOverviewRetryError(displayedDashboardLoadError ?? "Request failed");
+              const retryTimeframe = dashboardTimeframe;
+              setRetainedDashboardLoadError({
+                timeframe: retryTimeframe,
+                message: displayedDashboardLoadError ?? "Request failed",
+              });
+              setOverviewRetryTimeframe(retryTimeframe);
               void dashboardQuery.refetch().finally(() => {
-                setInitialOverviewRetryError(null);
+                setOverviewRetryTimeframe((current) =>
+                  current === retryTimeframe ? null : current,
+                );
               });
             }}
           >

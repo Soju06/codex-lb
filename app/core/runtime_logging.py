@@ -7,6 +7,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from types import TracebackType
 from typing import cast
 
 from fastapi import Request
@@ -16,27 +17,53 @@ from uvicorn.logging import AccessFormatter, DefaultFormatter
 from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id
 
+_LOG_REDACTION = "[REDACTED]"
+# Bounded by whitespace and structural delimiters rather than by the token68
+# alphabet so a malformed credential cannot leave a glued suffix like
+# `abc?secret`, while a closing quote or bracket after a token is kept.
+_BEARER_CREDENTIAL_CHARACTER = r"""[^\s,&;"'\\)\]}]"""
 _SENSITIVE_LOG_VALUE_PATTERNS = (
     re.compile(r"(?i)(password|passwd|pwd|token|secret|api[_-]?key)(\s*[=:]\s*)([^\s,&]+)"),
-    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
+    # An earlier marker is consumed whole so re-formatting is idempotent.
+    re.compile(
+        rf"(?i)(bearer\s+)(?:{re.escape(_LOG_REDACTION)}{_BEARER_CREDENTIAL_CHARACTER}*|{_BEARER_CREDENTIAL_CHARACTER}+)"
+    ),
     re.compile(r"(?i)(authorization\s*[=:]\s*)(?!\s*bearer\b)([^,&]+)"),
 )
+# A value cut off by the end of its line (traceback lines are redacted one at a
+# time) is redacted through that line end, including a dangling escape.
 _JSON_SENSITIVE_LOG_VALUE_PATTERN = re.compile(
     r'(?i)("(?:password|passwd|pwd|token|secret|api[_-]?key|authorization)"\s*:\s*")'
-    r'(?:\\.|[^"\\])*(")'
+    r'(?:\\.|[^"\\])*\\?("|$)'
 )
-_LOG_REDACTION = "[REDACTED]"
+# Every boundary str.splitlines() honors, so per-line redaction never spans one.
+_LINE_TERMINATORS = "\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+
+type _ExcInfo = tuple[type[BaseException], BaseException, TracebackType | None] | tuple[None, None, None]
 
 
 def _redact_log_value(value: str | None) -> str | None:
     collapsed = _collapse_log_value(value)
     if collapsed is None:
         return None
-    redacted = collapsed
-    redacted = _JSON_SENSITIVE_LOG_VALUE_PATTERN.sub(_redact_json_secret, redacted)
+    return _redact_sensitive_log_line(collapsed)
+
+
+def _redact_sensitive_log_line(line: str) -> str:
+    redacted = _JSON_SENSITIVE_LOG_VALUE_PATTERN.sub(_redact_json_secret, line)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[0].sub(_redact_keyed_secret, redacted)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[1].sub(_redact_bearer_token, redacted)
     return _SENSITIVE_LOG_VALUE_PATTERNS[2].sub(_redact_authorization_value, redacted)
+
+
+def _redact_traceback_text(text: str) -> str:
+    # Apply the one-line policy to each line on its own so no pattern can
+    # consume a line terminator; frames and the exception line stay intact.
+    parts: list[str] = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip(_LINE_TERMINATORS)
+        parts.append(_redact_sensitive_log_line(body) + line[len(body) :])
+    return "".join(parts)
 
 
 def _redact_keyed_secret(match: re.Match[str]) -> str:
@@ -62,6 +89,21 @@ def _utc_converter(seconds: float | None) -> time.struct_time:
 class UtcDefaultFormatter(DefaultFormatter):
     converter: Callable[[float | None], time.struct_time] = staticmethod(_utc_converter)
 
+    def format(self, record: logging.LogRecord) -> str:
+        # logging.Formatter.format() caches the traceback on the shared record as
+        # exc_text and appends another formatter's cache verbatim. Format a copy
+        # so this formatter neither emits a cached unredacted traceback nor
+        # changes what other handlers see.
+        record = copy.copy(record)
+        if record.exc_info:
+            record.exc_text = None
+        elif record.exc_text:
+            record.exc_text = _redact_traceback_text(record.exc_text)
+        return super().format(record)
+
+    def formatException(self, ei: _ExcInfo) -> str:
+        return _redact_traceback_text(super().formatException(ei))
+
 
 class UtcAccessFormatter(AccessFormatter):
     converter: Callable[[float | None], time.struct_time] = staticmethod(_utc_converter)
@@ -70,6 +112,9 @@ class UtcAccessFormatter(AccessFormatter):
 class JsonFormatter(logging.Formatter):
     def __init__(self) -> None:
         super().__init__()
+
+    def formatException(self, ei: _ExcInfo) -> str:
+        return _redact_traceback_text(super().formatException(ei))
 
     def format(self, record: logging.LogRecord) -> str:
         log_entry = {

@@ -8,8 +8,9 @@ that measured usage with a failed zero-token settlement.
 
 - Finish owned warmup reservation finalization before propagating cancellation
   once the probe has returned exact usage.
-- Preserve zero-usage failure when cancellation occurs before successful
-  finalization.
+- Preserve zero-usage failure only when cancellation occurs before the probe
+  returns measured usage. Cancellation during finalization preserves measured
+  usage.
 - Keep request logging and decision completion outside the deferred boundary.
 
 ## Capabilities

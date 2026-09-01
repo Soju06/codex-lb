@@ -13,7 +13,7 @@
 ## Passing checks
 
 - `scripts/check_cancellation_safety.py`: passed against the complete application tree.
-- Checker plus HTTP bridge cancellation regressions: 47 passed.
+- Checker plus HTTP bridge cancellation regressions: 48 passed.
 - Shared-future/defer-cancellation focused group before final review: 56 passed.
 - Full `tests/unit/test_proxy_utils.py`: 1,212 passed.
 - Full `tests/unit/test_proxy_http_bridge.py`: 947 passed with the unrelated baseline failure below.
@@ -25,7 +25,7 @@
 
 ## Review
 
-Pi review session `be9e1a5e-d9b7-4418-a965-b86efc6b6d8f` reviewed the rebased residual patch. Findings corrected cancellation loss when a terminal append fails after direct caller cancellation, conditional/`try`/`match`/exception-group checker bypasses, nested-definition false positives, alias bleed, and missing `proxy-architecture` requirements. Final re-review reported no actionable issues.
+Pi review session `be9e1a5e-d9b7-4418-a965-b86efc6b6d8f` reviewed the rebased residual patch. Findings corrected cancellation loss when a terminal append fails after direct caller cancellation, conditional/`try`/`match`/exception-group checker bypasses, nested-definition false positives, alias bleed, and missing `proxy-architecture` requirements. Final re-review reported no actionable issues. Current-head CodeRabbit's one quick-win finding widened assigned-shield detection to indirect awaited expressions and gained a regression.
 
 ## Baseline failures
 

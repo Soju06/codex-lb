@@ -204,10 +204,12 @@ def _assigned_shields_awaited_by_try(
     parents: dict[ast.AST, ast.AST],
 ) -> list[ast.Call]:
     awaited_names = {
-        child.value.id
+        name.id
         for statement in try_node.body
         for child in _walk_same_scope(statement)
-        if isinstance(child, ast.Await) and isinstance(child.value, ast.Name)
+        if isinstance(child, ast.Await)
+        for name in _walk_same_scope(child.value)
+        if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Load)
     }
     if not awaited_names:
         return []

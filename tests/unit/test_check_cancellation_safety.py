@@ -105,6 +105,20 @@ async def wait(task):
     pytest.param(
         """
 import asyncio
+async def wait(task, timeout):
+    while True:
+        guarded = asyncio.shield(task)
+        try:
+            await asyncio.wait_for(guarded, timeout)
+        except asyncio.CancelledError:
+            continue
+""",
+        5,
+        id="assigned-shield-indirect-await",
+    ),
+    pytest.param(
+        """
+import asyncio
 import anyio
 async def wait(task):
     with anyio.CancelScope(shield=True):

@@ -1540,9 +1540,75 @@ async def test_durable_bridge_previous_response_alias_lookup_returns_replacement
 
     assert resolved is not None
     assert resolved.session_id == claimed.session_id
-    assert resolved.latest_response_id == "resp-replacement"
+    assert resolved.latest_response_id == "resp-newer-replacement"
     assert ordinary is None
     assert unknown is None
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_lookup_prefers_retained_alias_during_same_account_handoff(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    ordinary_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-ordinary-alias-owner",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=120.0,
+        account_id="acc-shared-alias",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id="resp-ordinary-current",
+        allow_takeover=True,
+    )
+    retained_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-retained-alias-owner",
+        api_key_id=None,
+        instance_id="instance-b",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=120.0,
+        account_id="acc-shared-alias",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id="resp-retained-current",
+        allow_takeover=True,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=ordinary_owner.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=ordinary_owner.owner_epoch,
+        response_id="resp-shared-alias",
+        latest_response_id="resp-ordinary-current",
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=retained_owner.session_id,
+        api_key_id=None,
+        instance_id="instance-b",
+        owner_epoch=retained_owner.owner_epoch,
+        response_id="resp-shared-alias",
+        latest_response_id="resp-retained-target",
+        retained_replay=True,
+        lease_ttl_seconds=120.0,
+    )
+
+    lookup = await coordinator.lookup_request_targets(
+        session_key_kind="request",
+        session_key_value="req-shared-alias",
+        api_key_id=None,
+        turn_state=None,
+        session_header=None,
+        previous_response_id="resp-shared-alias",
+    )
+
+    assert lookup is not None
+    assert lookup.session_id == retained_owner.session_id
+    assert lookup.latest_response_id == "resp-retained-target"
 
 
 @pytest.mark.asyncio

@@ -3419,7 +3419,7 @@ def _http_bridge_previous_response_rejection_fields(
     error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
     code = _normalize_error_code(raw_code, error_type)
     param_value = error.get("param")
-    if "param" in error and not isinstance(param_value, str):
+    if "param" in error and param_value is not None and not isinstance(param_value, str):
         return None
     param = param_value.strip() if isinstance(param_value, str) else None
     message_value = error.get("message")

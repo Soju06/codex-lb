@@ -3390,7 +3390,7 @@ class _HTTPBridgeStreamingMixin:
                     # A cancellation must not interrupt the compensating
                     # transaction; the caller re-raises it after rollback.
                     with anyio.CancelScope(shield=True):
-                        return bool(
+                        rolled_back = bool(
                             await rollback_recovery_attempt(
                                 session_id=session_id,
                                 api_key_id=api_key_id,
@@ -3399,7 +3399,7 @@ class _HTTPBridgeStreamingMixin:
                                 request_fingerprint=request_fingerprint,
                             )
                         )
-                    return False
+                    return rolled_back
                 except BaseException:
                     logger.warning(
                         "Failed to roll back claimed HTTP bridge recovery checkpoint request_id=%s",

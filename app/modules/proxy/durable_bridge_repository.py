@@ -4140,6 +4140,7 @@ class DurableBridgeRepository:
                     set_={
                         "session_id": session_id,
                         "alias_value": alias_value,
+                        "target_response_id": target_response_id,
                         "updated_at": now,
                     },
                     where=conflict_where,
@@ -4159,6 +4160,7 @@ class DurableBridgeRepository:
                     set_={
                         "session_id": session_id,
                         "alias_value": alias_value,
+                        "target_response_id": target_response_id,
                         "updated_at": now,
                     },
                     where=conflict_where,

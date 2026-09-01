@@ -34,10 +34,6 @@ _DURABLE_TURN_STATE_ALIAS = "turn_state"
 _DURABLE_PREVIOUS_RESPONSE_ALIAS = "previous_response_id"
 _DURABLE_RETAINED_PREVIOUS_RESPONSE_ALIAS = "retained_previous_response_id"
 _DURABLE_SESSION_HEADER_ALIAS = "session_header"
-_DURABLE_RESPONSE_ALIAS_KINDS = (
-    _DURABLE_PREVIOUS_RESPONSE_ALIAS,
-    _DURABLE_RETAINED_PREVIOUS_RESPONSE_ALIAS,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,8 +131,12 @@ class DurableBridgeSessionCoordinator:
                     requested_response_snapshot = next(
                         (
                             snapshot
+                            for preferred_kind in (
+                                _DURABLE_RETAINED_PREVIOUS_RESPONSE_ALIAS,
+                                _DURABLE_PREVIOUS_RESPONSE_ALIAS,
+                            )
                             for alias_kind, snapshot in resolved_aliases
-                            if alias_kind in _DURABLE_RESPONSE_ALIAS_KINDS and snapshot.account_id == account_id
+                            if alias_kind == preferred_kind and snapshot.account_id == account_id
                         ),
                         None,
                     )

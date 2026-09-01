@@ -2577,6 +2577,12 @@ class DurableBridgeRepository:
                 or not snapshot.response_output_items_json
             ):
                 return None
+            if snapshot.parent_response_id is None and snapshot.response_replay_input_turn_count <= 0:
+                # Root requests can contain an arbitrary client-supplied
+                # history. Without a persisted snapshot there is no
+                # trustworthy turn count, so representing the whole request as
+                # one turn could bypass the configured replay bound.
+                return None
             turn_bytes = len(snapshot.request_text.encode("utf-8")) + len(
                 snapshot.response_output_items_json.encode("utf-8")
             )

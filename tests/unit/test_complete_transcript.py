@@ -908,6 +908,48 @@ async def test_complete_transcript_prefers_snapshot_when_parent_chain_is_missing
     )
 
 
+@pytest.mark.asyncio
+async def test_complete_transcript_rejects_unsnapshotted_root_with_unknown_depth() -> None:
+    row = SimpleNamespace(
+        operation_id="op_root",
+        session_id="session",
+        request_fingerprint="fingerprint",
+        account_id="account",
+        model="gpt-test",
+        parent_response_id=None,
+        state="completed",
+        response_id="resp_root",
+        recovery_dispatch_count=0,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-test",
+                "input": [
+                    {"type": "message", "role": "user", "content": "first"},
+                    {"type": "message", "role": "assistant", "content": "answer"},
+                    {"type": "message", "role": "user", "content": "second"},
+                ],
+            }
+        ),
+        event_spool_complete=False,
+        transcript_version=1,
+        response_output_items_json=json.dumps(
+            [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]}]
+        ),
+        response_output_items_complete=True,
+        response_replay_input_json=None,
+        response_replay_input_complete=False,
+        response_replay_input_turn_count=0,
+    )
+
+    class _Session:
+        async def scalar(self, statement: object) -> object:
+            return row
+
+    repository = DurableBridgeRepository(cast(AsyncSession, _Session()))
+    assert await repository.get_complete_transcript(response_id="resp_root", max_turns=1) is None
+
+
 def test_build_complete_replay_payload_rejects_broken_parent_continuation() -> None:
     turns = [
         _turn(

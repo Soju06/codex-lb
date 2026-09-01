@@ -2220,10 +2220,7 @@ class DurableBridgeRepository:
                     HttpBridgeOperationRecord.response_id.is_(None),
                     HttpBridgeOperationRecord.event_bytes == 0,
                     *(
-                        [
-                            HttpBridgeOperationRecord.recovery_dispatch_count
-                            == expected_recovery_dispatch_count + 1
-                        ]
+                        [HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count + 1]
                         if expected_recovery_dispatch_count is not None
                         else []
                     ),

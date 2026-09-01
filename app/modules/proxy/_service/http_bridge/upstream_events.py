@@ -1764,6 +1764,21 @@ async def _try_complete_transcript_recovery(
         )
         if retried:
             return True
+    except asyncio.CancelledError:
+        # Reconnect/admission may be cancelled before the replacement send.
+        # Finish the pre-dispatch cleanup before propagating cancellation so
+        # the rebound operation and pending ownership are not stranded.
+        cleanup_task = asyncio.create_task(
+            service._cleanup_http_bridge_submit_interruption(
+                session,
+                request_state=request_state,
+                gate_acquired=False,
+                request_enqueued=True,
+                counted_in_queue=_http_bridge_request_counts_against_queue(request_state),
+            )
+        )
+        await _await_task_deferring_cancellation(cleanup_task)
+        raise
     except UpstreamWebSocketTransportError:
         raise
     except Exception:
@@ -2191,6 +2206,21 @@ async def _try_unsafe_partial_transcript_recovery(
         )
         if retried:
             return True
+    except asyncio.CancelledError:
+        # Reconnect/admission may be cancelled before the replacement send.
+        # Finish the pre-dispatch cleanup before propagating cancellation so
+        # the rebound operation and pending ownership are not stranded.
+        cleanup_task = asyncio.create_task(
+            service._cleanup_http_bridge_submit_interruption(
+                session,
+                request_state=request_state,
+                gate_acquired=False,
+                request_enqueued=True,
+                counted_in_queue=_http_bridge_request_counts_against_queue(request_state),
+            )
+        )
+        await _await_task_deferring_cancellation(cleanup_task)
+        raise
     except UpstreamWebSocketTransportError:
         raise
     except Exception:

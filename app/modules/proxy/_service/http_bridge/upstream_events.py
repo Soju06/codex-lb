@@ -1545,6 +1545,41 @@ async def _try_complete_transcript_recovery(
             )
             return False
 
+    async def rollback_rebound_operation(rebound_operation: Any) -> bool:
+        """Undo a durable rebind when event fencing blocks dispatch."""
+        rollback_operation = getattr(
+            getattr(service, "_durable_bridge", None),
+            "rollback_operation_before_dispatch",
+            None,
+        )
+        if not callable(rollback_operation):
+            logger.warning(
+                "Complete HTTP bridge transcript recovery rollback is unavailable request_id=%s",
+                request_state.request_id,
+            )
+            return False
+        try:
+            return bool(
+                await rollback_operation(
+                    operation_id=operation_id,
+                    session_id=session.durable_session_id,
+                    instance_id=settings.http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                    restore_rebound=True,
+                    rebound_from_session_id=getattr(rebound_operation, "rebound_from_session_id", None),
+                    rebound_from_account_id=getattr(rebound_operation, "rebound_from_account_id", None),
+                    rebound_from_model=getattr(rebound_operation, "rebound_from_model", None),
+                    rebound_from_parent_response_id=getattr(rebound_operation, "rebound_from_parent_response_id", None),
+                )
+            )
+        except Exception:
+            logger.warning(
+                "Complete HTTP bridge transcript recovery rollback failed request_id=%s",
+                request_state.request_id,
+                exc_info=True,
+            )
+            return False
+
     async def recovery_claimed_by_concurrent_call() -> bool:
         """Detect a competing recovery that won the durable CAS claim."""
         lookup_sessions = getattr(getattr(service, "_durable_bridge", None), "lookup_sessions", None)
@@ -1650,6 +1685,7 @@ async def _try_complete_transcript_recovery(
         request_state.operation_recovery_claimed = False
         return False
     if not await fence_rebound_operation():
+        await rollback_rebound_operation(rebound_operation)
         return False
     # Do not authorize an unanchored retry until the durable operation has
     # been rebound successfully. If the owner fence or database write fails,
@@ -1912,6 +1948,41 @@ async def _try_unsafe_partial_transcript_recovery(
             )
             return False
 
+    async def rollback_rebound_operation(rebound_operation: Any) -> bool:
+        """Undo a durable rebind when event fencing blocks dispatch."""
+        rollback_operation = getattr(
+            getattr(service, "_durable_bridge", None),
+            "rollback_operation_before_dispatch",
+            None,
+        )
+        if not callable(rollback_operation):
+            logger.warning(
+                "Unsafe HTTP bridge partial transcript recovery rollback is unavailable request_id=%s",
+                getattr(request_state, "request_id", None),
+            )
+            return False
+        try:
+            return bool(
+                await rollback_operation(
+                    operation_id=operation_id,
+                    session_id=session.durable_session_id,
+                    instance_id=settings.http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                    restore_rebound=True,
+                    rebound_from_session_id=getattr(rebound_operation, "rebound_from_session_id", None),
+                    rebound_from_account_id=getattr(rebound_operation, "rebound_from_account_id", None),
+                    rebound_from_model=getattr(rebound_operation, "rebound_from_model", None),
+                    rebound_from_parent_response_id=getattr(rebound_operation, "rebound_from_parent_response_id", None),
+                )
+            )
+        except Exception:
+            logger.warning(
+                "Unsafe HTTP bridge partial transcript recovery rollback failed request_id=%s",
+                getattr(request_state, "request_id", None),
+                exc_info=True,
+            )
+            return False
+
     async def recovery_claimed_by_concurrent_call() -> bool:
         # A CAS miss is expected when the other recovery task won the durable
         # claim. Never clear its shared in-memory state; doing so would detach
@@ -2020,6 +2091,7 @@ async def _try_unsafe_partial_transcript_recovery(
         request_state.operation_recovery_claimed = False
         return False
     if not await fence_rebound_operation():
+        await rollback_rebound_operation(rebound_operation)
         return False
 
     # The interrupted attempt may already have exposed ``response.created``

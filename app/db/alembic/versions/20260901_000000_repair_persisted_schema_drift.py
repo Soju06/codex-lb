@@ -80,11 +80,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
+    """Keep objects owned by the parent migrations intact on downgrade.
 
-    if _has_table(bind, _QUOTA_TABLE) and _LEASE_COLUMN in _quota_columns(bind):
-        with op.batch_alter_table(_QUOTA_TABLE) as batch_op:
-            batch_op.drop_column(_LEASE_COLUMN)
-
-    if _has_table(bind, _OPERATIONS_TABLE) and _has_index(bind, _OPERATIONS_TABLE, _OPERATIONS_INDEX):
-        op.drop_index(_OPERATIONS_INDEX, table_name=_OPERATIONS_TABLE)
+    Both the quota lease column and the operations index belong to revisions
+    earlier in this graph.  This repair only fills them in for databases that
+    were stamped past those revisions before the DDL reached the image, so a
+    downgrade must not remove objects the parent revision still requires.
+    """

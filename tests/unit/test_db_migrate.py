@@ -2089,6 +2089,24 @@ def test_routing_policy_persistence_downgrade_does_not_drop_shared_columns(monke
     migration.downgrade()
 
 
+def test_persisted_recovery_schema_repair_downgrade_preserves_parent_objects(monkeypatch) -> None:
+    migration = importlib.import_module("app.db.alembic.versions.20260901_000000_repair_persisted_schema_drift")
+
+    class _OpMustNotAlter:
+        def get_bind(self):  # pragma: no cover - assertion helper
+            raise AssertionError("repair downgrade must not inspect a bind")
+
+        def batch_alter_table(self, table_name: str):  # pragma: no cover - assertion helper
+            raise AssertionError(f"unexpected schema alteration for {table_name}")
+
+        def drop_index(self, index_name: str, *, table_name: str):  # pragma: no cover - assertion helper
+            raise AssertionError(f"unexpected index drop {index_name} on {table_name}")
+
+    monkeypatch.setattr(migration, "op", _OpMustNotAlter())
+
+    migration.downgrade()
+
+
 def test_replica_guardrails_migration_round_trips_with_version_backfill(tmp_path: Path) -> None:
     from alembic.script import ScriptDirectory
 

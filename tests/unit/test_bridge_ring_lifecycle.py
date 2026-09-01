@@ -323,6 +323,56 @@ async def test_purge_abandoned_before_removes_expired_rows_and_aliases_keeps_liv
 
 
 @pytest.mark.asyncio
+async def test_lookup_request_targets_preserves_retained_response_alias_target(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claimed = await _claim(repository, instance_id="retained-owner", session_key_value="sid-retained-target")
+    finally:
+        await session.close()
+
+    coordinator = DurableBridgeSessionCoordinator(async_session_factory)
+    registration = await coordinator.register_previous_response_id(
+        session_id=claimed.id,
+        api_key_id=None,
+        instance_id="retained-owner",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp-client-alias",
+        latest_response_id="resp-replacement",
+        lease_ttl_seconds=120.0,
+        retained_replay=True,
+    )
+    assert registration is DurableBridgeAliasRegistration.REGISTERED
+
+    # The session may advance after the retained alias is registered. A
+    # lookup through that client-visible alias must still return its persisted
+    # replacement target rather than the session's newer mutable anchor.
+    session = async_session_factory()
+    try:
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == claimed.id)
+            .values(latest_response_id="resp-later")
+        )
+        await session.commit()
+    finally:
+        await session.close()
+
+    lookup = await coordinator.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value="sid-retained-target",
+        api_key_id=None,
+        turn_state=None,
+        session_header=None,
+        previous_response_id="resp-client-alias",
+    )
+    assert lookup is not None
+    assert lookup.latest_response_id == "resp-replacement"
+
+
+@pytest.mark.asyncio
 async def test_get_sessions_by_ids_chunks_large_id_sets(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

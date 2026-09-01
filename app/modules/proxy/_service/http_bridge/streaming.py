@@ -3327,6 +3327,12 @@ class _HTTPBridgeStreamingMixin:
         )
         try:
             yielded_any = False
+            # Set once the durable one-shot recovery journal has been claimed
+            # and the replacement payload is armed.  That path intentionally
+            # clears ``effective_payload.previous_response_id`` before the
+            # normal recovery classifiers run, so the classifier guard below
+            # must not mistake an armed fresh replay for an unhandled error.
+            durable_recovery_retry_armed = False
 
             async def reset_previous_response_recovery_operation_spool(
                 recovery_session: "_HTTPBridgeSession",
@@ -3733,6 +3739,7 @@ class _HTTPBridgeStreamingMixin:
                     marked = False
                     logger.warning("Failed to fence HTTP bridge recovery attempt", exc_info=True)
                 if marked:
+                    durable_recovery_retry_armed = True
                     recovery_origin_session_id = request_state.recovery_attempt_session_id or session.durable_session_id
                     recovery_origin_owner_epoch = (
                         request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch
@@ -3817,7 +3824,8 @@ class _HTTPBridgeStreamingMixin:
                 and bridge_session_key.strength != "hard"
             )
             if (
-                not should_attempt_previous_response_recovery
+                not durable_recovery_retry_armed
+                and not should_attempt_previous_response_recovery
                 and not should_rollover_after_context_overflow
                 and not should_attempt_context_overflow_fresh_turn_recovery
             ):
@@ -3842,7 +3850,13 @@ class _HTTPBridgeStreamingMixin:
                         "HTTP response recovery operation fence is unavailable; retry the request.",
                     ),
                 ) from exc
-            if should_attempt_context_overflow_fresh_turn_recovery:
+            if durable_recovery_retry_armed:
+                # The unsafe fresh-response branch already installed its
+                # anchor-free retry payload and recovery metadata above.
+                # Do not fall through to the ordinary previous-response
+                # recovery branches, which would overwrite that path.
+                pass
+            elif should_attempt_context_overflow_fresh_turn_recovery:
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
                     bridge_durable_recover_total.labels(path="context_overflow_fresh_turn").inc()
                 _log_http_bridge_event(

@@ -97,11 +97,27 @@ class DurableBridgeSessionCoordinator:
             ):
                 if alias_value is None:
                     continue
-                snapshot = await repository.resolve_alias(
-                    alias_kind=alias_kind,
-                    alias_value=alias_value,
-                    api_key_scope=api_key_scope,
-                )
+                if alias_kind == _DURABLE_RETAINED_PREVIOUS_RESPONSE_ALIAS:
+                    retained_alias = await repository.resolve_retained_response_alias(
+                        alias_kind=alias_kind,
+                        alias_value=alias_value,
+                        api_key_scope=api_key_scope,
+                    )
+                    if retained_alias is None:
+                        continue
+                    retained_snapshot, target_response_id = retained_alias
+                    # A retained client-visible response ID is an alias for
+                    # the replacement response that was persisted during the
+                    # replay. Carry that target through every conflict and
+                    # handoff path instead of falling back to the session's
+                    # mutable latest_response_id.
+                    snapshot = replace(retained_snapshot, latest_response_id=target_response_id)
+                else:
+                    snapshot = await repository.resolve_alias(
+                        alias_kind=alias_kind,
+                        alias_value=alias_value,
+                        api_key_scope=api_key_scope,
+                    )
                 if snapshot is not None:
                     resolved_aliases.append((alias_kind, snapshot))
             resolved_identities = {(snapshot.id, snapshot.account_id) for _alias_kind, snapshot in resolved_aliases}

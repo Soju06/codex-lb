@@ -3246,24 +3246,36 @@ class _HTTPBridgeRequestSubmitMixin:
             retire_closed_session = session.closed and session.admission_waiter_count == 0
         if (
             request_state.recovery_attempt_fingerprint is not None
-            and not request_state.recovery_attempt_claimed
             and not request_state.recovery_attempt_dispatched
             and session.durable_session_id is not None
             and session.durable_owner_epoch is not None
         ):
-            rollback_recovery_attempt = getattr(self._durable_bridge, "rollback_recovery_attempt_before_dispatch", None)
+            rollback_method = (
+                "rollback_recovery_attempt_replayed"
+                if request_state.recovery_attempt_claimed
+                else "rollback_recovery_attempt_before_dispatch"
+            )
+            rollback_recovery_attempt = getattr(self._durable_bridge, rollback_method, None)
             if callable(rollback_recovery_attempt):
                 try:
-                    await _call_with_supported_optional_kwargs(
-                        rollback_recovery_attempt,
-                        optional_kwargs={},
-                        session_id=session.durable_session_id,
-                        api_key_id=session.key.api_key_id,
-                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                        owner_epoch=session.durable_owner_epoch,
-                        request_fingerprint=request_state.recovery_attempt_fingerprint,
-                    )
-                except Exception:
+                    with anyio.CancelScope(shield=True):
+                        rolled_back = bool(
+                            await _call_with_supported_optional_kwargs(
+                                rollback_recovery_attempt,
+                                optional_kwargs={},
+                                session_id=session.durable_session_id,
+                                api_key_id=session.key.api_key_id,
+                                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                                owner_epoch=session.durable_owner_epoch,
+                                request_fingerprint=request_state.recovery_attempt_fingerprint,
+                            )
+                        )
+                    if rolled_back and request_state.recovery_attempt_claimed:
+                        request_state.recovery_attempt_claimed = False
+                        request_state.recovery_attempt_fingerprint = None
+                        request_state.recovery_attempt_session_id = None
+                        request_state.recovery_attempt_owner_epoch = None
+                except BaseException:
                     logger.warning(
                         "Failed to roll back pre-dispatch HTTP bridge recovery checkpoint request_id=%s",
                         request_state.request_id,

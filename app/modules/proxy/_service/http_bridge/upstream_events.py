@@ -1684,8 +1684,18 @@ async def _try_complete_transcript_recovery(
         request_state.operation_dispatched = False
         request_state.operation_recovery_claimed = False
         return False
-    if not await fence_rebound_operation():
-        await rollback_rebound_operation(rebound_operation)
+    try:
+        fenced = await fence_rebound_operation()
+    except asyncio.CancelledError:
+        # Cancellation is a pre-dispatch failure too.  The durable rebind
+        # must be restored before propagating cancellation, otherwise the
+        # advanced generation can strand the operation with no replacement.
+        with anyio.CancelScope(shield=True):
+            await rollback_rebound_operation(rebound_operation)
+        raise
+    if not fenced:
+        with anyio.CancelScope(shield=True):
+            await rollback_rebound_operation(rebound_operation)
         return False
     # Do not authorize an unanchored retry until the durable operation has
     # been rebound successfully. If the owner fence or database write fails,
@@ -2090,8 +2100,18 @@ async def _try_unsafe_partial_transcript_recovery(
         request_state.operation_dispatched = False
         request_state.operation_recovery_claimed = False
         return False
-    if not await fence_rebound_operation():
-        await rollback_rebound_operation(rebound_operation)
+    try:
+        fenced = await fence_rebound_operation()
+    except asyncio.CancelledError:
+        # Cancellation is a pre-dispatch failure too.  The durable rebind
+        # must be restored before propagating cancellation, otherwise the
+        # advanced generation can strand the operation with no replacement.
+        with anyio.CancelScope(shield=True):
+            await rollback_rebound_operation(rebound_operation)
+        raise
+    if not fenced:
+        with anyio.CancelScope(shield=True):
+            await rollback_rebound_operation(rebound_operation)
         return False
 
     # The interrupted attempt may already have exposed ``response.created``

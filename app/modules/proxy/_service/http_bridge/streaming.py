@@ -3403,6 +3403,94 @@ class _HTTPBridgeStreamingMixin:
                     )
                     return False
 
+            async def claim_recovery_attempt_for_local_replay() -> None:
+                """Fence an origin journal before dispatching its replacement request."""
+                if request_state.recovery_attempt_fingerprint is None or request_state.recovery_attempt_claimed:
+                    return
+                if not request_state.recovery_attempt_dispatched:
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "The recovery checkpoint was not proven safe for replay; retry the request.",
+                        ),
+                    )
+                recovery_session_id = request_state.recovery_attempt_session_id or session.durable_session_id
+                recovery_owner_epoch = request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch
+                if recovery_session_id is None or recovery_owner_epoch is None:
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "HTTP response recovery ownership could not be verified; retry the request.",
+                        ),
+                    )
+                try:
+                    attempt = await self._durable_bridge.record_recovery_attempt(
+                        session_id=recovery_session_id,
+                        api_key_id=bridge_session_key.api_key_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=recovery_owner_epoch,
+                        request_fingerprint=request_state.recovery_attempt_fingerprint,
+                        request_id=request_state.request_id,
+                        account_id=session.account.id,
+                        model=request_state.model,
+                        replay_safe=True,
+                    )
+                except Exception as exc:
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "HTTP response recovery ownership could not be fenced; retry the request.",
+                        ),
+                    ) from exc
+                if attempt is None:
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "HTTP response recovery ownership changed; retry the request.",
+                        ),
+                    )
+                attempt_state = getattr(attempt.state, "value", attempt.state)
+                if attempt_state == "replayed" and attempt.response_id is None:
+                    request_state.recovery_attempt_claimed = True
+                    return
+                if attempt_state != "unknown":
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "The recovery checkpoint was already consumed; retry the request.",
+                        ),
+                    )
+                try:
+                    marked = await self._durable_bridge.mark_recovery_attempt_replayed(
+                        session_id=recovery_session_id,
+                        api_key_id=bridge_session_key.api_key_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=recovery_owner_epoch,
+                        request_fingerprint=request_state.recovery_attempt_fingerprint,
+                    )
+                except Exception as exc:
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "HTTP response recovery ownership could not be fenced; retry the request.",
+                        ),
+                    ) from exc
+                if not marked:
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "The recovery checkpoint was already consumed; retry the request.",
+                        ),
+                    )
+                request_state.recovery_attempt_claimed = True
+
             async def reset_previous_response_recovery_operation_spool(
                 recovery_session: "_HTTPBridgeSession",
                 recovery_request_state: _WebSocketRequestState,
@@ -3986,10 +4074,12 @@ class _HTTPBridgeStreamingMixin:
                 await capture_verified_stale_anchor_circuit_generation(session)
                 capture_verified_stale_anchor_quarantine_generation(session)
                 await reset_previous_response_recovery_operation_spool(session, request_state)
+                await claim_recovery_attempt_for_local_replay()
                 await self._reset_http_bridge_session_after_local_terminal_error(
                     session,
                     error_code="stream_incomplete",
                     error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
+                    preserve_durable_lease=True,
                 )
                 switch_to_account_neutral_replay(
                     event="previous_response_recover_fresh_resend",
@@ -4028,6 +4118,7 @@ class _HTTPBridgeStreamingMixin:
                 )
                 if retry_injected_input is not None:
                     retry_payload = retry_payload.model_copy(update={"input": retry_injected_input})
+                await claim_recovery_attempt_for_local_replay()
                 retry_preferred_account_id = request_state.preferred_account_id or session.account.id
                 bridge_session_key = _HTTPBridgeSessionKey(
                     "internal_request_parallel",
@@ -4039,6 +4130,7 @@ class _HTTPBridgeStreamingMixin:
                     session,
                     error_code="stream_incomplete",
                     error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
+                    preserve_durable_lease=True,
                 )
                 recovery_path = "local_previous_response_same_owner_fresh_replay"
                 retry_previous_response_id = None

@@ -3247,9 +3247,11 @@ class _HTTPBridgeRequestSubmitMixin:
         if (
             request_state.recovery_attempt_fingerprint is not None
             and not request_state.recovery_attempt_dispatched
-            and session.durable_session_id is not None
-            and session.durable_owner_epoch is not None
+            and (request_state.recovery_attempt_session_id or session.durable_session_id) is not None
+            and (request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch) is not None
         ):
+            recovery_session_id = request_state.recovery_attempt_session_id or session.durable_session_id
+            recovery_owner_epoch = request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch
             rollback_method = (
                 "rollback_recovery_attempt_replayed"
                 if request_state.recovery_attempt_claimed
@@ -3263,10 +3265,10 @@ class _HTTPBridgeRequestSubmitMixin:
                             await _call_with_supported_optional_kwargs(
                                 rollback_recovery_attempt,
                                 optional_kwargs={},
-                                session_id=session.durable_session_id,
+                                session_id=recovery_session_id,
                                 api_key_id=session.key.api_key_id,
                                 instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                                owner_epoch=session.durable_owner_epoch,
+                                owner_epoch=recovery_owner_epoch,
                                 request_fingerprint=request_state.recovery_attempt_fingerprint,
                             )
                         )

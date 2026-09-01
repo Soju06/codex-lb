@@ -1876,6 +1876,17 @@ def test_run_upgrade_fails_for_unsupported_alembic_version_id(tmp_path: Path) ->
         run_upgrade(url, "head", bootstrap_legacy=False)
 
 
+def test_http_bridge_recovery_merge_revision_is_known_and_is_the_graph_head(tmp_path: Path) -> None:
+    from alembic.script import ScriptDirectory
+
+    config = _build_alembic_config(_db_url(tmp_path / "compatibility-head.db"))
+    script_directory = ScriptDirectory.from_config(config)
+    compatibility_revision = "20260828_020000_merge_http_bridge_recovery_heads"
+
+    assert script_directory.get_revision(compatibility_revision) is not None
+    assert script_directory.get_heads() == [compatibility_revision]
+
+
 def test_check_migration_policy_reports_head_and_format_violations(monkeypatch, tmp_path: Path) -> None:
     class _FakeRevision:
         def __init__(self, revision: str, path: str) -> None:

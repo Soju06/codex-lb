@@ -42,6 +42,7 @@ FILTERS = {
         "deny.toml",
         "crates/**",
         "app/core/clients/codex.py",
+        "app/core/clients/http.py",
         "app/core/clients/native_egress.py",
         "app/core/clients/proxy.py",
         "app/core/clients/proxy_websocket.py",

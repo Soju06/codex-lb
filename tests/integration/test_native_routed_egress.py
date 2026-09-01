@@ -12,10 +12,7 @@ import pytest
 from websockets.asyncio.server import serve as websocket_serve
 
 from app.core.clients.codex import CodexClient
-from app.core.clients.native_egress import (
-    NativeEgressRequest,
-    SubprocessNativeEgressClient,
-)
+from app.core.clients.native_egress import SubprocessNativeEgressClient
 from app.core.clients.proxy import stream_responses
 from app.core.clients.proxy_websocket import (
     _RESPONSES_WEBSOCKET_POLICY,
@@ -55,11 +52,18 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper() -> Non
     proxy_hits: list[str] = []
     http_bodies: list[bytes] = []
     direct_hits: list[str] = []
+    direct_bodies: list[bytes] = []
 
     async def direct_http_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         head = await reader.readuntil(b"\r\n\r\n")
         direct_hits.append(head.split(b"\r\n", 1)[0].decode("ascii"))
-        body = b'data: {"type":"response.created"}\n\ndata: [DONE]\n\n'
+        content_length = 0
+        for line in head.split(b"\r\n")[1:]:
+            name, _, value = line.partition(b":")
+            if name.lower() == b"content-length":
+                content_length = int(value.strip())
+        direct_bodies.append(await reader.readexactly(content_length))
+        body = b'data: {"type":"response.completed","response":{"id":"resp_direct"}}\n\n'
         writer.write(
             b"HTTP/1.1 200 OK\r\n"
             b"Content-Type: text/event-stream\r\n"
@@ -124,15 +128,27 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper() -> Non
         python_session = _UnexpectedPythonSession()
         client = CodexClient(python_session, native_egress_client=native)
         try:
-            direct_response = await native.request(
-                NativeEgressRequest(
-                    method="GET",
-                    url=f"http://127.0.0.1:{direct_port}/v1/responses",
-                    headers={"accept": "text/event-stream"},
-                    timeout_seconds=2,
+            direct_events = [
+                event
+                async for event in stream_responses(
+                    ResponsesRequest(
+                        model="gpt-5.4",
+                        instructions="",
+                        input="direct probe",
+                        stream=True,
+                    ),
+                    {},
+                    access_token,
+                    "account-1",
+                    base_url=f"http://127.0.0.1:{direct_port}",
+                    upstream_stream_transport_override="http",
+                    native_egress_client=native,
+                    allow_direct_egress=False,
+                    suppress_live_usage=True,
+                    session=cast(aiohttp.ClientSession, python_session),
                 )
-            )
-            assert await direct_response.read() == (b'data: {"type":"response.created"}\n\ndata: [DONE]\n\n')
+            ]
+            assert direct_events == ['data: {"type":"response.completed","response":{"id":"resp_direct"}}\n\n']
             helper_process = native._process
 
             routed_events = [
@@ -178,7 +194,11 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper() -> Non
 
             assert native._process is helper_process
             assert helper_process is not None and helper_process.returncode is None
-            assert direct_hits == ["GET /v1/responses HTTP/1.1"]
+            assert direct_hits == ["POST /codex/responses HTTP/1.1"]
+            assert len(direct_bodies) == 1
+            direct_body = json.loads(direct_bodies[0])
+            assert direct_body["model"] == "gpt-5.4"
+            assert direct_body["input"]
             assert len(http_bodies) == 1
             routed_body = json.loads(http_bodies[0])
             assert routed_body["model"] == "gpt-5.4"

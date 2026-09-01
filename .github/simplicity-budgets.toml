@@ -60,6 +60,7 @@ allowed = [
   "deny.toml",
   "deploy",
   "docker-compose.prod.yml",
+  "docker-compose.peentar.yml",
   "docker-compose.yml",
   "docs",
   "flake.lock",

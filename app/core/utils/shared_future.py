@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable
-from typing import TypeVar
+from typing import TypeVar, cast
 
 import anyio
 from anyio.lowlevel import checkpoint_if_cancelled
@@ -116,7 +116,7 @@ async def _await_task_deferring_cancellation(
             await checkpoint_if_cancelled()
         except asyncio.CancelledError as exc:
             cancellation = exc
-    return result, cancellation
+    return cast(_TaskResultT, result), cancellation
 
 
 async def _await_result_deferring_cancellation(

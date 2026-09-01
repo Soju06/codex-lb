@@ -1398,6 +1398,7 @@ async def _try_complete_transcript_recovery(
     # A concurrent recovery must CAS the same generation observed here; it
     # must not read a winner's already-advanced generation and dispatch again.
     expected_recovery_dispatch_count = int(getattr(request_state, "operation_attempt_generation", 0))
+    request_state.operation_recovery_expected_generation = expected_recovery_dispatch_count
     if session.key.strength == "hard":
         get_retry_circuit_generation = getattr(service, "_http_bridge_retry_circuit_generation", None)
         if not callable(get_retry_circuit_generation):
@@ -1568,6 +1569,7 @@ async def _try_complete_transcript_recovery(
                     rebound_from_account_id=getattr(rebound_operation, "rebound_from_account_id", None),
                     rebound_from_model=getattr(rebound_operation, "rebound_from_model", None),
                     rebound_from_parent_response_id=getattr(rebound_operation, "rebound_from_parent_response_id", None),
+                    expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                 )
             )
         except Exception:
@@ -1842,6 +1844,7 @@ async def _try_unsafe_partial_transcript_recovery(
     # helper is suspended; every entrant must still claim the same generation
     # it observed at admission.
     expected_recovery_dispatch_count = int(getattr(request_state, "operation_attempt_generation", 0))
+    request_state.operation_recovery_expected_generation = expected_recovery_dispatch_count
     if not bool(getattr(settings, "http_responses_session_bridge_unsafe_partial_replay_enabled", False)):
         return False
     partial_event_count = int(getattr(request_state, "response_event_count", 0))
@@ -2013,6 +2016,7 @@ async def _try_unsafe_partial_transcript_recovery(
                     rebound_from_account_id=getattr(rebound_operation, "rebound_from_account_id", None),
                     rebound_from_model=getattr(rebound_operation, "rebound_from_model", None),
                     rebound_from_parent_response_id=getattr(rebound_operation, "rebound_from_parent_response_id", None),
+                    expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                 )
             )
         except Exception:

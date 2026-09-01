@@ -345,6 +345,17 @@ def _http_bridge_operation_fence_for_hard_continuity_enabled(request_state: _Web
     ) in {"server_anchored_replay_once", "server_indefinite_recovery"}
 
 
+def _http_bridge_owned_session_completed_response_id(session: Any) -> str | None:
+    """Return a session anchor only when it belongs to the active account."""
+    response_id = getattr(session, "last_completed_response_id", None)
+    if not isinstance(response_id, str) or not response_id:
+        return None
+    active_account_id = getattr(getattr(session, "account", None), "id", None)
+    if getattr(session, "last_completed_response_account_id", None) != active_account_id:
+        return None
+    return response_id
+
+
 def _http_bridge_complete_transcript_root_recovery_candidate(
     request_state: _WebSocketRequestState,
     text_data: str,
@@ -708,7 +719,7 @@ def _text_without_operation_id(text_data: str) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
-def _text_without_account_installation_id(text_data: str) -> str:
+def _text_without_account_installation_id(text_data: str, *, sort_keys: bool = True) -> str:
     """Normalize account metadata and JSON ordering out of a fingerprint.
 
     Codex can resend the same logical ``response.create`` payload with a
@@ -741,14 +752,14 @@ def _text_without_account_installation_id(text_data: str) -> str:
                         turn_metadata,
                         ensure_ascii=True,
                         separators=(",", ":"),
-                        sort_keys=True,
+                        sort_keys=sort_keys,
                     )
             metadata[key] = value
         if metadata:
             payload["client_metadata"] = metadata
         else:
             payload.pop("client_metadata", None)
-    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=sort_keys)
 
 
 def _text_with_previous_response_id(text_data: str, response_id: str | None) -> str:
@@ -1314,6 +1325,33 @@ class _HTTPBridgeRequestSubmitMixin:
             return operation, None
         if (
             request_state.previous_response_id is not None
+            and not request_state.proxy_injected_previous_response_id
+            and callable(get_operation_by_fingerprint)
+        ):
+            # ``_text_without_account_installation_id`` began canonicalizing
+            # JSON object order in a later deploy.  An anchored retry may still
+            # carry the pre-canonical fingerprint; probe that exact legacy
+            # spelling before admitting a second operation row.
+            legacy_text = _text_without_account_installation_id(text_data, sort_keys=False)
+            current_text = _text_without_account_installation_id(text_data)
+            if legacy_text != current_text:
+                legacy_fingerprint = durable_bridge_operation_fingerprint(
+                    api_key_scope=api_key_scope,
+                    request_text=legacy_text,
+                )
+                legacy_operation = await _call_with_supported_optional_kwargs(
+                    get_operation_by_fingerprint,
+                    optional_kwargs={"api_key_scope": api_key_scope},
+                    request_fingerprint=legacy_fingerprint,
+                )
+                if (
+                    legacy_operation is not None
+                    and getattr(legacy_operation, "session_id", None) == session.durable_session_id
+                    and getattr(legacy_operation, "parent_response_id", None) == request_state.previous_response_id
+                ):
+                    return legacy_operation, "legacy_fingerprint"
+        if (
+            request_state.previous_response_id is not None
             or not _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
             or session.durable_session_id is None
         ):
@@ -1432,7 +1470,8 @@ class _HTTPBridgeRequestSubmitMixin:
         recovery_attempt_consumed = False
         allow_operation_fenced_continuity_replay = False
         request_state.complete_transcript_recovery_anchor = (
-            request_state.complete_transcript_recovery_anchor or session.last_completed_response_id
+            request_state.complete_transcript_recovery_anchor
+            or _http_bridge_owned_session_completed_response_id(session)
         )
         # Session-level reattach may have injected an anchor into ``text_data``
         # even though the client originally sent a complete, unanchored
@@ -1517,7 +1556,8 @@ class _HTTPBridgeRequestSubmitMixin:
             # replay is being admitted.  The recovery helper can then rebuild
             # a complete body if this fenced attempt closes before an event.
             request_state.complete_transcript_recovery_anchor = (
-                request_state.complete_transcript_recovery_anchor or session.last_completed_response_id
+                request_state.complete_transcript_recovery_anchor
+                or _http_bridge_owned_session_completed_response_id(session)
             )
             request_state.fresh_upstream_request_text = root_recovery_request_text
             # The raw client body may contain Codex/provider-owned fields. It
@@ -3325,15 +3365,20 @@ class _HTTPBridgeRequestSubmitMixin:
             rollback_operation = getattr(self._durable_bridge, "rollback_operation_before_dispatch", None)
             if callable(rollback_operation):
                 try:
+                    rollback_optional_kwargs = {
+                        "restore_rebound": request_state.operation_rebound,
+                        "rebound_from_session_id": request_state.operation_rebound_from_session_id,
+                        "rebound_from_account_id": request_state.operation_rebound_from_account_id,
+                        "rebound_from_model": request_state.operation_rebound_from_model,
+                        "rebound_from_parent_response_id": request_state.operation_rebound_from_parent_response_id,
+                    }
+                    if request_state.operation_recovery_expected_generation is not None:
+                        rollback_optional_kwargs["expected_recovery_dispatch_count"] = (
+                            request_state.operation_recovery_expected_generation
+                        )
                     rolled_back = await _call_with_supported_optional_kwargs(
                         rollback_operation,
-                        optional_kwargs={
-                            "restore_rebound": request_state.operation_rebound,
-                            "rebound_from_session_id": request_state.operation_rebound_from_session_id,
-                            "rebound_from_account_id": request_state.operation_rebound_from_account_id,
-                            "rebound_from_model": request_state.operation_rebound_from_model,
-                            "rebound_from_parent_response_id": request_state.operation_rebound_from_parent_response_id,
-                        },
+                        optional_kwargs=rollback_optional_kwargs,
                         operation_id=request_state.operation_id,
                         session_id=session.durable_session_id,
                         instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
@@ -4229,7 +4274,9 @@ class _HTTPBridgeRequestSubmitMixin:
                     if request_state.previous_response_id is not None:
                         request_state.complete_transcript_recovery_anchor = request_state.previous_response_id
                     elif request_state.complete_transcript_recovery_anchor is None:
-                        request_state.complete_transcript_recovery_anchor = session.last_completed_response_id
+                        request_state.complete_transcript_recovery_anchor = (
+                            _http_bridge_owned_session_completed_response_id(session)
+                        )
                     _bind_http_bridge_proxy_injected_anchor(
                         self,
                         request_state,

@@ -2651,6 +2651,108 @@ async def test_failed_operation_rebind_rollback_restores_row_instead_of_deleting
 
 
 @pytest.mark.asyncio
+async def test_rebind_rollback_requires_the_claimed_recovery_generation(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-rebind-cas", session_key_value="sid-rebind-cas")
+        fingerprint = durable_bridge_hash("rebind-cas")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-rebind-cas",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-rebind-cas",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None and operation.recovery_dispatch_count == 0
+
+        first_rebind = await repository.rebind_operation_for_complete_transcript(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-rebind-cas",
+            owner_epoch=claim.owner_epoch,
+            account_id="account-rebind-cas",
+            model="gpt-5.6",
+            request_text='{"type":"response.create","input":[]}',
+            expected_recovery_dispatch_count=0,
+        )
+        assert first_rebind is not None and first_rebind.recovery_dispatch_count == 1
+
+        assert await repository.rollback_operation_before_dispatch(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-rebind-cas",
+            owner_epoch=claim.owner_epoch,
+            restore_rebound=True,
+            expected_recovery_dispatch_count=0,
+        )
+        refunded = await repository.get_operation(operation_id=operation_id)
+        assert refunded is not None
+        assert refunded.state == "failed"
+        assert refunded.recovery_dispatch_count == 0
+
+        # A later retry can re-submit the refunded failed row and advance the
+        # generation twice, representing a newer concurrent winner.
+        retried = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-rebind-cas",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-rebind-cas",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert retried is not None and retried.state == "submitted"
+
+        newer_rebind = await repository.rebind_operation_for_complete_transcript(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-rebind-cas",
+            owner_epoch=claim.owner_epoch,
+            account_id="account-rebind-cas",
+            model="gpt-5.6",
+            request_text='{"type":"response.create","input":[]}',
+            expected_recovery_dispatch_count=0,
+        )
+        assert newer_rebind is not None and newer_rebind.recovery_dispatch_count == 1
+
+        second_rebind = await repository.rebind_operation_for_complete_transcript(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-rebind-cas",
+            owner_epoch=claim.owner_epoch,
+            account_id="account-rebind-cas",
+            model="gpt-5.6",
+            request_text='{"type":"response.create","input":[]}',
+            expected_recovery_dispatch_count=1,
+        )
+        assert second_rebind is not None and second_rebind.recovery_dispatch_count == 2
+
+        # The first recovery's cleanup must not roll back the second winner.
+        assert not await repository.rollback_operation_before_dispatch(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-rebind-cas",
+            owner_epoch=claim.owner_epoch,
+            restore_rebound=True,
+            expected_recovery_dispatch_count=0,
+        )
+        current = await repository.get_operation(operation_id=operation_id)
+        assert current is not None
+        assert current.state == "submitted"
+        assert current.recovery_dispatch_count == 2
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_terminal_failure_exposes_state_when_spool_overflows(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

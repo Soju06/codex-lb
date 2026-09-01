@@ -2307,6 +2307,9 @@ class _HTTPBridgeStreamingMixin:
             prior_operation_attempt_generation = (
                 request_state.operation_attempt_generation if preserve_operation_identity else 0
             )
+            prior_operation_recovery_expected_generation = (
+                request_state.operation_recovery_expected_generation if preserve_operation_identity else None
+            )
             prior_operation_persisted_response_id = (
                 request_state.operation_persisted_response_id if preserve_operation_identity else None
             )
@@ -2350,6 +2353,7 @@ class _HTTPBridgeStreamingMixin:
                 request_state.operation_parent_response_id = prior_operation_parent_response_id
                 request_state.operation_registered = prior_operation_registered
                 request_state.operation_attempt_generation = prior_operation_attempt_generation
+                request_state.operation_recovery_expected_generation = prior_operation_recovery_expected_generation
                 request_state.operation_persisted_response_id = prior_operation_persisted_response_id
                 request_state.operation_rebind_required = True
             request_state.recovery_attempt_fingerprint = prior_recovery_attempt_fingerprint

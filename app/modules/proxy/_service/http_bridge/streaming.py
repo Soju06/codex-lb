@@ -2310,6 +2310,7 @@ class _HTTPBridgeStreamingMixin:
             prior_operation_persisted_response_id = (
                 request_state.operation_persisted_response_id if preserve_operation_identity else None
             )
+            prior_request_id = request_state.request_id
             prior_recovery_attempt_fingerprint = request_state.recovery_attempt_fingerprint
             prior_recovery_attempt_session_id = request_state.recovery_attempt_session_id
             prior_recovery_attempt_owner_epoch = request_state.recovery_attempt_owner_epoch
@@ -2339,6 +2340,10 @@ class _HTTPBridgeStreamingMixin:
             if fresh_payload is None:
                 raise RuntimeError("account-neutral replay projection missing after eligibility check")
             request_state, text_data = prepare_bridge_request(fresh_payload)
+            # Internal replacement requests remain one logical recovery
+            # attempt. Preserve the origin request ID so a concurrent replay
+            # cannot adopt the origin's active journal claim.
+            request_state.request_id = prior_request_id
             if preserve_operation_identity:
                 request_state.operation_id = prior_operation_id
                 request_state.operation_fingerprint = prior_operation_fingerprint
@@ -3454,7 +3459,11 @@ class _HTTPBridgeStreamingMixin:
                         ),
                     )
                 attempt_state = getattr(attempt.state, "value", attempt.state)
-                if attempt_state == "replayed" and attempt.response_id is None:
+                if (
+                    attempt_state == "replayed"
+                    and attempt.response_id is None
+                    and attempt.request_id == request_state.request_id
+                ):
                     request_state.recovery_attempt_claimed = True
                     return
                 if attempt_state != "unknown":
@@ -4329,6 +4338,7 @@ class _HTTPBridgeStreamingMixin:
                     retry_payload,
                     reservation=retry_api_key_reservation,
                 )
+                retry_request_state.request_id = request_state.request_id
                 local_previous_response_recovery = recovery_path in {
                     "local_previous_response_error",
                     "local_previous_response_fresh_replay",

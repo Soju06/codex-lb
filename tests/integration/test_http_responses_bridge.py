@@ -13948,6 +13948,7 @@ async def test_v1_responses_http_bridge_rebinds_after_upstream_previous_response
         "inactive-unknown-owner-bound-journal",
         "newer-circuit-before-submit",
         "account-neutral-newer-circuit-before-submit",
+        "replayed-claim-different-request",
         "circuit-advances-during-admission",
         "prior-replay-ambiguous-after-event",
         "stale-rejection-after-event-first-attempt",
@@ -13968,6 +13969,7 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         "account-neutral-newer-circuit-before-submit",
         "spool-reset-raises",
         "spool-reset-falsy",
+        "replayed-claim-different-request",
     }
     forwarded_receiver = replay_case.startswith("forwarded-")
     operation_fence_unavailable = replay_case == "operation-fence-unavailable"
@@ -13998,6 +14000,7 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         "newer-circuit-before-submit",
         "account-neutral-newer-circuit-before-submit",
     }
+    replayed_claim_different_request = replay_case == "replayed-claim-different-request"
     circuit_advances_during_admission = replay_case == "circuit-advances-during-admission"
     transport_only = replay_case == "transport-only"
     owner_bound_replay = replay_case in {
@@ -14222,6 +14225,23 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
             )
 
         monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", lookup_pending_tool_manifest)
+    elif replayed_claim_different_request:
+        original_record_recovery_attempt = service._durable_bridge.record_recovery_attempt
+        recovery_record_calls = 0
+
+        async def record_mismatched_replayed_claim(**kwargs):
+            nonlocal recovery_record_calls
+            recovery_record_calls += 1
+            attempt = await original_record_recovery_attempt(**kwargs)
+            if (
+                recovery_record_calls >= 2
+                and attempt is not None
+                and getattr(attempt.state, "value", attempt.state) == "replayed"
+            ):
+                return replace(attempt, request_id="different-recovery-request")
+            return attempt
+
+        monkeypatch.setattr(service._durable_bridge, "record_recovery_attempt", record_mismatched_replayed_claim)
 
     full_resend = [
         *historical_input,
@@ -14310,6 +14330,18 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         assert alternate_upstream.sent_text == []
         claim_live_session.assert_not_awaited()
         mark_recovery_attempt_replayed.assert_not_awaited()
+        return
+    if replayed_claim_different_request:
+        failed_response = await async_client.post(
+            "/backend-api/codex/responses",
+            json=second_payload,
+            headers={**session_headers, "x-codex-turn-state": f"http_turn_stale_{case}"},
+        )
+        assert failed_response.status_code == 502
+        assert failed_response.json()["error"]["code"] == "bridge_continuity_persistence_failed"
+        assert connected_account_ids == [owner_chatgpt_account_id]
+        assert len(owner_upstream.sent_text) == 1
+        assert alternate_upstream.sent_text == []
         return
     if account_neutral and newer_circuit_before_submit:
         failed_response = await async_client.post(

@@ -17,4 +17,4 @@
 
 - [x] 3.1 Cover prefixed tool-output echoes and exact duplicate tool pairs.
 - [x] 3.2 Cover the HTTP bridge transport-close recovery call path.
-- [ ] 3.3 Run strict OpenSpec validation before publishing the change.
+- [x] 3.3 Run strict OpenSpec validation before publishing the change.

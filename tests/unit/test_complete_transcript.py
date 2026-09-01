@@ -236,6 +236,42 @@ def test_build_complete_replay_payload_does_not_duplicate_unanchored_latest_outp
     assert [item.get("role") for item in input_items] == ["user", "assistant", "user"]
 
 
+def test_build_complete_replay_payload_keeps_repeated_anchored_turn_input() -> None:
+    turns = [
+        _turn(
+            1,
+            parent_response_id=None,
+            response_id="resp_1",
+            request_input=[{"type": "message", "role": "user", "content": "repeat"}],
+            output=[{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "one"}]}],
+        ),
+        _turn(
+            2,
+            parent_response_id="resp_1",
+            response_id="resp_2",
+            request_input=[{"type": "message", "role": "user", "content": "repeat"}],
+            output=[{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "two"}]}],
+        ),
+    ]
+
+    payload = build_complete_replay_payload(
+        turns,
+        continuation_request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-test",
+                "previous_response_id": "resp_2",
+                "input": [{"type": "message", "role": "user", "content": "next"}],
+            }
+        ),
+    )
+
+    assert payload is not None
+    input_items = json.loads(payload)["input"]
+    assert [item.get("role") for item in input_items] == ["user", "assistant", "user", "assistant", "user"]
+    assert [item["content"] for item in input_items if item.get("role") == "user"] == ["repeat", "repeat", "next"]
+
+
 def test_build_unanchored_root_replay_payload_sanitizes_legacy_history() -> None:
     payload = build_unanchored_root_replay_payload(
         json.dumps(

@@ -191,9 +191,17 @@ def build_complete_replay_payload(
             # immediately preceding response. Remove only that exact echoed
             # subsequence so the stored output is inserted once below.
             fresh_input = matched_input
-        elif client_input_history and _items_prefix_matches(turn_input, client_input_history):
+        elif (
+            parsed.get("previous_response_id") in (None, "")
+            and client_input_history
+            and _items_prefix_matches(turn_input, client_input_history)
+        ):
             fresh_input = turn_input[len(client_input_history) :]
-        elif client_input_history and _items_prefix_matches(client_input_history, turn_input):
+        elif (
+            parsed.get("previous_response_id") in (None, "")
+            and client_input_history
+            and _items_prefix_matches(client_input_history, turn_input)
+        ):
             # A shorter resend cannot prove which historical items were
             # intentionally omitted, so it is not a complete transcript.
             return None

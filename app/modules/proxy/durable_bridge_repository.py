@@ -2377,7 +2377,11 @@ class DurableBridgeRepository:
         except (TypeError, ValueError):
             bounded_age = 15 * 60
         try:
-            bounded_limit = min(32, max(1, int(limit)))
+            # Callers request one extra row as an overflow sentinel so they
+            # can distinguish an exact page from a truncated candidate set.
+            # The public setting remains capped at 32; permit that internal
+            # ``limit + 1`` query without dropping the sentinel row.
+            bounded_limit = min(33, max(1, int(limit)))
         except (TypeError, ValueError):
             bounded_limit = 8
         cutoff = utcnow() - timedelta(seconds=bounded_age)

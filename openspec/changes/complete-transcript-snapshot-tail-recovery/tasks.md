@@ -19,4 +19,4 @@
 - [x] 3.1 Cover legacy snapshot bookkeeping and output normalization.
 - [x] 3.2 Cover snapshot-root replay with a descendant tool-call tail.
 - [x] 3.3 Run focused transcript and HTTP bridge tests, Ruff, and Ty.
-- [ ] 3.4 Run strict OpenSpec validation before publishing the change.
+- [x] 3.4 Run strict OpenSpec validation before publishing the change.

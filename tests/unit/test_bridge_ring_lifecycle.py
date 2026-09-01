@@ -2443,6 +2443,53 @@ async def test_unknown_operation_recent_lookup_is_bounded_to_session_model_and_a
 
 
 @pytest.mark.asyncio
+async def test_recent_unknown_operations_preserves_overflow_sentinel_at_limit(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-operation-overflow",
+            session_key_value="sid-operation-overflow",
+        )
+        for index in range(33):
+            fingerprint = durable_bridge_hash(f"operation-overflow-{index}")
+            operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+            operation = await repository.record_operation(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id="inst-operation-overflow",
+                owner_epoch=claim.owner_epoch,
+                request_fingerprint=fingerprint,
+                account_id="account-operation",
+                model="gpt-5.6",
+                parent_response_id=f"resp-parent-{index}",
+                request_text=f'{{"type":"response.create","input":"retry-{index}"}}',
+            )
+            assert operation is not None
+            assert await repository.update_operation(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id="inst-operation-overflow",
+                owner_epoch=claim.owner_epoch,
+                state="unknown",
+            )
+
+        recent = await repository.get_recent_unknown_operations(
+            session_id=claim.id,
+            model="gpt-5.6",
+            api_key_scope="__anonymous__",
+            max_age_seconds=60.0,
+            limit=33,
+        )
+        assert len(recent) == 33
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_operation_retry_reset_clears_partial_spool(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

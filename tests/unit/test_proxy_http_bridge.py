@@ -19902,6 +19902,164 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_for_local_p
 
 
 @pytest.mark.asyncio
+async def test_local_recovery_cancellation_during_replacement_close_copies_dispatch_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled replacement close must not lose the durable dispatch marker."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "hello",
+            "prompt_cache_key": "bridge-cancel-rebind",
+            "previous_response_id": "resp_prev_cancel",
+        }
+    )
+    initial_state = proxy_service._WebSocketRequestState(
+        request_id="req-cancel-initial",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        previous_response_id="resp_prev_cancel",
+    )
+    initial_state.request_stage = "follow_up"
+    initial_state.preferred_account_id = "acc-1"
+    initial_state.recovery_attempt_fingerprint = "recovery-fingerprint"
+    initial_state.recovery_attempt_session_id = "recovery-session"
+    initial_state.recovery_attempt_owner_epoch = 1
+    initial_state.recovery_attempt_claimed = True
+    initial_state.recovery_attempt_dispatched = True
+    retry_state = proxy_service._WebSocketRequestState(
+        request_id="req-cancel-retry",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        previous_response_id="resp_prev_cancel",
+    )
+    key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-cancel-rebind", None)
+    initial_session = _make_bridge_session(key=key, key_value="bridge-cancel-rebind")
+    retry_session = _make_bridge_session(key=key, key_value="bridge-cancel-rebind")
+    initial_session.account = cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE))
+    retry_session.account = cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE))
+    service._http_bridge_sessions[key] = initial_session
+
+    prepare_calls = 0
+
+    def fake_prepare(
+        prepared_payload: proxy_service.ResponsesRequest,
+        _headers: Mapping[str, str],
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del prepared_payload, api_key, api_key_reservation, client_ip
+        nonlocal prepare_calls
+        prepare_calls += 1
+        if prepare_calls == 1:
+            return initial_state, '{"type":"response.create","request":"initial"}'
+        return retry_state, '{"type":"response.create","request":"retry"}'
+
+    class _Events:
+        def __init__(self, state: proxy_service._WebSocketRequestState, *, retry: bool) -> None:
+            self.state = state
+            self.retry = retry
+            self.yielded = False
+
+        def __aiter__(self) -> "_Events":
+            return self
+
+        async def __anext__(self) -> str:
+            if not self.retry:
+                raise ProxyResponseError(400, proxy_service.openai_error("previous_response_not_found", "missing"))
+            if self.yielded:
+                raise StopAsyncIteration
+            self.yielded = True
+            # Simulate the request submitter proving the replacement send.
+            assert self.state.recovery_attempt_dispatched is False
+            self.state.recovery_attempt_dispatched = True
+            return 'data: {"type":"response.completed"}\n\n'
+
+        async def aclose(self) -> None:
+            if self.retry:
+                raise asyncio.CancelledError()
+
+    stream_calls = 0
+
+    def fake_stream_http_bridge_session_events(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+        propagate_http_errors: bool,
+        downstream_turn_state: str | None,
+        request_deadline: float | None = None,
+    ) -> _Events:
+        del text_data, queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
+        nonlocal stream_calls
+        stream_calls += 1
+        return _Events(request_state, retry=stream_calls > 1)
+
+    get_or_create = AsyncMock(side_effect=[initial_session, retry_session])
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)
+    monkeypatch.setattr(service, "_close_http_bridge_session", AsyncMock())
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in service._stream_via_http_bridge(
+            payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=900.0,
+            max_sessions=8,
+            queue_limit=4,
+        ):
+            pass
+
+    assert stream_calls == 2
+    assert initial_state.recovery_attempt_dispatched is True
+    assert retry_state.recovery_attempt_dispatched is True
+
+
+@pytest.mark.asyncio
 async def test_stream_via_http_bridge_does_not_rebind_after_downstream_visible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

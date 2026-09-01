@@ -4482,7 +4482,12 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.recovery_attempt_session_id = request_state.recovery_attempt_session_id
                 retry_request_state.recovery_attempt_owner_epoch = request_state.recovery_attempt_owner_epoch
                 retry_request_state.recovery_attempt_claimed = request_state.recovery_attempt_claimed
-                retry_request_state.recovery_attempt_dispatched = request_state.recovery_attempt_dispatched
+                # The claim is inherited, but this replacement has not sent
+                # its own request yet.  Keep the dispatch marker clear so a
+                # cancellation or setup failure before ``send_text`` can
+                # safely refund the inherited one-shot claim; the submitter
+                # sets it once the replacement frame is dispatched.
+                retry_request_state.recovery_attempt_dispatched = False
 
                 retry_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
                     session,
@@ -4497,10 +4502,27 @@ class _HTTPBridgeStreamingMixin:
                     async for event_block in retry_events:
                         yield event_block
                 finally:
+                    close_cancellation: asyncio.CancelledError | None = None
                     try:
-                        await retry_events.aclose()
+                        close_task = asyncio.create_task(retry_events.aclose())
+                        _, close_cancellation = await _await_task_deferring_cancellation(close_task)
+                    except asyncio.CancelledError as exc:
+                        close_cancellation = exc
                     except Exception:
                         pass
+                    # Cancellation can land while closing the replacement
+                    # stream.  Copy the replacement's claim/dispatch state
+                    # under a shield before propagating that cancellation, so
+                    # the outer finalizer never rolls back an already-sent
+                    # replacement (or leaks a pre-dispatch claim).
+                    with anyio.CancelScope(shield=True):
+                        request_state.recovery_attempt_dispatched = retry_request_state.recovery_attempt_dispatched
+                        request_state.recovery_attempt_claimed = retry_request_state.recovery_attempt_claimed
+                        request_state.recovery_attempt_fingerprint = retry_request_state.recovery_attempt_fingerprint
+                        request_state.recovery_attempt_session_id = retry_request_state.recovery_attempt_session_id
+                        request_state.recovery_attempt_owner_epoch = retry_request_state.recovery_attempt_owner_epoch
+                    if close_cancellation is not None:
+                        raise close_cancellation
             except BaseException:
                 if retry_reservation_reacquired and retry_api_key_reservation is not None:
                     retry_lifecycle = (

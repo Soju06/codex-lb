@@ -410,22 +410,32 @@ def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
 
+def _canonical_background_ack_response_id(
+    event_payload: dict[str, JsonValue] | None,
+    event_type: str | None,
+) -> str | None:
+    if event_type not in {"response.queued", "response.in_progress"}:
+        return None
+    response = event_payload.get("response") if event_payload is not None else None
+    response_id = response.get("id") if isinstance(response, dict) else None
+    if not (
+        isinstance(response, dict)
+        and response.get("object") == "response"
+        and isinstance(response_id, str)
+        and bool(response_id)
+        and response.get("status") == event_type.removeprefix("response.")
+        and response.get("output") == []
+    ):
+        return None
+    return response_id
+
+
 def _is_background_json_ack(
     stream: bool | None,
     event_payload: dict[str, JsonValue] | None,
     event_type: str | None,
 ) -> bool:
-    if stream is not False or event_type not in {"response.queued", "response.in_progress"}:
-        return False
-    response = event_payload.get("response") if event_payload is not None else None
-    return (
-        isinstance(response, dict)
-        and response.get("object") == "response"
-        and isinstance(response.get("id"), str)
-        and bool(response["id"])
-        and response.get("status") == event_type.removeprefix("response.")
-        and response.get("output") == []
-    )
+    return stream is False and _canonical_background_ack_response_id(event_payload, event_type) is not None
 
 
 def _stream_iterator_after_capacity_admission(

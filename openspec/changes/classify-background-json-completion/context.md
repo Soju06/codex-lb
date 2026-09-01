@@ -27,7 +27,8 @@ streams.
 
 A `stream: false` request receives HTTP 200 JSON with
 `{"object":"response","id":"resp_1","status":"queued","output":[]}`. The client
-receives that object, the request log records success, and account health
-records success. A malformed object with non-object output items and a
-`stream: true` SSE connection that disconnects after `response.queued` both
-retain error settlement.
+receives that object, the request log records success keyed by `resp_1`, and
+account health records success. A queued object that omits `object` or a
+non-empty `id` returns the same external contract error as other malformed
+acknowledgements, and a `stream: true` SSE connection that disconnects after
+`response.queued` retains error settlement.

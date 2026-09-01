@@ -8709,8 +8709,14 @@ async def _collect_responses_payload(
                     parsed = None
                 if parsed is not None:
                     if event_type in ("response.queued", "response.in_progress"):
-                        if isinstance(parsed, OpenAIResponsePayload):
+                        if isinstance(parsed, OpenAIResponsePayload) and proxy_service_module._is_background_json_ack(
+                            False,
+                            payload,
+                            event_type,
+                        ):
                             nonterminal_result = parsed
+                        else:
+                            contract_violation_kind = contract_violation_kind or "invalid_json"
                     else:
                         terminal_result = parsed
                     continue

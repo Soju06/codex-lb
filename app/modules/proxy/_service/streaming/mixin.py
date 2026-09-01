@@ -632,7 +632,15 @@ class _StreamingMixin(_StreamingRetryMixin):
             )
             if malformed_error_rewrite is not None:
                 first, event, first_payload, event_type = malformed_error_rewrite
-            terminal_event_seen = _facade()._is_background_json_ack(payload.stream, first_payload, event_type)
+            ack_response_id = (
+                _facade()._canonical_background_ack_response_id(first_payload, event_type)
+                if payload.stream is False
+                else None
+            )
+            terminal_event_seen = ack_response_id is not None
+            if ack_response_id is not None:
+                response_id = ack_response_id
+                settlement.response_id = ack_response_id
             if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
                 await _touch_api_key_reservation()
             event_service_tier = _facade()._service_tier_from_event_payload(first_payload)

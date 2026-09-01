@@ -23,6 +23,7 @@ streams.
 - **WHEN** codex-lb finishes reading that HTTP response
 - **THEN** the Response object is returned unchanged
 - **AND** the request log records success without `stream_incomplete`
+- **AND** the request log stores the returned response ID for later owner lookup
 - **AND** account health records success without an error penalty
 
 #### Scenario: Malformed background object retains error settlement

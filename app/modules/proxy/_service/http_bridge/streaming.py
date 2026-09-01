@@ -4328,6 +4328,15 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.request_stage = retry_request_stage
                 retry_request_state.preferred_account_id = retry_preferred_account_id
                 retry_request_state.excluded_account_ids.update(request_state.excluded_account_ids)
+                # The recovery journal claim belongs to the replacement
+                # request too. Carry it through local recovery so the retry
+                # cannot create a second UNKNOWN row or consume the one-shot
+                # fence a second time.
+                retry_request_state.recovery_attempt_fingerprint = request_state.recovery_attempt_fingerprint
+                retry_request_state.recovery_attempt_session_id = request_state.recovery_attempt_session_id
+                retry_request_state.recovery_attempt_owner_epoch = request_state.recovery_attempt_owner_epoch
+                retry_request_state.recovery_attempt_claimed = request_state.recovery_attempt_claimed
+                retry_request_state.recovery_attempt_dispatched = request_state.recovery_attempt_dispatched
 
                 retry_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
                     session,
@@ -4367,6 +4376,15 @@ class _HTTPBridgeStreamingMixin:
                         session,
                         request_scope_id=local_recovery_scope_id,
                     )
+                if retry_request_state is not None:
+                    # Reflect replacement dispatch/claim cleanup back to the
+                    # outer request state before its finalizer decides whether
+                    # the recovery claim needs to be rolled back.
+                    request_state.recovery_attempt_dispatched = retry_request_state.recovery_attempt_dispatched
+                    request_state.recovery_attempt_claimed = retry_request_state.recovery_attempt_claimed
+                    request_state.recovery_attempt_fingerprint = retry_request_state.recovery_attempt_fingerprint
+                    request_state.recovery_attempt_session_id = retry_request_state.recovery_attempt_session_id
+                    request_state.recovery_attempt_owner_epoch = retry_request_state.recovery_attempt_owner_epoch
         finally:
             if initial_handoff_scope_id is not None:
                 _release_http_bridge_unanchored_handoff(

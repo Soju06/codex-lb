@@ -34918,6 +34918,11 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
             previous_response_id=request_payload.previous_response_id,
             operation_registered=True,
             operation_id="op-terse-recovery",
+            recovery_attempt_fingerprint=("recovery-fingerprint-origin" if not request_states else None),
+            recovery_attempt_session_id=("durable-recovery-origin" if not request_states else None),
+            recovery_attempt_owner_epoch=(7 if not request_states else None),
+            recovery_attempt_claimed=(True if not request_states else False),
+            recovery_attempt_dispatched=False,
         )
         request_states.append(request_state)
         return request_state, '{"type":"response.create"}'
@@ -34948,7 +34953,22 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
         stream_attempts.append(request_state.previous_response_id)
         del text_data
         if len(stream_attempts) == 1:
+            assert request_state.recovery_attempt_fingerprint == "recovery-fingerprint-origin"
+            assert request_state.recovery_attempt_session_id == "durable-recovery-origin"
+            assert request_state.recovery_attempt_owner_epoch == 7
+            assert request_state.recovery_attempt_claimed is True
+            assert request_state.recovery_attempt_dispatched is False
             raise terse_rejection
+        assert request_state.recovery_attempt_fingerprint == "recovery-fingerprint-origin"
+        assert request_state.recovery_attempt_session_id == "durable-recovery-origin"
+        assert request_state.recovery_attempt_owner_epoch == 7
+        assert request_state.recovery_attempt_claimed is True
+        assert request_state.recovery_attempt_dispatched is False
+        request_state.recovery_attempt_fingerprint = "recovery-fingerprint-final"
+        request_state.recovery_attempt_session_id = "durable-recovery-final"
+        request_state.recovery_attempt_owner_epoch = 8
+        request_state.recovery_attempt_claimed = True
+        request_state.recovery_attempt_dispatched = True
         yield 'data: {"type":"response.completed"}\n\n'
 
     monkeypatch.setattr(
@@ -35021,6 +35041,11 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
     assert recovery_call.kwargs["request_stage"] == "reattach"
     assert stream_attempts == ["resp_stale_anchor", "resp_stale_anchor"]
     assert request_states
+    assert request_states[0].recovery_attempt_fingerprint == "recovery-fingerprint-final"
+    assert request_states[0].recovery_attempt_session_id == "durable-recovery-final"
+    assert request_states[0].recovery_attempt_owner_epoch == 8
+    assert request_states[0].recovery_attempt_claimed is True
+    assert request_states[0].recovery_attempt_dispatched is True
     assert ordered_events == ["reset", "retire"]
     reset_operation_event_spool.assert_awaited_once_with(
         operation_id="op-terse-recovery",

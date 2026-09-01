@@ -1815,11 +1815,31 @@ async def _try_complete_transcript_recovery(
         getattr(request_state, "complete_transcript_recovery_count", 0) + 1
     )
     request_state.complete_transcript_recovery_retry_authorized = True
-    async with session.pending_lock:
-        if request_state not in session.pending_requests:
-            session.pending_requests.appendleft(request_state)
-            if _http_bridge_request_counts_against_queue(request_state):
-                session.queued_request_count += 1
+    request_enqueued = False
+    request_counted_in_queue = False
+    try:
+        async with session.pending_lock:
+            if request_state not in session.pending_requests:
+                session.pending_requests.appendleft(request_state)
+                request_enqueued = True
+                if _http_bridge_request_counts_against_queue(request_state):
+                    session.queued_request_count += 1
+                    request_counted_in_queue = True
+    except asyncio.CancelledError:
+        # Cancellation while waiting for the queue lock still occurs before
+        # the replacement send.  Run the same pre-dispatch compensation used
+        # by the retry path so a fenced rebind cannot strand the operation.
+        cleanup_task = asyncio.create_task(
+            service._cleanup_http_bridge_submit_interruption(
+                session,
+                request_state=request_state,
+                gate_acquired=False,
+                request_enqueued=request_enqueued,
+                counted_in_queue=request_counted_in_queue,
+            )
+        )
+        await _await_task_deferring_cancellation(cleanup_task)
+        raise
     _log_http_bridge_event(
         "complete_transcript_recovery_retry",
         session.key,
@@ -2296,11 +2316,31 @@ async def _try_unsafe_partial_transcript_recovery(
     request_state.operation_attempt_generation = int(getattr(rebound_operation, "recovery_dispatch_count", 0))
     request_state.unsafe_partial_replay_count = getattr(request_state, "unsafe_partial_replay_count", 0) + 1
     request_state.unsafe_partial_replay_retry_authorized = True
-    async with session.pending_lock:
-        if request_state not in session.pending_requests:
-            session.pending_requests.appendleft(request_state)
-            if _http_bridge_request_counts_against_queue(request_state):
-                session.queued_request_count += 1
+    request_enqueued = False
+    request_counted_in_queue = False
+    try:
+        async with session.pending_lock:
+            if request_state not in session.pending_requests:
+                session.pending_requests.appendleft(request_state)
+                request_enqueued = True
+                if _http_bridge_request_counts_against_queue(request_state):
+                    session.queued_request_count += 1
+                    request_counted_in_queue = True
+    except asyncio.CancelledError:
+        # Cancellation while waiting for the queue lock is still a
+        # pre-dispatch failure; compensate the fenced rebind before
+        # propagating it so later retries are not stranded.
+        cleanup_task = asyncio.create_task(
+            service._cleanup_http_bridge_submit_interruption(
+                session,
+                request_state=request_state,
+                gate_acquired=False,
+                request_enqueued=request_enqueued,
+                counted_in_queue=request_counted_in_queue,
+            )
+        )
+        await _await_task_deferring_cancellation(cleanup_task)
+        raise
     _log_http_bridge_event(
         "unsafe_partial_transcript_recovery_retry",
         session.key,

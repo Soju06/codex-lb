@@ -7755,6 +7755,97 @@ async def test_complete_transcript_root_recovery_rejects_history_over_turn_limit
 
 
 @pytest.mark.asyncio
+async def test_complete_transcript_recovery_cancellation_waiting_for_pending_lock_cleans_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-pending-lock-cancel")
+    session.durable_session_id = "durable-recovery-pending-lock-cancel"
+    session.durable_owner_epoch = 1
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-recovery-pending-lock-cancel",
+            model="gpt-test",
+            request_text='{"type":"response.create","previous_response_id":"resp-parent","input":[]}',
+            previous_response_id="resp-parent",
+            complete_transcript_recovery_anchor=None,
+            operation_id="op-recovery-pending-lock-cancel",
+            operation_fingerprint="fingerprint-recovery-pending-lock-cancel",
+            operation_parent_response_id="resp-parent",
+            operation_registered=True,
+            operation_created=True,
+            operation_recovery_claimed=False,
+            operation_dispatched=True,
+            operation_attempt_generation=0,
+            response_event_count=0,
+            replay_count=0,
+            upstream_model_output_seen=False,
+            downstream_visible=False,
+            last_downstream_sequence_number=None,
+        ),
+    )
+    rebind_started = asyncio.Event()
+
+    async def rebind_operation(**_: Any) -> Any:
+        rebind_started.set()
+        return SimpleNamespace(rebound=True, recovery_dispatch_count=1)
+
+    cleanup = AsyncMock()
+    service._cleanup_http_bridge_submit_interruption = cleanup
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[SimpleNamespace(represented_turn_count=1)]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_complete_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=128,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-recovery-pending-lock-cancel",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_retry_circuit_generation", AsyncMock(return_value=(True, None)))
+
+    await session.pending_lock.acquire()
+    try:
+        task = asyncio.create_task(
+            http_bridge_upstream_events_module._try_complete_transcript_recovery(
+                service,
+                session,
+                request_state,
+            )
+        )
+        await asyncio.wait_for(rebind_started.wait(), timeout=1.0)
+        for _ in range(100):
+            if session.pending_lock.statistics().tasks_waiting:
+                break
+            await asyncio.sleep(0)
+        assert session.pending_lock.statistics().tasks_waiting
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        session.pending_lock.release()
+
+    cleanup.assert_awaited_once()
+    assert cleanup.await_args is not None
+    assert cleanup.await_args.kwargs["request_enqueued"] is False
+    assert cleanup.await_args.kwargs["counted_in_queue"] is False
+
+
+@pytest.mark.asyncio
 async def test_complete_transcript_recovery_rolls_back_rebind_when_dispatch_not_started(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

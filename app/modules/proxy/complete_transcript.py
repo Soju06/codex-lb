@@ -468,8 +468,16 @@ def derive_replay_input_turn_count(request_text: str) -> int | None:
         for item in input_items
         if isinstance(item, dict) and item.get("type") in (None, "message") and item.get("role") == "user"
     )
-    if user_turn_count > 0:
-        return user_turn_count
+    # A settled tool call/output pair is a subsequent Responses turn even
+    # when the client keeps the original user message in the same root body.
+    # The validator above proves that every output settles a distinct call, so
+    # counting outputs is conservative for parallel tool batches and avoids
+    # admitting arbitrarily deep tool continuations under a small turn bound.
+    tool_continuation_count = sum(
+        1 for item in input_items if isinstance(item, dict) and item.get("type") in _REPLAY_TOOL_OUTPUT_TYPES
+    )
+    if user_turn_count > 0 or tool_continuation_count > 0:
+        return user_turn_count + tool_continuation_count
     # A single validated non-message item can still be the current request;
     # multiple such items do not expose a trustworthy conversational boundary.
     return 1 if len(input_items) == 1 else None

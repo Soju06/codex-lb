@@ -976,6 +976,14 @@ async def test_complete_transcript_bounds_unsnapshotted_root_by_persisted_depth(
             '{"type":"message","role":"user","content":"second"}]}',
             2,
         ),
+        (
+            '{"input":[{"type":"message","role":"user","content":"run it"},'
+            '{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},'
+            '{"type":"function_call_output","call_id":"call_1","output":"done"},'
+            '{"type":"function_call","call_id":"call_2","name":"lookup","arguments":"{}"},'
+            '{"type":"function_call_output","call_id":"call_2","output":"done"}]}',
+            3,
+        ),
         ('{"input":[{"type":"message"}]}', None),
     ],
 )

@@ -11,8 +11,11 @@ from websockets.asyncio.server import serve as websocket_serve
 from app.core.clients.codex import CodexClient
 from app.core.clients.native_egress import (
     NativeEgressRequest,
-    NativeWebSocketMessage,
     SubprocessNativeEgressClient,
+)
+from app.core.clients.proxy_websocket import (
+    _RESPONSES_WEBSOCKET_POLICY,
+    _connect_upstream_websocket,
 )
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
@@ -135,18 +138,22 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper() -> Non
             assert await http_result.response.read() == b'{"ok":true}'
             assert native._process is helper_process
 
-            websocket_result = await client.open_ws_with_route_metadata(
-                f"ws://127.0.0.1:{websocket_port}/v1/responses",
+            websocket = await _connect_upstream_websocket(
+                {},
+                "test-token",
+                "account-1",
+                url=f"ws://127.0.0.1:{websocket_port}/v1/responses",
                 route=route,
-                timeout=2,
-                max_msg_size=1024,
-                compress=15,
+                codex_client=client,
+                policy=_RESPONSES_WEBSOCKET_POLICY,
             )
-            assert websocket_result.native is True
-            await websocket_result.websocket.send_text("probe")
-            message = await websocket_result.websocket.receive()
-            assert message == NativeWebSocketMessage(kind="text", text="echo:probe")
-            await websocket_result.websocket.close()
+            assert getattr(websocket, "upstream_proxy_endpoint_id", None) == "proxy-1"
+            assert getattr(websocket, "upstream_proxy_fallback_used", None) is False
+            await websocket.send_text("probe")
+            message = await websocket.receive()
+            assert message.kind == "text"
+            assert message.text == "echo:probe"
+            await websocket.close()
 
             assert native._process is helper_process
             assert helper_process is not None and helper_process.returncode is None

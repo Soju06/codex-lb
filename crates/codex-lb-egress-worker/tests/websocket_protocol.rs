@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::TcpListener;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::oneshot;
 use tokio_tungstenite::accept_async_with_config;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tungstenite::extensions::ExtensionsConfig;
@@ -62,6 +63,7 @@ async fn missing_pong_emits_liveness_timeout() {
         .await
         .expect("bind websocket server");
     let address = listener.local_addr().expect("server address");
+    let (release_server, wait_for_liveness_failure) = oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept websocket client");
         let mut extensions = ExtensionsConfig::default();
@@ -73,7 +75,9 @@ async fn missing_pong_emits_liveness_timeout() {
             .expect("accept websocket handshake");
         // Do not poll the server stream: tungstenite therefore cannot observe
         // or automatically answer the helper's ping.
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        wait_for_liveness_failure
+            .await
+            .expect("liveness assertion must release websocket server");
     });
 
     let (mut helper, mut stdin, mut lines) = start_helper().await;
@@ -99,6 +103,9 @@ async fn missing_pong_emits_liveness_timeout() {
     assert_eq!(failure["failure_phase"], "liveness_timeout");
     assert_eq!(failure["retryable_same_contract"], false);
 
+    release_server
+        .send(())
+        .expect("release websocket server after liveness failure");
     drop(stdin);
     tokio::time::timeout(Duration::from_secs(2), helper.wait())
         .await
@@ -153,12 +160,6 @@ async fn explicit_cancel_aborts_websocket_and_emits_one_cancelled_event() {
     let cancelled = read_event(&mut lines, "cancel event timeout").await;
     assert_eq!(cancelled["type"], "cancelled");
     assert_eq!(cancelled["request_id"], "cancel-test");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), lines.next_line())
-            .await
-            .is_err(),
-        "explicit cancellation must emit exactly one terminal event"
-    );
 
     server.await.expect("websocket server task");
     drop(stdin);
@@ -166,4 +167,16 @@ async fn explicit_cancel_aborts_websocket_and_emits_one_cancelled_event() {
         .await
         .expect("helper exit timeout")
         .expect("wait for helper");
+    let mut remaining_events = Vec::new();
+    while let Some(event) = lines
+        .next_line()
+        .await
+        .expect("drain native helper events after exit")
+    {
+        remaining_events.push(event);
+    }
+    assert!(
+        remaining_events.is_empty(),
+        "explicit cancellation must emit exactly one terminal event: {remaining_events:?}"
+    );
 }

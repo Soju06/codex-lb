@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
@@ -51,6 +51,7 @@ import {
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 import { useThemeStore } from "@/hooks/use-theme";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
+import { getErrorMessageOrNull } from "@/utils/errors";
 import { formatModelLabel, formatCurrency, formatSlug } from "@/utils/formatters";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 
@@ -105,6 +106,7 @@ export function DashboardPage() {
   const dashboardTimeframe =
     dashboardView === "conversations" ? conversationTimeframe : overviewTimeframe;
   const dashboardQuery = useDashboard(dashboardTimeframe);
+  const [initialOverviewRetryError, setInitialOverviewRetryError] = useState<string | null>(null);
   const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
   const conversationsState = useConversations({
     enabled: isAdmin && dashboardView === "conversations",
@@ -351,8 +353,11 @@ export function DashboardPage() {
     [optionsQuery.data?.statuses, t],
   );
 
+  const dashboardLoadError = getErrorMessageOrNull(dashboardQuery.error);
+  const displayedDashboardLoadError = dashboardLoadError ?? initialOverviewRetryError;
+  const overviewRetryBusy = dashboardQuery.isFetching || initialOverviewRetryError !== null;
   const errorMessage =
-    (dashboardQuery.error instanceof Error && dashboardQuery.error.message) ||
+    (overview ? dashboardLoadError : null) ||
     (dashboardView === "request-logs" && optionsQuery.error instanceof Error && optionsQuery.error.message) ||
     null;
 
@@ -394,8 +399,29 @@ export function DashboardPage() {
 
       {errorMessage ? <AlertMessage variant="error">{errorMessage}</AlertMessage> : null}
 
-      {!view ? (
+      {dashboardQuery.isPending && !view && initialOverviewRetryError === null ? (
         <DashboardSkeleton />
+      ) : !view ? (
+        <div className="space-y-3 rounded-xl border bg-card p-4">
+          <div role="alert">
+            <AlertMessage variant="error">{displayedDashboardLoadError ?? "Request failed"}</AlertMessage>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            aria-busy={overviewRetryBusy}
+            disabled={overviewRetryBusy}
+            onClick={() => {
+              setInitialOverviewRetryError(displayedDashboardLoadError ?? "Request failed");
+              void dashboardQuery.refetch().finally(() => {
+                setInitialOverviewRetryError(null);
+              });
+            }}
+          >
+            {t("common.actions.retry")}
+          </Button>
+        </div>
       ) : (
         <>
           <StatsGrid stats={view.stats} />

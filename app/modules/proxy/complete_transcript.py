@@ -458,6 +458,7 @@ def derive_replay_input_turn_count(request_text: str) -> int | None:
         return None
     validation_payload = dict(payload)
     validation_payload.pop("type", None)
+    _drop_bridge_operation_metadata(validation_payload)
     validation_payload["input"] = input_items
     if not responses_payload_is_account_neutral_fresh_replay(validation_payload):
         return None

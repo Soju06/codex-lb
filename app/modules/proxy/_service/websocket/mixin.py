@@ -5716,6 +5716,13 @@ class _WebSocketMixin:
                 original_text=text,
                 unsafe_new_response_recovery=unsafe_new_response_recovery,
             )
+            if unsafe_new_response_recovery:
+                # The terse invalid-anchor shape is intentionally normalized
+                # by the rewrite above, but it must also enter the verified
+                # fresh-replay branch below. The strict classifier cannot
+                # recognize this provider variant on its own.
+                retry_is_previous_response_not_found = True
+                retry_error_code = "stream_incomplete"
         if event_type in {"response.failed", "response.incomplete", "error"} and isinstance(payload, dict):
             public_payload = _sanitize_public_websocket_event_payload(payload, event_type=event_type)
             if public_payload is not payload:

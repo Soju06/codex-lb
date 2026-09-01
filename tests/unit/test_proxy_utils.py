@@ -37439,6 +37439,14 @@ async def test_process_upstream_websocket_text_rewrites_opted_in_terse_invalid_a
         ),
         previous_response_id="resp_anchor",
         response_id=None,
+        fresh_upstream_request_is_retry_safe=True,
+        fresh_upstream_request_text=json.dumps(
+            {
+                "type": "response.create",
+                "input": [{"type": "message", "role": "user", "content": "retry"}],
+            },
+            separators=(",", ":"),
+        ),
     )
     pending_requests = deque([pending_request])
     upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -37473,7 +37481,12 @@ async def test_process_upstream_websocket_text_rewrites_opted_in_terse_invalid_a
     assert downstream_error["code"] == "stream_incomplete"
     assert "Invalid previous response id" not in downstream_text
     assert "previous_response_id" not in downstream_text
-    assert finalize_request_state.await_count == 1
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.replay_request_state is pending_request
+    assert pending_request.replay_count == 1
+    assert pending_request.previous_response_id is None
+    assert pending_request.fresh_upstream_request_is_retry_safe is False
+    assert finalize_request_state.await_count == 0
 
 
 @pytest.mark.asyncio

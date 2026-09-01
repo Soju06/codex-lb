@@ -989,6 +989,11 @@ async def test_complete_transcript_bounds_unsnapshotted_root_by_persisted_depth(
         ('{"input":"first"}', 1),
         ('{"input":[{"type":"message","role":"user","content":"first"}]}', 1),
         (
+            '{"client_metadata":{"codex_lb_operation_id":"op-root"},'
+            '"input":[{"type":"message","role":"user","content":"first"}]}',
+            1,
+        ),
+        (
             '{"input":[{"type":"message","role":"user","content":"first"},'
             '{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]},'
             '{"type":"message","role":"user","content":"second"}]}',

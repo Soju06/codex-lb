@@ -3382,6 +3382,7 @@ class _HTTPBridgeStreamingMixin:
                                 request_fingerprint=request_fingerprint,
                             )
                         )
+                    return False
                 except BaseException:
                     logger.warning(
                         "Failed to roll back claimed HTTP bridge recovery checkpoint request_id=%s",

@@ -399,7 +399,9 @@ export function DashboardPage() {
 
       {errorMessage ? <AlertMessage variant="error">{errorMessage}</AlertMessage> : null}
 
-      {dashboardQuery.isPending && !view && initialOverviewRetryError === null ? (
+      {(dashboardQuery.isPending || dashboardQuery.isFetching) &&
+      !view &&
+      displayedDashboardLoadError === null ? (
         <DashboardSkeleton />
       ) : !view ? (
         <div className="space-y-3 rounded-xl border bg-card p-4">

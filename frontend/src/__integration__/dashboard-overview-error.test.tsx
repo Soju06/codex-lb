@@ -115,6 +115,12 @@ describe("dashboard overview error integration", () => {
           await nextTimeframeRequestGate;
           return HttpResponse.json(
             createDashboardOverview({
+              timeframe: {
+                key: "30d",
+                windowMinutes: 43_200,
+                bucketSeconds: 86_400,
+                bucketCount: 30,
+              },
               accounts: [
                 createAccountSummary({
                   accountId: "acc_thirty_day",

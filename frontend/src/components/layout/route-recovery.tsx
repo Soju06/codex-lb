@@ -136,8 +136,15 @@ export class RouteErrorBoundary extends Component<
     return { failed: true };
   }
 
-  componentDidUpdate(previousProps: RouteErrorBoundaryProps): void {
-    if (this.state.failed && previousProps.resetKey !== this.props.resetKey) {
+  componentDidUpdate(
+    previousProps: RouteErrorBoundaryProps,
+    previousState: RouteErrorBoundaryState,
+  ): void {
+    if (
+      previousState.failed &&
+      this.state.failed &&
+      previousProps.resetKey !== this.props.resetKey
+    ) {
       this.setState({ failed: false });
     }
   }

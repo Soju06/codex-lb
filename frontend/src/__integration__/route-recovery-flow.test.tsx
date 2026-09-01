@@ -1,9 +1,28 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
 import { renderWithProviders } from "@/test/utils";
+
+const dashboardMockState = vi.hoisted(() => ({ failed: false }));
+
+vi.mock("@/features/dashboard/components/dashboard-page", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/features/dashboard/components/dashboard-page")>();
+  const DashboardPage = actual.DashboardPage;
+
+  return {
+    ...actual,
+    DashboardPage() {
+      if (dashboardMockState.failed) {
+        throw new Error("Dashboard route render failed");
+      }
+      return <DashboardPage />;
+    },
+  };
+});
 
 vi.mock("@/features/accounts/components/accounts-page", () => {
   throw new Error("Rejected route chunk");
@@ -12,7 +31,8 @@ vi.mock("@/features/accounts/components/accounts-page", () => {
 vi.mock("@/features/settings/components/settings-page", () => {
   return {
     SettingsPage() {
-      if (window.location.search || window.location.hash) {
+      const { hash, search } = useLocation();
+      if (search || hash) {
         throw new Error("Settings route render failed");
       }
       return <div data-testid="settings-route-loaded">Settings route recovered</div>;
@@ -26,6 +46,7 @@ describe("route recovery flow integration", () => {
   });
 
   afterEach(() => {
+    dashboardMockState.failed = false;
     vi.restoreAllMocks();
     window.history.pushState({}, "", "/");
   });
@@ -104,5 +125,33 @@ describe("route recovery flow integration", () => {
     expect(search).toHaveFocus();
     expect(window.location.search).toContain("search=abc");
     expect(screen.queryByTestId("route-load-error")).not.toBeInTheDocument();
+  });
+
+  it("recovers a failed Dashboard route through same-URL navigation", async () => {
+    const user = userEvent.setup({ delay: null });
+    dashboardMockState.failed = true;
+    window.history.pushState({}, "", "/dashboard");
+
+    renderWithProviders(<App />);
+    const recovery = await screen.findByTestId("route-load-error");
+
+    dashboardMockState.failed = false;
+    await user.click(within(recovery).getByRole("link", { name: "Go to Dashboard" }));
+
+    expect(await screen.findByRole("textbox")).toBeVisible();
+    expect(screen.queryByTestId("route-load-error")).not.toBeInTheDocument();
+  });
+
+  it("retains a new render failure introduced by a healthy location update", async () => {
+    window.history.pushState({}, "", "/settings");
+
+    renderWithProviders(<App />);
+    expect(await screen.findByTestId("settings-route-loaded")).toBeVisible();
+
+    window.history.pushState({}, "", "/settings?advanced=1#firewall");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+
+    expect(await screen.findByTestId("route-load-error")).toBeVisible();
+    expect(screen.queryByTestId("settings-route-loaded")).not.toBeInTheDocument();
   });
 });

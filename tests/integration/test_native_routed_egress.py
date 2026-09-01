@@ -12,7 +12,11 @@ import pytest
 from websockets.asyncio.server import serve as websocket_serve
 
 from app.core.clients.codex import CodexClient
-from app.core.clients.native_egress import SubprocessNativeEgressClient
+from app.core.clients.native_egress import (
+    SubprocessNativeEgressClient,
+    close_discovered_native_egress_client,
+    discover_native_egress_client,
+)
 from app.core.clients.proxy import stream_responses
 from app.core.clients.proxy_websocket import (
     _RESPONSES_WEBSOCKET_POLICY,
@@ -40,7 +44,9 @@ async def _copy_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
 
 
 @pytest.mark.asyncio
-async def test_direct_sse_and_routed_http_websocket_share_native_helper() -> None:
+async def test_direct_sse_and_routed_http_websocket_share_native_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     helper_value = os.environ.get("CODEX_LB_NATIVE_EGRESS_TEST_BINARY")
     if not helper_value:
         pytest.skip("set CODEX_LB_NATIVE_EGRESS_TEST_BINARY to run the native route wire probe")
@@ -124,9 +130,12 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper() -> Non
             pool_id="wire-probe",
             endpoint=ResolvedProxyEndpoint("proxy-1", "http", "127.0.0.1", proxy_port),
         )
-        native = SubprocessNativeEgressClient(helper)
+        await close_discovered_native_egress_client()
+        monkeypatch.setenv("PATH", f"{helper.parent}{os.pathsep}{os.environ.get('PATH', '')}")
+        native = discover_native_egress_client()
+        assert isinstance(native, SubprocessNativeEgressClient)
         python_session = _UnexpectedPythonSession()
-        client = CodexClient(python_session, native_egress_client=native)
+        client = CodexClient(python_session)
         try:
             direct_events = [
                 event
@@ -142,7 +151,6 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper() -> Non
                     "account-1",
                     base_url=f"http://127.0.0.1:{direct_port}",
                     upstream_stream_transport_override="http",
-                    native_egress_client=native,
                     allow_direct_egress=False,
                     suppress_live_usage=True,
                     session=cast(aiohttp.ClientSession, python_session),
@@ -208,6 +216,6 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper() -> Non
         finally:
             proxy_server.close()
             await proxy_server.wait_closed()
-            await native.aclose()
+            await close_discovered_native_egress_client()
             direct_server.close()
             await direct_server.wait_closed()

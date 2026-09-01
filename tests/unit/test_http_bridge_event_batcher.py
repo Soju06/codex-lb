@@ -196,7 +196,7 @@ async def test_dropped_batch_requires_fenced_terminal_settlement() -> None:
         max_pending_events=32,
     )
     try:
-        await _enqueue(batcher, "one")
+        await _enqueue(batcher, "one", recovery_dispatch_count=1)
         for _ in range(20):
             if durable.batches:
                 break
@@ -209,12 +209,14 @@ async def test_dropped_batch_requires_fenced_terminal_settlement() -> None:
             event_text="terminal",
             max_bytes=1024,
             state="failed",
+            expected_recovery_dispatch_count=1,
         )
         assert result.persisted is False
         assert result.settlement_required is True
         assert durable.finalized == []
         assert durable.updated == []
         assert batcher._contexts == {}
+        assert batcher._operation_generations == {}
         assert batcher._dropped_operations == set()
     finally:
         await batcher.close()

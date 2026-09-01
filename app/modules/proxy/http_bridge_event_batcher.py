@@ -328,6 +328,7 @@ class HttpBridgeOperationEventBatcher:
             async with self._lock:
                 self._closing_operations.discard(operation_id)
                 self._contexts.pop(operation_id, None)
+                self._operation_generations.pop(operation_id, None)
                 self._dropped_operations.discard(operation_id)
             return TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
         try:

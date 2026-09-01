@@ -279,6 +279,7 @@ from app.modules.proxy._service.streaming.helpers import (
     _openai_error_fields,
     _raw_stream_error_code_or_upstream,
     _rewrite_malformed_stream_error_event,
+    _settle_background_ack,
     _stream_transport_failure_event_or_raise,
 )
 from app.modules.proxy._service.streaming.helpers import _raw_stream_error_fields as _raw_error_fields
@@ -632,15 +633,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             )
             if malformed_error_rewrite is not None:
                 first, event, first_payload, event_type = malformed_error_rewrite
-            ack_response_id = (
-                _facade()._canonical_background_ack_response_id(first_payload, event_type)
-                if payload.stream is False
-                else None
-            )
-            terminal_event_seen = ack_response_id is not None
-            if ack_response_id is not None:
-                response_id = ack_response_id
-                settlement.response_id = ack_response_id
+            terminal_event_seen, response_id = _settle_background_ack(settlement, payload, first_payload, response_id)
             if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
                 await _touch_api_key_reservation()
             event_service_tier = _facade()._service_tier_from_event_payload(first_payload)

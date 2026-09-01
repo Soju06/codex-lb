@@ -516,9 +516,6 @@ from app.modules.proxy._service.streaming.helpers import (
     _call_stream_with_supported_optional_kwargs as _call_stream_with_supported_optional_kwargs,
 )
 from app.modules.proxy._service.streaming.helpers import (
-    _canonical_background_ack_response_id as _canonical_background_ack_response_id,
-)
-from app.modules.proxy._service.streaming.helpers import (
     _classify_upstream_close as _classify_upstream_close,
 )
 from app.modules.proxy._service.streaming.helpers import (

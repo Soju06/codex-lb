@@ -54,7 +54,8 @@ from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
 from app.core.openai.models import OpenAIError, OpenAIEvent
-from app.core.openai.parsing import parse_sse_event
+from app.core.openai.parsing import classify_event_type, parse_sse_event
+from app.core.openai.requests import ResponsesRequest
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
 )
@@ -436,6 +437,24 @@ def _is_background_json_ack(
     event_type: str | None,
 ) -> bool:
     return stream is False and _canonical_background_ack_response_id(event_payload, event_type) is not None
+
+
+def _settle_background_ack(
+    settlement: _StreamSettlement,
+    payload: ResponsesRequest,
+    event_payload: dict[str, JsonValue] | None,
+    response_id: str,
+) -> tuple[bool, str]:
+    """Treat a canonical background acknowledgement as the terminal event of a `stream: false` request."""
+    ack_response_id = (
+        _canonical_background_ack_response_id(event_payload, classify_event_type(event_payload))
+        if payload.stream is False
+        else None
+    )
+    if ack_response_id is None:
+        return False, response_id
+    settlement.response_id = ack_response_id
+    return True, ack_response_id
 
 
 def _stream_iterator_after_capacity_admission(

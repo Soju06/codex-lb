@@ -745,9 +745,18 @@ def test_runstate_clean_is_ignored_after_a_timestamp_preserving_restore(tmp_path
     sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
     original = db_path.stat()
 
-    db_path.unlink()
-    db_path.write_bytes(b"B" * 4096)
-    os.utime(db_path, ns=(original.st_atime_ns, original.st_mtime_ns))
+    # Keep the original inode referenced while replacing the path. Some
+    # filesystems immediately reuse a just-unlinked inode, which would make
+    # this test depend on allocator timing rather than exercise replacement
+    # detection.
+    original_link = tmp_path / "store.db.original"
+    os.link(db_path, original_link)
+    try:
+        db_path.unlink()
+        db_path.write_bytes(b"B" * 4096)
+        os.utime(db_path, ns=(original.st_atime_ns, original.st_mtime_ns))
+    finally:
+        original_link.unlink(missing_ok=True)
 
     restored = db_path.stat()
     assert restored.st_size == original.st_size

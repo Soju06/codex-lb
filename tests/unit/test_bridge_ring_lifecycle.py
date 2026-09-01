@@ -334,6 +334,16 @@ async def test_lookup_request_targets_preserves_retained_response_alias_target(
         await session.close()
 
     coordinator = DurableBridgeSessionCoordinator(async_session_factory)
+    ordinary_registration = await coordinator.register_previous_response_id(
+        session_id=claimed.id,
+        api_key_id=None,
+        instance_id="retained-owner",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp-client-alias",
+        latest_response_id="resp-ordinary",
+        lease_ttl_seconds=120.0,
+    )
+    assert ordinary_registration is DurableBridgeAliasRegistration.REGISTERED
     registration = await coordinator.register_previous_response_id(
         session_id=claimed.id,
         api_key_id=None,

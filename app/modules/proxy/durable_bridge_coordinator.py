@@ -85,10 +85,14 @@ class DurableBridgeSessionCoordinator:
         async with self._session() as session:
             repository = DurableBridgeRepository(session)
             resolved_aliases: list[tuple[str, DurableBridgeSessionSnapshot]] = []
+            retained_alias_identity: tuple[str, str | None] | None = None
             for alias_kind, alias_value in (
                 (_DURABLE_TURN_STATE_ALIAS, turn_state),
-                (_DURABLE_PREVIOUS_RESPONSE_ALIAS, previous_response_id),
+                # Resolve retained aliases before ordinary response aliases so
+                # a same-session pair preserves the immutable replacement
+                # target carried by the retained entry.
                 (_DURABLE_RETAINED_PREVIOUS_RESPONSE_ALIAS, previous_response_id),
+                (_DURABLE_PREVIOUS_RESPONSE_ALIAS, previous_response_id),
                 (_DURABLE_SESSION_HEADER_ALIAS, session_header),
             ):
                 if alias_value is None:
@@ -115,6 +119,14 @@ class DurableBridgeSessionCoordinator:
                         api_key_scope=api_key_scope,
                     )
                 if snapshot is not None:
+                    identity = (snapshot.id, snapshot.account_id)
+                    if alias_kind == _DURABLE_RETAINED_PREVIOUS_RESPONSE_ALIAS:
+                        retained_alias_identity = identity
+                    elif alias_kind == _DURABLE_PREVIOUS_RESPONSE_ALIAS and identity == retained_alias_identity:
+                        # The ordinary alias points at the same durable row;
+                        # retaining it would let the mutable session anchor
+                        # shadow the retained alias's immutable target.
+                        continue
                     resolved_aliases.append((alias_kind, snapshot))
             resolved_identities = {(snapshot.id, snapshot.account_id) for _alias_kind, snapshot in resolved_aliases}
             resolved_account_ids = {

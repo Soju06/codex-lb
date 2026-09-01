@@ -2547,17 +2547,19 @@ class DurableBridgeRepository:
                     replay_payload.pop("stream", None)
                     replay_payload["type"] = "response.create"
                     replay_payload["input"] = replay_input
-                    # The self-contained replay input already includes this
-                    # snapshot turn's terminal output; count it once against
-                    # the byte bound.
-                    snapshot_bytes = len(snapshot.response_replay_input_json.encode("utf-8"))
+                    # The synthetic request carries the original payload
+                    # fields as well as the self-contained replay input. Count
+                    # the exact serialized request so retained instructions,
+                    # tools, or metadata cannot bypass the byte bound.
+                    synthetic_request_text = json.dumps(replay_payload, ensure_ascii=True, separators=(",", ":"))
+                    snapshot_bytes = len(synthetic_request_text.encode("utf-8"))
                     snapshot_turn_count = max(1, snapshot.response_replay_input_turn_count)
                     if represented_turns + snapshot_turn_count > max_turns or total_bytes + snapshot_bytes > max_bytes:
                         return None
                     synthetic_operation = replace(
                         snapshot,
                         parent_response_id=None,
-                        request_text=json.dumps(replay_payload, ensure_ascii=True, separators=(",", ":")),
+                        request_text=synthetic_request_text,
                     )
                     turns.append(
                         DurableBridgeTranscriptTurn(

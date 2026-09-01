@@ -4,7 +4,7 @@
 
 When complete-transcript recovery is explicitly enabled and an HTTP bridge
 request has a hard continuity anchor, zero upstream response events, and an
-eventless transport close or timeout, the proxy MAY build a bounded,
+eventless transport close or timeout, the proxy MUST attempt to build a bounded,
 account-neutral unanchored replay. It MUST require the durable operation fence,
 same-account ownership, circuit-generation claim, and single-replay guard. If
 any condition is not proven, it MUST preserve the existing fail-closed error.

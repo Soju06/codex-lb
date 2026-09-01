@@ -20,7 +20,7 @@ the configured maximum turn, input-item, and byte limits.
 
 ### Requirement: Legacy replay bookkeeping remains account-neutral
 
-Complete transcript recovery MAY remove only known response-owned legacy
+Complete transcript recovery MUST remove or normalize only known response-owned legacy
 reasoning, metadata, output annotations, and empty output fragments from
 durable replay items before validation. Unknown fields, account-scoped state,
 unsettled calls, and ambiguous shapes MUST remain fail-closed.

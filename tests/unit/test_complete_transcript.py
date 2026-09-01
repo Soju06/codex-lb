@@ -884,6 +884,24 @@ async def test_complete_transcript_prefers_snapshot_when_parent_chain_is_missing
         )
         is None
     )
+    row.request_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-test",
+            "previous_response_id": "purged-parent",
+            "instructions": "x" * 600,
+            "input": [{"type": "message", "role": "user", "content": "old delta"}],
+        }
+    )
+    # The retained snapshot itself is small, but the synthetic request also
+    # carries the original payload fields and must stay within max_bytes.
+    assert (
+        await DurableBridgeRepository(cast(AsyncSession, _Session())).get_complete_transcript(
+            response_id="resp_snapshot",
+            max_bytes=512,
+        )
+        is None
+    )
     replay = build_complete_replay_payload(
         turns,
         continuation_request_text=json.dumps(

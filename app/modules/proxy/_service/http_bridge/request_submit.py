@@ -1547,9 +1547,11 @@ class _HTTPBridgeRequestSubmitMixin:
                             model_class=_extract_model_class(request_state.model) if request_state.model else None,
                             owner_check_applied=True,
                         )
-        allow_complete_transcript_root_recovery = _http_bridge_complete_transcript_root_recovery_candidate(
-            request_state,
-            root_recovery_request_text if root_recovery_body else text_data,
+        allow_complete_transcript_root_recovery = root_recovery_body and (
+            _http_bridge_complete_transcript_root_recovery_candidate(
+                request_state,
+                root_recovery_request_text,
+            )
         )
         if allow_complete_transcript_root_recovery:
             # Preserve the durable predecessor while this self-contained root

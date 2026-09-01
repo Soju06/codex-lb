@@ -40,7 +40,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     is_account_neutral_websocket_error_code,
 )
-from app.core.errors import response_failed_event
+from app.core.errors import OpenAIErrorParam, coerce_error_param, response_failed_event
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import (
     _LIFECYCLE_EVENT_TYPES,
@@ -252,7 +252,7 @@ def _http_bridge_precreated_retry_recovery_kwargs(retry_method: Any) -> dict[str
 def _http_bridge_unsafe_new_response_anchor_error(
     *,
     code: str | None,
-    param: str | None,
+    param: OpenAIErrorParam | str | None,
     message: str | None,
 ) -> bool:
     """Classify the upstream's terse invalid-anchor error only when opted in."""
@@ -266,7 +266,13 @@ def _http_bridge_unsafe_new_response_anchor_error(
     if code != "invalid_request_error":
         return False
     normalized = " ".join((message or "").lower().replace("`", "").replace("_", " ").split()).strip(" .")
-    return param == "previous_response_id" or normalized == "invalid previous response id"
+    param_state = coerce_error_param(param)
+    if param_state.present:
+        # Presence of a blank, null, or non-string parameter is malformed
+        # provider data, not proof that the stale anchor was rejected.  Keep
+        # the explicit unsafe recovery opt-in fail-closed for that shape.
+        return not param_state.malformed and param_state.normalized == "previous_response_id"
+    return normalized == "invalid previous response id"
 
 
 _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (

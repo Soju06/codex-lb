@@ -4000,6 +4000,7 @@ class _HTTPBridgeStreamingMixin:
             previous_response_rejected_full_resend_without_operation_fence = bool(
                 explicit_previous_response_rejection
                 and not verified_stale_anchor_operation_fenced
+                and not durable_recovery_retry_armed
                 and request_state.response_event_count == 0
                 and request_state.replay_count == 0
                 and durable_full_resend_retains_required_context()

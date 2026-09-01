@@ -386,6 +386,7 @@ async def test_rollback_fence_operation_restores_generation_after_rebind_rollbac
         await _enqueue(batcher, "old-before-rebind")
         await batcher.fence_operation(operation_id="op-1", recovery_dispatch_count=1)
         assert await batcher.rollback_fence_operation(operation_id="op-1", recovery_dispatch_count=0) is True
+        assert "op-1" not in batcher._operation_generations
         assert await batcher.rollback_fence_operation(operation_id="op-1", recovery_dispatch_count=0) is False
         await _enqueue(batcher, "replacement-after-rollback")
         assert await batcher.flush_pending_operation(operation_id="op-1") is True

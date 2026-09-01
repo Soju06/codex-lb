@@ -246,6 +246,48 @@ def test_build_complete_replay_payload_accepts_unanchored_full_history() -> None
     assert payload is not None
 
 
+def test_build_complete_replay_payload_preserves_prior_output_on_full_history_resend() -> None:
+    first_output: dict[str, object] = {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "answer"}],
+    }
+    turns = [
+        _turn(
+            1,
+            parent_response_id=None,
+            response_id="resp_1",
+            request_input=[{"type": "message", "role": "user", "content": "first"}],
+            output=[first_output],
+        ),
+        _turn(
+            2,
+            parent_response_id="resp_1",
+            response_id="resp_2",
+            request_input=[
+                {"type": "message", "role": "user", "content": "first"},
+                first_output,
+                {"type": "message", "role": "user", "content": "follow up"},
+            ],
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "second answer"}],
+                }
+            ],
+        ),
+    ]
+
+    payload = build_complete_replay_payload(turns)
+
+    assert payload is not None
+    assert [item["role"] for item in json.loads(payload)["input"]] == ["user", "assistant", "user"]
+
+
 def test_build_complete_replay_payload_rejects_divergent_unanchored_history() -> None:
     turn = _turn(
         1,
@@ -1077,6 +1119,24 @@ def test_materialize_output_items_prefers_output_item_done_over_empty_completed_
     assert output is not None
     output_items = cast(list[dict[str, Any]], output)
     assert [item["type"] for item in output_items] == ["reasoning", "message"]
+
+
+def test_materialize_output_items_rejects_conflicting_terminal_output() -> None:
+    events = [
+        (
+            "event: response.output_item.done\ndata: "
+            '{"type":"response.output_item.done","output_index":0,"item":'
+            '{"type":"message","role":"assistant","content":[{"type":"output_text","text":"spooled"}]}}\n\n'
+        ),
+        (
+            "event: response.completed\ndata: "
+            '{"type":"response.completed","response":{"output":['
+            '{"type":"message","role":"assistant","content":[{"type":"output_text","text":"terminal"}]}'
+            "]}}\n\n"
+        ),
+    ]
+
+    assert materialize_output_items_from_events(events) is None
 
 
 def test_materialize_output_items_requires_terminal_completion() -> None:

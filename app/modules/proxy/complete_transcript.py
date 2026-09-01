@@ -80,7 +80,24 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
         output_indexes = sorted(output_items)
         if output_indexes != list(range(len(output_indexes))):
             return None
-        return [output_items[index] for index in sorted(output_items)]
+        materialized_output = [output_items[index] for index in output_indexes]
+        # A non-empty terminal output is an independent representation of the
+        # same response.  The durable spool is only replayable when both
+        # representations agree; otherwise choosing the indexed events would
+        # silently discard a conflicting terminal payload.
+        if (
+            completed_output is not None
+            and completed_output
+            and (
+                len(completed_output) != len(materialized_output)
+                or any(
+                    _canonical_item(terminal_item) != _canonical_item(indexed_item)
+                    for terminal_item, indexed_item in zip(completed_output, materialized_output)
+                )
+            )
+        ):
+            return None
+        return materialized_output
     return completed_output
 
 
@@ -150,6 +167,10 @@ def build_complete_replay_payload(
             and (matched_input := _strip_omitted_output_prefix(turn_input, canonical_with_prior)) is not None
         ):
             fresh_input = matched_input
+            # The matched prefix already contains ``prior_output``; retain it
+            # in the canonical transcript so a full-history resend cannot drop
+            # the preceding assistant or tool output.
+            canonical_input = list(canonical_with_prior)
             include_prior_output = False
         elif (
             index > 0

@@ -5704,7 +5704,11 @@ class _WebSocketMixin:
                     _websocket_event_error_code(event_type, payload),
                     _websocket_event_error_type(event_type, payload),
                 ),
-                param=unsafe_error_param.normalized if unsafe_error_param is not None else None,
+                # Preserve parameter presence and validity.  Passing only the
+                # normalized string would collapse an omitted field and a
+                # present-but-malformed field into the same ``None`` value,
+                # allowing the unsafe opt-in to recover on malformed input.
+                param=unsafe_error_param,
                 message=_websocket_event_error_message(event_type, payload),
             )
             event, payload, event_type, downstream_text = _maybe_rewrite_websocket_previous_response_not_found_event(

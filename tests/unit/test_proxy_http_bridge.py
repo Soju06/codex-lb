@@ -42,7 +42,7 @@ from app.core.clients.proxy_websocket import (
     WebsocketsUpstreamWebSocket,
 )
 from app.core.config.settings import Settings
-from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, openai_error
+from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, OpenAIErrorParam, openai_error
 from app.core.openai.models import OpenAIError
 from app.core.openai.requests import ResponsesRequest
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
@@ -1567,6 +1567,16 @@ def test_http_bridge_unsafe_new_response_recovery_classifies_terse_anchor_error(
         )
         is False
     )
+
+    for malformed_param in (OpenAIErrorParam(True, None), OpenAIErrorParam(True, " "), OpenAIErrorParam(True, 0)):
+        assert (
+            http_bridge_upstream_events_module._http_bridge_unsafe_new_response_anchor_error(
+                code="invalid_request_error",
+                param=malformed_param,
+                message="Invalid `previous_response_id`.",
+            )
+            is False
+        )
 
 
 @pytest.mark.parametrize("param", ["", "   "])

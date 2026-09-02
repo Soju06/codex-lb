@@ -78,6 +78,14 @@ _SQLITE_WATCHDOG_STATEMENT_PREVIEW_CHARS = 300
 # aiosqlite worker thread still holds it — so on timeout the reclaim below
 # interrupts the driver and invalidates the connection, disposing the worker.
 _SQLITE_TEARDOWN_TIMEOUT_SECONDS = _SQLITE_BUSY_TIMEOUT_SECONDS / 6
+# The bound above is wall-clock, so a starved event loop can reach it while the
+# aiosqlite worker has already finished and its completion is merely queued
+# behind the timeout wakeup. ``_shielded_bounded`` re-checks the task once when
+# it wakes; this grace covers the window just after that check, so a teardown
+# that is finishing right now is observed instead of reclaimed (issue #2029).
+# One fortieth of the busy timeout: long enough for a queued completion to be
+# delivered, far too short to matter to a genuinely wedged worker.
+_SQLITE_TEARDOWN_COMPLETION_GRACE_SECONDS = _SQLITE_BUSY_TIMEOUT_SECONDS / 40
 # Session.info marker set once a teardown step was abandoned as wedged: the
 # session must never be driven by another coroutine again (the abandoned
 # greenlet may still resume), and the deferred cleanup takes over.
@@ -693,12 +701,40 @@ def _sqlite_watchdog_identifiers(connection: Connection) -> str:
         return "write_held_seconds=unknown"
 
 
+async def _teardown_completed_after_bound(abandoned: asyncio.Task[object]) -> bool:
+    """Did the abandoned teardown finish *successfully* while we were deciding?
+
+    Tripping the wall-clock bound does not prove the aiosqlite worker is stuck:
+    under a starved event loop the rollback/close can already have completed,
+    with only its callback still queued (issue #2029). Reclaiming there fences a
+    healthy session and invalidates a live connection, and the interrupt then
+    fails with "no active connection" / "Cannot operate on a closed database".
+
+    Only a task that is done, uncancelled, and exception-free earns the
+    exemption. A failed or cancelled teardown proves nothing about what was
+    released — SQLAlchemy clears ``session._transaction`` before it finishes
+    releasing every held connection — so those keep the issue #1682 reclaim.
+    """
+    if not abandoned.done():
+        with anyio.CancelScope(shield=True):
+            try:
+                await asyncio.wait({abandoned}, timeout=_SQLITE_TEARDOWN_COMPLETION_GRACE_SECONDS)
+            except asyncio.CancelledError:
+                # Teardown runs in ``finally`` blocks; the caller's cancellation
+                # does not decide whether this teardown is wedged.
+                pass
+    if not abandoned.done() or abandoned.cancelled():
+        return False
+    return abandoned.exception() is None
+
+
 async def _reclaim_wedged_sqlite_session(
     session: AsyncSession,
     abandoned: asyncio.Task[object],
     connections: tuple[Connection, ...],
     *,
     phase: str,
+    elapsed_seconds: float,
 ) -> None:
     """Release what a wedged SQLite teardown still holds and fence the session.
 
@@ -724,10 +760,12 @@ async def _reclaim_wedged_sqlite_session(
     _wedged_teardown_cleanup_tasks.add(abandoned)
     for connection in connections:
         logger.warning(
-            "sqlite_wedged_teardown phase=%s bound_seconds=%.1f %s — interrupting and invalidating the "
-            "connection so the writer slot is released instead of stalling every writer (issue #1682)",
+            "sqlite_wedged_teardown phase=%s bound_seconds=%.1f elapsed_seconds=%.1f %s — interrupting and "
+            "invalidating the connection so the writer slot is released instead of stalling every writer "
+            "(issue #1682)",
             phase,
             _SQLITE_TEARDOWN_TIMEOUT_SECONDS,
+            elapsed_seconds,
             _sqlite_watchdog_identifiers(connection),
         )
         try:
@@ -750,13 +788,21 @@ async def _reclaim_wedged_sqlite_session(
         try:
             connection.invalidate()
         except Exception:
-            logger.debug("Invalidating a wedged SQLite connection failed", exc_info=True)
+            # The last mechanism that could have released the writer slot just
+            # failed: a permanent hold (issue #1981) starts exactly here, so
+            # this must be visible rather than debug-only.
+            logger.warning(
+                "Invalidating a wedged SQLite connection failed — the writer slot may stay held for the "
+                "lifetime of this process (issue #1981)",
+                exc_info=True,
+            )
     if not connections:
         logger.warning(
-            "sqlite_wedged_teardown phase=%s bound_seconds=%.1f — no held connection to reclaim; "
-            "abandoning the wedged %s (issue #1682)",
+            "sqlite_wedged_teardown phase=%s bound_seconds=%.1f elapsed_seconds=%.1f — no held connection to "
+            "reclaim; abandoning the wedged %s (issue #1682)",
             phase,
             _SQLITE_TEARDOWN_TIMEOUT_SECONDS,
+            elapsed_seconds,
             phase,
         )
     # The abandoned teardown is owned until completion (registered above, so
@@ -800,6 +846,41 @@ def _finish_abandoned_teardown(session: AsyncSession, task: asyncio.Task[object]
     cleanup_task.add_done_callback(_wedged_teardown_cleanup_tasks.discard)
 
 
+async def _finish_bounded_teardown(
+    session: AsyncSession,
+    abandoned: asyncio.Task[object],
+    held_connections: tuple[Connection, ...],
+    *,
+    phase: str,
+    elapsed_seconds: float,
+) -> None:
+    """Decide what the expired teardown bound actually means, then act.
+
+    A completed teardown holds nothing: it released its own connection, so
+    fencing the session and invalidating that connection would be pure damage
+    (issue #2029). Everything else — still running, failed, cancelled — keeps
+    the issue #1682 reclaim.
+    """
+    if await _teardown_completed_after_bound(abandoned):
+        logger.warning(
+            "sqlite_teardown_bound_elapsed_but_completed phase=%s bound_seconds=%.1f elapsed_seconds=%.1f — the "
+            "%s completed before the reclaim ran, so nothing is held; the bound elapsed without the teardown "
+            "being stuck (issue #2029)",
+            phase,
+            _SQLITE_TEARDOWN_TIMEOUT_SECONDS,
+            elapsed_seconds,
+            phase,
+        )
+        return
+    await _reclaim_wedged_sqlite_session(
+        session,
+        abandoned,
+        held_connections,
+        phase=phase,
+        elapsed_seconds=elapsed_seconds,
+    )
+
+
 async def _safe_rollback(session: AsyncSession) -> None:
     if not session.in_transaction():
         return
@@ -816,12 +897,19 @@ async def _safe_rollback(session: AsyncSession) -> None:
             return
         return
     held_connections = _session_sync_connections(session)
+    started = asyncio.get_running_loop().time()
     try:
         abandoned = await _shielded_bounded(session.rollback(), bound)
     except BaseException:
         return
     if abandoned is not None:
-        await _reclaim_wedged_sqlite_session(session, abandoned, held_connections, phase="rollback")
+        await _finish_bounded_teardown(
+            session,
+            abandoned,
+            held_connections,
+            phase="rollback",
+            elapsed_seconds=asyncio.get_running_loop().time() - started,
+        )
 
 
 async def _safe_close(session: AsyncSession) -> None:
@@ -836,12 +924,19 @@ async def _safe_close(session: AsyncSession) -> None:
             return
         return
     held_connections = _session_sync_connections(session)
+    started = asyncio.get_running_loop().time()
     try:
         abandoned = await _shielded_bounded(session.close(), bound)
     except BaseException:
         return
     if abandoned is not None:
-        await _reclaim_wedged_sqlite_session(session, abandoned, held_connections, phase="close")
+        await _finish_bounded_teardown(
+            session,
+            abandoned,
+            held_connections,
+            phase="close",
+            elapsed_seconds=asyncio.get_running_loop().time() - started,
+        )
 
 
 async def close_session(session: AsyncSession) -> None:

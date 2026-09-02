@@ -801,8 +801,12 @@ async def test_upstream_proxy_endpoint_test_probes_socks_proxy(async_client, mon
             captured["get_kwargs"] = kwargs
             return _Response()
 
+    shared_context = object()
     monkeypatch.setattr("app.modules.settings.api.ProxyConnector", _FakeConnector)
     monkeypatch.setattr("app.modules.settings.api.aiohttp.ClientSession", _FakeAiohttpSession)
+    # The probe must reuse the process-wide context (issue #2029), not build a
+    # fresh one; the name is patched where this module bound it at import.
+    monkeypatch.setattr("app.modules.settings.api.shared_ssl_context", lambda: shared_context)
 
     endpoint = await async_client.post(
         "/api/settings/upstream-proxy/endpoints",
@@ -831,6 +835,7 @@ async def test_upstream_proxy_endpoint_test_probes_socks_proxy(async_client, mon
     assert connector_kwargs["host"] == "proxy.internal"
     assert connector_kwargs["port"] == 1080
     assert connector_kwargs["rdns"] is True
+    assert connector_kwargs["ssl"] is shared_context
     assert session_kwargs["trust_env"] is False
 
 

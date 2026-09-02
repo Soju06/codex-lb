@@ -7,9 +7,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import app.core.clients.codex as codex_module
 import app.core.clients.http as http_module
+from app.core.upstream_proxy import ResolvedProxyEndpoint
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _clear_shared_ssl_context_cache():
+    """The shared context is memoized for the process; a sentinel built while
+    ``_build_ssl_context`` is patched must never escape into another test, and a
+    real context cached by an earlier test must never hide a patched builder."""
+    http_module.shared_ssl_context.cache_clear()
+    yield
+    http_module.shared_ssl_context.cache_clear()
 
 
 def _settings() -> SimpleNamespace:
@@ -620,3 +632,80 @@ async def test_refresh_http_client_cancellation_keeps_current_generation() -> No
         assert http_module.get_http_client() is initial
 
     await http_module.close_http_client()
+
+
+def test_shared_ssl_context_is_memoized_and_builder_stays_uncached() -> None:
+    with patch("app.core.clients.http._build_ssl_context") as build_ssl_context:
+        first = http_module.shared_ssl_context()
+        second = http_module.shared_ssl_context()
+
+    assert first is second is build_ssl_context.return_value
+    build_ssl_context.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_shared_ssl_context_is_built_once_across_client_generations() -> None:
+    """Issue #2029: every connector generation used to load the CA bundle again
+    on the event loop. Crossing a construction boundary (startup + refresh) is
+    what makes this sensitive: the two connectors built inside a single
+    ``_build_http_client`` call already shared one context before the fix."""
+    await http_module.close_http_client()
+
+    ssl_context = MagicMock()
+    connectors = [MagicMock() for _ in range(4)]
+    sessions = []
+    for _ in range(4):
+        session = MagicMock()
+        session.close = AsyncMock()
+        sessions.append(session)
+    retry_client = MagicMock()
+    retry_client.close = AsyncMock()
+
+    with (
+        patch("app.core.clients.http.get_settings", return_value=_settings()),
+        patch("app.core.clients.http._build_ssl_context", return_value=ssl_context) as build_ssl_context,
+        patch("app.core.clients.http.aiohttp.TCPConnector", side_effect=connectors) as tcp_connector_cls,
+        patch("app.core.clients.http.aiohttp.ClientSession", side_effect=sessions),
+        patch("app.core.clients.http.RetryClient", return_value=retry_client),
+    ):
+        await http_module.init_http_client()
+        await http_module.refresh_http_client()
+        await _drain_close_tasks()
+
+    assert build_ssl_context.call_count == 1
+    assert [call.kwargs["ssl"] for call in tcp_connector_cls.call_args_list] == [ssl_context] * 4
+
+    await http_module.close_http_client()
+    await _drain_close_tasks()
+
+
+def test_create_codex_session_uses_the_shared_ssl_context() -> None:
+    ssl_context = MagicMock()
+    connector = MagicMock()
+    session = MagicMock()
+
+    with (
+        patch("app.core.clients.http.shared_ssl_context", return_value=ssl_context) as shared_context,
+        patch("app.core.clients.codex.aiohttp.TCPConnector", return_value=connector) as tcp_connector_cls,
+        patch("app.core.clients.codex.aiohttp.ClientSession", return_value=session) as client_session_cls,
+    ):
+        assert codex_module.create_codex_session() is session
+
+    shared_context.assert_called_once_with()
+    assert tcp_connector_cls.call_args.kwargs["ssl"] is ssl_context
+    assert client_session_cls.call_args.kwargs["connector"] is connector
+
+
+def test_socks_proxy_connector_uses_the_shared_ssl_context() -> None:
+    ssl_context = MagicMock()
+    connector = MagicMock()
+    endpoint = ResolvedProxyEndpoint("ep_1", "socks5h", "proxy.test", 1080)
+
+    with (
+        patch("app.core.clients.http.shared_ssl_context", return_value=ssl_context) as shared_context,
+        patch("app.core.clients.codex.ProxyConnector", return_value=connector) as proxy_connector_cls,
+    ):
+        assert codex_module._socks_proxy_connector(endpoint) is connector
+
+    shared_context.assert_called_once_with()
+    assert proxy_connector_cls.call_args.kwargs["ssl"] is ssl_context

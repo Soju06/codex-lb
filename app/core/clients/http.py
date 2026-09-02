@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 import os
 import socket
@@ -107,6 +108,25 @@ def _build_ssl_context() -> ssl.SSLContext:
     return context
 
 
+@functools.cache
+def shared_ssl_context() -> ssl.SSLContext:
+    """The process's one outbound SSL context, built on first use.
+
+    Loading the CA bundle costs a synchronous read of every root certificate,
+    and every upstream connector used to pay it on the event loop — a stall
+    that starved the loop for tens of seconds under load and tripped the
+    bounded SQLite teardown below its 5s deadline (issue #2029). Startup's
+    ``init_http_client`` builds it before the app serves, so later connector
+    factories reuse this instance instead of re-reading the roots per turn.
+
+    The published context is treated as immutable: no runtime code may change
+    its verification mode, hostname checking, CA locations, ciphers, or ALPN
+    afterwards, because every connector shares it. Trust-root changes on disk
+    therefore take effect only after a process restart.
+    """
+    return _build_ssl_context()
+
+
 def _apply_tcp_keepalive(sock: socket.socket) -> None:
     """Enable OS keepalive probes on an upstream socket.
 
@@ -173,7 +193,7 @@ class HttpClientLease:
 
 async def _build_http_client() -> HttpClient:
     settings = get_settings()
-    ssl_context = _build_ssl_context()
+    ssl_context = shared_ssl_context()
     proxy_env = (
         settings.upstream_websocket_proxy_env() if hasattr(settings, "upstream_websocket_proxy_env") else os.environ
     )

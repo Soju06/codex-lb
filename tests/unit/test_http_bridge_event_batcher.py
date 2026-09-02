@@ -92,6 +92,19 @@ class _BlockingTerminalAppendDurableBridge(_FakeDurableBridge):
         return True
 
 
+class _BlockingBatchAppendDurableBridge(_FakeDurableBridge):
+    def __init__(self) -> None:
+        super().__init__()
+        self.batch_started = asyncio.Event()
+        self.release_batch = asyncio.Event()
+
+    async def append_operation_events(self, *, events, max_bytes: int) -> bool:
+        result = await super().append_operation_events(events=events, max_bytes=max_bytes)
+        self.batch_started.set()
+        await self.release_batch.wait()
+        return result
+
+
 async def _enqueue(
     batcher: HttpBridgeOperationEventBatcher,
     text: str,
@@ -433,6 +446,46 @@ async def test_enqueue_refreshes_context_when_owner_identity_changes() -> None:
         assert await batcher.flush_pending_operation(operation_id="op-1") is True
         assert durable.batches == [["original", "replacement"]]
     finally:
+        await batcher.close()
+
+
+@pytest.mark.asyncio
+async def test_owner_rebinding_waits_for_inflight_flush_before_rewriting_context() -> None:
+    durable = _BlockingBatchAppendDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    try:
+        await _enqueue(batcher, "original", recovery_dispatch_count=1)
+        flush_task = asyncio.create_task(batcher.flush_pending_operation(operation_id="op-1"))
+        await durable.batch_started.wait()
+
+        rebind_task = asyncio.create_task(
+            batcher.enqueue(
+                operation_id="op-1",
+                session_id="replacement-session",
+                instance_id="replacement-instance",
+                owner_epoch=9,
+                event_text="replacement",
+                recovery_dispatch_count=1,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not rebind_task.done()
+
+        durable.release_batch.set()
+        await flush_task
+        await rebind_task
+        assert durable.batches == [["original"]]
+
+        assert await batcher.flush_pending_operation(operation_id="op-1") is True
+        assert durable.batches == [["original"], ["replacement"]]
+    finally:
+        await batcher.discard_operation(operation_id="op-1")
         await batcher.close()
 
 

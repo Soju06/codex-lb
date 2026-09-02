@@ -567,6 +567,19 @@ async def test_collect_responses_payload_returns_contract_error_on_truncated_str
 
 
 @pytest.mark.asyncio
+async def test_collect_responses_payload_rejects_unfinished_output_item() -> None:
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks(
+            'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message"}}\n\n',
+            'data: {"type":"response.completed","response":{"id":"resp_1","output":[]}}\n\n',
+        )
+    )
+
+    body = result.model_dump(mode="json", exclude_none=True)
+    assert body["error"]["code"] == "invalid_output_item"
+
+
+@pytest.mark.asyncio
 async def test_collect_responses_payload_captures_turn_state_metadata_before_failed_response() -> None:
     captured_headers: dict[str, str] = {}
 
@@ -1340,7 +1353,20 @@ async def test_normalize_public_responses_stream_rejects_added_after_done() -> N
         if payload is not None
     ]
     assert "response.output_item.added" not in event_types
-    assert "response.completed" in event_types
+    delta = next(
+        payload
+        for payload in (proxy_api_module._parse_sse_payload(block) for block in blocks)
+        if payload is not None and payload.get("type") == "response.output_text.delta"
+    )
+    assert delta["delta"] == "done"
+    assert event_types[-1] == "response.failed"
+    failed = proxy_api_module._parse_sse_payload(blocks[-1])
+    assert failed is not None
+    response = failed["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "invalid_output_item"
 
 
 @pytest.mark.asyncio

@@ -8708,6 +8708,7 @@ async def _collect_responses_payload(
     terminal_result: OpenAIResponseResult | None = None
     nonterminal_result: OpenAIResponsePayload | None = None
     contract_violation_kind: str | None = None
+    output_lifecycle_invalid = False
     async for line in stream:
         payload = _parse_sse_payload(line)
         if not payload:
@@ -8725,6 +8726,7 @@ async def _collect_responses_payload(
             terminal_seen=terminal_result is not None,
         ):
             contract_violation_kind = contract_violation_kind or "invalid_output_item"
+            output_lifecycle_invalid = True
         if terminal_result is not None:
             continue
         if event_type == "error":
@@ -8767,6 +8769,11 @@ async def _collect_responses_payload(
             )
 
     if terminal_result is not None:
+        if output_lifecycle_invalid or added_output_indexes - done_output_indexes:
+            return _public_contract_error_envelope(
+                "invalid_output_item",
+                _public_contract_error_message("invalid_output_item"),
+            )
         return terminal_result
     if nonterminal_result is not None:
         return nonterminal_result
@@ -8848,6 +8855,7 @@ async def _normalize_public_responses_stream(
     done_seen = False
     unparseable_forwarded = False
     contract_violation_kind: str | None = None
+    output_lifecycle_invalid = False
     next_sequence_number = 0
     seen_text_delta_keys: set[tuple[str | None, int | None]] = set()
     # Collect output items from streamed ``response.output_item.added`` /
@@ -8968,6 +8976,7 @@ async def _normalize_public_responses_stream(
             # A terminal response closes the output lifecycle. Do not let a
             # late frame mutate the collected replay or leak to the client.
             contract_violation_kind = contract_violation_kind or "invalid_output_item"
+            output_lifecycle_invalid = True
             continue
         if (
             enforce_openai_sdk_contract
@@ -9079,7 +9088,20 @@ async def _normalize_public_responses_stream(
             terminal_seen=terminal_seen,
         ):
             contract_violation_kind = contract_violation_kind or "invalid_output_item"
+            output_lifecycle_invalid = True
             continue
+        if (
+            enforce_openai_sdk_contract
+            and event_type in {"response.completed", "response.incomplete"}
+            and (output_lifecycle_invalid or added_output_indexes - done_output_indexes)
+        ):
+            for formatted_payload in _public_response_failed_event_blocks(
+                "invalid_output_item",
+                include_created=False,
+                sequence_number=next_sequence_number,
+            ):
+                yield formatted_payload
+            return
         if event_type == "response.output_text.delta":
             seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
         # Both the backfill branch and _normalize_public_stream_payload copy

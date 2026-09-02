@@ -1062,6 +1062,20 @@ class DurableBridgeSessionCoordinator:
                 api_key_scope=api_key_scope,
             )
 
+    async def get_unique_unknown_operation_for_root(
+        self,
+        *,
+        session_id: str,
+        model: str,
+        api_key_scope: str | None = None,
+    ) -> DurableBridgeOperationSnapshot | None:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).get_unique_unknown_operation_for_root(
+                session_id=session_id,
+                model=model,
+                api_key_scope=api_key_scope,
+            )
+
     async def get_recent_unknown_operations(
         self,
         *,

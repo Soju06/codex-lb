@@ -1324,6 +1324,65 @@ async def test_hard_continuity_operation_replay_falls_back_to_latest_parent_unkn
 
 
 @pytest.mark.asyncio
+async def test_hard_continuity_operation_replay_falls_back_to_root_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-root-fallback")
+    session.durable_session_id = "durable-hard-fence-root-fallback"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-root-fallback",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery"
+        ),
+    )
+    operation = SimpleNamespace(
+        operation_id="op-root-fallback",
+        request_fingerprint="fingerprint-root-fallback",
+        parent_response_id=None,
+        session_id=session.durable_session_id,
+        state="unknown",
+        event_spool_complete=False,
+        request_text='{"type":"response.create","input":"retry"}',
+    )
+    exact_lookup = AsyncMock(return_value=None)
+    root_lookup = AsyncMock(return_value=operation)
+    parent_lookup = AsyncMock(return_value=None)
+    service._durable_bridge = SimpleNamespace(
+        get_operation_by_fingerprint=exact_lookup,
+        get_unique_unknown_operation_for_root=root_lookup,
+        get_unique_unknown_operation_for_latest_parent=parent_lookup,
+    )
+
+    allowed, reason = await service._http_bridge_operation_fenced_continuity_replay_diagnostic(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"retry"}',
+    )
+
+    assert allowed is True
+    assert reason == "operation_unknown_root"
+    exact_lookup.assert_awaited_once()
+    root_lookup.assert_awaited_once_with(
+        session_id=session.durable_session_id,
+        model=request_state.model,
+        api_key_scope="__anonymous__",
+    )
+    parent_lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_hard_continuity_operation_replay_falls_back_to_one_recent_parent_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

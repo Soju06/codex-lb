@@ -2395,6 +2395,58 @@ async def test_unknown_operation_latest_parent_fallback_requires_unique_model_ma
 
 
 @pytest.mark.asyncio
+async def test_unknown_operation_root_fallback_matches_parentless_operation(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-operation-root-fallback",
+            session_key_value="sid-operation-root-fallback",
+        )
+        assert await repository.renew_session(
+            session_id=claim.id,
+            instance_id="inst-operation-root-fallback",
+            owner_epoch=claim.owner_epoch,
+            lease_ttl_seconds=120.0,
+            latest_response_id="resp-latest-parent",
+        )
+
+        fingerprint = durable_bridge_hash("operation-root-fallback")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-root-fallback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id=None,
+        )
+        assert operation is not None
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-root-fallback",
+            owner_epoch=claim.owner_epoch,
+            state="unknown",
+        )
+
+        recovered = await repository.get_unique_unknown_operation_for_root(
+            session_id=claim.id,
+            model="gpt-5.6",
+            api_key_scope="__anonymous__",
+        )
+        assert recovered is not None
+        assert recovered.operation_id == operation_id
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_unknown_operation_recent_lookup_is_bounded_to_session_model_and_age(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

@@ -2371,6 +2371,40 @@ class DurableBridgeRepository:
             return None
         return _to_operation_snapshot(rows[0])
 
+    async def get_unique_unknown_operation_for_root(
+        self,
+        *,
+        session_id: str,
+        model: str | None = None,
+        api_key_scope: str | None = None,
+    ) -> DurableBridgeOperationSnapshot | None:
+        """Find one safely recoverable UNKNOWN root turn for this session."""
+        if not isinstance(model, str) or not model:
+            return None
+        session_statement = select(HttpBridgeSessionRecord.id).where(
+            HttpBridgeSessionRecord.id == session_id,
+        )
+        if api_key_scope is not None:
+            session_statement = session_statement.where(
+                HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+            )
+        predicates = [
+            HttpBridgeOperationRecord.session_id == session_statement.scalar_subquery(),
+            HttpBridgeOperationRecord.parent_response_id.is_(None),
+            HttpBridgeOperationRecord.state == "unknown",
+            HttpBridgeOperationRecord.model == model,
+        ]
+        result = await self._session.execute(
+            select(HttpBridgeOperationRecord)
+            .where(*predicates)
+            .order_by(HttpBridgeOperationRecord.updated_at.desc())
+            .limit(2)
+        )
+        rows = result.scalars().all()
+        if len(rows) != 1:
+            return None
+        return _to_operation_snapshot(rows[0])
+
     async def get_recent_unknown_operations(
         self,
         *,

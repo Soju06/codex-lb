@@ -484,7 +484,7 @@ async def test_enqueue_ignores_stale_owner_refresh_for_same_generation() -> None
             9,
         )
         queued = batcher._pending.get("op-1", [])
-        assert [item.event_text for item in queued] == ["successor"] or not queued
+        assert all(item.event_text == "successor" for item in queued)
         assert await batcher.flush_pending_operation(operation_id="op-1") is True
         assert [event for batch in durable.batches for event in batch] == ["successor"]
     finally:

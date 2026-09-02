@@ -684,7 +684,13 @@ def _output_item_identity(item: Mapping[str, JsonValue]) -> dict[str, str]:
 def _output_item_identity_is_valid(identity: Mapping[str, str]) -> bool:
     """Require the output-item type discriminator for lifecycle validation."""
     item_type = identity.get("type")
-    return isinstance(item_type, str) and bool(item_type)
+    if not isinstance(item_type, str) or not item_type:
+        return False
+    if item_type in {"function_call", "custom_tool_call", "apply_patch_call"}:
+        return bool(identity.get("id")) and bool(identity.get("call_id"))
+    if item_type in {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}:
+        return bool(identity.get("call_id"))
+    return True
 
 
 def _output_item_identities_match(added: Mapping[str, str], done: Mapping[str, str]) -> bool:

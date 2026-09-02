@@ -493,7 +493,7 @@ async def test_enqueue_ignores_stale_owner_refresh_for_same_generation() -> None
 
 
 @pytest.mark.asyncio
-async def test_owner_rebinding_waits_for_inflight_flush_before_rewriting_context() -> None:
+async def test_owner_rebinding_does_not_wait_for_inflight_flush() -> None:
     durable = _BlockingBatchAppendDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(
         durable,
@@ -518,7 +518,10 @@ async def test_owner_rebinding_waits_for_inflight_flush_before_rewriting_context
             )
         )
         await asyncio.sleep(0)
-        assert not rebind_task.done()
+        # Durable appends are outside the global flush lock, so an owner
+        # rebind for another event can proceed while the original append is
+        # still in flight.
+        assert rebind_task.done()
 
         durable.release_batch.set()
         await flush_task

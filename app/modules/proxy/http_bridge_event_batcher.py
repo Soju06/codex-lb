@@ -277,54 +277,72 @@ class HttpBridgeOperationEventBatcher:
     async def _flush_one(self, operation_id: str) -> None:
         async with self._flush_lock:
             batch = await self._take_batch(operation_id)
+        if not batch:
+            return
+        # Re-check generation and owner context after taking the batch. A
+        # concurrent recovery may have rebound the operation while the batch
+        # was being removed from the in-memory queue; stale events must not be
+        # appended under the replacement owner.
+        async with self._lock:
+            if operation_id in self._dropped_operations:
+                return
+            current_generation = self._operation_generations.get(operation_id, 0)
+            current_context = self._contexts.get(operation_id)
+            batch = [
+                item
+                for item in batch
+                if item.recovery_dispatch_count >= current_generation
+                and (
+                    current_context is None
+                    or (
+                        item.recovery_dispatch_count == current_context.recovery_dispatch_count
+                        and item.session_id == current_context.session_id
+                        and item.instance_id == current_context.instance_id
+                        and item.owner_epoch == current_context.owner_epoch
+                    )
+                )
+            ]
             if not batch:
                 return
-            async with self._lock:
-                if operation_id in self._dropped_operations:
-                    return
-                current_generation = self._operation_generations.get(operation_id, 0)
-                batch = [item for item in batch if item.recovery_dispatch_count >= current_generation]
-                if not batch:
-                    return
-            try:
-                events = [
-                    DurableBridgeOperationEventInput(
-                        operation_id=item.operation_id,
-                        session_id=item.session_id,
-                        instance_id=item.instance_id,
-                        owner_epoch=item.owner_epoch,
-                        event_text=item.event_text,
-                        recovery_dispatch_count=item.recovery_dispatch_count,
-                    )
-                    for item in batch
-                ]
-                if self._spool_format == HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2:
-                    persisted = await self._durable_bridge.append_operation_event_chunk(
-                        events=events,
-                        max_bytes=self._max_bytes,
-                    )
-                else:
-                    persisted = await self._durable_bridge.append_operation_events(
-                        events=events,
-                        max_bytes=self._max_bytes,
-                    )
-                if not persisted:
-                    async with self._lock:
-                        self._dropped_operations.add(operation_id)
-                        dropped = self._pending.pop(operation_id, [])
-                        self._pending_count -= len(dropped)
-                        self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in dropped)
-            except Exception:
+        try:
+            events = [
+                DurableBridgeOperationEventInput(
+                    operation_id=item.operation_id,
+                    session_id=item.session_id,
+                    instance_id=item.instance_id,
+                    owner_epoch=item.owner_epoch,
+                    event_text=item.event_text,
+                    recovery_dispatch_count=item.recovery_dispatch_count,
+                )
+                for item in batch
+            ]
+            if self._spool_format == HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2:
+                persisted = await self._durable_bridge.append_operation_event_chunk(
+                    events=events,
+                    max_bytes=self._max_bytes,
+                )
+            else:
+                persisted = await self._durable_bridge.append_operation_events(
+                    events=events,
+                    max_bytes=self._max_bytes,
+                )
+            if not persisted:
                 async with self._lock:
                     self._dropped_operations.add(operation_id)
                     dropped = self._pending.pop(operation_id, [])
                     self._pending_count -= len(dropped)
                     self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in dropped)
-                logger.debug(
-                    "Dropping failed HTTP bridge transcript event batch operation_id=%s",
-                    operation_id,
-                    exc_info=True,
-                )
+        except Exception:
+            async with self._lock:
+                self._dropped_operations.add(operation_id)
+                dropped = self._pending.pop(operation_id, [])
+                self._pending_count -= len(dropped)
+                self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in dropped)
+            logger.debug(
+                "Dropping failed HTTP bridge transcript event batch operation_id=%s",
+                operation_id,
+                exc_info=True,
+            )
 
     async def flush_operation(
         self,

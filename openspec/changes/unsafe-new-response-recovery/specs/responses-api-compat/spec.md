@@ -3,7 +3,7 @@
 ### Requirement: Unsafe fresh-response recovery is explicitly bounded
 
 When the unsafe new-response recovery flag is enabled together with
-`server_indefinite_recovery`, the HTTP bridge MAY replace an upstream-rejected
+`server_indefinite_recovery`, the HTTP bridge MUST replace an upstream-rejected
 `previous_response_id` with one fresh, anchor-free response. The request MUST
 already have a verified, complete full-history replay body and a durable
 one-shot recovery fence. Delta-only, incomplete, ambiguous, or already-replayed

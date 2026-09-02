@@ -5667,7 +5667,10 @@ class _WebSocketMixin:
                 surface="websocket",
             )
 
-        retry_is_previous_response_not_found = is_previous_response_not_found_event
+        # An identity-bearing terminal frame belongs to an already selected
+        # response, even when the rewrite below removes that identity from the
+        # public error envelope. Do not turn it into a replay candidate.
+        retry_is_previous_response_not_found = is_previous_response_not_found_event and response_id is None
         retry_error_code = _websocket_precreated_retry_error_code(
             request_state,
             event_type=event_type,
@@ -5733,7 +5736,7 @@ class _WebSocketMixin:
                     has_other_pending_requests=has_other_pending_requests,
                     allow_unsafe_previous_response_recovery=True,
                 )
-                if unsafe_retry_error_code is not None:
+                if unsafe_retry_error_code is not None and response_id is None:
                     retry_is_previous_response_not_found = True
                     retry_error_code = unsafe_retry_error_code
         if event_type in {"response.failed", "response.incomplete", "error"} and isinstance(payload, dict):
@@ -5749,6 +5752,14 @@ class _WebSocketMixin:
                 payload=payload,
                 has_other_pending_requests=has_other_pending_requests,
             )
+        if response_id is not None and is_previous_response_not_found_event:
+            # A terminal frame carrying a response identity belongs to an
+            # already selected response.  Even if its error payload matches a
+            # retry classifier (for example, an invalid previous anchor or a
+            # pre-created model rejection), it must settle normally rather
+            # than mutating replay state or scheduling a reconnect.
+            retry_is_previous_response_not_found = False
+            retry_error_code = None
         retry_safe_owner_replay = bool(
             retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
             and request_state.previous_response_id is not None

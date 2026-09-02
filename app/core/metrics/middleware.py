@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 
+from starlette._utils import get_route_path
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.metrics.prometheus import (
@@ -51,7 +52,7 @@ class MetricsMiddleware:
         start = time.monotonic()
         status_code = 500
         method = _normalize_method(scope.get("method", "GET"))
-        path = _normalize_path(scope.get("path", "/"))
+        path = _normalize_path(get_route_path(scope))
 
         active_connections.inc()
 

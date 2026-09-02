@@ -16,4 +16,4 @@
 
 - [x] 3.1 Run `uv run pytest tests/unit/test_metrics.py`.
 - [x] 3.2 Run `uv run ruff check app/core/metrics/middleware.py tests/unit/test_metrics.py`.
-- [x] 3.3 Run `openspec validate --specs`.
+- [x] 3.3 Run `openspec validate bound-request-metric-label-cardinality --strict`.

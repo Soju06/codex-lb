@@ -618,9 +618,43 @@ async def test_terminal_flush_releases_operation_synchronization_state() -> None
     await _enqueue(batcher, "terminal", terminal=True)
 
     assert batcher._operation_locks == {}
+    assert batcher._operation_lock_users == {}
     assert batcher._flush_completion_events == {}
 
     await batcher.close()
+
+
+@pytest.mark.asyncio
+async def test_operation_lock_cleanup_retains_waiter_reference() -> None:
+    batcher = HttpBridgeOperationEventBatcher(
+        _FakeDurableBridge(),
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+    )
+    operation_lock = await batcher._operation_lock_for("op-1")
+    await operation_lock.acquire()
+    await batcher._flush_lock.acquire()
+    waiter = asyncio.create_task(batcher.fence_operation(operation_id="op-1", recovery_dispatch_count=1))
+    try:
+        for _ in range(20):
+            if batcher._operation_lock_users.get("op-1") == 2:
+                break
+            await asyncio.sleep(0)
+        assert batcher._operation_lock_users == {"op-1": 2}
+
+        operation_lock.release()
+        await batcher._release_operation_lock_user("op-1")
+        await asyncio.sleep(0)
+
+        # The fence waiter has the shared lock reference even though the lock
+        # itself is currently unlocked while it waits for the flush lock.
+        assert batcher._operation_lock_users == {"op-1": 1}
+        assert batcher._operation_locks.get("op-1") is operation_lock
+    finally:
+        batcher._flush_lock.release()
+        await waiter
+        await batcher.discard_operation(operation_id="op-1")
+        await batcher.close()
 
 
 @pytest.mark.asyncio

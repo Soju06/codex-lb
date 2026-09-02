@@ -13579,6 +13579,96 @@ async def test_retry_http_bridge_precreated_request_ignores_existing_response_id
 
 
 @pytest.mark.asyncio
+async def test_operation_fenced_retry_ignores_existing_response_id_entries(
+    app_instance,
+    monkeypatch,
+):
+    """A completed sibling must not block the operation-fenced retry claim."""
+    service = get_proxy_service_for_app(app_instance)
+    session = proxy_module._HTTPBridgeSession(
+        key=proxy_module._HTTPBridgeSessionKey("prompt_cache", "retry-fenced-race-key", None),
+        headers={},
+        affinity=proxy_module._AffinityPolicy(
+            key="retry-fenced-race-key",
+            kind=proxy_module.StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=300,
+        ),
+        request_model="gpt-5.1",
+        account=cast(Account, SimpleNamespace(id="acct-fenced-race", status=AccountStatus.ACTIVE)),
+        upstream=cast(proxy_module.UpstreamWebSocket, _SilentUpstreamWebSocket()),
+        upstream_control=proxy_module._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=2,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=120.0,
+    )
+    session.durable_session_id = "durable-retry-fenced-race"
+    session.durable_owner_epoch = 4
+    existing_request = proxy_module._WebSocketRequestState(
+        request_id="req-fenced-existing",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_id="resp-fenced-existing",
+        awaiting_response_created=False,
+        transport="http",
+    )
+    retry_request = proxy_module._WebSocketRequestState(
+        request_id="req-fenced-retry",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        transport="http",
+        request_text=json.dumps({"type": "response.create", "model": "gpt-5.1", "input": ["retry"]}),
+        operation_id="op-fenced-retry",
+        operation_registered=True,
+        operation_attempt_generation=0,
+    )
+    session.pending_requests.extend([existing_request, retry_request])
+    replacement_upstream = _RecordingUpstreamWebSocket()
+
+    async def claim_operation(_session, state):
+        state.operation_recovery_claimed = True
+        state.operation_attempt_generation = 1
+        return True
+
+    async def fake_reconnect(
+        self,
+        target_session,
+        *,
+        request_state,
+        restart_reader=False,
+        require_same_account=False,
+        require_preferred_account=False,
+    ):
+        del self, request_state, restart_reader, require_same_account, require_preferred_account
+        target_session.upstream = replacement_upstream
+
+    monkeypatch.setattr(service, "_claim_http_bridge_operation_fenced_continuity_replay", claim_operation)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(proxy_module.ProxyService, "_reconnect_http_bridge_session", fake_reconnect)
+
+    assert (
+        await service._retry_http_bridge_precreated_request(
+            session,
+            allow_operation_fenced_continuity_replay=True,
+        )
+        is True
+    )
+    assert len(replacement_upstream.sent_text) == 1
+    sent_payload = json.loads(replacement_upstream.sent_text[0])
+    assert sent_payload["input"] == ["retry"]
+    assert sent_payload["client_metadata"]["codex_lb_operation_id"] == "op-fenced-retry"
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailable(
     async_client,
     app_instance,

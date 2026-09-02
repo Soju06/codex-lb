@@ -4639,6 +4639,7 @@ class _HTTPBridgeRequestSubmitMixin:
         fresh_hard_request_account_switch_candidate = False
         proof_gated_continuity_replay_candidate = False
         server_anchored_replay_candidate = False
+        request_state_was_retryable_before_prepare = False
         if session.key.strength == "hard":
             async with session.pending_lock:
                 retryable_candidates = [
@@ -4719,6 +4720,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 or not request_is_retryable(request_state)
             ):
                 return False
+            # The visible-output preparation below consumes the ordinary
+            # replay slot.  Preserve the pre-prepare ownership proof so the
+            # post-claim check does not mistake that intentional state change
+            # for a second competing retry.
+            request_state_was_retryable_before_prepare = True
             if retry_send_baselines is not None:
                 # The send-attempt baseline: a retried request already carries
                 # prior attempts, so the release keys on advancement past
@@ -4903,7 +4909,11 @@ class _HTTPBridgeRequestSubmitMixin:
                     [
                         pending_request
                         for pending_request in session.pending_requests
-                        if not pending_request.draining_until_terminal and request_is_retryable(pending_request)
+                        if not pending_request.draining_until_terminal
+                        and (
+                            (pending_request is request_state and request_state_was_retryable_before_prepare)
+                            or request_is_retryable(pending_request)
+                        )
                     ]
                 )
                 claim_still_retryable = (
@@ -4911,7 +4921,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     and any(candidate is request_state for candidate in claim_retryable_requests)
                     and not request_state.draining_until_terminal
                     and _http_bridge_request_counts_against_queue(request_state)
-                    and request_is_retryable(request_state)
+                    and (request_state_was_retryable_before_prepare or request_is_retryable(request_state))
                 )
             if not claim_still_retryable:
                 await rollback_operation_fenced_claim()

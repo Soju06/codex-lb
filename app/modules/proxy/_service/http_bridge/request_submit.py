@@ -4679,12 +4679,25 @@ class _HTTPBridgeRequestSubmitMixin:
                 if len(retryable_requests) != 1:
                     return False
                 request_state = retryable_requests[0]
-            operation_fenced_claimed = (
-                await self._claim_http_bridge_operation_fenced_continuity_replay(session, request_state)
-                if allow_operation_fenced_continuity_replay
-                else True
+        assert request_state is not None
+        operation_fenced_claimed = True
+        if allow_operation_fenced_continuity_replay:
+            # The durable claim performs database reads, spool deletion, and a
+            # commit. Keep it outside ``pending_lock`` so a slow store cannot
+            # block unrelated submits or detaches for this session.
+            operation_fenced_claimed = await self._claim_http_bridge_operation_fenced_continuity_replay(
+                session, request_state
             )
             if not operation_fenced_claimed:
+                return False
+        async with session.pending_lock:
+            if (
+                request_state not in session.pending_requests
+                or any(pending_request is not request_state for pending_request in session.pending_requests)
+                or request_state.draining_until_terminal
+                or not _http_bridge_request_counts_against_queue(request_state)
+                or not request_is_retryable(request_state)
+            ):
                 return False
             if retry_send_baselines is not None:
                 # The send-attempt baseline: a retried request already carries

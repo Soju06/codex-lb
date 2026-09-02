@@ -8755,11 +8755,6 @@ async def _collect_responses_payload(
         if event_type in ("response.completed", "response.incomplete", "response.queued", "response.in_progress"):
             response = payload.get("response")
             if is_json_mapping(response):
-                terminal_output_valid = _terminal_output_matches_collected_items(response, output_items)
-                if event_type in {"response.completed", "response.incomplete"} and not terminal_output_valid:
-                    contract_violation_kind = contract_violation_kind or "invalid_output_item"
-                    output_lifecycle_invalid = True
-                    continue
                 normalized_response, violation_kind = _normalize_public_response_mapping(response, output_items)
                 if violation_kind is not None:
                     contract_violation_kind = contract_violation_kind or violation_kind
@@ -8851,28 +8846,6 @@ def _merge_collected_output_items(
 
     merged["output"] = [item for _, item in sorted(output_items.items())]
     return merged
-
-
-def _terminal_output_matches_collected_items(
-    response: Mapping[str, JsonValue],
-    output_items: Mapping[int, Mapping[str, JsonValue]],
-) -> bool:
-    """Reject a non-empty terminal output that conflicts with lifecycle frames."""
-    if not output_items:
-        return True
-    terminal_output = response.get("output")
-    if not isinstance(terminal_output, list) or not terminal_output:
-        return True
-    output_indexes = sorted(output_items)
-    if output_indexes != list(range(len(output_indexes))) or len(terminal_output) != len(output_items):
-        return False
-    for terminal_item, output_index in zip(terminal_output, output_indexes):
-        if not isinstance(terminal_item, Mapping):
-            return False
-        done_item = output_items[output_index]
-        if _output_item_identity(terminal_item) != _output_item_identity(done_item):
-            return False
-    return True
 
 
 async def _normalize_public_responses_stream(
@@ -9036,16 +9009,12 @@ async def _normalize_public_responses_stream(
         ):
             response_obj = payload.get("response")
             if is_json_mapping(response_obj):
-                if (
-                    output_lifecycle_invalid
-                    or added_output_indexes - done_output_indexes
-                    or not _terminal_output_matches_collected_items(response_obj, output_items)
-                ):
+                if output_lifecycle_invalid or added_output_indexes - done_output_indexes:
                     contract_violation_kind = contract_violation_kind or "invalid_output_item"
                     output_lifecycle_invalid = True
                     for formatted_payload in _public_response_failed_event_blocks(
                         "invalid_output_item",
-                        include_created=False,
+                        include_created=not created_emitted,
                         sequence_number=next_sequence_number,
                     ):
                         yield formatted_payload

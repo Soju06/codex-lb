@@ -179,7 +179,8 @@ def build_complete_replay_payload(
             return None
         canonical_with_prior = canonical_input + (prior_output or []) if include_prior_output else canonical_input
         if (
-            canonical_with_prior
+            parsed.get("previous_response_id") in (None, "")
+            and canonical_with_prior
             and (matched_input := _strip_omitted_output_prefix(turn_input, canonical_with_prior)) is not None
         ):
             fresh_input = matched_input
@@ -189,7 +190,8 @@ def build_complete_replay_payload(
             canonical_input = list(canonical_with_prior)
             include_prior_output = False
         elif (
-            index > 0
+            parsed.get("previous_response_id") in (None, "")
+            and index > 0
             and prior_output
             and (matched_input := _strip_omitted_output_prefix(turn_input, prior_output)) is not None
         ):
@@ -199,7 +201,8 @@ def build_complete_replay_payload(
             # strip the echoed prefix so tool call IDs are not duplicated.
             fresh_input = matched_input
         elif (
-            index > 0
+            parsed.get("previous_response_id") in (None, "")
+            and index > 0
             and prior_output
             and (matched_input := _strip_omitted_output_subsequence(turn_input, prior_output)) is not None
         ):
@@ -264,7 +267,8 @@ def build_complete_replay_payload(
             canonical_input if replay_input_includes_latest_output else canonical_input + latest_prior_output
         )
         if (
-            canonical_with_latest_output
+            continuation_previous_response_id in (None, "")
+            and canonical_with_latest_output
             and (matched_input := _strip_omitted_output_prefix(continuation_input, canonical_with_latest_output))
             is not None
         ):
@@ -285,7 +289,8 @@ def build_complete_replay_payload(
             continuation_input = continuation_input[len(canonical_input) :]
             include_prior_output = not replay_input_includes_latest_output
         elif (
-            latest_prior_output
+            continuation_previous_response_id in (None, "")
+            and latest_prior_output
             and (matched_input := _strip_omitted_output_prefix(continuation_input, latest_prior_output)) is not None
         ):
             # A delta may echo only the immediately preceding output rather
@@ -295,7 +300,8 @@ def build_complete_replay_payload(
             continuation_input = matched_input
             include_prior_output = not replay_input_includes_latest_output
         elif (
-            latest_prior_output
+            continuation_previous_response_id in (None, "")
+            and latest_prior_output
             and (matched_input := _strip_omitted_output_subsequence(continuation_input, latest_prior_output))
             is not None
         ):

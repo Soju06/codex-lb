@@ -215,6 +215,7 @@ from app.modules.proxy.affinity import (
 from app.modules.proxy.complete_transcript import (
     _output_item_identities_match,
     _output_item_identity,
+    _output_item_identity_is_valid,
     build_complete_replay_payload,
     build_replay_input_snapshot,
     build_unanchored_root_replay_payload,
@@ -1326,6 +1327,9 @@ def _record_http_bridge_response_output(
         if type(output_index) is not int or output_index < 0 or not isinstance(item, dict):
             request_state.response_output_items_event_invalid = True
             return
+        if not _output_item_identity_is_valid(_output_item_identity(item)):
+            request_state.response_output_items_event_invalid = True
+            return
         if output_index in request_state.response_output_item_added_indexes:
             request_state.response_output_items_event_invalid = True
             return
@@ -1340,6 +1344,9 @@ def _record_http_bridge_response_output(
         output_index = payload.get("output_index")
         item = payload.get("item")
         if type(output_index) is not int or output_index < 0 or not isinstance(item, dict):
+            request_state.response_output_items_event_invalid = True
+            return
+        if not _output_item_identity_is_valid(_output_item_identity(item)):
             request_state.response_output_items_event_invalid = True
             return
         if output_index in request_state.response_output_items_by_index:

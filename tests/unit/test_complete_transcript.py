@@ -150,8 +150,19 @@ def test_build_complete_replay_payload_preserves_latest_output_from_full_history
 
     assert payload is not None
     input_items = json.loads(payload)["input"]
-    assert [item["content"] for item in input_items if item.get("role") == "user"] == ["first", "second", "third"]
-    assert [item["content"][0]["text"] for item in input_items if item.get("role") == "assistant"] == ["one", "two"]
+    assert [item["content"] for item in input_items if item.get("role") == "user"] == [
+        "first",
+        "second",
+        "first",
+        "second",
+        "third",
+    ]
+    assert [item["content"][0]["text"] for item in input_items if item.get("role") == "assistant"] == [
+        "one",
+        "two",
+        "one",
+        "two",
+    ]
 
 
 def test_build_complete_replay_payload_restores_latest_output_for_compacted_prefix() -> None:
@@ -457,7 +468,13 @@ def test_build_complete_replay_payload_preserves_prior_output_on_full_history_re
     payload = build_complete_replay_payload(turns)
 
     assert payload is not None
-    assert [item["role"] for item in json.loads(payload)["input"]] == ["user", "assistant", "user"]
+    assert [item["role"] for item in json.loads(payload)["input"]] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+    ]
 
 
 def test_build_complete_replay_payload_rejects_divergent_unanchored_history() -> None:

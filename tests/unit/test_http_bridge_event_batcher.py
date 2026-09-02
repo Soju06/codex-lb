@@ -493,7 +493,7 @@ async def test_enqueue_ignores_stale_owner_refresh_for_same_generation() -> None
 
 
 @pytest.mark.asyncio
-async def test_owner_rebinding_does_not_wait_for_inflight_flush() -> None:
+async def test_owner_rebinding_waits_for_inflight_flush() -> None:
     durable = _BlockingBatchAppendDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(
         durable,
@@ -518,10 +518,9 @@ async def test_owner_rebinding_does_not_wait_for_inflight_flush() -> None:
             )
         )
         await asyncio.sleep(0)
-        # Durable appends are outside the global flush lock, so an owner
-        # rebind for another event can proceed while the original append is
-        # still in flight.
-        assert rebind_task.done()
+        # Rebinding the same operation waits for its in-flight durable append,
+        # while unrelated operations remain free of the global flush lock.
+        assert not rebind_task.done()
 
         durable.release_batch.set()
         await flush_task
@@ -532,6 +531,45 @@ async def test_owner_rebinding_does_not_wait_for_inflight_flush() -> None:
         assert durable.batches == [["original"], ["replacement"]]
     finally:
         await batcher.discard_operation(operation_id="op-1")
+        await batcher.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_append_waits_for_inflight_batch_flush() -> None:
+    durable = _BlockingBatchAppendDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+    )
+    try:
+        await _enqueue(batcher, "event-before-terminal")
+        flush_task = asyncio.create_task(batcher.flush_pending_operation(operation_id="op-1"))
+        await durable.batch_started.wait()
+
+        terminal_task = asyncio.create_task(
+            batcher.append_terminal_event(
+                operation_id="op-1",
+                session_id="session-1",
+                instance_id="instance-1",
+                owner_epoch=1,
+                event_text="terminal",
+                max_bytes=1024,
+                state="completed",
+            )
+        )
+        await asyncio.sleep(0)
+        assert not terminal_task.done()
+
+        durable.release_batch.set()
+        await flush_task
+        result = await terminal_task
+
+        assert result.persisted is True
+        assert durable.batches == [["event-before-terminal"]]
+        assert durable.terminal_rows == ["terminal"]
+    finally:
         await batcher.close()
 
 

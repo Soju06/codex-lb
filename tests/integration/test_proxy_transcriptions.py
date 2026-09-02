@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import socket
 from collections.abc import AsyncIterator
 from tempfile import SpooledTemporaryFile
 from unittest.mock import patch
@@ -93,12 +92,6 @@ async def _enable_api_key_auth(async_client) -> None:
         },
     )
     assert response.status_code == 200
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _make_upstream_model(slug: str) -> UpstreamModel:

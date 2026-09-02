@@ -4680,16 +4680,6 @@ class _HTTPBridgeRequestSubmitMixin:
                     return False
                 request_state = retryable_requests[0]
         assert request_state is not None
-        operation_fenced_claimed = True
-        if allow_operation_fenced_continuity_replay:
-            # The durable claim performs database reads, spool deletion, and a
-            # commit. Keep it outside ``pending_lock`` so a slow store cannot
-            # block unrelated submits or detaches for this session.
-            operation_fenced_claimed = await self._claim_http_bridge_operation_fenced_continuity_replay(
-                session, request_state
-            )
-            if not operation_fenced_claimed:
-                return False
         async with session.pending_lock:
             if (
                 request_state not in session.pending_requests
@@ -4822,6 +4812,68 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.clean_close_retry_close_generation = close_generation
             if additional_clean_close_retry:
                 request_state.clean_close_replay_count += 1
+
+        operation_fenced_claimed = True
+        operation_claim_acquired_here = False
+        operation_attempt_generation_before_claim = request_state.operation_attempt_generation
+
+        async def rollback_operation_fenced_claim() -> None:
+            """Refund a claim made by this retry when dispatch is abandoned."""
+            if not operation_claim_acquired_here or not request_state.operation_recovery_claimed:
+                return
+            mark_operation_unknown = getattr(self._durable_bridge, "mark_operation_unknown", None)
+            if not callable(mark_operation_unknown):
+                logger.warning(
+                    "Unable to refund abandoned HTTP bridge recovery claim operation_id=%s",
+                    request_state.operation_id,
+                )
+                return
+            try:
+                restored = await _call_with_supported_optional_kwargs(
+                    mark_operation_unknown,
+                    optional_kwargs={"restore_recovery_dispatch_claim": True},
+                    operation_id=request_state.operation_id,
+                    session_id=session.durable_session_id,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to refund abandoned HTTP bridge recovery claim operation_id=%s",
+                    request_state.operation_id,
+                    exc_info=True,
+                )
+                return
+            if restored:
+                request_state.operation_recovery_claimed = False
+                request_state.operation_attempt_generation = operation_attempt_generation_before_claim
+
+        if allow_operation_fenced_continuity_replay:
+            # The durable claim performs database reads, spool deletion, and a
+            # commit. Keep it outside ``pending_lock`` so a slow store cannot
+            # block unrelated submits or detaches for this session.
+            claim_was_already_set = request_state.operation_recovery_claimed
+            operation_fenced_claimed = await self._claim_http_bridge_operation_fenced_continuity_replay(
+                session, request_state
+            )
+            operation_claim_acquired_here = operation_fenced_claimed and not claim_was_already_set
+            if not operation_fenced_claimed:
+                return False
+            # The request may detach or become non-retryable while the durable
+            # claim is in flight. Re-check ownership after the claim, then
+            # refund that exact claim before returning so the next request is
+            # not fenced out by a phantom submitted attempt.
+            async with session.pending_lock:
+                claim_still_retryable = (
+                    request_state in session.pending_requests
+                    and not any(pending_request is not request_state for pending_request in session.pending_requests)
+                    and not request_state.draining_until_terminal
+                    and _http_bridge_request_counts_against_queue(request_state)
+                    and request_is_retryable(request_state)
+                )
+            if not claim_still_retryable:
+                await rollback_operation_fenced_claim()
+                return False
         retry_jitter_seconds = (
             self._http_bridge_clean_close_retry_jitter_seconds() if additional_clean_close_retry else 0.0
         )

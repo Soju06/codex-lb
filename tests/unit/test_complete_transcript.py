@@ -1339,6 +1339,34 @@ def test_materialize_output_items_requires_terminal_completion() -> None:
     assert materialize_output_items_from_events(events) is None
 
 
+@pytest.mark.parametrize("malformed_event", ["data: {not-json}\n\n", "data: []\n\n"])
+def test_materialize_output_items_rejects_malformed_data_blocks(malformed_event: str) -> None:
+    events = [
+        (
+            "event: response.output_item.done\ndata: "
+            '{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}\n\n'
+        ),
+        malformed_event,
+        'event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n',
+    ]
+
+    assert materialize_output_items_from_events(events) is None
+
+
+def test_materialize_output_items_ignores_keepalive_and_done_sentinels() -> None:
+    events = [
+        ": keepalive\n\n",
+        "data: [DONE]\n\n",
+        (
+            "event: response.output_item.done\ndata: "
+            '{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}\n\n'
+        ),
+        'event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n',
+    ]
+
+    assert materialize_output_items_from_events(events) == [{"type": "message"}]
+
+
 def test_materialize_output_items_rejects_sparse_indexes() -> None:
     events = [
         (

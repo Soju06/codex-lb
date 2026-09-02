@@ -888,6 +888,53 @@ async def test_terminal_cleanup_preserves_newer_recovery_fence() -> None:
 
 
 @pytest.mark.asyncio
+async def test_terminal_cleanup_preserves_same_generation_successor_owner() -> None:
+    durable = _BlockingTerminalAppendDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    try:
+        terminal_task = asyncio.create_task(
+            batcher.append_terminal_event(
+                operation_id="op-1",
+                session_id="session-1",
+                instance_id="instance-1",
+                owner_epoch=1,
+                event_text="old-terminal",
+                max_bytes=1024,
+                state="completed",
+                expected_recovery_dispatch_count=0,
+            )
+        )
+        await durable.terminal_started.wait()
+
+        await batcher.enqueue(
+            operation_id="op-1",
+            session_id="session-2",
+            instance_id="instance-2",
+            owner_epoch=2,
+            event_text="same-generation-successor",
+            recovery_dispatch_count=0,
+        )
+        durable.release_terminal.set()
+        result = await terminal_task
+
+        assert result.persisted is True
+        context = batcher._contexts["op-1"]
+        assert (context.session_id, context.instance_id, context.owner_epoch) == ("session-2", "instance-2", 2)
+        assert batcher._closing_operations == set()
+        assert await batcher.flush_pending_operation(operation_id="op-1") is True
+        assert durable.batches == [["same-generation-successor"]]
+    finally:
+        await batcher.discard_operation(operation_id="op-1")
+        await batcher.close()
+
+
+@pytest.mark.asyncio
 async def test_close_cancels_background_flusher() -> None:
     durable = _FakeDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(

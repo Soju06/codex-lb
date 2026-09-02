@@ -244,6 +244,7 @@ class HttpBridgeOperationEventBatcher:
                     # All events in one generation must carry the same durable
                     # owner context. Rebind events queued before a handoff so a
                     # mixed-owner batch cannot be rejected by the repository.
+                    self._closing_operations.discard(operation_id)
                     queued = self._pending.get(operation_id)
                     if queued:
                         self._pending[operation_id] = [
@@ -635,7 +636,18 @@ class HttpBridgeOperationEventBatcher:
             )
         finally:
             async with self._lock:
-                if self._operation_generations.get(operation_id, 0) == expected_recovery_dispatch_count:
+                current_context = self._contexts.get(operation_id)
+                terminal_owner_still_current = (
+                    current_context is not None
+                    and current_context.recovery_dispatch_count == context.recovery_dispatch_count
+                    and current_context.session_id == context.session_id
+                    and current_context.instance_id == context.instance_id
+                    and current_context.owner_epoch == context.owner_epoch
+                )
+                if (
+                    self._operation_generations.get(operation_id, 0) == expected_recovery_dispatch_count
+                    and terminal_owner_still_current
+                ):
                     self._closing_operations.discard(operation_id)
                     self._contexts.pop(operation_id, None)
                     self._operation_generations.pop(operation_id, None)

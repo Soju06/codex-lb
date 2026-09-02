@@ -7,7 +7,7 @@ from collections.abc import Iterable, Mapping
 from typing import cast
 
 from app.core.types import JsonValue
-from app.core.utils.sse import parse_sse_data_json
+from app.core.utils.sse import extract_sse_data, parse_sse_data_json
 from app.modules.proxy.durable_bridge_repository import DurableBridgeTranscriptTurn
 from app.modules.proxy.replay_safety import (
     responses_input_items_are_self_contained_fresh_replay,
@@ -43,9 +43,15 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
     saw_completed = False
 
     for event_text in events:
+        # Comment/keepalive blocks and the SSE ``[DONE]`` sentinel carry no
+        # materializable JSON and are safe to ignore.  Once a data payload is
+        # present, however, a parse failure or non-object value makes the
+        # transcript incomplete rather than silently dropping an event.
+        if extract_sse_data(event_text) is None:
+            continue
         payload = parse_sse_data_json(event_text)
         if not isinstance(payload, dict):
-            continue
+            return None
         event_type = payload.get("type")
         if event_type in {"response.output_item.added", "response.output_item.done"}:
             if saw_completed:

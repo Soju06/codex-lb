@@ -1,6 +1,7 @@
-- [x] Add `shared_ssl_context()` and route the shared HTTP/WebSocket connectors, Codex direct sessions, Codex SOCKS connector, and the settings SOCKS probe through it
+- [x] Add `shared_ssl_context()` and route the shared HTTP/WebSocket connectors, Codex direct sessions, Codex SOCKS connector, and both forms of the settings upstream-proxy probe through it
 - [x] Observe the abandoned teardown for a bounded grace and exempt only a successfully completed rollback/close from the reclaim
 - [x] Carry elapsed seconds into both teardown log lines and report a failed invalidation at warning level
 - [x] Add regression coverage for shared-context reuse across client generations and for all four connector consumers
 - [x] Add regression coverage for the completed-teardown exemption in both phases, and guards proving failed and cancelled teardowns still reclaim
+- [x] Reword the `bound-sqlite-wedged-teardown` delta so only a teardown still pending past the deadline must be reclaimed
 - [x] Run targeted tests, lint, typecheck, and OpenSpec strict validation

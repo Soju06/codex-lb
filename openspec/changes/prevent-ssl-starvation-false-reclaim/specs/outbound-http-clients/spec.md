@@ -9,9 +9,12 @@ loop.
 
 During normal application startup the process MUST construct that context
 before it begins serving requests. The shared HTTP connector, the shared
-WebSocket connector, Codex direct sessions, Codex SOCKS sessions, and both the
-SOCKS and HTTP(S) forms of the settings upstream-proxy probe MUST all receive
-that same instance. Runtime code MUST NOT call the uncached constructor
+WebSocket connector, Codex direct sessions, Codex SOCKS sessions, and the SOCKS
+form of the settings upstream-proxy probe MUST all receive that same instance.
+The HTTP(S) form of that probe runs on httpx, whose transport reconfigures the
+ALPN protocols of any context it is handed; it MUST NOT receive the shared
+instance and instead keeps httpx's own per-client context, an acceptable cost
+for an operator-triggered probe. Runtime code MUST NOT call the uncached constructor
 directly, and MUST NOT mutate the published context's verification mode,
 hostname checking, certificate authority locations, ciphers, or ALPN
 configuration.
@@ -35,5 +38,10 @@ system or bundled trust roots takes effect only after the process restarts.
 
 #### Scenario: Codex and proxy-probe factories reuse the same context
 
-- **WHEN** a Codex session, a Codex SOCKS connector, or either form of the settings upstream-proxy probe builds its client
+- **WHEN** a Codex session, a Codex SOCKS connector, or the SOCKS form of the settings upstream-proxy probe builds its client
 - **THEN** it receives the process's shared outbound SSL context rather than constructing its own
+
+#### Scenario: The HTTP(S) proxy probe keeps httpx's own context
+
+- **WHEN** the settings upstream-proxy probe targets an HTTP or HTTPS proxy
+- **THEN** the httpx client is built without the shared context, so httpx's ALPN reconfiguration cannot mutate the singleton

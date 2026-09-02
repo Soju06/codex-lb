@@ -580,7 +580,11 @@ async def _probe_upstream_proxy_endpoint(endpoint) -> int:
         proxy=endpoint.proxy_url,
         timeout=httpx.Timeout(UPSTREAM_PROXY_TEST_TIMEOUT_SECONDS),
         follow_redirects=False,
-        verify=shared_ssl_context(),
+        # Deliberately not ``verify=shared_ssl_context()``: httpcore calls
+        # ``set_alpn_protocols`` on whatever context it is handed, which would
+        # mutate the process-wide singleton under the aiohttp connectors that
+        # share it. This probe is an operator-triggered dashboard action, so
+        # httpx's own per-client context is an acceptable cost.
     ) as client:
         response = await client.get(UPSTREAM_PROXY_TEST_URL)
         return response.status_code

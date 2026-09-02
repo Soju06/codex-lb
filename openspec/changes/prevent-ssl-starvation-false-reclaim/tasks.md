@@ -1,4 +1,4 @@
-- [x] Add `shared_ssl_context()` and route the shared HTTP/WebSocket connectors, Codex direct sessions, Codex SOCKS connector, and both forms of the settings upstream-proxy probe through it
+- [x] Add `shared_ssl_context()` and route the shared HTTP/WebSocket connectors, Codex direct sessions, Codex SOCKS connector, and the SOCKS form of the settings upstream-proxy probe through it, leaving the HTTP(S) probe on httpx's own context
 - [x] Observe the abandoned teardown for a bounded grace and exempt only a successfully completed rollback/close from the reclaim
 - [x] Carry elapsed seconds into both teardown log lines and report a failed invalidation at warning level
 - [x] Add regression coverage for shared-context reuse across client generations and for all four connector consumers

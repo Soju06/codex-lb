@@ -681,11 +681,7 @@ async def test_upstream_proxy_endpoint_test_probes_configured_proxy(async_client
             captured["url"] = url
             return _Response()
 
-    shared_context = object()
     monkeypatch.setattr("app.modules.settings.api.httpx.AsyncClient", _FakeAsyncClient)
-    # The HTTP(S) probe must verify against the process-wide context too, or it
-    # reloads the CA bundle of its own accord (issue #2029).
-    monkeypatch.setattr("app.modules.settings.api.shared_ssl_context", lambda: shared_context)
 
     endpoint = await async_client.post(
         "/api/settings/upstream-proxy/endpoints",
@@ -712,7 +708,9 @@ async def test_upstream_proxy_endpoint_test_probes_configured_proxy(async_client
     client_kwargs = cast(dict[str, Any], captured["client_kwargs"])
     assert captured["url"] == "https://chatgpt.com/cdn-cgi/trace"
     assert client_kwargs["proxy"] == "https://user:secret@proxy.internal:8080"
-    assert client_kwargs["verify"] is shared_context
+    # httpcore mutates the ALPN configuration of any context it is given, so the
+    # HTTP(S) probe must never receive the process-wide shared instance.
+    assert "verify" not in client_kwargs
     assert "secret" not in str(payload)
 
 

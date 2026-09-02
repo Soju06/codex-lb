@@ -21,7 +21,9 @@ window, with 8 of the 13 on the current build failing that way.
 
 - Build the outbound SSL context once per process (`shared_ssl_context`) and
   reuse it from the shared HTTP/WebSocket connectors, Codex direct sessions,
-  Codex SOCKS sessions, and both forms of the settings upstream-proxy probe.
+  Codex SOCKS sessions, and the SOCKS form of the settings upstream-proxy probe
+  (the HTTP(S) form stays on httpx's own context, since httpcore mutates the
+  ALPN configuration of any context it is given).
   `_build_ssl_context` stays the uncached constructor.
 - After the teardown bound expires, observe the abandoned rollback/close for a
   short shielded grace. When it has *successfully* completed, skip the reclaim

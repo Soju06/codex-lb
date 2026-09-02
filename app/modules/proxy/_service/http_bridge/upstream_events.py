@@ -213,6 +213,7 @@ from app.modules.proxy.affinity import (
     _extract_model_class,
 )
 from app.modules.proxy.complete_transcript import (
+    _output_item_identities_match,
     _output_item_identity,
     build_complete_replay_payload,
     build_replay_input_snapshot,
@@ -1345,7 +1346,9 @@ def _record_http_bridge_response_output(
             request_state.response_output_items_event_invalid = True
             return
         added_identities = getattr(request_state, "response_output_item_added_identities", {})
-        if output_index in added_identities and added_identities[output_index] != _output_item_identity(item):
+        if output_index in added_identities and not _output_item_identities_match(
+            added_identities[output_index], _output_item_identity(item)
+        ):
             request_state.response_output_items_event_invalid = True
             return
         request_state.response_output_items_by_index[output_index] = cast(JsonValue, item)

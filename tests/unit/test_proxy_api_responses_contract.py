@@ -584,8 +584,9 @@ async def test_collect_responses_payload_rejects_added_done_identity_mismatch() 
     result = await proxy_api_module._collect_responses_payload(
         _iter_blocks(
             'data: {"type":"response.output_item.added","output_index":0,'
-            '"item":{"id":"call_a","type":"function_call"}}\n\n',
-            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_b","type":"message"}}\n\n',
+            '"item":{"id":"item_shared","call_id":"call_a","type":"function_call"}}\n\n',
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"item_shared",'
+            '"call_id":"call_b","type":"message"}}\n\n',
             'data: {"type":"response.completed","response":{"id":"resp_1","output":[]}}\n\n',
         )
     )
@@ -1308,11 +1309,11 @@ async def test_normalize_public_responses_stream_rejects_added_done_identity_mis
                 ),
                 (
                     'data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,'
-                    '"item":{"id":"call_a","type":"function_call"}}\n\n'
+                    '"item":{"id":"item_shared","call_id":"call_a","type":"function_call"}}\n\n'
                 ),
                 (
                     'data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,'
-                    '"item":{"id":"msg_b","type":"message"}}\n\n'
+                    '"item":{"id":"item_shared","call_id":"call_b","type":"message"}}\n\n'
                 ),
                 (
                     'data: {"type":"response.completed","sequence_number":3,'

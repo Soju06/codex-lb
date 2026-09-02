@@ -9433,12 +9433,18 @@ def test_response_output_capture_rejects_added_done_identity_mismatch() -> None:
     http_bridge_upstream_events_module._record_http_bridge_response_output(
         request_state,
         event_type="response.output_item.added",
-        payload={"output_index": 0, "item": {"id": "call_a", "type": "function_call"}},
+        payload={
+            "output_index": 0,
+            "item": {"id": "item_shared", "call_id": "call_a", "type": "function_call"},
+        },
     )
     http_bridge_upstream_events_module._record_http_bridge_response_output(
         request_state,
         event_type="response.output_item.done",
-        payload={"output_index": 0, "item": {"id": "msg_b", "type": "message"}},
+        payload={
+            "output_index": 0,
+            "item": {"id": "item_shared", "call_id": "call_b", "type": "message"},
+        },
     )
 
     assert request_state.response_output_items_by_index == {}
@@ -19566,7 +19572,7 @@ async def test_stream_via_http_bridge_translates_retained_response_alias_before_
 
     assert chunks == []
     alias_lookup.assert_awaited_once_with(response_id="resp-retained", api_key_id=None)
-    assert prepared_previous_response_ids[0] == "resp-retained"
+    assert prepared_previous_response_ids[0] is None
     assert prepared_previous_response_ids[-1] == "resp-replacement"
     assert request_state.previous_response_id == "resp-replacement"
     assert request_state.proxy_injected_previous_response_id is True

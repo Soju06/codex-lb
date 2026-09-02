@@ -1219,7 +1219,7 @@ class _WebSocketRequestState:
     response_output_item_added_indexes: set[int] = field(default_factory=set)
     # Keep the stable identity observed on each added item so a later done
     # frame cannot replace it with a different output item at the same index.
-    response_output_item_added_identities: dict[int, tuple[str, str] | None] = field(default_factory=dict)
+    response_output_item_added_identities: dict[int, dict[str, str]] = field(default_factory=dict)
     response_output_items_event_invalid: bool = False
     response_output_items_complete: bool = False
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)

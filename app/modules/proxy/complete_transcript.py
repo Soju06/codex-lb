@@ -38,7 +38,7 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
     completed_output: list[JsonValue] | None = None
     output_items: dict[int, JsonValue] = {}
     added_indexes: set[int] = set()
-    added_identities: dict[int, tuple[str, str] | None] = {}
+    added_identities: dict[int, dict[str, str]] = {}
     done_indexes: set[int] = set()
     saw_completed = False
 
@@ -64,7 +64,9 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
                 continue
             if output_index in done_indexes:
                 return None
-            if output_index in added_identities and added_identities[output_index] != _output_item_identity(item):
+            if output_index in added_identities and not _output_item_identities_match(
+                added_identities[output_index], _output_item_identity(item)
+            ):
                 return None
             existing = output_items.get(output_index)
             if existing is not None and _canonical_item(existing) != _canonical_item(item):
@@ -663,13 +665,22 @@ def _is_omitted_output_item(item: JsonValue) -> bool:
     return isinstance(item, dict) and item.get("type") in _OMIT_OUTPUT_TYPES
 
 
-def _output_item_identity(item: Mapping[str, JsonValue]) -> tuple[str, str] | None:
-    """Return the strongest stable identity available for an output item."""
+def _output_item_identity(item: Mapping[str, JsonValue]) -> dict[str, str]:
+    """Return all stable identity fields available for an output item."""
+    identity: dict[str, str] = {}
     for field in ("id", "call_id", "type"):
         value = item.get(field)
         if isinstance(value, str) and value:
-            return field, value
-    return None
+            identity[field] = value
+    return identity
+
+
+def _output_item_identities_match(added: Mapping[str, str], done: Mapping[str, str]) -> bool:
+    """Compare every identity field shared by an added/done item pair."""
+    if not added or not done:
+        return not added and not done
+    shared_fields = added.keys() & done.keys()
+    return bool(shared_fields) and all(added[field] == done[field] for field in shared_fields)
 
 
 def _canonical_item(item: JsonValue) -> str:

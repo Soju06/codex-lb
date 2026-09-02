@@ -578,6 +578,7 @@ class HttpBridgeOperationEventBatcher:
                 current_generation = self._operation_generations.get(operation_id, 0)
                 if recovery_dispatch_count <= current_generation:
                     return
+                self._cancel_generation_cleanup_locked(operation_id)
                 self._operation_generations[operation_id] = recovery_dispatch_count
                 pending = self._pending.pop(operation_id, [])
                 self._pending_count -= len(pending)

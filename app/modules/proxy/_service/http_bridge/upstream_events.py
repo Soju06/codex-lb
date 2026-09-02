@@ -265,14 +265,10 @@ def _http_bridge_unsafe_new_response_anchor_error(
         return False
     if code != "invalid_request_error":
         return False
-    normalized = " ".join((message or "").lower().replace("`", "").replace("_", " ").split()).strip(" .")
     param_state = coerce_error_param(param)
-    if param_state.present:
-        # Presence of a blank, null, or non-string parameter is malformed
-        # provider data, not proof that the stale anchor was rejected.  Keep
-        # the explicit unsafe recovery opt-in fail-closed for that shape.
-        return not param_state.malformed and param_state.normalized == "previous_response_id"
-    return normalized == "invalid previous response id"
+    # Keep the unsafe recovery gate aligned with the shared stale-anchor
+    # classifier: the parameter alone is not enough to prove an anchor error.
+    return _is_previous_response_not_found_error(code=code, param=param_state, message=message)
 
 
 _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (

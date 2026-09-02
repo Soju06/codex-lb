@@ -1594,6 +1594,14 @@ def test_http_bridge_unsafe_new_response_recovery_classifies_terse_anchor_error(
         )
         is False
     )
+    assert (
+        http_bridge_upstream_events_module._http_bridge_unsafe_new_response_anchor_error(
+            code="invalid_request_error",
+            param="previous_response_id",
+            message="Invalid response format.",
+        )
+        is False
+    )
 
     for malformed_param in (OpenAIErrorParam(True, None), OpenAIErrorParam(True, " "), OpenAIErrorParam(True, 0)):
         assert (

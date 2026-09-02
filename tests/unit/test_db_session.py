@@ -1987,9 +1987,7 @@ async def test_reclaim_skips_a_connection_the_failed_teardown_already_closed(tmp
         assert not any("interrupting and invalidating" in message for message in warnings), (
             "a released connection must not be reported as a reclaim"
         )
-        released = [
-            message for message in warnings if "failed after releasing its connection" in message
-        ]
+        released = [message for message in warnings if "failed after releasing its connection" in message]
         assert len(released) == 1, "the failure that ended the teardown must still be reported"
         assert "rollback raised after the connection was released" in released[0]
         assert "phase=rollback" in released[0] and "elapsed_seconds=6.0" in released[0]

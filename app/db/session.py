@@ -776,9 +776,7 @@ async def _reclaim_wedged_sqlite_session(
             # permanent hold (issue #1981) would be a false alarm. The failure
             # that ended the teardown is still worth a warning, because
             # ``_finish_abandoned_teardown`` consumes it silently.
-            failure = (
-                abandoned.exception() if abandoned.done() and not abandoned.cancelled() else None
-            )
+            failure = abandoned.exception() if abandoned.done() and not abandoned.cancelled() else None
             if failure is not None:
                 logger.warning(
                     "sqlite_wedged_teardown phase=%s bound_seconds=%.1f elapsed_seconds=%.1f — the %s failed "

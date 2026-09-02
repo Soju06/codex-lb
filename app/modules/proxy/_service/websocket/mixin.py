@@ -421,6 +421,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _sanitize_public_websocket_event_payload,
     _sanitize_websocket_connect_failure,
     _sanitize_websocket_previous_response_error,
+    _sanitize_websocket_previous_response_input_items,
     _sanitize_websocket_terminal_error_fields,
     _serialize_websocket_error_event,
     _trim_websocket_previous_response_input_items,
@@ -3137,7 +3138,9 @@ class _WebSocketMixin:
         client_full_resend_retry_safe = False
         if responses_payload.previous_response_id is not None and isinstance(responses_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], responses_payload.input)
-            client_full_resend_input_items = previous_response_input_items
+            client_full_resend_input_items = _sanitize_websocket_previous_response_input_items(
+                previous_response_input_items
+            )
             client_full_resend_retry_safe = _websocket_client_previous_response_full_resend_is_retry_safe(
                 previous_response_id=responses_payload.previous_response_id,
                 input_value=responses_payload.input,
@@ -3150,7 +3153,6 @@ class _WebSocketMixin:
                     previous_response_input_items
                 )
                 responses_payload = responses_payload.model_copy(update={"input": trimmed_input_items})
-                client_full_resend_input_items = trimmed_input_items
         full_resend_client_metadata = client_metadata
         if client_full_resend_retry_safe and client_full_resend_input_items is not None:
             if trusted_incremental_responses_lite and client_metadata is not None:

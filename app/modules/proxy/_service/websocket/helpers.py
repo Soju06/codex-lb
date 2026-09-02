@@ -2071,7 +2071,7 @@ def _serialize_websocket_error_event(payload: dict[str, JsonValue]) -> str:
 
 
 def _trim_websocket_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
-    replay_safe_input_items = [_strip_websocket_replayed_tool_search_id(item) for item in input_items]
+    replay_safe_input_items = _sanitize_websocket_previous_response_input_items(input_items)
     first_output_index = next(
         (
             index
@@ -2089,6 +2089,10 @@ def _trim_websocket_previous_response_input_items(input_items: list[JsonValue]) 
     if not all(_is_websocket_previous_response_output_item(item) for item in prefix):
         return replay_safe_input_items
     return replay_safe_input_items[first_output_index:]
+
+
+def _sanitize_websocket_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
+    return [_strip_websocket_replayed_tool_search_id(item) for item in input_items]
 
 
 def _is_websocket_previous_response_output_item(item: JsonValue) -> bool:

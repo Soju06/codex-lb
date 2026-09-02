@@ -513,9 +513,10 @@ class HttpBridgeOperationEventBatcher:
         The durable rollback uses the previous generation as a compare-and-set
         guard. Mirror that guard in memory so a concurrent replacement cannot
         be unfenced by stale cleanup from an older recovery attempt. Once the
-        rollback succeeds there is no active queued/context state to protect;
-        remove the generation entry so abandoned cancellations do not retain
-        one key for every operation for the process lifetime.
+        rollback succeeds there is no active queued/context state to protect.
+        Retain a non-zero restored generation so late events from older
+        attempts remain fenced; only generation zero can drop the entry
+        without weakening that guard.
         """
         recovery_dispatch_count = max(0, int(recovery_dispatch_count))
         fenced_generation = recovery_dispatch_count + 1
@@ -524,7 +525,10 @@ class HttpBridgeOperationEventBatcher:
                 current_generation = self._operation_generations.get(operation_id)
                 if current_generation != fenced_generation:
                     return False
-                self._operation_generations.pop(operation_id, None)
+                if recovery_dispatch_count == 0:
+                    self._operation_generations.pop(operation_id, None)
+                else:
+                    self._operation_generations[operation_id] = recovery_dispatch_count
                 return True
 
     async def close(self) -> None:

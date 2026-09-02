@@ -443,6 +443,32 @@ async def test_rollback_fence_operation_restores_generation_after_rebind_rollbac
 
 
 @pytest.mark.asyncio
+async def test_rollback_fence_operation_retains_nonzero_restored_generation() -> None:
+    durable = _FakeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    try:
+        await _enqueue(batcher, "generation-one", recovery_dispatch_count=1)
+        await batcher.fence_operation(operation_id="op-1", recovery_dispatch_count=2)
+        assert await batcher.rollback_fence_operation(operation_id="op-1", recovery_dispatch_count=1) is True
+        assert batcher._operation_generations == {"op-1": 1}
+
+        # The restored generation still fences events from the rolled-back
+        # replacement while allowing the original generation to resume.
+        await _enqueue(batcher, "stale-generation", recovery_dispatch_count=0)
+        await _enqueue(batcher, "restored-generation", recovery_dispatch_count=1)
+        assert await batcher.flush_pending_operation(operation_id="op-1") is True
+        assert durable.batches == [["restored-generation"]]
+    finally:
+        await batcher.close()
+
+
+@pytest.mark.asyncio
 async def test_terminal_append_refreshes_context_for_new_recovery_generation() -> None:
     durable = _FakeDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(

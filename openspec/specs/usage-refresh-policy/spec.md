@@ -1591,7 +1591,8 @@ alter stale-reservation cleanup or WebSocket health handling.
 
 ### Requirement: Reset-confirmed warm-up follows the plan-applicable long window
 
-When reset-confirmed limit warm-up evaluates an account's selected long quota window, the system MUST use the monthly usage row when that account's plan has
+When reset-confirmed limit warm-up evaluates an account's selected long quota
+window, the system MUST use the monthly usage row when that account's plan has
 monthly quota capacity and MUST otherwise use the secondary usage row. The
 persisted warm-up attempt MUST retain the canonical window name from the
 selected usage row.

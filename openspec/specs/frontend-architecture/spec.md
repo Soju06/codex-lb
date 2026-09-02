@@ -2946,7 +2946,8 @@ The list order MUST be stable: `lastRequest DESC`, then normalized
 
 ### Requirement: Dashboard conversation activity uses the list eligibility scope
 
-The dashboard overview conversation metrics and per-bucket conversation trend MUST use the same eligible `request_logs` row scope as the conversation list:
+The dashboard overview conversation metrics and per-bucket conversation trend
+MUST use the same eligible `request_logs` row scope as the conversation list:
 non-empty conversation IDs, request kinds other than `warmup` and
 `limit_warmup`, and `deleted_at IS NULL`. This scope MUST apply to both the
 distinct conversation count and conversation request count in the overview
@@ -2965,7 +2966,8 @@ summary and to each conversation trend bucket.
 
 ### Requirement: Conversation listing total is served from a short-TTL cache
 
-The grouped `total` returned by `GET /api/conversations` MUST remain display-only pagination metadata that tolerates short staleness, and the dashboard polls the
+The grouped `total` returned by `GET /api/conversations` is display-only
+pagination metadata that tolerates short staleness, and the dashboard polls the
 endpoint every 30 seconds. Recomputing the grouped count over the full eligible
 `request_logs` history on every poll risks the same dashboard-induced
 database contention this repository has previously optimized away.

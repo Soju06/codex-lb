@@ -89,5 +89,6 @@ def test_openspec_validation_is_required_for_spec_only_changes() -> None:
     assert "paths-ignore:" not in trigger_block
     assert "\n    needs:" not in openspec_job
     assert "\n    if:" not in openspec_job
-    assert "npx --yes @fission-ai/openspec@1.4.1 validate --specs --strict" in openspec_job
+    assert "npx --yes @fission-ai/openspec@1.11.0 validate --specs" in openspec_job
+    assert "--strict" not in openspec_job
     assert "- openspec" in required_job

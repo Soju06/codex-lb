@@ -5,7 +5,10 @@ Error-rate accounting that counts only genuinely-failed terminals: cancelled cli
 ## Requirements
 ### Requirement: Error metrics count only genuinely-failed terminals
 
-Every materialization of a request-log error count or error rate — the usage summary metrics, the dashboard overview activity metrics and per-bucket error-rate trend inputs, the reports daily and summary aggregates, and the fleet pressure metrics — MUST classify a request-log row as an error only
+Every materialization of a request-log error count or error rate — the usage
+summary metrics, the dashboard overview activity metrics and per-bucket
+error-rate trend inputs, the reports daily and summary aggregates, and the
+fleet pressure metrics — MUST classify a request-log row as an error only
 when `status NOT IN ('success', 'cancelled')`. Rows with `status =
 'cancelled'` (normal client-side disconnect terminals, e.g.
 `error_code=client_disconnected`) MUST NOT be counted in any error numerator.
@@ -75,7 +78,8 @@ disclosed step change at deploy.
 
 ### Requirement: New code repairs the rolling-upgrade fold window
 
-The rolling-upgrade fold window MUST be repaired because the migration runs before old replicas drain: a legacy replica may fold post-migration hours with the old error fold and advance the shared
+Because the migration runs before old replicas drain, a legacy replica may
+fold post-migration hours with the old error fold and advance the shared
 watermark — by up to its full per-pass slice budget, so no fixed trailing
 window can bound the damage. The migration MUST persist the legacy-suspect
 range start on the fold-state row (`upgrade_repair_from`): existing rows are

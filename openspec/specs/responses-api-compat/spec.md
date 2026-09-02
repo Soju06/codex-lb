@@ -67,7 +67,9 @@ When `upstream_stream_transport` is `"auto"` and the serialized request payload 
 
 ### Requirement: Clean upstream close before any response event fails fast
 
-When the HTTP Responses bridge observes an upstream WebSocket close with `close_code = 1000` before any `response.*` event has been surfaced for the pending request, the proxy MUST preserve its existing pre-visible replay
+When the HTTP Responses bridge observes an upstream WebSocket close with
+`close_code = 1000` before any `response.*` event has been surfaced for the
+pending request, the proxy MUST preserve its existing pre-visible replay
 guards. If the request has already used exactly one eligible pre-visible
 replay and the replacement upstream WebSocket also closes cleanly before any
 response event, the proxy MAY perform exactly one additional replay. The
@@ -331,7 +333,9 @@ The proxy MUST configure direct and routed upstream Responses WebSocket transpor
 - **AND** the submitter cancellation is preserved after settlement completes
 
 ### Requirement: Upstream websocket drops penalize affected accounts
-When an upstream websocket closes while one or more streamed response requests are pending and have not reached a terminal event, the proxy MUST record a transient upstream error for the account before signaling failure for those
+When an upstream websocket closes while one or more streamed response requests
+are pending and have not reached a terminal event, the proxy MUST record a
+transient upstream error for the account before signaling failure for those
 pending requests, except when the close carries a classified process-wide
 network failure or upstream WebSocket liveness timeout, is a clean close
 (`close_code = 1000`) before any `response.*` event, or carries the classified
@@ -4512,7 +4516,8 @@ current capability grant through the canonical selector.
 
 ### Requirement: Proof-gated recovery attempts are durably fenced
 
-When an HTTP bridge request has a verified, account-neutral, unanchored full resend body, the proxy MUST record that request fingerprint in the durable
+When an HTTP bridge request has a verified, account-neutral, unanchored full
+resend body, the proxy MUST record that request fingerprint in the durable
 recovery journal before dispatching it upstream. The record MUST be owned by
 the current durable session owner epoch and MUST start in `unknown` state.
 Requests without that replay-safety proof MUST NOT create a recovery-journal
@@ -4583,7 +4588,8 @@ MUST require the journal table.
 
 ### Requirement: Claimed HTTP bridge completed queues remain deliverable
 
-When HTTP bridge processing of `response.completed` removes a request from pending ownership, it MUST retain the request's downstream event queue for the
+When HTTP bridge processing of `response.completed` removes a request from
+pending ownership, it MUST retain the request's downstream event queue for the
 remainder of that completed operation. Later asynchronous bookkeeping or
 request detachment MUST NOT revoke that claimed queue before the completed
 operation's selected terminal event and end-of-stream marker are enqueued. If
@@ -4710,7 +4716,9 @@ For standard and compact Responses requests, the proxy MUST omit `namespace` fro
 
 ### Requirement: Responses-Lite replay proof tolerates only verified developer interleaving
 
-When a fresh durable HTTP bridge classifies a client-unanchored Responses-Lite full resend whose `additional_tools` bundle preserves developer messages inline, the replay proof MUST tolerate a developer message only in the historical and
+When a fresh durable HTTP bridge classifies a client-unanchored Responses-Lite
+full resend whose `additional_tools` bundle preserves developer messages inline,
+the replay proof MUST tolerate a developer message only in the historical and
 fresh positions defined below. Every other developer position or shape MUST
 remain fail-closed.
 
@@ -5112,7 +5120,8 @@ operation retention continues.
 
 ### Requirement: Fresh indefinite-recovery spool
 
-Before dispatching a server-owned retry for a nonterminal operation, the system MUST atomically clear any partial event spool under the durable owner fence.
+Before dispatching a server-owned retry for a nonterminal operation, the system
+MUST atomically clear any partial event spool under the durable owner fence.
 
 #### Scenario: Retry starts with a clean transcript
 
@@ -5154,7 +5163,8 @@ cannot retain raw request data indefinitely.
 
 ### Requirement: Acknowledged alias persistence failure
 
-If upstream has acknowledged a response but local continuity-alias persistence fails, the downstream error MUST NOT transition the durable operation to a
+If upstream has acknowledged a response but local continuity-alias persistence
+fails, the downstream error MUST NOT transition the durable operation to a
 retryable failed state. The operation MUST remain acknowledged/ambiguous so an
 identical retry cannot dispatch a duplicate upstream turn.
 
@@ -5165,7 +5175,8 @@ identical retry cannot dispatch a duplicate upstream turn.
 
 ### Requirement: Cross-session nonterminal handoff
 
-When a scoped operation fingerprint is found under a different durable session, a nonterminal operation MUST be atomically rebound to the currently
+When a scoped operation fingerprint is found under a different durable
+session, a nonterminal operation MUST be atomically rebound to the currently
 owned session before its event spool is reset or a recovery attempt is sent.
 Completed replayable operations MUST remain attached to their original session.
 The handoff MUST be refused while the prior session has an unexpired owner
@@ -5237,7 +5248,8 @@ terminate normally rather than being resent indefinitely.
 
 ### Requirement: Retry reservation terminalization
 
-If reacquiring API-key usage limits for a recovery attempt fails, the proxy MUST settle the prior reservation and emit a terminal `response.failed` SSE
+If reacquiring API-key usage limits for a recovery attempt fails, the proxy
+MUST settle the prior reservation and emit a terminal `response.failed` SSE
 event instead of aborting the already-started stream.
 
 #### Scenario: Quota failure produces terminal SSE
@@ -5268,7 +5280,8 @@ durable repository supports it.
 
 ### Requirement: Partial disconnect acknowledgement
 
-When a bridge disconnects after an operation has emitted any response event but before a terminal event, the durable operation MUST remain acknowledged or
+When a bridge disconnects after an operation has emitted any response event but
+before a terminal event, the durable operation MUST remain acknowledged or
 ambiguous. It MUST NOT be classified as retryable failed solely because the
 disconnect was non-terminal.
 
@@ -5603,7 +5616,8 @@ The Responses WebSocket relay MUST preserve ordered text and binary messages, se
 
 ### Requirement: Synthesized downstream turn state must remain provenance-scoped
 
-A turn-state value synthesized by codex-lb for downstream reconnect and internal affinity MUST remain available to those consumers without being
+A turn-state value synthesized by codex-lb for downstream reconnect and
+internal affinity MUST remain available to those consumers without being
 presented to the upstream server as a client-originated initial WebSocket
 handshake header. A nonblank turn-state explicitly supplied by the client or
 issued by upstream MAY continue through the existing owner-bound continuity
@@ -5626,7 +5640,8 @@ path.
 
 ### Requirement: Backend non-streaming Responses preserve HTTP JSON transport
 
-When `POST /backend-api/codex/responses` receives a valid request with `stream: false`, the service MUST preserve that value in the upstream request,
+When `POST /backend-api/codex/responses` receives a valid request with
+`stream: false`, the service MUST preserve that value in the upstream request,
 MUST use upstream HTTP rather than WebSocket, and MUST return one
 `application/json` Response object rather than an SSE stream. The service MUST
 retain the existing account selection, error masking, usage settlement, and
@@ -5652,7 +5667,9 @@ upstream stream when required by the configured ChatGPT Codex backend.
 
 ### Requirement: Native Codex HTTP attempts preserve client transport choice
 
-For a downstream HTTP/SSE Responses request identified as a native Codex request by the existing first-party `User-Agent` or `originator` rules, the proxy MUST retain upstream HTTP when transport is otherwise controlled by the
+For a downstream HTTP/SSE Responses request identified as a native Codex
+request by the existing first-party `User-Agent` or `originator` rules, the
+proxy MUST retain upstream HTTP when transport is otherwise controlled by the
 HTTP downstream policy. This native pin MUST take precedence over sticky
 continuation signals and the `smart` or `always_websocket` policy, but it MUST
 NOT override an explicit operator `upstream_stream_transport="websocket"` or
@@ -5674,7 +5691,8 @@ WebSocket requests MUST remain on their dedicated WebSocket path.
 
 ### Requirement: Native Codex preserves upstream failure lifecycle
 
-For a native Codex HTTP/SSE Responses request, an upstream transport timeout or stream EOF without a terminal Responses event MUST terminate the downstream
+For a native Codex HTTP/SSE Responses request, an upstream transport timeout or
+stream EOF without a terminal Responses event MUST terminate the downstream
 stream without synthesizing `response.failed`, `error`, or `[DONE]`. The proxy
 MUST still execute reservation, request-log, account-health, and owned-resource
 cleanup before propagating the termination. Non-native and OpenAI-compatible
@@ -5696,7 +5714,9 @@ clients MUST retain the existing stable terminal-error shaping.
 
 ### Requirement: Propagated upstream rate limits preserve Retry-After
 
-When a Responses upstream HTTP rejection carries a valid `Retry-After` header and that rejection is propagated as a downstream HTTP response, codex-lb MUST copy the field value unchanged. The proxy MUST accept only a bounded value with
+When a Responses upstream HTTP rejection carries a valid `Retry-After` header
+and that rejection is propagated as a downstream HTTP response, codex-lb MUST
+copy the field value unchanged. The proxy MUST accept only a bounded value with
 no CR or LF and MUST NOT expose other upstream response headers through this
 rule. A missing or invalid value MUST remain absent.
 

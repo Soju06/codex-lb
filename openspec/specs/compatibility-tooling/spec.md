@@ -562,8 +562,8 @@ dynamic-table equality.
 
 ### Requirement: Raw HTTP/2 parity gates wire-profile changes
 
-Changes to native HTTP/2 startup settings or native Codex header serialization MUST be verified with controlled A′, A, and C captures.
-A′ and A MUST establish
+Changes to native HTTP/2 startup settings or native Codex header serialization
+MUST be verified with controlled A′, A, and C captures. A′ and A MUST establish
 direct repeatability, and A/C ordered SETTINGS, connection-control shape,
 decoded header-name order/casing, and stream/reuse pattern MUST all match before
 the wire-profile change is considered verified. HPACK fragments MUST remain

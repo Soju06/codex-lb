@@ -279,7 +279,6 @@ from app.modules.proxy._service.streaming.helpers import (
     _openai_error_fields,
     _raw_stream_error_code_or_upstream,
     _rewrite_malformed_stream_error_event,
-    _settle_background_ack,
     _stream_transport_failure_event_or_raise,
 )
 from app.modules.proxy._service.streaming.helpers import _raw_stream_error_fields as _raw_error_fields
@@ -289,6 +288,7 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.helpers import (
     _select_account_with_budget_for_stream as _select_account_with_budget_for_stream_helper,
 )
+from app.modules.proxy._service.streaming.helpers import _settle_background_ack as _settle_bg_ack
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.streaming.retry import _StreamingRetryMixin
 from app.modules.proxy._service.support import (
@@ -633,7 +633,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             )
             if malformed_error_rewrite is not None:
                 first, event, first_payload, event_type = malformed_error_rewrite
-            terminal_event_seen, response_id = _settle_background_ack(settlement, payload, first_payload, response_id)
+            terminal_event_seen, response_id, usage = _settle_bg_ack(settlement, payload, first_payload, response_id)
             if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
                 await _touch_api_key_reservation()
             event_service_tier = _facade()._service_tier_from_event_payload(first_payload)

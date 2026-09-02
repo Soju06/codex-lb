@@ -53,7 +53,7 @@ from app.core.errors import (
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
-from app.core.openai.models import OpenAIError, OpenAIEvent, OpenAIResponsePayload
+from app.core.openai.models import OpenAIError, OpenAIEvent, OpenAIResponsePayload, ResponseUsage
 from app.core.openai.parsing import classify_event_type, parse_sse_event
 from app.core.openai.requests import ResponsesRequest
 from app.core.resilience.network_recovery import (
@@ -411,10 +411,10 @@ def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
 
-def _canonical_background_ack_response_id(
+def _canonical_background_ack(
     event_payload: dict[str, JsonValue] | None,
     event_type: str | None,
-) -> str | None:
+) -> tuple[str, OpenAIResponsePayload] | None:
     if event_type not in {"response.queued", "response.in_progress"}:
         return None
     response = event_payload.get("response") if event_payload is not None else None
@@ -437,7 +437,15 @@ def _canonical_background_ack_response_id(
         return None
     if (response.get("error") is None) != (payload.error is None):
         return None
-    return response_id
+    return response_id, payload
+
+
+def _canonical_background_ack_response_id(
+    event_payload: dict[str, JsonValue] | None,
+    event_type: str | None,
+) -> str | None:
+    canonical_ack = _canonical_background_ack(event_payload, event_type)
+    return canonical_ack[0] if canonical_ack is not None else None
 
 
 def _is_background_json_ack(
@@ -453,17 +461,18 @@ def _settle_background_ack(
     payload: ResponsesRequest,
     event_payload: dict[str, JsonValue] | None,
     response_id: str,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, ResponseUsage | None]:
     """Treat a canonical background acknowledgement as the terminal event of a `stream: false` request."""
-    ack_response_id = (
-        _canonical_background_ack_response_id(event_payload, classify_event_type(event_payload))
+    canonical_ack = (
+        _canonical_background_ack(event_payload, classify_event_type(event_payload))
         if payload.stream is False
         else None
     )
-    if ack_response_id is None:
-        return False, response_id
+    if canonical_ack is None:
+        return False, response_id, None
+    ack_response_id, ack_payload = canonical_ack
     settlement.response_id = ack_response_id
-    return True, ack_response_id
+    return True, ack_response_id, ack_payload.usage
 
 
 def _stream_iterator_after_capacity_admission(

@@ -3022,6 +3022,134 @@ async def test_background_json_completion_is_not_truncated(
 
 
 @pytest.mark.asyncio
+async def test_background_json_ack_usage_is_finalized(async_client, monkeypatch) -> None:
+    email = "background-json-usage@example.com"
+    raw_account_id = "acc_background_json_usage"
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    imported = await async_client.post("/api/accounts/import", files=files)
+    assert imported.status_code == 200
+
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_background_json_usage",
+        key_id="key_background_json_usage",
+        model="gpt-5.4",
+    )
+    request_log_calls: list[dict[str, object]] = []
+    settle_calls: list[dict[str, object]] = []
+    success_account_ids: list[str] = []
+
+    async def fake_stream(
+        payload: ResponsesRequest,
+        *_args: object,
+        **_kwargs: object,
+    ) -> AsyncIterator[str]:
+        assert payload.stream is False
+        yield proxy_module.format_sse_event(
+            {
+                "type": "response.queued",
+                "response": {
+                    "id": "resp_background_json_usage",
+                    "object": "response",
+                    "status": "queued",
+                    "output": [],
+                    "usage": {
+                        "input_tokens": 12,
+                        "output_tokens": 3,
+                        "total_tokens": 15,
+                        "input_tokens_details": {"cached_tokens": 2},
+                        "output_tokens_details": {"reasoning_tokens": 1},
+                    },
+                },
+            }
+        )
+
+    async def fake_enforce_request_limits(*_args: object, **_kwargs: object) -> ApiKeyUsageReservationData:
+        return reservation
+
+    async def fake_write_request_log(
+        _self: object,
+        **kwargs: object,
+    ) -> None:
+        request_log_calls.append(dict(kwargs))
+
+    async def fake_settle_stream_api_key_usage(
+        _self: object,
+        _api_key: object,
+        api_key_reservation: ApiKeyUsageReservationData | None,
+        settlement: proxy_module._StreamSettlement,
+        request_id: str,
+        **kwargs: object,
+    ) -> bool:
+        settle_calls.append(
+            {
+                "reservation": api_key_reservation,
+                "status": settlement.status,
+                "request_id": request_id,
+                "input_tokens": settlement.input_tokens,
+                "output_tokens": settlement.output_tokens,
+                "cached_input_tokens": settlement.cached_input_tokens,
+                "wait_for_settlement": kwargs.get("wait_for_settlement", False),
+            }
+        )
+        return True
+
+    async def fake_record_success(_self: object, account: Account) -> None:
+        success_account_ids.append(account.id)
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", fake_enforce_request_limits)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_settle_stream_api_key_usage",
+        fake_settle_stream_api_key_usage,
+    )
+    monkeypatch.setattr(proxy_module.LoadBalancer, "record_success", fake_record_success)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [],
+            "stream": False,
+            "background": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["usage"] == {
+        "input_tokens": 12,
+        "output_tokens": 3,
+        "total_tokens": 15,
+        "input_tokens_details": {"cached_tokens": 2},
+        "output_tokens_details": {"reasoning_tokens": 1},
+    }
+    assert len(request_log_calls) == 1
+    request_log = request_log_calls[0]
+    assert request_log["status"] == "success"
+    assert request_log["request_id"] == "resp_background_json_usage"
+    assert request_log["input_tokens"] == 12
+    assert request_log["output_tokens"] == 3
+    assert request_log["cached_input_tokens"] == 2
+    assert request_log["reasoning_tokens"] == 1
+    assert settle_calls == [
+        {
+            "reservation": reservation,
+            "status": "success",
+            "request_id": request_log_calls[0]["archive_request_id"],
+            "input_tokens": 12,
+            "output_tokens": 3,
+            "cached_input_tokens": 2,
+            "wait_for_settlement": False,
+        }
+    ]
+    assert success_account_ids == [expected_account_id]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "response_body"),
     [

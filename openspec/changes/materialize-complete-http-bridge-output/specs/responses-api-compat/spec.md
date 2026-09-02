@@ -17,7 +17,7 @@ completed operation. The snapshot MUST omit stale response anchors and
 response-owned item IDs, and MUST NOT delay or fail the live response if it
 cannot be built.
 
-When a complete replay-input snapshot is available, recovery SHOULD use it as
+When a complete replay-input snapshot is available, recovery MUST use it as
 the fresh request input even if an upstream parent response is no longer
 available.
 

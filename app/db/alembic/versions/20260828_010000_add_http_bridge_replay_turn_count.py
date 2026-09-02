@@ -10,6 +10,14 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.alembic.http_bridge_migration_ownership import (
+    drop_ownership_table_if_empty,
+    ensure_ownership_table,
+    forget_created,
+    mark_created,
+    was_created,
+)
+
 revision = "20260828_010000_add_http_bridge_replay_turn_count"
 down_revision = "20260827_000000_add_http_bridge_retained_alias_target"
 branch_labels = None
@@ -17,7 +25,6 @@ depends_on = None
 
 _TABLE = "http_bridge_operations"
 _COLUMN = "response_replay_input_turn_count"
-_created_column = False
 
 
 def _columns(bind) -> set[str]:
@@ -28,19 +35,20 @@ def _columns(bind) -> set[str]:
 
 
 def upgrade() -> None:
-    global _created_column
     bind = op.get_bind()
-    _created_column = False
-    if not _columns(bind) or _COLUMN in _columns(bind):
+    columns = _columns(bind)
+    if not columns or _COLUMN in columns:
         return
+    ensure_ownership_table(bind)
     with op.batch_alter_table(_TABLE) as batch_op:
         batch_op.add_column(sa.Column(_COLUMN, sa.Integer(), nullable=False, server_default=sa.text("0")))
-    _created_column = True
+    mark_created(bind, revision, "column", _COLUMN)
 
 
 def downgrade() -> None:
     bind = op.get_bind()
-    if not _created_column or _COLUMN not in _columns(bind):
-        return
-    with op.batch_alter_table(_TABLE) as batch_op:
-        batch_op.drop_column(_COLUMN)
+    if _COLUMN in _columns(bind) and was_created(bind, revision, "column", _COLUMN):
+        with op.batch_alter_table(_TABLE) as batch_op:
+            batch_op.drop_column(_COLUMN)
+        forget_created(bind, revision, "column", _COLUMN)
+    drop_ownership_table_if_empty(bind)

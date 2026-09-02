@@ -1974,6 +1974,16 @@ class HttpBridgeRecoveryAttemptRecord(Base):
     )
 
 
+class HttpBridgeMigrationObjectOwnership(Base):
+    """Track additive objects created by HTTP bridge revisions."""
+
+    __tablename__ = "http_bridge_migration_object_ownership"
+
+    revision: Mapped[str] = mapped_column(String(128), primary_key=True)
+    object_type: Mapped[str] = mapped_column(String(32), primary_key=True)
+    object_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+
+
 class HttpBridgeOperationRecord(Base):
     """Durable identity and outcome for a continuity-bound response.create."""
 

@@ -3,9 +3,11 @@
 The bridge first performs the existing exact operation-fingerprint lookup and
 then the existing unique latest-parent lookup. Only when those paths do not
 produce a body-matching operation, and the parked-recovery flag is enabled, it
-queries at most nine recent `UNKNOWN` rows for the same durable session and
-model. The ninth row is a truncation sentinel; if present, recovery is
-ambiguous and is rejected.
+queries at most `_http_bridge_recent_unknown_operation_limit` recent `UNKNOWN`
+rows for the same durable session and model. The limit defaults to 8 and accepts
+configured values from 1 through 32. The query requests one additional row as a
+truncation sentinel, so the sentinel is not always the ninth row; if present,
+recovery is ambiguous and is rejected.
 
 The query uses operation `created_at`, not mutable retry timestamps, so repeated
 failed probes cannot keep an old operation eligible forever. The request body

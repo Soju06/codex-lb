@@ -391,6 +391,35 @@ async def test_fence_operation_drops_late_events_from_interrupted_generation() -
 
 
 @pytest.mark.asyncio
+async def test_enqueue_refreshes_context_when_owner_identity_changes() -> None:
+    durable = _FakeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    try:
+        await _enqueue(batcher, "original", recovery_dispatch_count=1)
+        await batcher.enqueue(
+            operation_id="op-1",
+            session_id="replacement-session",
+            instance_id="replacement-instance",
+            owner_epoch=9,
+            event_text="replacement",
+            recovery_dispatch_count=1,
+        )
+
+        context = batcher._contexts["op-1"]
+        assert context.session_id == "replacement-session"
+        assert context.instance_id == "replacement-instance"
+        assert context.owner_epoch == 9
+    finally:
+        await batcher.close()
+
+
+@pytest.mark.asyncio
 async def test_rollback_fence_operation_restores_generation_after_rebind_rollback() -> None:
     durable = _FakeDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(

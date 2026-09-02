@@ -139,7 +139,14 @@ class HttpBridgeOperationEventBatcher:
             if recovery_dispatch_count > current_generation:
                 self._operation_generations[operation_id] = recovery_dispatch_count
             current_context = self._contexts.get(operation_id)
-            if current_context is None or current_context.recovery_dispatch_count < recovery_dispatch_count:
+            if current_context is None or current_context.recovery_dispatch_count < recovery_dispatch_count or (
+                current_context.recovery_dispatch_count == recovery_dispatch_count
+                and (
+                    current_context.session_id != session_id
+                    or current_context.instance_id != instance_id
+                    or current_context.owner_epoch != owner_epoch
+                )
+            ):
                 self._contexts[operation_id] = pending
             if terminal:
                 self._closing_operations.add(operation_id)

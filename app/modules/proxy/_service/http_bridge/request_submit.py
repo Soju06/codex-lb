@@ -1456,6 +1456,55 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         return allowed
 
+    async def _claim_http_bridge_operation_fenced_continuity_replay(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        request_state: _WebSocketRequestState,
+    ) -> bool:
+        """Claim an UNKNOWN operation before a parked recovery dispatch."""
+        if request_state.operation_recovery_claimed:
+            return True
+        operation_id = request_state.operation_id
+        if (
+            not operation_id
+            or not request_state.operation_registered
+            or session.durable_session_id is None
+            or session.durable_owner_epoch is None
+        ):
+            return False
+        claim_unknown_operation = getattr(self._durable_bridge, "claim_unknown_operation_for_recovery", None)
+        if not callable(claim_unknown_operation):
+            return False
+        recovery_mode = getattr(
+            _service_get_settings(),
+            "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
+            "fail_closed",
+        )
+        optional_kwargs = {"max_recovery_dispatches": 1} if recovery_mode == "server_anchored_replay_once" else {}
+        try:
+            claimed = bool(
+                await _call_with_supported_optional_kwargs(
+                    claim_unknown_operation,
+                    optional_kwargs=optional_kwargs,
+                    operation_id=operation_id,
+                    session_id=session.durable_session_id,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                )
+            )
+        except Exception:
+            logger.warning(
+                "Failed to claim hard-continuity operation before parked recovery operation_id=%s",
+                operation_id,
+                exc_info=True,
+            )
+            return False
+        if not claimed:
+            return False
+        request_state.operation_recovery_claimed = True
+        request_state.operation_attempt_generation = max(0, int(request_state.operation_attempt_generation)) + 1
+        return True
+
     async def _submit_http_bridge_request_with_handoff(
         self: Any,
         session: "_HTTPBridgeSession",
@@ -4573,6 +4622,13 @@ class _HTTPBridgeRequestSubmitMixin:
                 if len(retryable_requests) != 1:
                     return False
                 request_state = retryable_requests[0]
+            operation_fenced_claimed = (
+                await self._claim_http_bridge_operation_fenced_continuity_replay(session, request_state)
+                if allow_operation_fenced_continuity_replay
+                else True
+            )
+            if not operation_fenced_claimed:
+                return False
             if retry_send_baselines is not None:
                 # The send-attempt baseline: a retried request already carries
                 # prior attempts, so the release keys on advancement past

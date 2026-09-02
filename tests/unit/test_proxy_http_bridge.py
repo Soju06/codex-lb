@@ -2137,6 +2137,67 @@ async def test_hard_continuity_operation_replay_requires_matching_unknown_fence(
     )
 
 
+@pytest.mark.asyncio
+async def test_parked_recovery_claims_unknown_operation_once_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-claim")
+    session.durable_session_id = "durable-hard-fence-claim"
+    session.durable_owner_epoch = 3
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_instance_id="instance-1",
+        ),
+    )
+    claim_lock = asyncio.Lock()
+    claim_taken = False
+    claim_calls: list[dict[str, object]] = []
+
+    async def claim_unknown_operation_for_recovery(**kwargs: object) -> bool:
+        nonlocal claim_taken
+        async with claim_lock:
+            claim_calls.append(kwargs)
+            if claim_taken:
+                return False
+            claim_taken = True
+            return True
+
+    service._durable_bridge = SimpleNamespace(
+        claim_unknown_operation_for_recovery=claim_unknown_operation_for_recovery,
+    )
+    request_states = [
+        proxy_service._WebSocketRequestState(
+            request_id=f"req-hard-fence-claim-{index}",
+            model="gpt-5.6",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=0.0,
+            operation_id="op-hard-fence-claim",
+            operation_registered=True,
+            operation_attempt_generation=2,
+        )
+        for index in range(2)
+    ]
+
+    results = await asyncio.gather(
+        *(
+            service._claim_http_bridge_operation_fenced_continuity_replay(session, request_state)
+            for request_state in request_states
+        )
+    )
+
+    assert sorted(results) == [False, True]
+    assert sum(request_state.operation_recovery_claimed for request_state in request_states) == 1
+    assert sorted(request_state.operation_attempt_generation for request_state in request_states) == [2, 3]
+    assert len(claim_calls) == 2
+    assert {call["operation_id"] for call in claim_calls} == {"op-hard-fence-claim"}
+
+
 def _make_app_settings(*, bridge_enabled: bool = True, **overrides: Any) -> Settings:
     return Settings(http_responses_session_bridge_enabled=bridge_enabled, **overrides)
 

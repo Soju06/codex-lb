@@ -4640,6 +4640,42 @@ class _HTTPBridgeRequestSubmitMixin:
         proof_gated_continuity_replay_candidate = False
         server_anchored_replay_candidate = False
         request_state_was_retryable_before_prepare = False
+        request_state_retryability_baseline: tuple[Any, ...] | None = None
+        session_retryability_baseline: tuple[Any, Any] | None = None
+
+        def retryability_fingerprint(request_state: _WebSocketRequestState) -> tuple[Any, ...]:
+            return (
+                request_state.precreated_replay_reason,
+                request_state.verified_stale_anchor_replay,
+                request_state.previous_response_id,
+                request_state.proxy_injected_previous_response_id,
+                request_state.fresh_upstream_request_is_retry_safe,
+                request_state.fresh_upstream_request_text,
+                request_state.request_text,
+                request_state.transport,
+                request_state.response_create_sent_at,
+                request_state.replay_count,
+                request_state.clean_close_replay_count,
+                request_state.generate_false_prewarm,
+                request_state.last_downstream_sequence_number,
+                request_state.response_id,
+                request_state.awaiting_response_created,
+                request_state.response_event_count,
+                request_state.downstream_visible,
+                request_state.upstream_model_output_seen,
+            )
+
+        def retryability_baseline_is_unchanged() -> bool:
+            return (
+                request_state_retryability_baseline is not None
+                and session_retryability_baseline == (
+                    session.last_upstream_close_code,
+                    session.last_upstream_close_generation,
+                )
+                and request_state is not None
+                and retryability_fingerprint(request_state) == request_state_retryability_baseline
+            )
+
         if session.key.strength == "hard":
             async with session.pending_lock:
                 retryable_candidates = [
@@ -4848,6 +4884,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.clean_close_retry_close_generation = close_generation
             if additional_clean_close_retry:
                 request_state.clean_close_replay_count += 1
+            request_state_retryability_baseline = retryability_fingerprint(request_state)
+            session_retryability_baseline = (
+                session.last_upstream_close_code,
+                session.last_upstream_close_generation,
+            )
 
         operation_fenced_claimed = True
         operation_claim_acquired_here = False
@@ -4911,7 +4952,11 @@ class _HTTPBridgeRequestSubmitMixin:
                         for pending_request in session.pending_requests
                         if not pending_request.draining_until_terminal
                         and (
-                            (pending_request is request_state and request_state_was_retryable_before_prepare)
+                            (
+                                pending_request is request_state
+                                and request_state_was_retryable_before_prepare
+                                and retryability_baseline_is_unchanged()
+                            )
                             or request_is_retryable(pending_request)
                         )
                     ]
@@ -4921,7 +4966,13 @@ class _HTTPBridgeRequestSubmitMixin:
                     and any(candidate is request_state for candidate in claim_retryable_requests)
                     and not request_state.draining_until_terminal
                     and _http_bridge_request_counts_against_queue(request_state)
-                    and (request_state_was_retryable_before_prepare or request_is_retryable(request_state))
+                    and (
+                        (
+                            request_state_was_retryable_before_prepare
+                            and retryability_baseline_is_unchanged()
+                        )
+                        or request_is_retryable(request_state)
+                    )
                 )
             if not claim_still_retryable:
                 await rollback_operation_fenced_claim()

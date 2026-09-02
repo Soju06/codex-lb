@@ -13669,6 +13669,88 @@ async def test_operation_fenced_retry_ignores_existing_response_id_entries(
 
 
 @pytest.mark.asyncio
+async def test_operation_fenced_retry_rejects_response_progress_during_claim(
+    app_instance,
+    monkeypatch,
+):
+    """A response event observed during the durable claim must cancel the retry."""
+    service = get_proxy_service_for_app(app_instance)
+    session = proxy_module._HTTPBridgeSession(
+        key=proxy_module._HTTPBridgeSessionKey("prompt_cache", "retry-fenced-progress-key", None),
+        headers={},
+        affinity=proxy_module._AffinityPolicy(
+            key="retry-fenced-progress-key",
+            kind=proxy_module.StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=300,
+        ),
+        request_model="gpt-5.1",
+        account=cast(Account, SimpleNamespace(id="acct-fenced-progress", status=AccountStatus.ACTIVE)),
+        upstream=cast(proxy_module.UpstreamWebSocket, _SilentUpstreamWebSocket()),
+        upstream_control=proxy_module._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=120.0,
+    )
+    session.durable_session_id = "durable-retry-fenced-progress"
+    session.durable_owner_epoch = 4
+    retry_request = proxy_module._WebSocketRequestState(
+        request_id="req-fenced-progress",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        transport="http",
+        request_text=json.dumps({"type": "response.create", "model": "gpt-5.1", "input": ["retry"]}),
+        operation_id="op-fenced-progress",
+        operation_registered=True,
+        operation_attempt_generation=0,
+    )
+    session.pending_requests.append(retry_request)
+    replacement_upstream = _RecordingUpstreamWebSocket()
+    refund_claim = AsyncMock(return_value=True)
+
+    async def claim_operation(_session, state):
+        state.operation_recovery_claimed = True
+        state.operation_attempt_generation = 1
+        # Simulate an upstream response event arriving while the durable claim
+        # is awaiting its commit.
+        state.response_event_count = 1
+        return True
+
+    async def fake_reconnect(
+        self,
+        target_session,
+        *,
+        request_state,
+        restart_reader=False,
+        require_same_account=False,
+        require_preferred_account=False,
+    ):
+        del self, request_state, restart_reader, require_same_account, require_preferred_account
+        target_session.upstream = replacement_upstream
+
+    monkeypatch.setattr(service, "_claim_http_bridge_operation_fenced_continuity_replay", claim_operation)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service._durable_bridge, "mark_operation_unknown", refund_claim)
+    monkeypatch.setattr(proxy_module.ProxyService, "_reconnect_http_bridge_session", fake_reconnect)
+
+    assert (
+        await service._retry_http_bridge_precreated_request(
+            session,
+            allow_operation_fenced_continuity_replay=True,
+        )
+        is False
+    )
+    assert replacement_upstream.sent_text == []
+    refund_claim.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailable(
     async_client,
     app_instance,

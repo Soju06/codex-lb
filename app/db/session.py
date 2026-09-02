@@ -791,7 +791,8 @@ async def _reclaim_wedged_sqlite_session(
                 )
             else:
                 logger.debug(
-                    "sqlite_wedged_teardown phase=%s — the abandoned %s already closed its connection; nothing to reclaim",
+                    "sqlite_wedged_teardown phase=%s — the abandoned %s already closed its connection; "
+                    "nothing to reclaim",
                     phase,
                     phase,
                 )

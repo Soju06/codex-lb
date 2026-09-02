@@ -1383,3 +1383,31 @@ def test_materialize_output_items_rejects_duplicate_done_indexes() -> None:
     ]
 
     assert materialize_output_items_from_events(events) is None
+
+
+def test_materialize_output_items_rejects_added_after_done() -> None:
+    events = [
+        (
+            "event: response.output_item.done\ndata: "
+            '{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}\n\n'
+        ),
+        (
+            "event: response.output_item.added\ndata: "
+            '{"type":"response.output_item.added","output_index":0,"item":{"type":"message"}}\n\n'
+        ),
+        'event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n',
+    ]
+
+    assert materialize_output_items_from_events(events) is None
+
+
+def test_materialize_output_items_rejects_output_lifecycle_after_completion() -> None:
+    events = [
+        'event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n',
+        (
+            "event: response.output_item.done\ndata: "
+            '{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}\n\n'
+        ),
+    ]
+
+    assert materialize_output_items_from_events(events) is None

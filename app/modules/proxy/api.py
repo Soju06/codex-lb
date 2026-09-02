@@ -8703,6 +8703,8 @@ async def _collect_responses_payload(
     captured_turn_state_headers: dict[str, str] | None = None,
 ) -> OpenAIResponseResult:
     output_items: dict[int, dict[str, JsonValue]] = {}
+    added_output_indexes: set[int] = set()
+    done_output_indexes: set[int] = set()
     terminal_result: OpenAIResponseResult | None = None
     nonterminal_result: OpenAIResponsePayload | None = None
     contract_violation_kind: str | None = None
@@ -8715,7 +8717,14 @@ async def _collect_responses_payload(
         if captured_turn_state_headers is not None:
             _capture_response_metadata_turn_state(payload, captured_turn_state_headers)
         event_type = classify_event_type(payload)
-        _collect_output_item_event(payload, output_items)
+        if not _collect_output_item_event(
+            payload,
+            output_items,
+            added_indexes=added_output_indexes,
+            done_indexes=done_output_indexes,
+            terminal_seen=terminal_result is not None,
+        ):
+            contract_violation_kind = contract_violation_kind or "invalid_output_item"
         if terminal_result is not None:
             continue
         if event_type == "error":
@@ -8771,15 +8780,30 @@ async def _collect_responses_payload(
 def _collect_output_item_event(
     payload: dict[str, JsonValue],
     output_items: dict[int, dict[str, JsonValue]],
-) -> None:
+    *,
+    added_indexes: set[int],
+    done_indexes: set[int],
+    terminal_seen: bool = False,
+) -> bool:
     event_type = payload.get("type")
     if event_type not in ("response.output_item.added", "response.output_item.done"):
-        return
+        return True
+    if terminal_seen:
+        return False
     output_index = payload.get("output_index")
     item = payload.get("item")
-    if not isinstance(output_index, int) or not isinstance(item, dict):
-        return
+    if type(output_index) is not int or output_index < 0 or not isinstance(item, dict):
+        return False
+    if event_type == "response.output_item.added":
+        if output_index in added_indexes or output_index in done_indexes:
+            return False
+        added_indexes.add(output_index)
+    else:
+        if output_index in done_indexes:
+            return False
+        done_indexes.add(output_index)
     output_items[output_index] = dict(item)
+    return True
 
 
 def _merge_collected_output_items(
@@ -8835,6 +8859,8 @@ async def _normalize_public_responses_stream(
     # ``stream.get_final_response().output`` see the same items the
     # non-streaming endpoint returns.
     output_items: dict[int, dict[str, JsonValue]] = {}
+    added_output_indexes: set[int] = set()
+    done_output_indexes: set[int] = set()
     # Track whether the first standard ``response.*`` event the public stream
     # emits is ``response.created``. The OpenAI Responses SSE contract requires
     # ``response.created`` to be the first event. The upstream Codex backend
@@ -8938,6 +8964,11 @@ async def _normalize_public_responses_stream(
                     failure_phase="upstream",
                 )
         raw_event_type = payload.get("type")
+        if terminal_seen and raw_event_type in {"response.output_item.added", "response.output_item.done"}:
+            # A terminal response closes the output lifecycle. Do not let a
+            # late frame mutate the collected replay or leak to the client.
+            contract_violation_kind = contract_violation_kind or "invalid_output_item"
+            continue
         if (
             enforce_openai_sdk_contract
             and isinstance(raw_event_type, str)
@@ -9040,7 +9071,15 @@ async def _normalize_public_responses_stream(
                 yield formatted_payload
             return
 
-        _collect_output_item_event(normalized_payload, output_items)
+        if not _collect_output_item_event(
+            normalized_payload,
+            output_items,
+            added_indexes=added_output_indexes,
+            done_indexes=done_output_indexes,
+            terminal_seen=terminal_seen,
+        ):
+            contract_violation_kind = contract_violation_kind or "invalid_output_item"
+            continue
         if event_type == "response.output_text.delta":
             seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
         # Both the backfill branch and _normalize_public_stream_payload copy

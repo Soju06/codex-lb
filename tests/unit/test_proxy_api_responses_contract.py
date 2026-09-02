@@ -1307,6 +1307,74 @@ async def test_normalize_public_responses_stream_preserves_existing_terminal_out
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_rejects_added_after_done() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.created","sequence_number":0,'
+                    '"response":{"id":"resp_1","status":"in_progress","output":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.output_item.done","sequence_number":1,"output_index":0,'
+                    '"item":{"id":"msg_1","type":"message","role":"assistant",'
+                    '"content":[{"type":"output_text","text":"done"}]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,'
+                    '"item":{"id":"msg_1","type":"message","role":"assistant",'
+                    '"content":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.completed","sequence_number":3,'
+                    '"response":{"id":"resp_1","status":"completed","output":[]}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    event_types = [
+        payload.get("type")
+        for payload in (proxy_api_module._parse_sse_payload(block) for block in blocks)
+        if payload is not None
+    ]
+    assert "response.output_item.added" not in event_types
+    assert "response.completed" in event_types
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_rejects_output_after_completion() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.created","sequence_number":0,'
+                    '"response":{"id":"resp_1","status":"in_progress","output":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.completed","sequence_number":1,'
+                    '"response":{"id":"resp_1","status":"completed","output":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,'
+                    '"item":{"id":"late","type":"message","role":"assistant",'
+                    '"content":[{"type":"output_text","text":"late"}]}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    event_types = [
+        payload.get("type")
+        for payload in (proxy_api_module._parse_sse_payload(block) for block in blocks)
+        if payload is not None
+    ]
+    assert event_types == ["response.created", "response.completed"]
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_synthesizes_response_created_on_leading_failure() -> None:
     """G4: when the upstream stream's first standard event is not
     `response.created` (e.g. upstream rejects and emits only

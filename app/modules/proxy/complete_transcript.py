@@ -47,12 +47,16 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
             continue
         event_type = payload.get("type")
         if event_type in {"response.output_item.added", "response.output_item.done"}:
+            if saw_completed:
+                # Output lifecycle frames after the terminal response belong
+                # to a different/corrupt stream and must not be replayed.
+                return None
             output_index = payload.get("output_index")
             item = payload.get("item")
             if type(output_index) is not int or output_index < 0 or not isinstance(item, dict):
                 return None
             if event_type == "response.output_item.added":
-                if output_index in added_indexes:
+                if output_index in added_indexes or output_index in done_indexes:
                     return None
                 added_indexes.add(output_index)
                 continue

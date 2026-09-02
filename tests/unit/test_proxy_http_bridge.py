@@ -37,11 +37,12 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.config.settings import Settings
 from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, openai_error
-from app.core.openai.models import OpenAIError
+from app.core.openai.models import OpenAIError, OpenAIResponsePayload
 from app.core.openai.requests import ResponsesRequest
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
 from app.db.models import AccountStatus, Base, HttpBridgeSessionState
 from app.modules.proxy import affinity as proxy_affinity
+from app.modules.proxy import api as proxy_api
 from app.modules.proxy import http_bridge_forwarding as http_bridge_forwarding_module
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import support as proxy_support_module
@@ -7502,6 +7503,97 @@ async def test_http_bridge_keepalive_counts_as_first_yield_before_late_response_
     await event_queue.put(None)
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(anext(stream), timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_keepalive_remains_nonterminal_for_aggregated_collector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            sse_keepalive_interval_seconds=0.05,
+            stream_idle_timeout_seconds=10.0,
+        ),
+    )
+
+    session = _make_bridge_session(key_value="sid-keepalive-collector")
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-keepalive-collector",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        transport="http",
+        response_id="resp_keepalive_collector",
+    )
+    completed_response: dict[str, Any] = {
+        "id": "resp_keepalive_collector",
+        "object": "response",
+        "status": "completed",
+        "output": [],
+    }
+
+    async def fake_submit_http_bridge_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del text_data, queue_limit
+        target_session.pending_requests.append(request_state)
+        await event_queue.put(
+            proxy_service.format_sse_event(
+                {
+                    "type": "response.created",
+                    "response": {"id": "resp_keepalive_collector", "status": "in_progress"},
+                }
+            )
+        )
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+
+    async def enqueue_completed() -> None:
+        await asyncio.sleep(1.0)
+        await event_queue.put(
+            proxy_service.format_sse_event({"type": "response.completed", "response": completed_response})
+        )
+        await event_queue.put(None)
+
+    keepalive_count = 0
+
+    async def bridge_stream() -> AsyncIterator[str]:
+        nonlocal keepalive_count
+        async for event in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data="{}",
+            queue_limit=8,
+            propagate_http_errors=True,
+            downstream_turn_state=None,
+        ):
+            payload = proxy_service.parse_sse_data_json(event)
+            if payload is not None and payload.get("type") == "response.in_progress":
+                keepalive_count += 1
+            yield event
+
+    async with asyncio.TaskGroup() as task_group:
+        task_group.create_task(enqueue_completed())
+        result = await asyncio.wait_for(
+            proxy_api._collect_responses_payload(bridge_stream()),
+            timeout=3.0,
+        )
+
+    assert keepalive_count > 0
+    assert isinstance(result, OpenAIResponsePayload)
+    assert result.model_dump(mode="json", exclude_none=True) == completed_response
 
 
 @pytest.mark.asyncio

@@ -37407,7 +37407,7 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
 
 
 @pytest.mark.asyncio
-async def test_process_upstream_websocket_text_rewrites_opted_in_terse_invalid_anchor(monkeypatch):
+async def test_process_upstream_websocket_text_replays_opted_in_terse_invalid_anchor(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     finalize_request_state = AsyncMock()
@@ -37457,7 +37457,7 @@ async def test_process_upstream_websocket_text_rewrites_opted_in_terse_invalid_a
             "error": {
                 "type": "invalid_request_error",
                 "code": "invalid_request_error",
-                "message": "Invalid previous response id",
+                "message": "Invalid previous_response_id",
                 "param": "previous_response_id",
             },
         },
@@ -37475,12 +37475,11 @@ async def test_process_upstream_websocket_text_rewrites_opted_in_terse_invalid_a
         response_create_gate=asyncio.Semaphore(1),
     )
 
-    downstream_payload = json.loads(downstream_text)
-    assert isinstance(downstream_payload, dict)
-    downstream_error = cast(dict[str, JsonValue], cast(dict[str, JsonValue], downstream_payload["response"])["error"])
-    assert downstream_error["code"] == "stream_incomplete"
-    assert "Invalid previous response id" not in downstream_text
-    assert "previous_response_id" not in downstream_text
+    # The original upstream error is suppressed while the verified fresh
+    # replay is handed to the reconnect path.  The client therefore never
+    # observes this raw error frame.
+    assert json.loads(downstream_text)["error"]["code"] == "invalid_request_error"
+    assert upstream_control.suppress_downstream_event is True
     assert upstream_control.reconnect_requested is True
     assert upstream_control.replay_request_state is pending_request
     assert pending_request.replay_count == 1

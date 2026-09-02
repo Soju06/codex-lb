@@ -53,7 +53,7 @@ from app.core.errors import (
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
-from app.core.openai.models import OpenAIError, OpenAIEvent
+from app.core.openai.models import OpenAIError, OpenAIEvent, OpenAIResponsePayload
 from app.core.openai.parsing import classify_event_type, parse_sse_event
 from app.core.openai.requests import ResponsesRequest
 from app.core.resilience.network_recovery import (
@@ -428,6 +428,14 @@ def _canonical_background_ack_response_id(
         and response.get("status") == event_type.removeprefix("response.")
         and response.get("output") == []
     ):
+        return None
+    # The relayed payload model drops known submodels that fail validation
+    # instead of raising, so a malformed `usage` or `error` would otherwise be
+    # discarded silently on a response classified as successful.
+    payload = OpenAIResponsePayload.model_validate(response)
+    if (response.get("usage") is None) != (payload.usage is None):
+        return None
+    if (response.get("error") is None) != (payload.error is None):
         return None
     return response_id
 

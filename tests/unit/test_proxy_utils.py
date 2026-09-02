@@ -9381,10 +9381,25 @@ def test_stream_startup_error_response_rejects_malformed_retry_after_header() ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["queued", "in_progress"])
-async def test_non_streaming_response_preserves_unfinished_status(status: str) -> None:
-    event_block, event_type = proxy_module._non_streaming_response_event(
-        {"id": "resp_background", "object": "response", "status": status, "output": []}
-    )
+@pytest.mark.parametrize(
+    "extra_fields",
+    [
+        {},
+        {"usage": {"input_tokens": 12, "output_tokens": 0, "total_tokens": 12}},
+    ],
+)
+async def test_non_streaming_response_preserves_unfinished_status(
+    status: str,
+    extra_fields: dict[str, JsonValue],
+) -> None:
+    response_body: dict[str, JsonValue] = {
+        "id": "resp_background",
+        "object": "response",
+        "status": status,
+        "output": [],
+        **extra_fields,
+    }
+    event_block, event_type = proxy_module._non_streaming_response_event(response_body)
 
     async def stream() -> AsyncIterator[str]:
         yield event_block
@@ -9394,6 +9409,7 @@ async def test_non_streaming_response_preserves_unfinished_status(status: str) -
     assert event_type == f"response.{status}"
     assert isinstance(result, OpenAIResponsePayload)
     assert result.status == status
+    assert result.model_dump(mode="json", exclude_none=True) == response_body
 
 
 @pytest.mark.asyncio
@@ -9433,6 +9449,14 @@ async def test_collect_responses_payload_aggregated_bridge_keepalive_yields_comp
         {"id": "", "object": "response", "status": "queued", "output": []},
         {"id": "   ", "object": "response", "status": "queued", "output": []},
         {"id": " resp_background ", "object": "response", "status": "queued", "output": []},
+        {
+            "id": "resp_background",
+            "object": "response",
+            "status": "queued",
+            "output": [],
+            "usage": {"input_tokens": "invalid"},
+        },
+        {"id": "resp_background", "object": "response", "status": "queued", "output": [], "error": "boom"},
     ],
 )
 async def test_collect_responses_payload_rejects_noncanonical_background_ack(

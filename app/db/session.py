@@ -716,13 +716,22 @@ async def _teardown_completed_after_bound(abandoned: asyncio.Task[object]) -> bo
     releasing every held connection — so those keep the issue #1682 reclaim.
     """
     if not abandoned.done():
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _SQLITE_TEARDOWN_COMPLETION_GRACE_SECONDS
         with anyio.CancelScope(shield=True):
-            try:
-                await asyncio.wait({abandoned}, timeout=_SQLITE_TEARDOWN_COMPLETION_GRACE_SECONDS)
-            except asyncio.CancelledError:
-                # Teardown runs in ``finally`` blocks; the caller's cancellation
-                # does not decide whether this teardown is wedged.
-                pass
+            while not abandoned.done():
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                try:
+                    await asyncio.wait({abandoned}, timeout=remaining)
+                except asyncio.CancelledError:
+                    # Teardown runs in ``finally`` blocks, so an edge cancel is
+                    # expected here. Falling through would cut the grace short
+                    # and reclaim a connection that is about to be released;
+                    # the deadline, not the caller, decides how long we look
+                    # (same shape as ``_shielded_bounded``).
+                    continue
     if not abandoned.done() or abandoned.cancelled():
         return False
     return abandoned.exception() is None

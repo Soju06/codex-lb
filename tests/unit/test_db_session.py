@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import subprocess
@@ -1513,6 +1514,42 @@ async def test_close_session_skips_reclaim_when_the_rollback_completes_after_the
         await asyncio.sleep(0.05)
         await engine.dispose()
         await other_writer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_completion_grace_holds_its_deadline_under_repeated_cancellation() -> None:
+    """Teardown runs in ``finally`` blocks, so the caller is often already being
+    cancelled while the grace is looking. Letting a cancel cut the grace short
+    would reclaim a connection that was about to be released — the exact damage
+    the exemption exists to prevent — so the deadline, not the caller, decides
+    how long the grace looks (same contract as ``_shielded_bounded``)."""
+    release = asyncio.Event()
+    finished: list[bool] = []
+    result: list[bool] = []
+
+    async def _teardown() -> None:
+        await release.wait()
+        finished.append(True)
+
+    abandoned = asyncio.ensure_future(_teardown())
+
+    async def _caller() -> None:
+        result.append(await session_module._teardown_completed_after_bound(abandoned))
+
+    caller = asyncio.ensure_future(_caller())
+    await asyncio.sleep(0)
+    for _ in range(3):
+        caller.cancel()
+        await asyncio.sleep(0.01)
+    assert not caller.done(), "an edge cancel must not cut the grace short"
+
+    release.set()
+    with contextlib.suppress(asyncio.CancelledError):
+        await caller
+    await abandoned
+
+    assert finished, "the teardown must be allowed to finish inside the grace"
+    assert result == [True], "a teardown completing inside the grace is exempt from the reclaim"
 
 
 @pytest.mark.asyncio

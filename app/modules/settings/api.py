@@ -580,6 +580,7 @@ async def _probe_upstream_proxy_endpoint(endpoint) -> int:
         proxy=endpoint.proxy_url,
         timeout=httpx.Timeout(UPSTREAM_PROXY_TEST_TIMEOUT_SECONDS),
         follow_redirects=False,
+        verify=shared_ssl_context(),
     ) as client:
         response = await client.get(UPSTREAM_PROXY_TEST_URL)
         return response.status_code

@@ -623,6 +623,7 @@ async def test_v1_audio_transcriptions_normalizes_openai_sdk_fingerprint_upstrea
                 files={"file": ("voice.wav", b"audio bytes", "audio/wav")},
                 headers={
                     "User-Agent": "OpenAI/JS 4.104.0",
+                    "x-openai-client-user-agent": "OpenAIJS/4.104.0",
                     "x-stainless-lang": "js",
                     "x-stainless-package-version": "4.104.0",
                 },
@@ -639,6 +640,7 @@ async def test_v1_audio_transcriptions_normalizes_openai_sdk_fingerprint_upstrea
     assert headers["authorization"] == "Bearer access-token"
     assert headers["chatgpt-account-id"] == "acc_transcribe_sdk"
     assert not any(key.startswith("x-stainless-") for key in headers)
+    assert not any(key.startswith("x-openai-client-") for key in headers)
     assert "openai/js" not in headers["user-agent"].lower()
     assert captured_content_type.startswith("multipart/form-data; boundary=")
     assert captured_file == b"audio bytes"

@@ -580,6 +580,21 @@ async def test_collect_responses_payload_rejects_unfinished_output_item() -> Non
 
 
 @pytest.mark.asyncio
+async def test_collect_responses_payload_rejects_added_done_identity_mismatch() -> None:
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks(
+            'data: {"type":"response.output_item.added","output_index":0,'
+            '"item":{"id":"call_a","type":"function_call"}}\n\n',
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_b","type":"message"}}\n\n',
+            'data: {"type":"response.completed","response":{"id":"resp_1","output":[]}}\n\n',
+        )
+    )
+
+    body = result.model_dump(mode="json", exclude_none=True)
+    assert body["error"]["code"] == "invalid_output_item"
+
+
+@pytest.mark.asyncio
 async def test_collect_responses_payload_captures_turn_state_metadata_before_failed_response() -> None:
     captured_headers: dict[str, str] = {}
 
@@ -1279,6 +1294,47 @@ async def test_normalize_public_responses_stream_backfills_terminal_output_from_
     assert output_item["id"] == "msg_1"
     assert output_item["type"] == "message"
     assert output_item["content"] == [{"type": "output_text", "text": "backfilled"}]
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_rejects_added_done_identity_mismatch() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.created","sequence_number":0,'
+                    '"response":{"id":"resp_1","status":"in_progress","output":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,'
+                    '"item":{"id":"call_a","type":"function_call"}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,'
+                    '"item":{"id":"msg_b","type":"message"}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.completed","sequence_number":3,'
+                    '"response":{"id":"resp_1","status":"completed","output":[]}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    event_types = [
+        payload.get("type")
+        for payload in (proxy_api_module._parse_sse_payload(block) for block in blocks)
+        if payload is not None
+    ]
+    assert event_types[-1] == "response.failed"
+    failed = proxy_api_module._parse_sse_payload(blocks[-1])
+    assert failed is not None
+    response = failed["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "invalid_output_item"
 
 
 @pytest.mark.asyncio

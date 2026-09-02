@@ -213,6 +213,7 @@ from app.modules.proxy.affinity import (
     _extract_model_class,
 )
 from app.modules.proxy.complete_transcript import (
+    _output_item_identity,
     build_complete_replay_payload,
     build_replay_input_snapshot,
     build_unanchored_root_replay_payload,
@@ -1328,6 +1329,11 @@ def _record_http_bridge_response_output(
             request_state.response_output_items_event_invalid = True
             return
         request_state.response_output_item_added_indexes.add(output_index)
+        added_identities = getattr(request_state, "response_output_item_added_identities", None)
+        if not isinstance(added_identities, dict):
+            added_identities = {}
+            request_state.response_output_item_added_identities = added_identities
+        added_identities[output_index] = _output_item_identity(item)
         return
     if event_type == "response.output_item.done":
         output_index = payload.get("output_index")
@@ -1336,6 +1342,10 @@ def _record_http_bridge_response_output(
             request_state.response_output_items_event_invalid = True
             return
         if output_index in request_state.response_output_items_by_index:
+            request_state.response_output_items_event_invalid = True
+            return
+        added_identities = getattr(request_state, "response_output_item_added_identities", {})
+        if output_index in added_identities and added_identities[output_index] != _output_item_identity(item):
             request_state.response_output_items_event_invalid = True
             return
         request_state.response_output_items_by_index[output_index] = cast(JsonValue, item)
@@ -1813,6 +1823,7 @@ async def _try_complete_transcript_recovery(
     request_state.response_output_items = []
     request_state.response_output_items_by_index = {}
     request_state.response_output_item_added_indexes = set()
+    request_state.response_output_item_added_identities = {}
     request_state.response_output_items_event_invalid = False
     request_state.response_output_items_complete = False
     request_state.operation_id = operation_id
@@ -2318,6 +2329,7 @@ async def _try_unsafe_partial_transcript_recovery(
     request_state.response_output_items = []
     request_state.response_output_items_by_index = {}
     request_state.response_output_item_added_indexes = set()
+    request_state.response_output_item_added_identities = {}
     request_state.response_output_items_event_invalid = False
     request_state.response_output_items_complete = False
     request_state.operation_id = operation_id

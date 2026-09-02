@@ -1371,6 +1371,22 @@ def test_materialize_output_items_rejects_duplicate_added_indexes() -> None:
     assert materialize_output_items_from_events(events) is None
 
 
+def test_materialize_output_items_rejects_added_done_identity_mismatch() -> None:
+    events = [
+        (
+            "event: response.output_item.added\ndata: "
+            '{"type":"response.output_item.added","output_index":0,"item":{"id":"call_a","type":"function_call"}}\n\n'
+        ),
+        (
+            "event: response.output_item.done\ndata: "
+            '{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_b","type":"message"}}\n\n'
+        ),
+        'event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n',
+    ]
+
+    assert materialize_output_items_from_events(events) is None
+
+
 def test_materialize_output_items_rejects_duplicate_done_indexes() -> None:
     done = (
         "event: response.output_item.done\ndata: "

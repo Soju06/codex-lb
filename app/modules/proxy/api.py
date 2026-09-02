@@ -253,6 +253,7 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import required_capability_metadata_values
+from app.modules.proxy.complete_transcript import _output_item_identity
 from app.modules.proxy.helpers import _openai_error_param, _parse_openai_error, _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.images_observability import (
@@ -8704,6 +8705,7 @@ async def _collect_responses_payload(
 ) -> OpenAIResponseResult:
     output_items: dict[int, dict[str, JsonValue]] = {}
     added_output_indexes: set[int] = set()
+    added_output_identities: dict[int, tuple[str, str] | None] = {}
     done_output_indexes: set[int] = set()
     terminal_result: OpenAIResponseResult | None = None
     nonterminal_result: OpenAIResponsePayload | None = None
@@ -8722,6 +8724,7 @@ async def _collect_responses_payload(
             payload,
             output_items,
             added_indexes=added_output_indexes,
+            added_identities=added_output_identities,
             done_indexes=done_output_indexes,
             terminal_seen=terminal_result is not None,
         ):
@@ -8789,6 +8792,7 @@ def _collect_output_item_event(
     output_items: dict[int, dict[str, JsonValue]],
     *,
     added_indexes: set[int],
+    added_identities: dict[int, tuple[str, str] | None],
     done_indexes: set[int],
     terminal_seen: bool = False,
 ) -> bool:
@@ -8805,8 +8809,11 @@ def _collect_output_item_event(
         if output_index in added_indexes or output_index in done_indexes:
             return False
         added_indexes.add(output_index)
+        added_identities[output_index] = _output_item_identity(item)
     else:
         if output_index in done_indexes:
+            return False
+        if output_index in added_identities and added_identities[output_index] != _output_item_identity(item):
             return False
         done_indexes.add(output_index)
     output_items[output_index] = dict(item)
@@ -8868,6 +8875,7 @@ async def _normalize_public_responses_stream(
     # non-streaming endpoint returns.
     output_items: dict[int, dict[str, JsonValue]] = {}
     added_output_indexes: set[int] = set()
+    added_output_identities: dict[int, tuple[str, str] | None] = {}
     done_output_indexes: set[int] = set()
     # Track whether the first standard ``response.*`` event the public stream
     # emits is ``response.created``. The OpenAI Responses SSE contract requires
@@ -9084,6 +9092,7 @@ async def _normalize_public_responses_stream(
             normalized_payload,
             output_items,
             added_indexes=added_output_indexes,
+            added_identities=added_output_identities,
             done_indexes=done_output_indexes,
             terminal_seen=terminal_seen,
         ):

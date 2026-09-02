@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import cast
 
 from app.core.types import JsonValue
@@ -38,6 +38,7 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
     completed_output: list[JsonValue] | None = None
     output_items: dict[int, JsonValue] = {}
     added_indexes: set[int] = set()
+    added_identities: dict[int, tuple[str, str] | None] = {}
     done_indexes: set[int] = set()
     saw_completed = False
 
@@ -59,8 +60,11 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
                 if output_index in added_indexes or output_index in done_indexes:
                     return None
                 added_indexes.add(output_index)
+                added_identities[output_index] = _output_item_identity(item)
                 continue
             if output_index in done_indexes:
+                return None
+            if output_index in added_identities and added_identities[output_index] != _output_item_identity(item):
                 return None
             existing = output_items.get(output_index)
             if existing is not None and _canonical_item(existing) != _canonical_item(item):
@@ -657,6 +661,15 @@ def _strip_omitted_output_subsequence(items: list[JsonValue], subsequence: list[
 
 def _is_omitted_output_item(item: JsonValue) -> bool:
     return isinstance(item, dict) and item.get("type") in _OMIT_OUTPUT_TYPES
+
+
+def _output_item_identity(item: Mapping[str, JsonValue]) -> tuple[str, str] | None:
+    """Return the strongest stable identity available for an output item."""
+    for field in ("id", "call_id", "type"):
+        value = item.get(field)
+        if isinstance(value, str) and value:
+            return field, value
+    return None
 
 
 def _canonical_item(item: JsonValue) -> str:

@@ -1383,6 +1383,69 @@ async def test_hard_continuity_operation_replay_falls_back_to_root_unknown(
 
 
 @pytest.mark.asyncio
+async def test_hard_continuity_parked_recovery_skips_unbounded_root_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-root-parked-gate")
+    session.durable_session_id = "durable-hard-fence-root-parked-gate"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-root-parked-gate",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_parked_recovery_enabled=True,
+        ),
+    )
+    operation = SimpleNamespace(
+        operation_id="op-root-parked-gate",
+        request_fingerprint="fingerprint-root-parked-gate",
+        parent_response_id="resp-recent-parent",
+        session_id=session.durable_session_id,
+        state="unknown",
+        event_spool_complete=False,
+        request_text='{"type":"response.create","input":"retry"}',
+    )
+    root_lookup = AsyncMock(
+        return_value=SimpleNamespace(
+            operation_id="op-unsafe-root",
+            parent_response_id=None,
+            session_id=session.durable_session_id,
+            state="unknown",
+            request_text=operation.request_text,
+        )
+    )
+    recent_lookup = AsyncMock(return_value=[operation])
+    service._durable_bridge = SimpleNamespace(
+        get_operation_by_fingerprint=AsyncMock(return_value=None),
+        get_unique_unknown_operation_for_root=root_lookup,
+        get_unique_unknown_operation_for_latest_parent=AsyncMock(return_value=None),
+        get_recent_unknown_operations=recent_lookup,
+    )
+
+    allowed, reason = await service._http_bridge_operation_fenced_continuity_replay_diagnostic(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"retry"}',
+    )
+
+    assert allowed is True
+    assert reason == "operation_unknown_recent_parent"
+    root_lookup.assert_not_awaited()
+    recent_lookup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_hard_continuity_operation_replay_falls_back_to_one_recent_parent_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -9353,6 +9416,33 @@ def test_response_output_capture_reconstructs_empty_completed_output() -> None:
 
     assert [item["type"] for item in request_state.response_output_items] == ["reasoning", "message"]
     assert request_state.response_output_items_complete is True
+
+
+def test_response_output_capture_rejects_added_done_identity_mismatch() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.added",
+        payload={"output_index": 0, "item": {"id": "call_a", "type": "function_call"}},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={"output_index": 0, "item": {"id": "msg_b", "type": "message"}},
+    )
+
+    assert request_state.response_output_items_by_index == {}
+    assert request_state.response_output_items_event_invalid is True
 
 
 def test_response_output_capture_rejects_duplicate_added_indexes() -> None:

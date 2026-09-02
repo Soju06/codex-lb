@@ -1330,7 +1330,10 @@ def _record_http_bridge_response_output(
         if not _output_item_identity_is_valid(_output_item_identity(item)):
             request_state.response_output_items_event_invalid = True
             return
-        if output_index in request_state.response_output_item_added_indexes:
+        if (
+            output_index in request_state.response_output_item_added_indexes
+            or output_index in request_state.response_output_items_by_index
+        ):
             request_state.response_output_items_event_invalid = True
             return
         request_state.response_output_item_added_indexes.add(output_index)

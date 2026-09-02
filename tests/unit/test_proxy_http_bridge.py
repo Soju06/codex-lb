@@ -9550,6 +9550,40 @@ def test_response_output_capture_rejects_duplicate_done_indexes() -> None:
     assert request_state.response_output_items_event_invalid is True
 
 
+def test_response_output_capture_rejects_added_after_done_index() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+    item = {"type": "message", "id": "msg_added_after_done"}
+
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={"output_index": 0, "item": item},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.added",
+        payload={"output_index": 0, "item": item},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.completed",
+        payload={"response": {"output": []}},
+    )
+
+    assert request_state.response_output_items == []
+    assert request_state.response_output_items_complete is False
+    assert request_state.response_output_items_event_invalid is True
+
+
 def test_response_output_capture_rejects_sparse_indexes_without_terminal_output() -> None:
     request_state = cast(
         Any,

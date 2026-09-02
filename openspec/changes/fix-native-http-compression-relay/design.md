@@ -1,43 +1,46 @@
 ## Context
 
-The Python proxy forwards first-party `Accept-Encoding` values into the persistent Rust helper. The helper's reqwest build currently omits response decoder features, then emits upstream headers and raw body chunks over IPC. Python only base64-decodes those chunks, so compressed JSON and SSE reach parsers still encoded.
+The Python proxy forwards each first-party `Accept-Encoding` value into the persistent Rust helper. The helper must preserve that request identity while ensuring that any compressed representation it negotiates is decoded before crossing IPC, because the Python adapter only base64-decodes native response chunks.
+
+Reqwest automatically inserts `Accept-Encoding` when a decoder feature is enabled and the request does not already contain the header. A single decoder-enabled client therefore changes requests whose callers omitted compression negotiation.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Keep native response bytes and relayed headers semantically consistent.
-- Match the transparent response-decoding behavior of the existing Python egress path.
-- Ensure the helper advertises only response codings compiled into its HTTP client.
+- Preserve `Accept-Encoding` presence and value across the native HTTP boundary.
+- Decode gzip, deflate, Brotli, and zstd responses before relaying bytes to Python.
+- Keep decoded body bytes and relayed response headers semantically consistent.
 - Preserve streaming delivery through reqwest rather than buffering complete responses.
 
 **Non-Goals:**
 
-- Preserve an inbound `Accept-Encoding` value that advertises unsupported codings.
 - Add custom compression or decompression code.
+- Add support for content codings outside gzip, deflate, Brotli, and zstd.
 - Change routing, replay, cancellation, WebSocket compression, or downstream public compression policy.
 
 ## Decisions
 
-- Remove the inbound `Accept-Encoding` header at the Rust request boundary. reqwest then negotiates only decoders compiled into the native helper instead of forwarding caller codings it may not support.
-- Enable reqwest's gzip response decoder in the shared workspace dependency. reqwest already owns HTTP framing and automatically removes `Content-Encoding` and encoded `Content-Length` when it decodes, so the existing header snapshot and chunk relay remain one coherent boundary.
-- Prove the contract with a local gzip origin, a broad inbound coding list, and assertions on the origin's negotiated header, decoded body bytes, and removed encoded-entity headers. This catches unsupported-advertisement, raw-byte, and stale-header regressions.
-- Limit compiled decoder support to the demonstrated gzip coding. The helper can add other decoders later with a focused regression for each without advertising them beforehand.
+- Add `decode_response` to the native HTTP `ClientPool` key. Its value is derived from whether the inbound request contains `Accept-Encoding`, so requests with and without compression negotiation cannot reuse clients with different decoder policy.
+- Build the no-inbound-header client with reqwest's `no_gzip`, `no_brotli`, `no_deflate`, and `no_zstd` controls. Disabling every compiled decoder prevents reqwest from synthesizing `Accept-Encoding`, preserving absence at the origin.
+- Restore ordinary forwarding of inbound `Accept-Encoding` in `forwarded_headers`. A present value crosses the helper boundary unchanged rather than being removed and replaced by reqwest's default.
+- Enable reqwest's gzip, deflate, Brotli, and zstd features on `codex-lb-egress`. This matches the established Python HTTP path's supported coding set and lets reqwest decode every coding in the common client header before response chunks cross IPC. Cargo adds eight compression-specific transitive packages for Brotli and zstd; this bounded dependency increase is preferred over rewriting the client's token list because exact forwarding preserves the traffic-parity identity header and avoids new quality-value parsing behavior.
+- Continue to rely on reqwest's streaming decoder and header normalization. When it decodes a response, reqwest removes the stale `Content-Encoding` and encoded `Content-Length` before the helper snapshots response headers and relays chunks.
 
-Alternative considered: compile every decoder named by arbitrary inbound values. Brotli, deflate, and zstd would increase binary and dependency surface without an executable contract for each coding. Removing inbound negotiation lets the helper advertise its actual capabilities while retaining gzip compression.
+Alternative considered: intersect the inbound token list with only gzip. Although this avoids the Brotli and zstd dependencies, it changes the caller's identity header and requires correct parsing and reconstruction of coding parameters. Enabling the established four-coding set preserves the inbound value instead.
 
-Alternative considered: manually decompress chunks in the bridge. Streaming decompression and header normalization would duplicate behavior already provided by reqwest and create a second codec/error seam.
+Alternative considered: manually decompress chunks in the bridge. Streaming decompression and header normalization would duplicate behavior already provided by reqwest and create a second codec and error seam.
 
 ## Risks / Trade-offs
 
-- [Decoder support increases the native binary dependency surface] -> Enable only the demonstrated gzip feature and rely on reqwest's maintained decoder path.
-- [Removing inbound negotiation could disable compression] -> Reqwest automatically advertises gzip because that decoder is compiled, which the real-helper QA verifies at the origin.
-- [Decoded bytes could retain encoded-entity metadata] -> Assert both `Content-Encoding` and encoded `Content-Length` are absent in the regression and real-helper QA.
-- [A malformed gzip body can fail during streaming] -> Retain reqwest's existing typed decode/body error classification.
+- [Additional decoders increase native binary and build dependency surface] -> Scope the feature set to the four codings already supported by the Python path and use reqwest's maintained implementations.
+- [A no-header request could accidentally reuse a decoder-enabled client] -> Include decoder policy in the pool key and cover both key partitioning and the origin-observed header with regressions.
+- [Decoded bytes could retain encoded-entity metadata] -> Keep assertions that `Content-Encoding` and encoded `Content-Length` are absent after gzip decoding.
+- [A malformed compressed body can fail during streaming] -> Retain reqwest's existing typed decode/body error classification.
 
 ## Migration Plan
 
-No data or configuration migration is required. Deployment replaces the native helper binary. Rollback restores the previous binary and its previous compressed-response failure behavior.
+No data or configuration migration is required. Deployment replaces the native helper binary. Rollback restores the previous helper behavior.
 
 ## Open Questions
 

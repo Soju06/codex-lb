@@ -21,7 +21,7 @@ futures-util = { version = "0.3.31", features = ["sink"] }
 hyper = "=1.8.1"
 hyper-rustls = { version = "=0.27.7", default-features = false, features = ["http2", "native-tokio", "aws-lc-rs"] }
 hyper-util = "=0.1.20"
-reqwest = { version = "=0.12.28", default-features = false, features = ["http2", "gzip", "rustls-tls-native-roots-no-provider", "socks"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["http2", "rustls-tls-native-roots-no-provider", "socks"] }
 rustls = { version = "=0.23.36", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std", "tls12"] }
 rustls-native-certs = "0.8.3"
 serde = { version = "1.0.228", features = ["derive"] }

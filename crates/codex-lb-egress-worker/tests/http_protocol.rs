@@ -4,7 +4,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use codex_lb_protocol::{NativeCommand, NativeEvent, NativeRequest, PROTOCOL_VERSION};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 type HelperLines = Lines<BufReader<ChildStdout>>;
@@ -65,6 +65,32 @@ async fn read_event(lines: &mut HelperLines, timeout_message: &str) -> NativeEve
     serde_json::from_str(&line).expect("decode native helper event")
 }
 
+async fn read_request_headers(stream: &mut TcpStream) -> String {
+    let mut request = Vec::with_capacity(1024);
+    while !request.ends_with(b"\r\n\r\n") {
+        let read = stream
+            .read_buf(&mut request)
+            .await
+            .expect("read request headers");
+        assert_ne!(read, 0, "request ended before headers completed");
+        assert!(
+            request.len() <= 8 * 1024,
+            "request headers exceeded test bound"
+        );
+    }
+
+    String::from_utf8(request).expect("ASCII request headers")
+}
+
+fn header_values(request: &str, expected_name: &str) -> Vec<String> {
+    request
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(name, _)| name.eq_ignore_ascii_case(expected_name))
+        .map(|(_, value)| value.trim().to_owned())
+        .collect()
+}
+
 #[tokio::test]
 async fn gzip_response_relay_crosses_native_helper_boundary() {
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -73,26 +99,8 @@ async fn gzip_response_relay_crosses_native_helper_boundary() {
     let address = listener.local_addr().expect("gzip origin address");
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept native helper");
-        let mut request = Vec::with_capacity(1024);
-        while !request.ends_with(b"\r\n\r\n") {
-            let read = stream
-                .read_buf(&mut request)
-                .await
-                .expect("read request headers");
-            assert_ne!(read, 0, "request ended before headers completed");
-            assert!(
-                request.len() <= 8 * 1024,
-                "request headers exceeded test bound"
-            );
-        }
-
-        let request = String::from_utf8(request).expect("ASCII request headers");
-        let accept_encodings = request
-            .lines()
-            .filter_map(|line| line.split_once(':'))
-            .filter(|(name, _)| name.eq_ignore_ascii_case("accept-encoding"))
-            .map(|(_, value)| value.trim().to_ascii_lowercase())
-            .collect::<Vec<_>>();
+        let request = read_request_headers(&mut stream).await;
+        let accept_encodings = header_values(&request, "accept-encoding");
 
         stream
             .write_all(
@@ -191,7 +199,7 @@ async fn gzip_response_relay_crosses_native_helper_boundary() {
     let (status, headers) = head.expect("native helper head event");
     assert!(saw_end, "native helper end event");
     assert_eq!(status, 200);
-    assert_eq!(accept_encodings, vec!["gzip".to_owned()]);
+    assert_eq!(accept_encodings, vec!["br, zstd, gzip".to_owned()]);
     assert_eq!(body, SENTINEL);
     assert!(
         !headers
@@ -203,4 +211,66 @@ async fn gzip_response_relay_crosses_native_helper_boundary() {
             .iter()
             .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
     );
+}
+
+#[tokio::test]
+async fn request_without_accept_encoding_reaches_origin_without_accept_encoding() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind origin");
+    let address = listener.local_addr().expect("origin address");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept native helper");
+        let request = read_request_headers(&mut stream).await;
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write response");
+        stream.shutdown().await.expect("close origin");
+
+        header_values(&request, "accept-encoding")
+    });
+
+    let (mut helper, mut stdin, mut lines) = start_helper().await;
+    write_command(
+        &mut stdin,
+        &NativeCommand::Request(NativeRequest {
+            request_id: "no-accept-encoding".to_owned(),
+            method: "GET".to_owned(),
+            url: format!("http://{address}/response"),
+            headers: vec![("accept".to_owned(), "application/json".to_owned())],
+            body: None,
+            timeout_ms: 2_000,
+            connect_timeout_ms: Some(2_000),
+            proxy_url: None,
+        }),
+    )
+    .await;
+
+    loop {
+        match read_event(&mut lines, "request event timeout").await {
+            NativeEvent::End { request_id } => {
+                assert_eq!(request_id, "no-accept-encoding");
+                break;
+            }
+            NativeEvent::Error { message, .. } => {
+                panic!("native helper request failed: {message}");
+            }
+            _ => {}
+        }
+    }
+
+    let accept_encodings = tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .expect("origin task timeout")
+        .expect("origin task");
+    assert!(
+        accept_encodings.is_empty(),
+        "native helper must not synthesize Accept-Encoding"
+    );
+
+    drop(stdin);
+    let exit = tokio::time::timeout(Duration::from_secs(2), helper.wait())
+        .await
+        .expect("helper exit timeout")
+        .expect("wait for helper");
+    assert!(exit.success(), "native helper must exit cleanly");
 }

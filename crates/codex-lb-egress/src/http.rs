@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use codex_lb_protocol::{NativeEvent, NativeRequest};
-use reqwest::header::{ACCEPT_ENCODING, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::runtime::{Output, RequestError, emit};
 
@@ -16,6 +16,7 @@ pub(crate) const CODEX_H2_MAX_HEADER_LIST_SIZE: u32 = 16 * 1024;
 pub(crate) struct ClientKey {
     pub(crate) proxy_url: Option<String>,
     pub(crate) connect_timeout_ms: Option<u64>,
+    pub(crate) decode_response: bool,
 }
 
 #[derive(Default)]
@@ -36,6 +37,9 @@ impl ClientPool {
             .http2_max_header_list_size(CODEX_H2_MAX_HEADER_LIST_SIZE)
             .pool_idle_timeout(Duration::from_secs(120))
             .pool_max_idle_per_host(8);
+        if !key.decode_response {
+            builder = builder.no_brotli().no_deflate().no_gzip().no_zstd();
+        }
         if let Some(connect_timeout_ms) = key.connect_timeout_ms {
             builder = builder.connect_timeout(Duration::from_millis(connect_timeout_ms));
         }
@@ -109,9 +113,6 @@ fn forwarded_headers(request_headers: Vec<(String, String)>) -> Result<HeaderMap
     let mut headers = HeaderMap::new();
     for (name, value) in request_headers {
         let name = HeaderName::from_bytes(name.as_bytes())?;
-        if name == ACCEPT_ENCODING {
-            continue;
-        }
         headers.append(name, HeaderValue::from_str(&value)?);
     }
     Ok(headers)
@@ -179,7 +180,7 @@ mod tests {
     use super::forwarded_headers;
 
     #[test]
-    fn forwarded_headers_drop_inbound_accept_encoding() {
+    fn forwarded_headers_preserve_inbound_accept_encoding() {
         let headers = forwarded_headers(vec![
             ("accept".to_owned(), "application/json".to_owned()),
             ("accept-encoding".to_owned(), "br, zstd, gzip".to_owned()),
@@ -190,6 +191,11 @@ mod tests {
             headers.get(ACCEPT).and_then(|value| value.to_str().ok()),
             Some("application/json")
         );
-        assert!(!headers.contains_key(ACCEPT_ENCODING));
+        assert_eq!(
+            headers
+                .get(ACCEPT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+            Some("br, zstd, gzip")
+        );
     }
 }

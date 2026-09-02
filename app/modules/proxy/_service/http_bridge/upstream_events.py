@@ -1260,9 +1260,8 @@ def _record_http_bridge_tool_call_lifecycle(
         # so an unsafe partial retry must not regenerate it.
         call_id = payload.get("call_id") if isinstance(payload, dict) else None
         item_id = payload.get("item_id") if isinstance(payload, dict) else None
-        if (
-            (not isinstance(call_id, str) or call_id not in request_state.added_tool_call_types)
-            and (not isinstance(item_id, str) or item_id not in request_state.added_tool_call_item_ids)
+        if (not isinstance(call_id, str) or call_id not in request_state.added_tool_call_types) and (
+            not isinstance(item_id, str) or item_id not in request_state.added_tool_call_item_ids
         ):
             request_state.tool_call_manifest_invalid = True
         return

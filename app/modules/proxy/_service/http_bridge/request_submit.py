@@ -1481,7 +1481,7 @@ class _HTTPBridgeRequestSubmitMixin:
             "fail_closed",
         )
         optional_kwargs = {"max_recovery_dispatches": 1} if recovery_mode == "server_anchored_replay_once" else {}
-        claim_task = asyncio.create_task(
+        claim_task = asyncio.ensure_future(
             _call_with_supported_optional_kwargs(
                 claim_unknown_operation,
                 optional_kwargs=optional_kwargs,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from app.core.config.settings import get_settings
@@ -139,17 +139,36 @@ class HttpBridgeOperationEventBatcher:
             if recovery_dispatch_count > current_generation:
                 self._operation_generations[operation_id] = recovery_dispatch_count
             current_context = self._contexts.get(operation_id)
+            owner_context_changed = (
+                current_context is not None
+                and current_context.recovery_dispatch_count == recovery_dispatch_count
+                and (
+                    current_context.session_id != session_id
+                    or current_context.instance_id != instance_id
+                    or current_context.owner_epoch != owner_epoch
+                )
+            )
+            if owner_context_changed:
+                # All events in one generation must carry the same durable
+                # owner context. Rebind events queued before a handoff so a
+                # mixed-owner batch cannot be rejected by the repository.
+                queued = self._pending.get(operation_id)
+                if queued:
+                    self._pending[operation_id] = [
+                        replace(
+                            item,
+                            session_id=session_id,
+                            instance_id=instance_id,
+                            owner_epoch=owner_epoch,
+                        )
+                        if item.recovery_dispatch_count == recovery_dispatch_count
+                        else item
+                        for item in queued
+                    ]
             if (
                 current_context is None
                 or current_context.recovery_dispatch_count < recovery_dispatch_count
-                or (
-                    current_context.recovery_dispatch_count == recovery_dispatch_count
-                    and (
-                        current_context.session_id != session_id
-                        or current_context.instance_id != instance_id
-                        or current_context.owner_epoch != owner_epoch
-                    )
-                )
+                or owner_context_changed
             ):
                 self._contexts[operation_id] = pending
             if terminal:
@@ -333,17 +352,33 @@ class HttpBridgeOperationEventBatcher:
             if expected_recovery_dispatch_count > current_generation:
                 self._operation_generations[operation_id] = expected_recovery_dispatch_count
             current_context = self._contexts.get(operation_id)
+            owner_context_changed = (
+                current_context is not None
+                and current_context.recovery_dispatch_count == expected_recovery_dispatch_count
+                and (
+                    current_context.session_id != session_id
+                    or current_context.instance_id != instance_id
+                    or current_context.owner_epoch != owner_epoch
+                )
+            )
+            if owner_context_changed:
+                queued = self._pending.get(operation_id)
+                if queued:
+                    self._pending[operation_id] = [
+                        replace(
+                            item,
+                            session_id=session_id,
+                            instance_id=instance_id,
+                            owner_epoch=owner_epoch,
+                        )
+                        if item.recovery_dispatch_count == expected_recovery_dispatch_count
+                        else item
+                        for item in queued
+                    ]
             if (
                 current_context is None
                 or current_context.recovery_dispatch_count < expected_recovery_dispatch_count
-                or (
-                    current_context.recovery_dispatch_count == expected_recovery_dispatch_count
-                    and (
-                        current_context.session_id != session_id
-                        or current_context.instance_id != instance_id
-                        or current_context.owner_epoch != owner_epoch
-                    )
-                )
+                or owner_context_changed
             ):
                 # A terminal event may arrive before the replacement's first
                 # enqueue. Refresh the owner identity when this generation is

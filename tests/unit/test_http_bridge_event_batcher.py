@@ -53,6 +53,16 @@ class _FakeDurableBridge:
         return await self.update_operation(**kwargs)
 
 
+class _OwnerConsistentDurableBridge(_FakeDurableBridge):
+    """Mirror the repository's mixed-owner batch rejection contract."""
+
+    async def append_operation_events(self, *, events, max_bytes: int) -> bool:
+        identities = {(event.session_id, event.instance_id, event.owner_epoch) for event in events}
+        if len(identities) > 1:
+            raise ValueError("mixed owner context")
+        return await super().append_operation_events(events=events, max_bytes=max_bytes)
+
+
 class _TerminalAppendFailingDurableBridge(_FakeDurableBridge):
     def __init__(self, *, append_result: bool = True, update_result: bool = True) -> None:
         super().__init__(append_result=append_result, update_result=update_result)
@@ -392,7 +402,7 @@ async def test_fence_operation_drops_late_events_from_interrupted_generation() -
 
 @pytest.mark.asyncio
 async def test_enqueue_refreshes_context_when_owner_identity_changes() -> None:
-    durable = _FakeDurableBridge()
+    durable = _OwnerConsistentDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(
         durable,
         max_bytes=1024,
@@ -415,6 +425,13 @@ async def test_enqueue_refreshes_context_when_owner_identity_changes() -> None:
         assert context.session_id == "replacement-session"
         assert context.instance_id == "replacement-instance"
         assert context.owner_epoch == 9
+        queued = batcher._pending["op-1"]
+        assert [(item.session_id, item.instance_id, item.owner_epoch) for item in queued] == [
+            ("replacement-session", "replacement-instance", 9),
+            ("replacement-session", "replacement-instance", 9),
+        ]
+        assert await batcher.flush_pending_operation(operation_id="op-1") is True
+        assert durable.batches == [["original", "replacement"]]
     finally:
         await batcher.close()
 

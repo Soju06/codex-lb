@@ -424,6 +424,7 @@ def _canonical_background_ack_response_id(
         and response.get("object") == "response"
         and isinstance(response_id, str)
         and bool(response_id)
+        and response_id == response_id.strip()
         and response.get("status") == event_type.removeprefix("response.")
         and response.get("output") == []
     ):

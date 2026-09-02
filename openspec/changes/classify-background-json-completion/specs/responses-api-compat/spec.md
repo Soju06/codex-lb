@@ -12,7 +12,8 @@ the `/v1/responses` subscription compatibility path, which MAY aggregate an
 upstream stream when required by the configured ChatGPT Codex backend.
 
 When the completed HTTP exchange returns a canonical background acknowledgement
-with `object = response`, a non-empty response ID, status `queued` or
+with `object = response`, a non-empty response ID without surrounding
+whitespace, status `queued` or
 `in_progress` matching the event type, and `output = []`, the proxy MUST treat
 the transport as successful: the request log MUST use `status=success` without
 `stream_incomplete`, account health MUST take the successful-request path, and
@@ -42,7 +43,7 @@ streams.
 - **GIVEN** a backend Responses request has `stream: false`
 - **AND** upstream returns one valid Response object with status `queued` or
   `in_progress`
-- **AND** the object has a non-empty ID and an empty output list
+- **AND** the object has a non-empty, unpadded ID and an empty output list
 - **WHEN** codex-lb finishes reading that HTTP response
 - **THEN** the Response object is returned unchanged
 - **AND** the request log records success without `stream_incomplete`

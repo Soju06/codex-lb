@@ -9431,6 +9431,8 @@ async def test_collect_responses_payload_aggregated_bridge_keepalive_yields_comp
     [
         {"id": "resp_background", "status": "queued", "output": []},
         {"id": "", "object": "response", "status": "queued", "output": []},
+        {"id": "   ", "object": "response", "status": "queued", "output": []},
+        {"id": " resp_background ", "object": "response", "status": "queued", "output": []},
     ],
 )
 async def test_collect_responses_payload_rejects_noncanonical_background_ack(

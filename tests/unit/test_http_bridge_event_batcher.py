@@ -486,6 +486,34 @@ async def test_rollback_fence_operation_retains_nonzero_restored_generation() ->
 
 
 @pytest.mark.asyncio
+async def test_rollback_fence_operation_bounded_cleanup_releases_abandoned_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    durable = _FakeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy.http_bridge_event_batcher._GENERATION_FENCE_RETENTION_SECONDS",
+        0.01,
+    )
+    try:
+        await _enqueue(batcher, "old", recovery_dispatch_count=1)
+        await batcher.fence_operation(operation_id="op-1", recovery_dispatch_count=2)
+        assert await batcher.rollback_fence_operation(operation_id="op-1", recovery_dispatch_count=1) is True
+        assert batcher._operation_generations == {"op-1": 1}
+        await asyncio.sleep(0.03)
+        assert batcher._operation_generations == {}
+        assert batcher._generation_cleanup_tasks == {}
+    finally:
+        await batcher.close()
+
+
+@pytest.mark.asyncio
 async def test_terminal_append_refreshes_context_for_new_recovery_generation() -> None:
     durable = _FakeDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(

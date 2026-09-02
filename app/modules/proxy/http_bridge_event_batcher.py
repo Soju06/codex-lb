@@ -11,6 +11,8 @@ from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationEv
 
 logger = logging.getLogger("app.modules.proxy.http_bridge_event_batcher")
 
+_GENERATION_FENCE_RETENTION_SECONDS = 300.0
+
 
 @dataclass(frozen=True, slots=True)
 class _PendingOperationEvent:
@@ -106,6 +108,7 @@ class HttpBridgeOperationEventBatcher:
         # SQLite already serializes writers; this also prevents a background
         # flush racing a terminal drain and final marker for one operation.
         self._flush_lock = asyncio.Lock()
+        self._generation_cleanup_tasks: dict[str, asyncio.Task[None]] = {}
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
@@ -130,67 +133,69 @@ class HttpBridgeOperationEventBatcher:
             event_text=event_text,
             recovery_dispatch_count=recovery_dispatch_count,
         )
-        async with self._lock:
-            current_generation = self._operation_generations.get(operation_id, 0)
-            if recovery_dispatch_count < current_generation:
-                # A late event from the interrupted attempt must not be
-                # appended after a recovery rebind has claimed the operation.
-                return
-            if recovery_dispatch_count > current_generation:
-                self._operation_generations[operation_id] = recovery_dispatch_count
-            current_context = self._contexts.get(operation_id)
-            owner_context_changed = (
-                current_context is not None
-                and current_context.recovery_dispatch_count == recovery_dispatch_count
-                and (
-                    current_context.session_id != session_id
-                    or current_context.instance_id != instance_id
-                    or current_context.owner_epoch != owner_epoch
-                )
-            )
-            if owner_context_changed:
-                # All events in one generation must carry the same durable
-                # owner context. Rebind events queued before a handoff so a
-                # mixed-owner batch cannot be rejected by the repository.
-                queued = self._pending.get(operation_id)
-                if queued:
-                    self._pending[operation_id] = [
-                        replace(
-                            item,
-                            session_id=session_id,
-                            instance_id=instance_id,
-                            owner_epoch=owner_epoch,
-                        )
-                        if item.recovery_dispatch_count == recovery_dispatch_count
-                        else item
-                        for item in queued
-                    ]
-            if (
-                current_context is None
-                or current_context.recovery_dispatch_count < recovery_dispatch_count
-                or owner_context_changed
-            ):
-                self._contexts[operation_id] = pending
-            if terminal:
-                self._closing_operations.add(operation_id)
-            if operation_id not in self._dropped_operations:
-                event_bytes = len(event_text.encode("utf-8"))
-                if (
-                    self._pending_count >= self._max_pending_events
-                    or self._pending_bytes + event_bytes > self._max_pending_bytes
-                ):
-                    self._dropped_operations.add(operation_id)
-                    dropped = self._pending.pop(operation_id, [])
-                    self._pending_count -= len(dropped)
-                    self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in dropped)
-                    logger.info(
-                        "Dropping HTTP bridge transcript events after queue overflow operation_id=%s",
-                        operation_id,
+        async with self._flush_lock:
+            async with self._lock:
+                current_generation = self._operation_generations.get(operation_id, 0)
+                if recovery_dispatch_count < current_generation:
+                    # A late event from the interrupted attempt must not be
+                    # appended after a recovery rebind has claimed the operation.
+                    return
+                self._cancel_generation_cleanup_locked(operation_id)
+                if recovery_dispatch_count > current_generation:
+                    self._operation_generations[operation_id] = recovery_dispatch_count
+                current_context = self._contexts.get(operation_id)
+                owner_context_changed = (
+                    current_context is not None
+                    and current_context.recovery_dispatch_count == recovery_dispatch_count
+                    and (
+                        current_context.session_id != session_id
+                        or current_context.instance_id != instance_id
+                        or current_context.owner_epoch != owner_epoch
                     )
-                else:
-                    self._pending.setdefault(operation_id, []).append(pending)
-                    self._pending_count += 1
-                    self._pending_bytes += event_bytes
+                )
+                if owner_context_changed:
+                    # All events in one generation must carry the same durable
+                    # owner context. Rebind events queued before a handoff so a
+                    # mixed-owner batch cannot be rejected by the repository.
+                    queued = self._pending.get(operation_id)
+                    if queued:
+                        self._pending[operation_id] = [
+                            replace(
+                                item,
+                                session_id=session_id,
+                                instance_id=instance_id,
+                                owner_epoch=owner_epoch,
+                            )
+                            if item.recovery_dispatch_count == recovery_dispatch_count
+                            else item
+                            for item in queued
+                        ]
+                if (
+                    current_context is None
+                    or current_context.recovery_dispatch_count < recovery_dispatch_count
+                    or owner_context_changed
+                ):
+                    self._contexts[operation_id] = pending
+                if terminal:
+                    self._closing_operations.add(operation_id)
+                if operation_id not in self._dropped_operations:
+                    event_bytes = len(event_text.encode("utf-8"))
+                    if (
+                        self._pending_count >= self._max_pending_events
+                        or self._pending_bytes + event_bytes > self._max_pending_bytes
+                    ):
+                        self._dropped_operations.add(operation_id)
+                        dropped = self._pending.pop(operation_id, [])
+                        self._pending_count -= len(dropped)
+                        self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in dropped)
+                        logger.info(
+                            "Dropping HTTP bridge transcript events after queue overflow operation_id=%s",
+                            operation_id,
+                        )
+                    else:
+                        self._pending.setdefault(operation_id, []).append(pending)
+                        self._pending_count += 1
+                        self._pending_bytes += event_bytes
         self._wake.set()
         if terminal:
             await self.flush_operation(
@@ -201,6 +206,42 @@ class HttpBridgeOperationEventBatcher:
     def _ensure_task(self) -> None:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run(), name="http-bridge-operation-event-flusher")
+
+    def _cancel_generation_cleanup_locked(self, operation_id: str) -> None:
+        task = self._generation_cleanup_tasks.pop(operation_id, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    def _schedule_generation_cleanup_locked(self, operation_id: str, generation: int) -> None:
+        """Bound a restored generation fence to the abandoned request lifetime.
+
+        A rollback must keep fencing late events for a short window, but an
+        operation that never resumes must not leave an entry in the process
+        forever. The cleanup task only removes the exact generation it was
+        scheduled for, so a newer enqueue/rebind cannot be unfenced by stale
+        timer work.
+        """
+        self._cancel_generation_cleanup_locked(operation_id)
+
+        async def cleanup() -> None:
+            try:
+                await asyncio.sleep(_GENERATION_FENCE_RETENTION_SECONDS)
+            except asyncio.CancelledError:
+                return
+            async with self._flush_lock:
+                async with self._lock:
+                    if (
+                        self._operation_generations.get(operation_id) == generation
+                        and operation_id not in self._pending
+                        and operation_id not in self._contexts
+                        and operation_id not in self._closing_operations
+                    ):
+                        self._operation_generations.pop(operation_id, None)
+                    self._generation_cleanup_tasks.pop(operation_id, None)
+
+        self._generation_cleanup_tasks[operation_id] = asyncio.create_task(
+            cleanup(), name=f"http-bridge-generation-cleanup-{operation_id}"
+        )
 
     async def _run(self) -> None:
         while True:
@@ -343,55 +384,57 @@ class HttpBridgeOperationEventBatcher:
     ) -> TerminalOperationEventAppendResult:
         """Drain queued events and atomically append the terminal outcome."""
         expected_recovery_dispatch_count = max(0, int(expected_recovery_dispatch_count))
-        async with self._lock:
-            current_generation = self._operation_generations.get(operation_id, 0)
-            if expected_recovery_dispatch_count < current_generation:
-                # A terminal event from a superseded upstream attempt must not
-                # settle the replacement operation.
-                return TerminalOperationEventAppendResult(persisted=False)
-            if expected_recovery_dispatch_count > current_generation:
-                self._operation_generations[operation_id] = expected_recovery_dispatch_count
-            current_context = self._contexts.get(operation_id)
-            owner_context_changed = (
-                current_context is not None
-                and current_context.recovery_dispatch_count == expected_recovery_dispatch_count
-                and (
-                    current_context.session_id != session_id
-                    or current_context.instance_id != instance_id
-                    or current_context.owner_epoch != owner_epoch
+        async with self._flush_lock:
+            async with self._lock:
+                current_generation = self._operation_generations.get(operation_id, 0)
+                if expected_recovery_dispatch_count < current_generation:
+                    # A terminal event from a superseded upstream attempt must not
+                    # settle the replacement operation.
+                    return TerminalOperationEventAppendResult(persisted=False)
+                self._cancel_generation_cleanup_locked(operation_id)
+                if expected_recovery_dispatch_count > current_generation:
+                    self._operation_generations[operation_id] = expected_recovery_dispatch_count
+                current_context = self._contexts.get(operation_id)
+                owner_context_changed = (
+                    current_context is not None
+                    and current_context.recovery_dispatch_count == expected_recovery_dispatch_count
+                    and (
+                        current_context.session_id != session_id
+                        or current_context.instance_id != instance_id
+                        or current_context.owner_epoch != owner_epoch
+                    )
                 )
-            )
-            if owner_context_changed:
-                queued = self._pending.get(operation_id)
-                if queued:
-                    self._pending[operation_id] = [
-                        replace(
-                            item,
-                            session_id=session_id,
-                            instance_id=instance_id,
-                            owner_epoch=owner_epoch,
-                        )
-                        if item.recovery_dispatch_count == expected_recovery_dispatch_count
-                        else item
-                        for item in queued
-                    ]
-            if (
-                current_context is None
-                or current_context.recovery_dispatch_count < expected_recovery_dispatch_count
-                or owner_context_changed
-            ):
-                # A terminal event may arrive before the replacement's first
-                # enqueue. Refresh the owner identity when this generation is
-                # newer so durable append is not fenced by stale context.
-                self._contexts[operation_id] = _PendingOperationEvent(
-                    operation_id=operation_id,
-                    session_id=session_id,
-                    instance_id=instance_id,
-                    owner_epoch=owner_epoch,
-                    event_text=event_text,
-                    recovery_dispatch_count=expected_recovery_dispatch_count,
-                )
-            self._closing_operations.add(operation_id)
+                if owner_context_changed:
+                    queued = self._pending.get(operation_id)
+                    if queued:
+                        self._pending[operation_id] = [
+                            replace(
+                                item,
+                                session_id=session_id,
+                                instance_id=instance_id,
+                                owner_epoch=owner_epoch,
+                            )
+                            if item.recovery_dispatch_count == expected_recovery_dispatch_count
+                            else item
+                            for item in queued
+                        ]
+                if (
+                    current_context is None
+                    or current_context.recovery_dispatch_count < expected_recovery_dispatch_count
+                    or owner_context_changed
+                ):
+                    # A terminal event may arrive before the replacement's first
+                    # enqueue. Refresh the owner identity when this generation is
+                    # newer so durable append is not fenced by stale context.
+                    self._contexts[operation_id] = _PendingOperationEvent(
+                        operation_id=operation_id,
+                        session_id=session_id,
+                        instance_id=instance_id,
+                        owner_epoch=owner_epoch,
+                        event_text=event_text,
+                        recovery_dispatch_count=expected_recovery_dispatch_count,
+                    )
+                self._closing_operations.add(operation_id)
         await self.flush_pending_operation(operation_id=operation_id)
         async with self._lock:
             current_generation = self._operation_generations.get(operation_id, 0)
@@ -560,13 +603,27 @@ class HttpBridgeOperationEventBatcher:
                 current_generation = self._operation_generations.get(operation_id)
                 if current_generation != fenced_generation:
                     return False
+                pending = self._pending.pop(operation_id, [])
+                self._pending_count -= len(pending)
+                self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in pending)
+                self._contexts.pop(operation_id, None)
+                self._closing_operations.discard(operation_id)
+                self._dropped_operations.discard(operation_id)
                 if recovery_dispatch_count == 0:
+                    self._cancel_generation_cleanup_locked(operation_id)
                     self._operation_generations.pop(operation_id, None)
                 else:
                     self._operation_generations[operation_id] = recovery_dispatch_count
+                    self._schedule_generation_cleanup_locked(operation_id, recovery_dispatch_count)
                 return True
 
     async def close(self) -> None:
+        cleanup_tasks = list(self._generation_cleanup_tasks.values())
+        self._generation_cleanup_tasks.clear()
+        for cleanup_task in cleanup_tasks:
+            cleanup_task.cancel()
+        if cleanup_tasks:
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
         task = self._task
         self._task = None
         if task is not None:

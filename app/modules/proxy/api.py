@@ -8783,6 +8783,11 @@ async def _collect_responses_payload(
             )
         return terminal_result
     if nonterminal_result is not None:
+        if output_lifecycle_invalid or added_output_indexes - done_output_indexes:
+            return _public_contract_error_envelope(
+                "invalid_output_item",
+                _public_contract_error_message("invalid_output_item"),
+            )
         return nonterminal_result
     error_kind = contract_violation_kind or "upstream_stream_truncated"
     return _public_contract_error_envelope(

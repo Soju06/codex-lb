@@ -567,6 +567,20 @@ async def test_collect_responses_payload_returns_contract_error_on_truncated_str
 
 
 @pytest.mark.asyncio
+async def test_collect_responses_payload_rejects_invalid_output_item_before_nonterminal_progress() -> None:
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks(
+            'data: {"type":"response.in_progress","response":{"id":"resp_1",'
+            '"object":"response","status":"in_progress","output":[]}}\n\n',
+            'data: {"type":"response.output_item.added","output_index":0,"item":{}}\n\n',
+        )
+    )
+
+    body = result.model_dump(mode="json", exclude_none=True)
+    assert body["error"]["code"] == "invalid_output_item"
+
+
+@pytest.mark.asyncio
 async def test_collect_responses_payload_rejects_unfinished_output_item() -> None:
     result = await proxy_api_module._collect_responses_payload(
         _iter_blocks(

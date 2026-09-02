@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 import sqlalchemy as sa
@@ -2105,6 +2106,42 @@ def test_persisted_recovery_schema_repair_downgrade_preserves_parent_objects(mon
     monkeypatch.setattr(migration, "op", _OpMustNotAlter())
 
     migration.downgrade()
+
+
+def test_recent_unknown_index_migration_preserves_preexisting_index(monkeypatch) -> None:
+    migration = importlib.import_module("app.db.alembic.versions.20260815_000000_add_http_bridge_recent_unknown_index")
+    bind = object()
+    create_index = Mock()
+    drop_index = Mock()
+    ensure_ownership_table = Mock()
+    mark_created = Mock()
+    forget_created = Mock()
+    was_created = Mock(return_value=False)
+    drop_ownership_table_if_empty = Mock()
+
+    monkeypatch.setattr(
+        migration,
+        "op",
+        SimpleNamespace(get_bind=lambda: bind, create_index=create_index, drop_index=drop_index),
+    )
+    monkeypatch.setattr(migration, "_has_table", lambda _bind: True)
+    monkeypatch.setattr(migration, "_has_index", lambda _bind: True)
+    monkeypatch.setattr(migration, "ensure_ownership_table", ensure_ownership_table)
+    monkeypatch.setattr(migration, "mark_created", mark_created)
+    monkeypatch.setattr(migration, "was_created", was_created)
+    monkeypatch.setattr(migration, "forget_created", forget_created)
+    monkeypatch.setattr(migration, "drop_ownership_table_if_empty", drop_ownership_table_if_empty)
+
+    migration.upgrade()
+    migration.downgrade()
+
+    create_index.assert_not_called()
+    ensure_ownership_table.assert_not_called()
+    mark_created.assert_not_called()
+    was_created.assert_called_once_with(bind, migration.revision, "index", migration._INDEX)
+    drop_index.assert_not_called()
+    forget_created.assert_not_called()
+    drop_ownership_table_if_empty.assert_called_once_with(bind)
 
 
 def test_replica_guardrails_migration_round_trips_with_version_backfill(tmp_path: Path) -> None:

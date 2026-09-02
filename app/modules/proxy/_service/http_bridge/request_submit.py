@@ -4846,6 +4846,11 @@ class _HTTPBridgeRequestSubmitMixin:
         operation_fenced_claimed = True
         operation_claim_acquired_here = False
         operation_attempt_generation_before_claim = request_state.operation_attempt_generation
+        retry_send_started = False
+
+        def mark_retry_send_started() -> None:
+            nonlocal retry_send_started
+            retry_send_started = True
 
         async def rollback_operation_fenced_claim() -> None:
             """Refund a claim made by this retry when dispatch is abandoned."""
@@ -4894,9 +4899,16 @@ class _HTTPBridgeRequestSubmitMixin:
             # refund that exact claim before returning so the next request is
             # not fenced out by a phantom submitted attempt.
             async with session.pending_lock:
+                claim_retryable_requests = prioritize_precreated_retryable_requests(
+                    [
+                        pending_request
+                        for pending_request in session.pending_requests
+                        if not pending_request.draining_until_terminal and request_is_retryable(pending_request)
+                    ]
+                )
                 claim_still_retryable = (
-                    request_state in session.pending_requests
-                    and not any(pending_request is not request_state for pending_request in session.pending_requests)
+                    len(claim_retryable_requests) == 1
+                    and any(candidate is request_state for candidate in claim_retryable_requests)
                     and not request_state.draining_until_terminal
                     and _http_bridge_request_counts_against_queue(request_state)
                     and request_is_retryable(request_state)
@@ -5033,7 +5045,12 @@ class _HTTPBridgeRequestSubmitMixin:
                     await self._release_request_state_account_response_create_lease(request_state)
                     return False
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
-            await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
+            await _send_http_bridge_request_text_with_archive_id(
+                session,
+                request_state,
+                request_text,
+                on_send_started=mark_retry_send_started,
+            )
             session.last_used_at = _service_time().monotonic()
             request_state.clean_close_retry_result = True
             return True
@@ -5062,6 +5079,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 logger.warning("HTTP bridge pre-created retry failed", exc_info=True)
             return False
         finally:
+            if operation_claim_acquired_here and not retry_send_started:
+                rollback_task = asyncio.create_task(rollback_operation_fenced_claim())
+                _, rollback_cancellation = await _await_task_deferring_cancellation(rollback_task)
+                if rollback_cancellation is not None:
+                    raise rollback_cancellation
             request_state.clean_close_retry_in_progress = False
 
     async def _retry_http_bridge_precreated_auth_request(

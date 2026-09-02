@@ -117,6 +117,37 @@ class HttpBridgeOperationEventBatcher:
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
+    async def _operation_lock_for(self, operation_id: str) -> asyncio.Lock:
+        """Return an operation lock while synchronizing its map lifetime."""
+        async with self._lock:
+            return self._operation_locks.setdefault(operation_id, asyncio.Lock())
+
+    def _cleanup_operation_state_locked(self, operation_id: str) -> None:
+        """Release idle per-operation synchronization objects.
+
+        Callers hold ``_lock``. Removing a lock only while it is unlocked keeps
+        callers that already obtained it on the same serialization path; a
+        future caller can safely create a fresh lock once no state remains.
+        """
+        if (
+            operation_id in self._pending
+            or self._inflight_flushes.get(operation_id, 0) > 0
+            or operation_id in self._closing_operations
+            or operation_id in self._contexts
+            or operation_id in self._operation_generations
+            or operation_id in self._generation_cleanup_tasks
+        ):
+            return
+        operation_lock = self._operation_locks.get(operation_id)
+        if operation_lock is not None and operation_lock.locked():
+            return
+        self._operation_locks.pop(operation_id, None)
+        self._flush_completion_events.pop(operation_id, None)
+
+    async def _cleanup_operation_state(self, operation_id: str) -> None:
+        async with self._lock:
+            self._cleanup_operation_state_locked(operation_id)
+
     async def enqueue(
         self,
         *,
@@ -138,7 +169,7 @@ class HttpBridgeOperationEventBatcher:
             event_text=event_text,
             recovery_dispatch_count=recovery_dispatch_count,
         )
-        operation_lock = self._operation_locks.setdefault(operation_id, asyncio.Lock())
+        operation_lock = await self._operation_lock_for(operation_id)
         async with operation_lock:
             accepted = await self._enqueue_pending(
                 pending,
@@ -147,6 +178,7 @@ class HttpBridgeOperationEventBatcher:
                 recovery_dispatch_count=recovery_dispatch_count,
             )
         if not accepted:
+            await self._cleanup_operation_state(operation_id)
             return
         self._wake.set()
         if terminal:
@@ -154,6 +186,7 @@ class HttpBridgeOperationEventBatcher:
                 operation_id=operation_id,
                 expected_recovery_dispatch_count=recovery_dispatch_count,
             )
+        await self._cleanup_operation_state(operation_id)
 
     async def _enqueue_pending(
         self,
@@ -268,6 +301,7 @@ class HttpBridgeOperationEventBatcher:
                     ):
                         self._operation_generations.pop(operation_id, None)
                     self._generation_cleanup_tasks.pop(operation_id, None)
+                    self._cleanup_operation_state_locked(operation_id)
 
         self._generation_cleanup_tasks[operation_id] = asyncio.create_task(
             cleanup(), name=f"http-bridge-generation-cleanup-{operation_id}"
@@ -301,12 +335,13 @@ class HttpBridgeOperationEventBatcher:
             return batch
 
     async def _flush_one(self, operation_id: str) -> None:
-        operation_lock = self._operation_locks.setdefault(operation_id, asyncio.Lock())
+        operation_lock = await self._operation_lock_for(operation_id)
         await operation_lock.acquire()
         async with self._flush_lock:
             batch = await self._take_batch(operation_id)
         if not batch:
             operation_lock.release()
+            await self._cleanup_operation_state(operation_id)
             return
         # Re-check generation and owner context after taking the batch. A
         # concurrent recovery may have rebound the operation while the batch
@@ -315,6 +350,7 @@ class HttpBridgeOperationEventBatcher:
         async with self._lock:
             if operation_id in self._dropped_operations:
                 operation_lock.release()
+                self._cleanup_operation_state_locked(operation_id)
                 return
             current_generation = self._operation_generations.get(operation_id, 0)
             current_context = self._contexts.get(operation_id)
@@ -334,6 +370,7 @@ class HttpBridgeOperationEventBatcher:
             ]
             if not batch:
                 operation_lock.release()
+                self._cleanup_operation_state_locked(operation_id)
                 return
             self._inflight_flushes[operation_id] = self._inflight_flushes.get(operation_id, 0) + 1
             completion_event = self._flush_completion_events.setdefault(operation_id, asyncio.Event())
@@ -382,12 +419,13 @@ class HttpBridgeOperationEventBatcher:
                 remaining = self._inflight_flushes.get(operation_id, 0) - 1
                 if remaining <= 0:
                     self._inflight_flushes.pop(operation_id, None)
-                    completion_event = self._flush_completion_events.get(operation_id)
+                    completion_event = self._flush_completion_events.pop(operation_id, None)
                     if completion_event is not None:
                         completion_event.set()
                 else:
                     self._inflight_flushes[operation_id] = remaining
             operation_lock.release()
+            await self._cleanup_operation_state(operation_id)
 
     async def flush_operation(
         self,
@@ -404,8 +442,10 @@ class HttpBridgeOperationEventBatcher:
                 else (context.recovery_dispatch_count if context is not None else 0)
             )
             if self._operation_generations.get(operation_id, 0) != expected_generation:
+                self._cleanup_operation_state_locked(operation_id)
                 return
             if context is not None and context.recovery_dispatch_count != expected_generation:
+                self._cleanup_operation_state_locked(operation_id)
                 return
             dropped = operation_id in self._dropped_operations
             self._closing_operations.discard(operation_id)
@@ -413,6 +453,7 @@ class HttpBridgeOperationEventBatcher:
             self._operation_generations.pop(operation_id, None)
             self._dropped_operations.discard(operation_id)
         if dropped or context is None:
+            await self._cleanup_operation_state(operation_id)
             return
         # A single final marker is the only synchronous database operation on
         # the terminal path. If it fails, the operation remains ineligible for
@@ -435,6 +476,7 @@ class HttpBridgeOperationEventBatcher:
                 operation_id,
                 exc_info=True,
             )
+        await self._cleanup_operation_state(operation_id)
 
     async def append_terminal_event(
         self,
@@ -457,6 +499,7 @@ class HttpBridgeOperationEventBatcher:
                 if expected_recovery_dispatch_count < current_generation:
                     # A terminal event from a superseded upstream attempt must not
                     # settle the replacement operation.
+                    self._cleanup_operation_state_locked(operation_id)
                     return TerminalOperationEventAppendResult(persisted=False)
                 self._cancel_generation_cleanup_locked(operation_id)
                 if expected_recovery_dispatch_count > current_generation:
@@ -474,6 +517,7 @@ class HttpBridgeOperationEventBatcher:
                 if owner_context_changed and owner_epoch <= current_context.owner_epoch:
                     # A terminal event from a detached predecessor must not
                     # steal the successor's owner context.
+                    self._cleanup_operation_state_locked(operation_id)
                     return TerminalOperationEventAppendResult(persisted=False)
                 if owner_context_changed:
                     queued = self._pending.get(operation_id)
@@ -512,8 +556,10 @@ class HttpBridgeOperationEventBatcher:
             context = self._contexts.get(operation_id)
             dropped = operation_id in self._dropped_operations
         if current_generation != expected_recovery_dispatch_count:
+            await self._cleanup_operation_state(operation_id)
             return TerminalOperationEventAppendResult(persisted=False)
         if context is None:
+            await self._cleanup_operation_state(operation_id)
             return TerminalOperationEventAppendResult(persisted=False)
         if dropped:
             async with self._lock:
@@ -522,6 +568,7 @@ class HttpBridgeOperationEventBatcher:
                     self._contexts.pop(operation_id, None)
                     self._operation_generations.pop(operation_id, None)
                     self._dropped_operations.discard(operation_id)
+                self._cleanup_operation_state_locked(operation_id)
             return TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
         try:
             if self._spool_format == HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2:
@@ -570,6 +617,7 @@ class HttpBridgeOperationEventBatcher:
                     self._contexts.pop(operation_id, None)
                     self._operation_generations.pop(operation_id, None)
                     self._dropped_operations.discard(operation_id)
+                self._cleanup_operation_state_locked(operation_id)
 
     async def settle_terminal_event(
         self,
@@ -641,6 +689,7 @@ class HttpBridgeOperationEventBatcher:
                 self._operation_generations.pop(operation_id, None)
                 self._closing_operations.discard(operation_id)
                 self._dropped_operations.discard(operation_id)
+                self._cleanup_operation_state_locked(operation_id)
 
     async def fence_operation(self, *, operation_id: str, recovery_dispatch_count: int) -> None:
         """Drop queued events from an attempt after its operation is rebound.
@@ -650,18 +699,24 @@ class HttpBridgeOperationEventBatcher:
         the small window between the database rebind and this in-memory drain.
         """
         recovery_dispatch_count = max(0, int(recovery_dispatch_count))
-        async with self._flush_lock:
-            async with self._lock:
-                current_generation = self._operation_generations.get(operation_id, 0)
-                if recovery_dispatch_count <= current_generation:
-                    return
-                self._cancel_generation_cleanup_locked(operation_id)
-                self._operation_generations[operation_id] = recovery_dispatch_count
-                pending = self._pending.pop(operation_id, [])
-                self._pending_count -= len(pending)
-                self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in pending)
-                self._closing_operations.discard(operation_id)
-                self._dropped_operations.discard(operation_id)
+        operation_lock = await self._operation_lock_for(operation_id)
+        await operation_lock.acquire()
+        try:
+            async with self._flush_lock:
+                async with self._lock:
+                    current_generation = self._operation_generations.get(operation_id, 0)
+                    if recovery_dispatch_count <= current_generation:
+                        return
+                    self._cancel_generation_cleanup_locked(operation_id)
+                    self._operation_generations[operation_id] = recovery_dispatch_count
+                    pending = self._pending.pop(operation_id, [])
+                    self._pending_count -= len(pending)
+                    self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in pending)
+                    self._closing_operations.discard(operation_id)
+                    self._dropped_operations.discard(operation_id)
+        finally:
+            operation_lock.release()
+            await self._cleanup_operation_state(operation_id)
 
     async def rollback_fence_operation(self, *, operation_id: str, recovery_dispatch_count: int) -> bool:
         """Restore a generation fence after a durable recovery rollback.
@@ -676,24 +731,30 @@ class HttpBridgeOperationEventBatcher:
         """
         recovery_dispatch_count = max(0, int(recovery_dispatch_count))
         fenced_generation = recovery_dispatch_count + 1
-        async with self._flush_lock:
-            async with self._lock:
-                current_generation = self._operation_generations.get(operation_id)
-                if current_generation != fenced_generation:
-                    return False
-                pending = self._pending.pop(operation_id, [])
-                self._pending_count -= len(pending)
-                self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in pending)
-                self._contexts.pop(operation_id, None)
-                self._closing_operations.discard(operation_id)
-                self._dropped_operations.discard(operation_id)
-                if recovery_dispatch_count == 0:
-                    self._cancel_generation_cleanup_locked(operation_id)
-                    self._operation_generations.pop(operation_id, None)
-                else:
-                    self._operation_generations[operation_id] = recovery_dispatch_count
-                    self._schedule_generation_cleanup_locked(operation_id, recovery_dispatch_count)
-                return True
+        operation_lock = await self._operation_lock_for(operation_id)
+        await operation_lock.acquire()
+        try:
+            async with self._flush_lock:
+                async with self._lock:
+                    current_generation = self._operation_generations.get(operation_id)
+                    if current_generation != fenced_generation:
+                        return False
+                    pending = self._pending.pop(operation_id, [])
+                    self._pending_count -= len(pending)
+                    self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in pending)
+                    self._contexts.pop(operation_id, None)
+                    self._closing_operations.discard(operation_id)
+                    self._dropped_operations.discard(operation_id)
+                    if recovery_dispatch_count == 0:
+                        self._cancel_generation_cleanup_locked(operation_id)
+                        self._operation_generations.pop(operation_id, None)
+                    else:
+                        self._operation_generations[operation_id] = recovery_dispatch_count
+                        self._schedule_generation_cleanup_locked(operation_id, recovery_dispatch_count)
+                    return True
+        finally:
+            operation_lock.release()
+            await self._cleanup_operation_state(operation_id)
 
     async def close(self) -> None:
         cleanup_tasks = list(self._generation_cleanup_tasks.values())

@@ -2381,6 +2381,66 @@ async def test_parked_recovery_claim_defers_cancellation_until_claim_state_is_re
     assert request_state.operation_attempt_generation == 3
 
 
+@pytest.mark.asyncio
+async def test_operation_fenced_retry_refunds_claim_when_admission_deadline_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "operation-fenced-abort", None),
+        key_value="operation-fenced-abort",
+        queued_request_count=1,
+    )
+    session.durable_session_id = "durable-operation-fenced-abort"
+    session.durable_owner_epoch = 4
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-operation-fenced-abort",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() - 1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","input":"retry"}',
+        operation_id="op-operation-fenced-abort",
+        operation_registered=True,
+        operation_attempt_generation=0,
+        account_response_create_lease=cast(Any, object()),
+        response_create_admission_reacquire_required=True,
+    )
+    session.pending_requests.append(request_state)
+
+    async def claim_operation(_session: Any, state: Any) -> bool:
+        state.operation_recovery_claimed = True
+        state.operation_attempt_generation = 1
+        return True
+
+    claim = AsyncMock(side_effect=claim_operation)
+    mark_operation_unknown = AsyncMock(return_value=True)
+    service._durable_bridge = cast(Any, SimpleNamespace(mark_operation_unknown=mark_operation_unknown))
+    monkeypatch.setattr(service, "_claim_http_bridge_operation_fenced_continuity_replay", claim)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_release_request_state_account_response_create_lease", AsyncMock())
+
+    assert (
+        await service._retry_http_bridge_precreated_request(
+            session,
+            allow_operation_fenced_continuity_replay=True,
+        )
+        is False
+    )
+
+    claim.assert_awaited_once_with(session, request_state)
+    mark_operation_unknown.assert_awaited_once()
+    assert mark_operation_unknown.await_args is not None
+    assert mark_operation_unknown.await_args.kwargs["restore_recovery_dispatch_claim"] is True
+    assert request_state.operation_recovery_claimed is False
+    assert request_state.operation_attempt_generation == 0
+
+
 def _make_app_settings(*, bridge_enabled: bool = True, **overrides: Any) -> Settings:
     return Settings(http_responses_session_bridge_enabled=bridge_enabled, **overrides)
 

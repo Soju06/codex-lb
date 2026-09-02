@@ -535,6 +535,38 @@ async def test_owner_rebinding_waits_for_inflight_flush() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fence_operation_waits_for_inflight_append() -> None:
+    durable = _BlockingBatchAppendDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    try:
+        await _enqueue(batcher, "original", recovery_dispatch_count=0)
+        flush_task = asyncio.create_task(batcher.flush_pending_operation(operation_id="op-1"))
+        await durable.batch_started.wait()
+
+        fence_task = asyncio.create_task(batcher.fence_operation(operation_id="op-1", recovery_dispatch_count=1))
+        await asyncio.sleep(0)
+        assert not fence_task.done()
+
+        durable.release_batch.set()
+        await flush_task
+        await fence_task
+
+        assert batcher._operation_generations == {"op-1": 1}
+        await _enqueue(batcher, "replacement", recovery_dispatch_count=1)
+        assert await batcher.flush_pending_operation(operation_id="op-1") is True
+        assert durable.batches == [["original"], ["replacement"]]
+    finally:
+        await batcher.discard_operation(operation_id="op-1")
+        await batcher.close()
+
+
+@pytest.mark.asyncio
 async def test_terminal_append_waits_for_inflight_batch_flush() -> None:
     durable = _BlockingBatchAppendDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(
@@ -571,6 +603,24 @@ async def test_terminal_append_waits_for_inflight_batch_flush() -> None:
         assert durable.terminal_rows == ["terminal"]
     finally:
         await batcher.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_flush_releases_operation_synchronization_state() -> None:
+    durable = _FakeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    await _enqueue(batcher, "terminal", terminal=True)
+
+    assert batcher._operation_locks == {}
+    assert batcher._flush_completion_events == {}
+
+    await batcher.close()
 
 
 @pytest.mark.asyncio

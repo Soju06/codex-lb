@@ -28787,6 +28787,44 @@ async def test_retry_http_bridge_request_on_fresh_upstream_claims_stale_anchor_g
 
 
 @pytest.mark.asyncio
+async def test_retry_http_bridge_request_on_fresh_upstream_skips_generation_claim_after_replay_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="stale-anchor-generation-budget")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-stale-anchor-generation-budget",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        previous_response_id=None,
+        transport="http",
+        replay_count=1,
+        verified_stale_anchor_replay=True,
+        verified_stale_anchor_retry_circuit_generation_captured=True,
+        verified_stale_anchor_retry_circuit_key=session.key,
+        verified_stale_anchor_retry_circuit_generation=None,
+    )
+    claim_generation = AsyncMock(return_value=True)
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_claim_http_bridge_retry_circuit_generation", claim_generation)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    recovered = await service._retry_http_bridge_request_on_fresh_upstream(
+        session=session,
+        request_state=request_state,
+        text_data='{"type":"response.create"}',
+        send_request=False,
+    )
+
+    assert recovered is False
+    claim_generation.assert_not_awaited()
+    reconnect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_retry_http_bridge_request_on_fresh_upstream_requires_file_pin_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -4317,6 +4317,10 @@ class _HTTPBridgeRequestSubmitMixin:
                 return False
             retry_text_data = request_state.fresh_upstream_request_text
             using_fresh_replay = True
+        if request_state.replay_count >= 1 and not (complete_transcript_retry or unsafe_partial_replay):
+            return False
+        if request_state.response_event_count > 0 and not unsafe_partial_replay:
+            return False
         if (
             request_state.verified_stale_anchor_replay
             and request_state.verified_stale_anchor_retry_circuit_generation_captured
@@ -4343,10 +4347,6 @@ class _HTTPBridgeRequestSubmitMixin:
                     model_class=_extract_model_class(session.request_model) if session.request_model else None,
                 )
                 return False
-        if request_state.replay_count >= 1 and not (complete_transcript_retry or unsafe_partial_replay):
-            return False
-        if request_state.response_event_count > 0 and not unsafe_partial_replay:
-            return False
         if complete_transcript_retry:
             # The durable operation recovery claim is the idempotency fence
             # for this one post-replay attempt.  Do not reset or increment the

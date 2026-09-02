@@ -333,7 +333,18 @@ class HttpBridgeOperationEventBatcher:
             if expected_recovery_dispatch_count > current_generation:
                 self._operation_generations[operation_id] = expected_recovery_dispatch_count
             current_context = self._contexts.get(operation_id)
-            if current_context is None or current_context.recovery_dispatch_count < expected_recovery_dispatch_count:
+            if (
+                current_context is None
+                or current_context.recovery_dispatch_count < expected_recovery_dispatch_count
+                or (
+                    current_context.recovery_dispatch_count == expected_recovery_dispatch_count
+                    and (
+                        current_context.session_id != session_id
+                        or current_context.instance_id != instance_id
+                        or current_context.owner_epoch != owner_epoch
+                    )
+                )
+            ):
                 # A terminal event may arrive before the replacement's first
                 # enqueue. Refresh the owner identity when this generation is
                 # newer so durable append is not fenced by stale context.

@@ -478,6 +478,40 @@ async def test_terminal_append_refreshes_context_for_new_recovery_generation() -
 
 
 @pytest.mark.asyncio
+async def test_terminal_append_refreshes_context_for_same_recovery_generation() -> None:
+    durable = _FakeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    try:
+        await _enqueue(batcher, "old-before-rebind")
+
+        result = await batcher.append_terminal_event(
+            operation_id="op-1",
+            session_id="replacement-session",
+            instance_id="replacement-instance",
+            owner_epoch=9,
+            event_text="replacement-terminal",
+            max_bytes=1024,
+            state="completed",
+            expected_recovery_dispatch_count=0,
+            response_id="resp-replacement",
+        )
+
+        assert result.persisted is True
+        assert durable.terminal_kwargs[0]["session_id"] == "replacement-session"
+        assert durable.terminal_kwargs[0]["instance_id"] == "replacement-instance"
+        assert durable.terminal_kwargs[0]["owner_epoch"] == 9
+        assert durable.terminal_kwargs[0]["expected_recovery_dispatch_count"] == 0
+    finally:
+        await batcher.close()
+
+
+@pytest.mark.asyncio
 async def test_terminal_cleanup_preserves_newer_recovery_fence() -> None:
     durable = _BlockingTerminalAppendDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(

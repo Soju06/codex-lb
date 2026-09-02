@@ -768,6 +768,18 @@ async def _reclaim_wedged_sqlite_session(
     # never touch a live connection.
     _wedged_teardown_cleanup_tasks.add(abandoned)
     for connection in connections:
+        if connection.closed:
+            # The teardown that outlived the bound got far enough to close this
+            # connection before it failed or was cancelled inside the
+            # completion grace, so nothing is held here: interrupting or
+            # invalidating it would only raise, and reporting that as a
+            # permanent hold (issue #1981) would be a false alarm.
+            logger.debug(
+                "sqlite_wedged_teardown phase=%s — the abandoned %s already closed its connection; nothing to reclaim",
+                phase,
+                phase,
+            )
+            continue
         logger.warning(
             "sqlite_wedged_teardown phase=%s bound_seconds=%.1f elapsed_seconds=%.1f %s — interrupting and "
             "invalidating the connection so the writer slot is released instead of stalling every writer "

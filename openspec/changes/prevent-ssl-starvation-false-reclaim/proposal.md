@@ -29,8 +29,9 @@ window, with 8 of the 13 on the current build failing that way.
   short shielded grace. When it has *successfully* completed, skip the reclaim
   entirely and report the elapsed bound instead. Failed, cancelled, and still
   pending teardowns keep the existing reclaim unchanged. The sibling
-  `bound-sqlite-wedged-teardown` delta is reworded so only a teardown still
-  pending past the deadline is required to be reclaimed.
+  `bound-sqlite-wedged-teardown` delta is reworded so only a teardown that
+  does not complete successfully within the grace (pending, cancelled, or
+  failed) must be reclaimed.
 - Carry `elapsed_seconds` into both teardown log lines, and raise a failed
   connection invalidation from debug to warning so a real permanent hold
   (issue #1981) stays visible.

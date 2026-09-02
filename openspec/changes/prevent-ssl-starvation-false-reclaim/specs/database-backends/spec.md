@@ -12,14 +12,17 @@ close for a bounded grace period before acting. When that teardown has
 completed successfully, the service MUST NOT fence the session, register the
 task for deferred cleanup, interrupt the driver, or invalidate the connection,
 and MUST emit exactly one warning naming the phase, the configured bound, and
-the measured elapsed time.
+the elapsed time measured at the bound, before the grace.
 
 A terminal task is not by itself proof of a successful teardown. A teardown
 that failed or was cancelled MUST NOT receive this exemption, and a teardown
 still pending after the grace MUST retain the existing fence, cleanup
 registration, driver interrupt, connection invalidation, and late-completion
-bookkeeping. A failed connection invalidation MUST be reported at warning
-level, because it is the point at which a permanent writer hold begins.
+bookkeeping. A connection that the failed or cancelled teardown had already closed
+holds nothing and MUST be skipped rather than interrupted, invalidated, or
+reported as a hold. A failed connection invalidation on a still-open connection
+MUST be reported at warning level, because it is the point at which a permanent
+writer hold begins.
 
 #### Scenario: Rollback completes after the bound elapses
 

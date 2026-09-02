@@ -3,5 +3,5 @@
 - [x] Carry elapsed seconds into both teardown log lines and report a failed invalidation at warning level
 - [x] Add regression coverage for shared-context reuse across client generations and for all four connector consumers
 - [x] Add regression coverage for the completed-teardown exemption in both phases, and guards proving failed and cancelled teardowns still reclaim
-- [x] Reword the `bound-sqlite-wedged-teardown` delta so only a teardown still pending past the deadline must be reclaimed
+- [x] Reword the `bound-sqlite-wedged-teardown` delta so only a teardown that does not complete successfully within the grace (pending, cancelled, or failed) must be reclaimed
 - [x] Run targeted tests, lint, typecheck, and OpenSpec strict validation

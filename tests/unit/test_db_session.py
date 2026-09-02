@@ -1947,6 +1947,62 @@ async def test_reclaim_interrupts_the_real_aiosqlite_driver_without_a_spy(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_reclaim_skips_a_connection_the_failed_teardown_already_closed(tmp_path, caplog) -> None:
+    """With the completion grace, the reclaim can be entered with a teardown
+    that failed or was cancelled *after* releasing its connection (SQLAlchemy
+    closes each held connection before the transaction-end hooks run). That
+    connection holds nothing: interrupting or invalidating it only raises, and
+    the issue #1981 permanent-hold warning would be a false alarm."""
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'closed-reclaim.db'}",
+        poolclass=NullPool,
+    )
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        session = factory()
+        await session.execute(sa_text("DELETE FROM accounts"))
+        held = session_module._session_sync_connections(session)
+        assert held, "the open write transaction must expose its sync connection"
+        # The teardown released the connection, then failed.
+        await session.rollback()
+        assert held[0].closed
+
+        async def _failed_after_release() -> None:
+            raise RuntimeError("after_transaction_end hook failed")
+
+        abandoned = asyncio.ensure_future(_failed_after_release())
+        with contextlib.suppress(RuntimeError):
+            await abandoned
+        with caplog.at_level(logging.DEBUG, logger=session_module.__name__):
+            await session_module._reclaim_wedged_sqlite_session(
+                session, abandoned, held, phase="rollback", elapsed_seconds=6.0
+            )
+
+        warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+        assert not any("Interrupting a wedged SQLite connection failed" in message for message in warnings)
+        assert not any("Invalidating a wedged SQLite connection failed" in message for message in warnings)
+        assert not any("interrupting and invalidating" in message for message in warnings), (
+            "a released connection must not be reported as a reclaim"
+        )
+        assert not held[0].invalidated, "a closed connection has nothing to invalidate"
+        assert session.info.get(session_module._SQLITE_TEARDOWN_WEDGED_INFO_KEY) is True, (
+            "the session is still fenced: its teardown did not complete successfully"
+        )
+
+        for _ in range(100):
+            pending = tuple(session_module._wedged_teardown_cleanup_tasks)
+            if not pending:
+                break
+            await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=2.0)
+            await asyncio.sleep(0)
+        assert not session_module._wedged_teardown_cleanup_tasks
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_close_db_drains_a_pending_reclaimed_rollback_and_its_bookkeeping_close(
     tmp_path, monkeypatch, caplog
 ) -> None:

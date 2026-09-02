@@ -4616,6 +4616,26 @@ class _HTTPBridgeRequestSubmitMixin:
                 allow_clean_close_retry=True,
             )
 
+        def prioritize_precreated_retryable_requests(
+            candidates: list[_WebSocketRequestState],
+        ) -> list[_WebSocketRequestState]:
+            """Prefer requests still waiting for ``response.created``.
+
+            A session can briefly contain an older request whose response id
+            has already been assigned alongside a newer pre-created request.
+            The former is not the request that a transport-close recovery is
+            trying to replay; letting it participate in candidate counting can
+            make an otherwise unambiguous pre-created retry look ambiguous.
+            Keep created-only retries available when no pre-created request is
+            present, but never let them mask one that is.
+            """
+            precreated = [
+                candidate
+                for candidate in candidates
+                if candidate.response_id is None and candidate.awaiting_response_created
+            ]
+            return precreated or candidates
+
         fresh_hard_request_account_switch_candidate = False
         proof_gated_continuity_replay_candidate = False
         server_anchored_replay_candidate = False
@@ -4626,6 +4646,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     for request_state in session.pending_requests
                     if not request_state.draining_until_terminal and request_is_retryable(request_state)
                 ]
+                retryable_candidates = prioritize_precreated_retryable_requests(retryable_candidates)
                 if len(retryable_candidates) == 1:
                     candidate = retryable_candidates[0]
                     fresh_hard_request_account_switch_candidate = (
@@ -4661,29 +4682,38 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         hard_owner_bound = _http_bridge_key_strength(session.key) == "hard"
         async with session.pending_lock:
+            retryable_requests = prioritize_precreated_retryable_requests(
+                [
+                    pending_request
+                    for pending_request in session.pending_requests
+                    if not pending_request.draining_until_terminal and request_is_retryable(pending_request)
+                ]
+            )
             if request_state is not None:
                 if (
-                    request_state not in session.pending_requests
-                    or any(pending_request is not request_state for pending_request in session.pending_requests)
+                    len(retryable_requests) != 1
+                    or not any(candidate is request_state for candidate in retryable_requests)
                     or request_state.draining_until_terminal
                     or not _http_bridge_request_counts_against_queue(request_state)
                     or not request_is_retryable(request_state)
                 ):
                     return False
             else:
-                retryable_requests = [
-                    request_state
-                    for request_state in session.pending_requests
-                    if not request_state.draining_until_terminal and request_is_retryable(request_state)
-                ]
                 if len(retryable_requests) != 1:
                     return False
                 request_state = retryable_requests[0]
         assert request_state is not None
         async with session.pending_lock:
+            retryable_requests = prioritize_precreated_retryable_requests(
+                [
+                    pending_request
+                    for pending_request in session.pending_requests
+                    if not pending_request.draining_until_terminal and request_is_retryable(pending_request)
+                ]
+            )
             if (
-                request_state not in session.pending_requests
-                or any(pending_request is not request_state for pending_request in session.pending_requests)
+                len(retryable_requests) != 1
+                or not any(candidate is request_state for candidate in retryable_requests)
                 or request_state.draining_until_terminal
                 or not _http_bridge_request_counts_against_queue(request_state)
                 or not request_is_retryable(request_state)

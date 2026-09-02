@@ -1,6 +1,6 @@
 ## Why
 
-OpenAI Node SDK transcription requests identify themselves with an `OpenAI/JS` user agent and `x-stainless-*` headers. The transcription forwarding path currently preserves that SDK fingerprint while sending the request to ChatGPT `/transcribe`, where it is rejected by the upstream WAF. Equivalent multipart requests made with curl succeed.
+OpenAI Node SDK transcription requests identify themselves with an `OpenAI/JS` user agent, `x-stainless-*` headers, and `x-openai-client-*` headers. The transcription forwarding path forwards the `OpenAI/JS` user agent and `x-openai-client-*` headers to ChatGPT `/transcribe`, where the request is rejected by the upstream WAF; its minimal allowlist does not forward `x-stainless-*` headers. Equivalent multipart requests made with curl succeed.
 
 ## What Changes
 

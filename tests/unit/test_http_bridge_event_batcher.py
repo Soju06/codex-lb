@@ -511,9 +511,8 @@ async def test_terminal_cleanup_preserves_newer_recovery_fence() -> None:
         assert result.persisted is True
         assert batcher._operation_generations == {"op-1": 1}
         assert batcher._contexts["op-1"].event_text == "replacement"
-        assert durable.batches == [["replacement"]] or [
-            item.event_text for item in batcher._pending.get("op-1", [])
-        ] == ["replacement"]
+        assert await batcher.flush_pending_operation(operation_id="op-1") is True
+        assert durable.batches == [["replacement"]]
     finally:
         await batcher.discard_operation(operation_id="op-1")
         await batcher.close()

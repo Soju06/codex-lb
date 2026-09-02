@@ -2473,7 +2473,7 @@ async def test_recent_unknown_operations_preserves_overflow_sentinel_at_limit(
             instance_id="inst-operation-overflow",
             session_key_value="sid-operation-overflow",
         )
-        for index in range(33):
+        for index in range(34):
             fingerprint = durable_bridge_hash(f"operation-overflow-{index}")
             operation_id = durable_bridge_operation_id(claim.id, fingerprint)
             operation = await repository.record_operation(

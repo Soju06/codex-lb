@@ -20,7 +20,9 @@ still pending after the grace MUST retain the existing fence, cleanup
 registration, driver interrupt, connection invalidation, and late-completion
 bookkeeping. A connection that the failed or cancelled teardown had already closed
 holds nothing and MUST be skipped rather than interrupted, invalidated, or
-reported as a hold. A failed connection invalidation on a still-open connection
+reported as a hold; when that teardown ended in an exception, the service MUST
+still report that exception at warning level, naming the phase and the elapsed
+time. A failed connection invalidation on a still-open connection
 MUST be reported at warning level, because it is the point at which a permanent
 writer hold begins.
 

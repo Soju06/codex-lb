@@ -773,12 +773,28 @@ async def _reclaim_wedged_sqlite_session(
             # connection before it failed or was cancelled inside the
             # completion grace, so nothing is held here: interrupting or
             # invalidating it would only raise, and reporting that as a
-            # permanent hold (issue #1981) would be a false alarm.
-            logger.debug(
-                "sqlite_wedged_teardown phase=%s — the abandoned %s already closed its connection; nothing to reclaim",
-                phase,
-                phase,
+            # permanent hold (issue #1981) would be a false alarm. The failure
+            # that ended the teardown is still worth a warning, because
+            # ``_finish_abandoned_teardown`` consumes it silently.
+            failure = (
+                abandoned.exception() if abandoned.done() and not abandoned.cancelled() else None
             )
+            if failure is not None:
+                logger.warning(
+                    "sqlite_wedged_teardown phase=%s bound_seconds=%.1f elapsed_seconds=%.1f — the %s failed "
+                    "after releasing its connection, so nothing is held and nothing is reclaimed (issue #2029): %r",
+                    phase,
+                    _SQLITE_TEARDOWN_TIMEOUT_SECONDS,
+                    elapsed_seconds,
+                    phase,
+                    failure,
+                )
+            else:
+                logger.debug(
+                    "sqlite_wedged_teardown phase=%s — the abandoned %s already closed its connection; nothing to reclaim",
+                    phase,
+                    phase,
+                )
             continue
         logger.warning(
             "sqlite_wedged_teardown phase=%s bound_seconds=%.1f elapsed_seconds=%.1f %s — interrupting and "

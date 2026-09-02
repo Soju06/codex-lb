@@ -1949,10 +1949,11 @@ async def test_reclaim_interrupts_the_real_aiosqlite_driver_without_a_spy(tmp_pa
 @pytest.mark.asyncio
 async def test_reclaim_skips_a_connection_the_failed_teardown_already_closed(tmp_path, caplog) -> None:
     """With the completion grace, the reclaim can be entered with a teardown
-    that failed or was cancelled *after* releasing its connection (SQLAlchemy
-    closes each held connection before the transaction-end hooks run). That
-    connection holds nothing: interrupting or invalidating it only raises, and
-    the issue #1981 permanent-hold warning would be a false alarm."""
+    that failed *after* releasing its connection: SQLAlchemy's
+    ``SessionTransaction.rollback`` captures a DBAPI rollback error, closes the
+    connection, then re-raises. That connection holds nothing, so interrupting
+    or invalidating it only raises and the issue #1981 permanent-hold warning
+    would be a false alarm; the rollback's own error is what must be reported."""
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{tmp_path / 'closed-reclaim.db'}",
         poolclass=NullPool,
@@ -1970,7 +1971,7 @@ async def test_reclaim_skips_a_connection_the_failed_teardown_already_closed(tmp
         assert held[0].closed
 
         async def _failed_after_release() -> None:
-            raise RuntimeError("after_transaction_end hook failed")
+            raise RuntimeError("rollback raised after the connection was released")
 
         abandoned = asyncio.ensure_future(_failed_after_release())
         with contextlib.suppress(RuntimeError):
@@ -1986,7 +1987,12 @@ async def test_reclaim_skips_a_connection_the_failed_teardown_already_closed(tmp
         assert not any("interrupting and invalidating" in message for message in warnings), (
             "a released connection must not be reported as a reclaim"
         )
-        assert not held[0].invalidated, "a closed connection has nothing to invalidate"
+        released = [
+            message for message in warnings if "failed after releasing its connection" in message
+        ]
+        assert len(released) == 1, "the failure that ended the teardown must still be reported"
+        assert "rollback raised after the connection was released" in released[0]
+        assert "phase=rollback" in released[0] and "elapsed_seconds=6.0" in released[0]
         assert session.info.get(session_module._SQLITE_TEARDOWN_WEDGED_INFO_KEY) is True, (
             "the session is still fenced: its teardown did not complete successfully"
         )

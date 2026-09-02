@@ -676,11 +676,10 @@ def _output_item_identity(item: Mapping[str, JsonValue]) -> dict[str, str]:
 
 
 def _output_item_identities_match(added: Mapping[str, str], done: Mapping[str, str]) -> bool:
-    """Compare every identity field shared by an added/done item pair."""
+    """Require every identity field observed on ``added`` in ``done``."""
     if not added or not done:
         return not added and not done
-    shared_fields = added.keys() & done.keys()
-    return bool(shared_fields) and all(added[field] == done[field] for field in shared_fields)
+    return all(field in done and done[field] == value for field, value in added.items())
 
 
 def _canonical_item(item: JsonValue) -> str:

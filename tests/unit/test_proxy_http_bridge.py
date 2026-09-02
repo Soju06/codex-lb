@@ -9451,6 +9451,40 @@ def test_response_output_capture_rejects_added_done_identity_mismatch() -> None:
     assert request_state.response_output_items_event_invalid is True
 
 
+def test_response_output_capture_rejects_done_missing_added_identity_field() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_item_added_identities={},
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.added",
+        payload={
+            "output_index": 0,
+            "item": {"id": "item_shared", "call_id": "call_a", "type": "function_call"},
+        },
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={
+            "output_index": 0,
+            "item": {"id": "item_shared", "type": "function_call"},
+        },
+    )
+
+    assert request_state.response_output_items_by_index == {}
+    assert request_state.response_output_items_event_invalid is True
+
+
 def test_response_output_capture_rejects_duplicate_added_indexes() -> None:
     request_state = cast(
         Any,

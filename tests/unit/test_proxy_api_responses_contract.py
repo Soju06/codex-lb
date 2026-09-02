@@ -596,6 +596,22 @@ async def test_collect_responses_payload_rejects_added_done_identity_mismatch() 
 
 
 @pytest.mark.asyncio
+async def test_collect_responses_payload_rejects_done_missing_added_identity_field() -> None:
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks(
+            'data: {"type":"response.output_item.added","output_index":0,'
+            '"item":{"id":"item_shared","call_id":"call_a","type":"function_call"}}\n\n',
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"item_shared",'
+            '"type":"function_call"}}\n\n',
+            'data: {"type":"response.completed","response":{"id":"resp_1","output":[]}}\n\n',
+        )
+    )
+
+    body = result.model_dump(mode="json", exclude_none=True)
+    assert body["error"]["code"] == "invalid_output_item"
+
+
+@pytest.mark.asyncio
 async def test_collect_responses_payload_captures_turn_state_metadata_before_failed_response() -> None:
     captured_headers: dict[str, str] = {}
 

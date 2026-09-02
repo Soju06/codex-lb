@@ -289,7 +289,9 @@ class _WarmupMixin:
         *,
         api_key: ApiKeyData | None,
     ) -> list[_WarmupAccountSnapshot]:
-        active_accounts = [account for account in accounts if account.status == AccountStatus.ACTIVE]
+        active_accounts = [
+            account for account in accounts if account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+        ]
         if api_key is None or not api_key.account_assignment_scope_enabled:
             return active_accounts
         assigned_ids = {account_id for account_id in api_key.assigned_account_ids if account_id}

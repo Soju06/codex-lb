@@ -7,15 +7,12 @@ import logging
 import math
 import sys
 import time
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
 from typing import Any, Literal, Mapping, TypeVar, cast
 from urllib.parse import urlparse
-
-import anyio
-from anyio.lowlevel import checkpoint_if_cancelled
 
 from app.core import shutdown as shutdown_state
 from app.core.balancer.rendezvous_hash import select_node
@@ -48,6 +45,8 @@ from app.core.errors import (
     HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
     OpenAIErrorDetail,
     OpenAIErrorEnvelope,
+    OpenAIErrorParam,
+    coerce_error_param,
     openai_error,
     previous_response_stream_incomplete_error,
     response_failed_event,
@@ -71,7 +70,7 @@ from app.core.openai.requests import (
 from app.core.resilience.overload import local_overload_error
 from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id
-from app.core.utils.shared_future import wait_on_shared_future
+from app.core.utils.shared_future import _await_task_deferring_cancellation, wait_on_shared_future
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
@@ -173,6 +172,7 @@ from app.modules.proxy._service.warmup import (
     _WarmupUsageSnapshot as _WarmupUsageSnapshot,
 )
 from app.modules.proxy.account_cache import is_account_routing_unavailable
+from app.modules.proxy.account_eligibility import reauth_access_token_is_expired
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _codex_backend_identity,
@@ -721,39 +721,6 @@ def _http_bridge_eventless_timeout_message(unmatched_upstream_liveness_count: in
     return _HTTP_BRIDGE_EVENTLESS_TIMEOUT_MESSAGE
 
 
-async def _await_task_deferring_cancellation(
-    task: asyncio.Task[T],
-) -> tuple[T, asyncio.CancelledError | None]:
-    """Finish critical cleanup while preserving the caller's cancellation."""
-
-    cancellation: asyncio.CancelledError | None = None
-    # The anyio shield keeps a level-cancelled Starlette scope from re-raising
-    # into every ``await``, which would otherwise busy-spin this loop until the
-    # owned task completes. ``wait_on_shared_future`` keeps the loop's waits
-    # off the task's done-callback list: Python 3.14's ``asyncio.shield``
-    # leaks a callback per cancelled wait, so re-shielding a task wedged on a
-    # lock grew 100k+ callbacks and O(n^2) remove scans in the 2026-08-30
-    # production event-loop livelock.
-    with anyio.CancelScope(shield=True):
-        while True:
-            try:
-                result = await wait_on_shared_future(task)
-                break
-            except asyncio.CancelledError as exc:
-                if task.cancelled():
-                    raise
-                cancellation = cancellation or exc
-    if cancellation is None:
-        # The shield also blocks the level cancellation this helper promises
-        # to surface. Probe for it without suspending so callers still get
-        # their cancellation marker after the owned task finished.
-        try:
-            await checkpoint_if_cancelled()
-        except asyncio.CancelledError as exc:
-            cancellation = exc
-    return result, cancellation
-
-
 @dataclass(frozen=True, slots=True)
 class _HTTPBridgeRuntimeConfig:
     enabled: bool
@@ -1101,13 +1068,15 @@ def _log_http_bridge_startup_wait_timeout(
     )
 
 
-def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[int, str, str, str, str | None]:
+def _http_bridge_precreated_retry_failure_error(
+    exc: BaseException,
+) -> tuple[int, str, str, str, OpenAIErrorParam | None]:
     if isinstance(exc, ProxyResponseError):
         parsed = _parse_openai_error(exc.payload)
         code = _normalize_error_code(parsed.code if parsed else None, parsed.type if parsed else None)
         message = parsed.message if parsed and parsed.message else "HTTP bridge pre-created retry failed"
         error_type = parsed.type if parsed and parsed.type else "server_error"
-        error_param = parsed.param if parsed else None
+        error_param = parsed.param_state if parsed else None
         return exc.status_code, code, message, error_type, error_param
     if isinstance(exc, TimeoutError):
         return (
@@ -1175,7 +1144,7 @@ def _normalize_http_bridge_error_event(
     error_code_value: str | None = None
     error_type_value: str | None = None
     error_message_value: str | None = None
-    error_param_value: str | None = None
+    error_param_value: OpenAIErrorParam | None = None
     explicit_error_code = False
     rate_limit_metadata: OpenAIErrorDetail = {}
 
@@ -1183,7 +1152,7 @@ def _normalize_http_bridge_error_event(
         error_code_value = event.error.code
         error_type_value = event.error.type
         error_message_value = event.error.message
-        error_param_value = event.error.param
+        error_param_value = event.error.param_state
         if isinstance(error_code_value, str) and error_code_value.strip():
             explicit_error_code = True
     elif isinstance(payload, dict):
@@ -1207,18 +1176,13 @@ def _normalize_http_bridge_error_event(
                 stripped = message_value.strip()
                 if stripped:
                     error_message_value = stripped
-            param_value = payload_error.get("param")
-            if isinstance(param_value, str):
-                error_param_value = param_value.strip()
-
     if isinstance(payload, dict):
         raw_error = payload.get("error")
         if not isinstance(raw_error, dict):
             raw_error = _websocket_top_level_error_payload(payload)
         if isinstance(raw_error, dict):
-            if "param" in raw_error:
-                raw_param = raw_error.get("param")
-                error_param_value = raw_param.strip() if isinstance(raw_param, str) else ""
+            if error_param_value is None and "param" in raw_error:
+                error_param_value = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], raw_error))
             plan_type = raw_error.get("plan_type")
             if isinstance(plan_type, str):
                 rate_limit_metadata["plan_type"] = plan_type
@@ -1238,7 +1202,7 @@ def _normalize_http_bridge_error_event(
         if request_state.error_message_override is not None:
             error_message_value = request_state.error_message_override
         if request_state.error_param_override is not None:
-            error_param_value = request_state.error_param_override
+            error_param_value = coerce_error_param(request_state.error_param_override)
 
     normalized_error_code = _normalize_error_code(error_code_value, error_type_value) or "upstream_error"
     if not explicit_error_code and normalized_error_code == "error":
@@ -1361,6 +1325,14 @@ def _http_bridge_retry_circuit_attempt_selection_for_pending_requests(
         if attempt is None:
             continue
         attempt_seen = True
+        # A request still holding a verified safe replay must not be charged
+        # anywhere: in a mixed batch its attempt would otherwise be the sole
+        # selectable one (charging the recoverable request) or make the
+        # stranded request's failure look ambiguous. It still counts as a
+        # seen attempt, so a safe-only batch classifies as ineligible rather
+        # than absent — absent is what authorizes an unscoped strike.
+        if _http_bridge_request_state_holds_safe_replay(request_state):
+            continue
         if attempt.retry_circuit_failure_recorded:
             recorded_attempts.append(attempt)
             continue
@@ -1393,6 +1365,57 @@ def _http_bridge_retry_circuit_attempt_selection_for_pending_requests(
                 attempts=tuple(unique_attempts),
             )
     return _HTTPBridgeRetryCircuitAttemptSelection(kind="ineligible" if attempt_seen else "absent")
+
+
+def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketRequestState) -> bool:
+    """Return whether retrying would require replaying an unsafe continuation."""
+    if request_state.previous_response_id is not None:
+        return not _http_bridge_request_state_holds_safe_replay(request_state)
+    return request_state.hard_continuity_anchor and not _http_bridge_request_state_holds_safe_replay(request_state)
+
+
+def _http_bridge_request_state_holds_safe_replay(request_state: Any) -> bool:
+    """Whether the request still holds a verified safe replay to protect.
+
+    Holding one means the proof fields are set AND the one permitted replay is
+    still available. ``_retry_http_bridge_request_on_fresh_upstream`` leaves
+    the proof fields in place after consuming the replay, so a request whose
+    permitted replay already failed is stranded like any other: it must strike
+    the circuit and must not keep an abandonment from settling it. The same
+    retry path also refuses a request that has observed a response event, so a
+    started response holds no replay either — counting it would leave the
+    circuit cooling for its full backoff after a successful abandonment, for a
+    replay that can never dispatch.
+    """
+    return bool(
+        getattr(request_state, "fresh_upstream_request_is_retry_safe", False)
+        and getattr(request_state, "fresh_upstream_request_text", None)
+        and getattr(request_state, "replay_count", 0) == 0
+        and getattr(request_state, "response_event_count", 0) == 0
+        # A deferred-reasoning prelude marks the response started without
+        # counting a response event, and a started response cannot replay.
+        and not getattr(request_state, "upstream_model_output_seen", False)
+    )
+
+
+def _http_bridge_abandonment_may_settle_circuit(request_states: Iterable[Any]) -> bool:
+    """Return whether this abandonment may settle the retry circuit with it.
+
+    The circuit must survive exactly one thing: a request that still holds a
+    safe replay. That replay claims the circuit's generation at dispatch
+    (#1863), so clearing the circuit under it removes the fence it depends on.
+    Every other case is a cooldown backing off a cause this abandonment just
+    removed — anchored or not. Requiring every state to also be
+    continuity-bound let an unanchored full-resend request, which has no
+    replay to protect, block the settle and keep the key cooling for its full
+    backoff after the anchor was already gone.
+
+    An empty set therefore settles. Terminal notification drains
+    ``pending_requests`` before retirement, so the funnels routinely reach here
+    with a pre-drain count and no states at all; nothing is holding the
+    generation.
+    """
+    return not any(_http_bridge_request_state_holds_safe_replay(state) for state in request_states if state is not None)
 
 
 def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:
@@ -1668,15 +1691,11 @@ async def _close_http_bridge_session_bounded(
     )
 
     def track_after_interruption(*, interruption: str) -> None:
-        if close_task.done():
-            return
-        service._background_cleanup_tasks.add(close_task)
-
         def close_done(done_task: asyncio.Task[None]) -> None:
-            service._background_cleanup_tasks.discard(done_task)
             try:
                 done_task.result()
             except asyncio.CancelledError:
+                service._http_bridge_background_cleanup_failed = True
                 logger.warning(
                     "http_bridge_session_close_cancelled_after_%s reason=%s bridge_kind=%s "
                     "bridge_key=%s account_id=%s model=%s",
@@ -1687,7 +1706,8 @@ async def _close_http_bridge_session_bounded(
                     session.account.id,
                     session.request_model,
                 )
-            except Exception:
+            except BaseException:
+                service._http_bridge_background_cleanup_failed = True
                 logger.warning(
                     "http_bridge_session_close_failed_after_%s reason=%s bridge_kind=%s "
                     "bridge_key=%s account_id=%s model=%s",
@@ -1699,7 +1719,13 @@ async def _close_http_bridge_session_bounded(
                     session.request_model,
                     exc_info=True,
                 )
+            finally:
+                service._background_cleanup_tasks.discard(done_task)
 
+        if close_task.done():
+            close_done(close_task)
+            return
+        service._background_cleanup_tasks.add(close_task)
         close_task.add_done_callback(close_done)
 
     try:
@@ -2100,7 +2126,14 @@ def _http_bridge_session_account_active(session: "_HTTPBridgeSession") -> bool:
     # per-request database reads). Cross-replica freshness comes from the
     # `account_routing` cache-invalidation namespace refreshing the routing
     # availability snapshot behind is_account_routing_unavailable().
-    return session.account.status == AccountStatus.ACTIVE and not is_account_routing_unavailable(session.account.id)
+    return (
+        session.account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+        and not reauth_access_token_is_expired(
+            session.account.status,
+            session.access_token_expires_at,
+        )
+        and not is_account_routing_unavailable(session.account.id)
+    )
 
 
 def _http_bridge_session_reusable_for_request(
@@ -3338,6 +3371,9 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
     raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
     type_value = error.get("type")
     error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
+    param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
+    if param_state.malformed:
+        return False
     # Normalize like the websocket rewrite path (#1818): upstream frames may
     # carry the classifiable code only in ``type`` (or omit both code and
     # param on the terse previous-response rejection), and a raw read would
@@ -3358,13 +3394,9 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
             "server_anchored_replay_once",
             "server_indefinite_recovery",
         }
-    param_value = error.get("param")
-    if "param" in error and not isinstance(param_value, str):
-        return False
-    param = param_value.strip() if isinstance(param_value, str) else None
     message_value = error.get("message")
     message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
-    return _is_previous_response_not_found_error(code=code, param=param, message=message)
+    return _is_previous_response_not_found_error(code=code, param=param_state, message=message)
 
 
 def _http_bridge_is_explicit_previous_response_rejection(exc: ProxyResponseError) -> bool:
@@ -3378,16 +3410,15 @@ def _http_bridge_is_explicit_previous_response_rejection(exc: ProxyResponseError
     raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
     type_value = error.get("type")
     error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
+    param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
+    if param_state.malformed:
+        return False
     code = _normalize_error_code(raw_code, error_type)
     if code == "bridge_previous_response_not_found":
         return True
-    param_value = error.get("param")
-    if "param" in error and not isinstance(param_value, str):
-        return False
-    param = param_value.strip() if isinstance(param_value, str) else None
     message_value = error.get("message")
     message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
-    return _is_previous_response_not_found_error(code=code, param=param, message=message)
+    return _is_previous_response_not_found_error(code=code, param=param_state, message=message)
 
 
 def _http_bridge_is_previous_response_owner_unavailable(exc: ProxyResponseError) -> bool:

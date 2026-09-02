@@ -502,81 +502,88 @@ export function DashboardPage() {
                 </>
               ) : null}
             </div>
-            {isAdmin && dashboardView === "conversations" ? <ConversationsView state={conversationsState} accounts={overview?.accounts ?? []} /> : logsQuery.isPending && !logPage ? (
-              <div className="rounded-xl border bg-card py-8">
-                <SpinnerBlock />
-              </div>
-            ) : logsQuery.error ? (
-              <div className="space-y-3 rounded-xl border bg-card p-4">
-                <div role="alert">
-                  <AlertMessage variant="error">{logsQuery.error.message}</AlertMessage>
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    void logsQuery.refetch();
-                  }}
-                  disabled={logsQuery.isFetching}
-                >
-                  {t("common.actions.retry")}
-                </Button>
-              </div>
-            ) : logPage ? (
+            {isAdmin && dashboardView === "conversations" ? (
+              <ConversationsView state={conversationsState} accounts={overview?.accounts ?? []} />
+            ) : (
               <>
-            <RequestFilters
-              filters={filters}
-              accountOptions={accountOptions}
-              apiKeyOptions={apiKeyOptions}
-              modelOptions={modelOptions}
-              statusOptions={statusOptions}
-              onSearchChange={(search) => updateFilters({ search, offset: 0 })}
-              onTimeframeChange={(timeframe) => updateFilters({ timeframe, offset: 0 })}
-              onAccountChange={(accountIds) => updateFilters({ accountIds, offset: 0 })}
-              onApiKeyChange={(apiKeyIds) => updateFilters({ apiKeyIds, offset: 0 })}
-              onModelChange={(modelOptionsSelected) =>
-                updateFilters({ modelOptions: modelOptionsSelected, offset: 0 })
-              }
-              onStatusChange={(statuses) => updateFilters({ statuses, offset: 0 })}
-              onConversationDismiss={handleConversationDismiss}
-              onReset={() =>
-                updateFilters({
-                  search: "",
-                  timeframe: "all",
-                  accountIds: [],
-                  apiKeyIds: [],
-                  modelOptions: [],
-                  statuses: [],
-                  conversationId: null,
-                  offset: 0,
-                })
-              }
-            />
-            {conversationSummary ? (
-              <div className="rounded-xl border bg-card p-4">
-                <p className="text-sm text-muted-foreground">{conversationSummary}</p>
-              </div>
-            ) : null}
-            <div className="transition-opacity duration-200">
-              <RecentRequestsTable
-                requests={view.requestLogs}
-                accounts={overview?.accounts ?? []}
-                total={logPage?.total ?? 0}
-                visibleColumns={visibleColumns}
-                columnWidths={columnWidths}
-                onColumnWidthChange={setColumnWidth}
-                limit={filters.limit}
-                offset={filters.offset}
-                hasMore={logPage?.hasMore ?? false}
-                filtersApplied={emptyStateFiltersApplied}
-                onLimitChange={(limit) => updateFilters({ limit, offset: 0 })}
-                onOffsetChange={(offset) => updateFilters({ offset })}
-                onConversationClick={handleConversationClick}
-              />
-            </div>
+                {logsQuery.error ? (
+                  <div className="space-y-3 rounded-xl border bg-card p-4">
+                    <div role="alert">
+                      <AlertMessage variant="error">{logsQuery.error.message}</AlertMessage>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        void logsQuery.refetch();
+                      }}
+                      disabled={logsQuery.isFetching}
+                    >
+                      {t("common.actions.retry")}
+                    </Button>
+                  </div>
+                ) : null}
+                {logsQuery.isPending && !logPage ? (
+                  <div className="rounded-xl border bg-card py-8">
+                    <SpinnerBlock />
+                  </div>
+                ) : logPage ? (
+                  <>
+                    <RequestFilters
+                      filters={filters}
+                      accountOptions={accountOptions}
+                      apiKeyOptions={apiKeyOptions}
+                      modelOptions={modelOptions}
+                      statusOptions={statusOptions}
+                      onSearchChange={(search) => updateFilters({ search, offset: 0 })}
+                      onTimeframeChange={(timeframe) => updateFilters({ timeframe, offset: 0 })}
+                      onAccountChange={(accountIds) => updateFilters({ accountIds, offset: 0 })}
+                      onApiKeyChange={(apiKeyIds) => updateFilters({ apiKeyIds, offset: 0 })}
+                      onModelChange={(modelOptionsSelected) =>
+                        updateFilters({ modelOptions: modelOptionsSelected, offset: 0 })
+                      }
+                      onStatusChange={(statuses) => updateFilters({ statuses, offset: 0 })}
+                      onConversationDismiss={handleConversationDismiss}
+                      onReset={() =>
+                        updateFilters({
+                          search: "",
+                          timeframe: "all",
+                          accountIds: [],
+                          apiKeyIds: [],
+                          modelOptions: [],
+                          statuses: [],
+                          conversationId: null,
+                          offset: 0,
+                        })
+                      }
+                    />
+                    {conversationSummary ? (
+                      <div className="rounded-xl border bg-card p-4">
+                        <p className="text-sm text-muted-foreground">{conversationSummary}</p>
+                      </div>
+                    ) : null}
+                    <div className="transition-opacity duration-200">
+                      <RecentRequestsTable
+                        requests={view.requestLogs}
+                        accounts={overview?.accounts ?? []}
+                        total={logPage.total}
+                        visibleColumns={visibleColumns}
+                        columnWidths={columnWidths}
+                        onColumnWidthChange={setColumnWidth}
+                        limit={filters.limit}
+                        offset={filters.offset}
+                        hasMore={logPage.hasMore}
+                        filtersApplied={emptyStateFiltersApplied}
+                        onLimitChange={(limit) => updateFilters({ limit, offset: 0 })}
+                        onOffsetChange={(offset) => updateFilters({ offset })}
+                        onConversationClick={handleConversationClick}
+                      />
+                    </div>
+                  </>
+                ) : null}
               </>
-            ) : null}
+            )}
           </section>
         </>
       )}

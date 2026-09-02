@@ -419,6 +419,7 @@ When an account has an active proxy binding but route resolution returns `None` 
 - **WHEN** a token refresh is attempted
 - **THEN** the refresh MUST raise an upstream proxy unavailable error
 - **AND** it MUST NOT silently use direct egress
+
 ### Requirement: Upstream SSE framing scans each byte a bounded number of times
 
 The upstream SSE event reader MUST NOT rescan previously scanned buffer bytes on each network read; framing cost MUST be linear in event size so a single large event (up to the configured event-size cap) cannot stall the shared event loop. Framing semantics MUST be unchanged: all separator forms (`\r\n\r\n`, `\n\n`, `\r\r`) are honored, including separators straddling read boundaries, and event-size limits and idle timeouts apply as before.
@@ -444,3 +445,196 @@ The shared upstream TCP connectors MUST configure connection keepalive of at lea
 
 - **WHEN** the shared HTTP client initializes its direct TCP connectors
 - **THEN** they are constructed with `keepalive_timeout >= 90` and `ttl_dns_cache >= 300`
+
+### Requirement: Packaged native egress is preferred only across a replay-safe boundary
+
+When the fixed packaged `codex-lb-native-egress` executable is available, direct and account-routed Codex model-discovery, JSON/raw/multipart HTTP, Responses HTTP/SSE, and Responses or Live WebSocket calls MUST prefer it over the corresponding Python data-plane client. Python MUST retain ownership of account selection, route resolution, ordered proxy endpoint fallback, route metadata, and health classification, while each native command MUST target exactly one concrete direct or proxy endpoint. The worker MUST reuse one persistent helper generation and compatible reqwest HTTP/2 client pools across HTTP requests, and MUST multiplex concurrent HTTP and WebSocket operations without cross-delivering events. Native calls MUST preserve standard direct HTTP/HTTPS/SOCKS proxy environment resolution and `NO_PROXY` bypass behavior, and routed calls MUST use the resolved endpoint without consulting environment proxy variables. Python fallback is permitted only when the executable is absent or cannot be spawned. Once a helper process launches, a malformed, timed-out, or incompatible hello/negotiation exchange MUST fail closed without dispatching the operation to Python. A non-idempotent request, WebSocket handshake, or WebSocket frame MUST NOT fall back to Python after its native command may have been dispatched. Helper failure MUST fail operations from that generation without replay and MAY be recovered only by starting a new generation for a later operation. A confirmed pre-dispatch routed connection failure MAY use the next endpoint under the existing route policy, while a TLS verification failure or ambiguous delivery MUST NOT gain new replay eligibility.
+
+Credential-bearing routed proxy endpoints MUST use encrypted `https://`
+transport. Route resolution MUST reject a username or password on a plaintext
+`http://`, `socks5://`, or `socks5h://` endpoint before either the native helper
+or Python connector can use the URL.
+
+#### Scenario: Plaintext proxy credentials fail before connector selection
+
+- **GIVEN** a routed endpoint contains credentials and uses `http://`, `socks5://`, or `socks5h://`
+- **WHEN** codex-lb resolves the route for an HTTP or WebSocket operation
+- **THEN** route resolution fails closed
+- **AND** neither native nor Python egress receives the credential-bearing URL
+
+#### Scenario: Packaged direct request prefers native transport
+
+- **GIVEN** the fixed native helper executable is available on the runtime path
+- **WHEN** a direct model-discovery or Responses HTTP/SSE request starts
+- **THEN** it is sent through the native helper
+- **AND** no aiohttp request is sent for that successful attempt
+
+#### Scenario: Compatible sequential requests reuse native pool
+
+- **GIVEN** the fixed native helper is available
+- **WHEN** compatible direct or routed requests complete sequentially in one worker
+- **THEN** they use the same helper generation and compatible reqwest client pool
+- **AND** the first response ending does not terminate the helper
+
+#### Scenario: Concurrent native requests remain isolated
+
+- **GIVEN** two direct or routed requests overlap in one helper generation
+- **WHEN** their head, chunk, frame, acknowledgement, and terminal events interleave
+- **THEN** each caller receives only events carrying its request identifier
+
+#### Scenario: Missing helper preserves zero-configuration behavior
+
+- **GIVEN** no native helper executable is available
+- **WHEN** codex-lb starts and sends a supported direct or routed request or opens a supported WebSocket
+- **THEN** startup succeeds
+- **AND** the existing Python transport handles the operation
+
+#### Scenario: Ambiguous native POST failure is not replayed
+
+- **GIVEN** a direct or routed Responses POST command may have reached the helper
+- **WHEN** the helper exits, its protocol fails, or its stream fails
+- **THEN** that attempt fails through the existing Responses error path
+- **AND** aiohttp and later route endpoints do not replay the POST
+
+#### Scenario: Later request restarts a dead helper
+
+- **GIVEN** a helper generation exited and its in-flight operations failed without replay
+- **WHEN** a later new direct or routed operation begins
+- **THEN** the worker may start a new helper generation for that new operation
+- **AND** no operation from the failed generation is resubmitted
+
+#### Scenario: Routed traffic retains existing transport
+
+- **WHEN** an HTTP or WebSocket request uses a resolved upstream proxy route
+- **THEN** Python selects one concrete endpoint and passes only that endpoint to the native helper
+- **AND** route fallback and account-health provenance remain owned by Python
+
+#### Scenario: Routed and WebSocket traffic retains existing transport
+
+- **WHEN** a request uses a resolved upstream proxy route and the native helper is unavailable before dispatch
+- **THEN** it retains the existing route-aware HTTP or WebSocket transport
+- **AND** an available helper enters the separately covered routed native cutover
+
+#### Scenario: Native direct request honors environment proxy routing
+
+- **GIVEN** a standard HTTPS or SOCKS proxy environment variable applies to the Codex upstream URL
+- **AND** `NO_PROXY` does not bypass that host and port
+- **WHEN** a native direct request starts
+- **THEN** the helper tunnels through the resolved environment proxy
+
+#### Scenario: Direct WebSocket uses native helper
+
+- **GIVEN** the fixed helper is available before connection dispatch
+- **WHEN** codex-lb opens a direct or account-routed Responses or Live upstream WebSocket
+- **THEN** the handshake and frames use the persistent native helper
+- **AND** the Python WebSocket connector is not opened
+
+#### Scenario: Native WebSocket failure is not replayed
+
+- **GIVEN** a native WebSocket handshake or frame command may have reached the helper
+- **WHEN** the helper reports a denial, transport failure, protocol failure, or exits
+- **THEN** that connection fails through the existing WebSocket error contract
+- **AND** codex-lb does not open a replacement Python connection or resend the frame
+
+#### Scenario: Confirmed routed connect failure uses next endpoint
+
+- **GIVEN** a routed native request has not reached upstream because connecting to its selected proxy endpoint failed
+- **WHEN** the route has another endpoint and existing policy permits fallback
+- **THEN** Python submits a new native command targeting the next endpoint
+- **AND** route metadata records that endpoint and fallback use
+
+#### Scenario: Routed TLS verification failure remains non-replayable
+
+- **GIVEN** a non-idempotent routed native request fails TLS certificate verification
+- **WHEN** another endpoint exists
+- **THEN** the request fails on the selected endpoint
+- **AND** neither the next endpoint nor aiohttp receives a replay
+
+### Requirement: Client-to-LB routing hints remain hop-local
+
+The service MUST treat `x-codex-routing-hint` as client-to-LB metadata. The
+header MAY be inspected by local routing or test harnesses, but it MUST NOT be
+included in any upstream HTTP request or WebSocket handshake. Header matching
+MUST be case-insensitive.
+
+#### Scenario: HTTP egress omits routing hint
+
+- **GIVEN** an inbound request includes `x-codex-routing-hint`
+- **WHEN** codex-lb builds an upstream Responses HTTP request
+- **THEN** the upstream request MUST NOT include that header.
+
+#### Scenario: WebSocket egress omits routing hint
+
+- **GIVEN** an inbound WebSocket handshake includes any case spelling of
+  `x-codex-routing-hint`
+- **WHEN** codex-lb builds an upstream Responses WebSocket handshake
+- **THEN** the upstream handshake MUST NOT include that header.
+
+### Requirement: Native HTTP/2 startup profile matches measured Codex
+
+Every persistent native HTTP client pool entry MUST use the measured Codex
+initial HTTP/2 stream receive window, connection receive window, maximum frame
+size, and maximum header-list size. It MUST NOT enable adaptive startup flow
+control when that would replace the explicit profile. The maintained profile is
+2,097,152 bytes for the stream receive window, 5,242,880 bytes for the
+connection receive window, 16,384 bytes for maximum frame size, and 16,384
+bytes for maximum header-list size.
+
+#### Scenario: Native helper starts a new HTTP/2 connection
+
+- **WHEN** a direct or routed native HTTP request creates a fresh connection
+- **THEN** its ordered initial SETTINGS and pre-request connection-control shape
+  match the maintained direct-Codex profile
+- **AND** the route choice does not select a different HTTP/2 profile
+
+### Requirement: Native Codex header replacement preserves wire order
+
+For an inbound native Codex request, codex-lb MUST replace authorization,
+accept, content-type, and selected-account values at the position and spelling
+of their existing case-insensitive field names. It MUST append a field only
+when that field is absent and MUST NOT emit duplicate case variants.
+
+#### Scenario: Native Responses request already contains singleton fields
+
+- **GIVEN** a native Codex request contains ordered authorization, accept,
+  content-type, and account-id fields
+- **WHEN** codex-lb installs the selected account and upstream values
+- **THEN** those field names retain their relative wire order and spelling
+- **AND** each case-insensitive singleton occurs exactly once
+
+### Requirement: Model discovery uses the direct Codex header sequence
+
+Subscription model-discovery requests MUST emit authorization, optional account
+id, accept, originator, and User-Agent in the maintained direct-Codex order.
+The client version MUST remain in the model-discovery query and User-Agent and
+MUST NOT be duplicated into a standalone `version` header unless a newer
+direct-client profile explicitly requires it.
+
+#### Scenario: Authenticated model discovery is serialized
+
+- **WHEN** codex-lb fetches models for an authenticated ChatGPT account
+- **THEN** the decoded header-name order matches the maintained direct profile
+- **AND** no standalone `version` header is present
+
+### Requirement: Native helper compatibility is negotiated before dispatch
+
+Each newly started native helper generation MUST complete a bounded,
+versioned client/server hello exchange before accepting an HTTP or WebSocket
+command. The Python adapter MUST require the negotiated protocol version and
+every capability used by its current call sites. A helper that is present but
+malformed, times out during negotiation, selects an unsupported version, or
+omits a required capability MUST fail as an incompatible protocol before
+dispatch and MUST NOT be treated as an unavailable helper eligible for Python
+fallback.
+
+#### Scenario: Compatible helper generation starts
+
+- **WHEN** the helper selects a mutually supported protocol version and reports every required capability
+- **THEN** the adapter starts the generation reader and may dispatch requests
+- **AND** later compatible requests reuse that negotiated generation
+
+#### Scenario: Installed helper is incompatible
+
+- **WHEN** the helper handshake times out, is malformed, selects an unsupported version, or lacks a required capability
+- **THEN** the adapter terminates that process before dispatch
+- **AND** the attempted operation fails without Python replay

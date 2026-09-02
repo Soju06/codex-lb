@@ -1,0 +1,18 @@
+{
+  "client_hello": {
+    "type": "client_hello",
+    "min_protocol_version": 1,
+    "max_protocol_version": 1
+  },
+  "server_hello": {
+    "type": "server_hello",
+    "protocol_version": 1,
+    "capabilities": [
+      "failure_provenance_v1",
+      "http",
+      "http2_profile_v1",
+      "websocket",
+      "websocket_send_ack"
+    ]
+  }
+}

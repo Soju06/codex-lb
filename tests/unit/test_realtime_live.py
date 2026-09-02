@@ -800,6 +800,15 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease()
             raise AssertionError("unreachable")
 
     lease = cast(AccountLease, object())
+    release_started = asyncio.Event()
+    finish_release = asyncio.Event()
+
+    class ContendedLoadBalancer(_FakeLoadBalancer):
+        async def release_account_lease(self, lease) -> None:
+            release_started.set()
+            await finish_release.wait()
+            self.released.append(lease)
+
     account = SimpleNamespace(
         id="account-a",
         status=AccountStatus.ACTIVE,
@@ -814,6 +823,7 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease()
         return upstream
 
     service = _ProxyService(account, lease, live_websocket_connector=fake_connect_live_websocket)
+    service._load_balancer = ContendedLoadBalancer()
     task = asyncio.create_task(
         service.proxy_realtime_live_websocket(
             cast(Any, downstream),
@@ -825,9 +835,12 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease()
     )
     await asyncio.wait_for(downstream.accepted_event.wait(), timeout=1)
     task.cancel()
+    await asyncio.wait_for(release_started.wait(), timeout=1)
+    task.cancel()
+    finish_release.set()
 
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.wait_for(task, timeout=1)
 
     assert downstream.close_codes == [1011]
     assert upstream.close_calls == [(1000, "")]
@@ -836,18 +849,24 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "status",
+    [AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED],
+    ids=["active", "reauth-required"],
+)
+@pytest.mark.parametrize(
     ("selected_subprotocol", "expected_accepted_subprotocol"),
     [(None, None), ("live.v1", "live.v1")],
     ids=["absent", "offered"],
 )
 async def test_live_sideband_accepts_only_absent_or_offered_upstream_subprotocol(
+    status: AccountStatus,
     selected_subprotocol: str | None,
     expected_accepted_subprotocol: str | None,
 ) -> None:
     lease = cast(AccountLease, object())
     account = SimpleNamespace(
         id="account-a",
-        status=AccountStatus.ACTIVE,
+        status=status,
         access_token_encrypted="encrypted-token",
         chatgpt_account_id="chatgpt-account-a",
         codex_installation_id="installation-a",
@@ -918,10 +937,9 @@ async def test_live_sideband_rejects_an_upstream_subprotocol_the_client_did_not_
         AccountStatus.RATE_LIMITED,
         AccountStatus.QUOTA_EXCEEDED,
         AccountStatus.PAUSED,
-        AccountStatus.REAUTH_REQUIRED,
         AccountStatus.DEACTIVATED,
     ],
-    ids=["rate-limited", "quota-exceeded", "paused", "reauth-required", "deactivated"],
+    ids=["rate-limited", "quota-exceeded", "paused", "deactivated"],
 )
 async def test_live_sideband_fails_closed_when_fresh_owner_snapshot_is_unavailable(
     status: AccountStatus,

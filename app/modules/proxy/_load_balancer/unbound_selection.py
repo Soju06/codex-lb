@@ -221,7 +221,11 @@ async def run_unbound_selection_path(
                     and result.error_code is None
                     and lease_kind is not None
                     and len(selection_states) < len(states)
-                    and any(state.status == AccountStatus.ACTIVE for state in states if state not in selection_states)
+                    and any(
+                        state.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+                        for state in states
+                        if state not in selection_states
+                    )
                 ):
                     selection_error_code = _account_cap_error_code(lease_kind)
                     result = SelectionResult(

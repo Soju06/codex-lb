@@ -64,6 +64,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
     _await_task_deferring_cancellation,
     _forget_http_bridge_denied_anchor_fence,
+    _http_bridge_abandonment_may_settle_circuit,
     _http_bridge_denied_anchor_fence_current_map,
     _http_bridge_denied_anchor_fence_entry,
     _http_bridge_durable_lease_ttl_seconds,
@@ -71,6 +72,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
+    _http_bridge_request_state_holds_safe_replay,
     _http_bridge_retry_circuit_attempt_selection_for_pending_requests,
     _log_http_bridge_event,
     _normalize_http_bridge_error_event,
@@ -81,10 +83,13 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _clear_http_bridge_quarantine,
+    _http_bridge_quarantine_clear_fence,
     _record_http_bridge_quarantine_eventless_timeout,
     _record_http_bridge_quarantine_wedged_pending,
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
+    _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
     _http_bridge_anchor_poison_detail,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -1196,6 +1201,9 @@ async def _abandon_durable_http_bridge_continuity(
     session: "_HTTPBridgeSession",
     *,
     detail: str = "repeated_zero_event_idle_timeout",
+    settle_circuit: bool = False,
+    expected_continuity: object = _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
+    authorized_episode: Any = None,
 ) -> bool:
     """Clear durable continuity before retiring a repeatedly poisoned bridge.
 
@@ -1206,6 +1214,40 @@ async def _abandon_durable_http_bridge_continuity(
     """
     if session.durable_session_id is None or session.durable_owner_epoch is None:
         return False
+    # Captured BEFORE the continuity clear's await: this is the closest
+    # snapshot to the episode the poison consult validated, and a sibling
+    # replacing the circuit episode while the rebind is in flight must not
+    # be mistaken for the authorizing one — the settle below clears only
+    # the episode this abandonment invalidated.
+    async with service._http_bridge_retry_circuit_lock:
+        # The consulted episode outranks a registry re-read: a sibling
+        # settle can remove the entry between the consult and this lock,
+        # and a None capture would run the settle unfenced — free to clear
+        # a replacement episode opened during the awaits below. The
+        # registry read remains only for legacy callers with no consult.
+        authorizing_state = (
+            authorized_episode
+            if authorized_episode is not None
+            else service._http_bridge_retry_circuits.get(session.key)
+        )
+        abandonment_expected_episode = (
+            (
+                authorizing_state.persisted_updated_at_epoch,
+                authorizing_state.consecutive_failures,
+                authorizing_state.persisted_admission_generation,
+            )
+            if authorizing_state is not None
+            else None
+        )
+    rebind_fence_kwargs: dict[str, Any] = {}
+    if expected_continuity is not _POISON_ANCHOR_CAPTURE_UNAVAILABLE:
+        # Fence the continuity clear on both anchors captured when the
+        # episode was validated: a completion registering a fresh response
+        # anchor or a turn-state write landing in between changes a column
+        # and the fenced write matches nothing.
+        expected_response_id, expected_turn_state = cast("tuple[str | None, str | None]", expected_continuity)
+        rebind_fence_kwargs["expected_latest_response_id"] = expected_response_id
+        rebind_fence_kwargs["expected_latest_turn_state"] = expected_turn_state
     try:
         cleared = await service._durable_bridge.rebind_session_account(
             session_id=session.durable_session_id,
@@ -1214,6 +1256,7 @@ async def _abandon_durable_http_bridge_continuity(
             owner_epoch=session.durable_owner_epoch,
             account_id=session.account.id,
             clear_continuity=True,
+            **rebind_fence_kwargs,
         )
     except Exception:
         logger.warning("Failed to abandon poisoned HTTP bridge continuity", exc_info=True)
@@ -1236,6 +1279,107 @@ async def _abandon_durable_http_bridge_continuity(
         cache_key_family=session.key.affinity_kind,
         model_class=_extract_model_class(session.request_model) if session.request_model else None,
     )
+    # Settle only when the requests this abandonment covers are actually
+    # stranded. A stale-anchor rejection that still holds a verified full
+    # resend is about to be replayed, and that replay claims the circuit
+    # generation at dispatch (#1863); clearing the circuit under it removes the
+    # fence it depends on, which is why `response.completed` also skips its
+    # clear for such a replay. Settling unconditionally broke five variants of
+    # the stale-owner replay suite, and settling for no funnel caller left the
+    # production wedge cooling for 60s after its anchor was already gone.
+    if not settle_circuit:
+        return True
+    # The circuit was opened by failures against the anchor this call just
+    # removed, so its cooldown is now backing off a cause that no longer
+    # exists. Leaving it running refuses requests that carry no anchor at all:
+    # observed live as a burst of ~25 rejections logged
+    # `reason=retry_circuit_cooldown_continuity_bound previous_response_id=None`
+    # in the 60s after a successful clear, every one of which would have gone
+    # upstream cleanly. A confirmed abandonment is proof the next attempt
+    # cannot repeat that failure, which is the same evidence a completed
+    # response carries, so settle the circuit the same way. A genuinely new
+    # failure re-opens it at the usual threshold.
+    # A sibling completion can race this settle after the continuity clear:
+    # it registers a FRESH anchor and erases its own transitional tombstone,
+    # and writing the tombstone here again would durably 404 every valid
+    # follow-up riding that fresh anchor, with no registration left to erase
+    # it. Re-read the continuity: an anchor that is present and different
+    # from the one this abandonment removed is fresh evidence, and the
+    # settle then writes a plain reset instead of the tombstone.
+    abandonment_settled_detail: str | None = _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+    abandoned_anchor, abandoned_turn_state = (
+        (expected_continuity[0], expected_continuity[1])
+        if isinstance(expected_continuity, tuple) and len(expected_continuity) == 2
+        else (None, None)
+    )
+
+    def _continuity_is_fresh(observed: tuple[str | None, str | None] | None) -> bool:
+        # Fresh evidence in EITHER continuity column: a delta can resolve
+        # through the turn state alone, so a turn-state advance without a
+        # response id is still continuity a tombstone must not fail closed.
+        return observed is not None and (
+            (observed[0] is not None and observed[0] != abandoned_anchor)
+            or (observed[1] is not None and observed[1] != abandoned_turn_state)
+        )
+
+    if session.durable_session_id:
+        try:
+            post_clear_continuity = await service._durable_bridge.session_latest_continuity(
+                session_id=session.durable_session_id
+            )
+        except Exception:
+            # Unknown continuity keeps the tombstone: the stale-tombstone
+            # cost is self-healing (the next completion settles and erases
+            # it), while a missing tombstone silently drops delta context.
+            post_clear_continuity = None
+        if _continuity_is_fresh(post_clear_continuity):
+            abandonment_settled_detail = None
+    circuit_settled = await service._clear_http_bridge_retry_circuit(
+        session,
+        settled_detail=abandonment_settled_detail,
+        settled_detail_authoritative=True,
+        expected_episode=abandonment_expected_episode,
+    )
+    if not circuit_settled:
+        # The clear reloads fresh state on every call, so one immediate
+        # retry covers a transient durable failure or a double CAS miss
+        # before the surviving cooldown is left to expire on its own. The
+        # abandonment itself still reports success: the anchor is gone, the
+        # marker must record that so the episode cannot clear now-empty
+        # continuity again, and only the settlement is owed.
+        circuit_settled = await service._clear_http_bridge_retry_circuit(
+            session,
+            settled_detail=abandonment_settled_detail,
+            settled_detail_authoritative=True,
+            expected_episode=abandonment_expected_episode,
+        )
+    if not circuit_settled:
+        _log_http_bridge_event(
+            "durable_circuit_settle_failed",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            detail=detail,
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+    if circuit_settled and abandonment_settled_detail is not None and session.durable_session_id:
+        # The pre-settle re-read closes most of the window, but a sibling
+        # registration can still land between that read and the settle
+        # write — and its own tombstone cleanup ran BEFORE this settle
+        # wrote a new one. Re-read once more after the write and erase the
+        # tombstone this settle left when fresh continuity now exists; the
+        # fenced detail-only rewrite defers to any newer write, and both
+        # sides reconciling after their own writes makes every
+        # interleaving converge.
+        try:
+            reconcile_continuity = await service._durable_bridge.session_latest_continuity(
+                session_id=session.durable_session_id
+            )
+        except Exception:
+            reconcile_continuity = None
+        if _continuity_is_fresh(reconcile_continuity):
+            await service._http_bridge_reconcile_transitional_tombstone(session)
     return True
 
 
@@ -1635,7 +1779,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                     ),
                 )
         finally:
-            poison_detail: str | None = None
             if session.admission_waiter_count > 0 and not force_retire:
                 retry_circuit_detail = None
                 if close_classification == "clean":
@@ -1649,27 +1792,71 @@ class _HTTPBridgeUpstreamEventsMixin:
                         ),
                         None,
                     )
-                if failed_pending_count > 0 and retry_circuit_detail is not None:
-                    consecutive_failures = await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
-                        session,
-                        detail=retry_circuit_detail,
-                        selection=retry_circuit_attempt_selection,
-                    )
-                    poison_candidate_detail = _http_bridge_anchor_poison_detail(retry_circuit_detail)
-                    if (
-                        poison_candidate_detail is not None
-                        and observed_response_events == 0
-                        and consecutive_failures is not None
-                        and consecutive_failures
-                        >= _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-                    ):
-                        poison_detail = poison_candidate_detail
-                if poison_detail is not None:
-                    durable_cleared = await _abandon_durable_http_bridge_continuity(self, session, detail=poison_detail)
-                    if durable_cleared:
+                # Mirror the terminal, grouped, and direct-retirement paths:
+                # a failed request that still holds a verified safe replay is
+                # about to re-dispatch and claim the circuit generation, so it
+                # must not strike the circuit or reach the poison clear here
+                # either. A pre-drain handoff with no states keeps striking.
+                pending_states_present = [state for state in pending_request_states if state is not None]
+                reader_strike_eligible = not pending_states_present or any(
+                    not _http_bridge_request_state_holds_safe_replay(state) for state in pending_states_present
+                )
+                reader_retired = False
+                reader_cancellation: asyncio.CancelledError | None = None
+                if failed_pending_count > 0 and retry_circuit_detail is not None and reader_strike_eligible:
+                    reader_strike_detail = retry_circuit_detail
+
+                    async def _reader_strike_and_clear() -> bool:
+                        consecutive_failures = (
+                            await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
+                                session,
+                                detail=reader_strike_detail,
+                                selection=retry_circuit_attempt_selection,
+                            )
+                        )
+                        poison_candidate_detail = await self._http_bridge_effective_anchor_poison_detail(
+                            session, reader_strike_detail
+                        )
+                        poison_episode = None
+                        poison_expected_anchor: object = _POISON_ANCHOR_CAPTURE_UNAVAILABLE
+                        if poison_candidate_detail is not None and observed_response_events == 0:
+                            # The consult returns the exact episode it
+                            # validated; the marker below scopes to it.
+                            poison_episode, poison_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
+                                session,
+                                consecutive_failures=consecutive_failures,
+                                configured_threshold=(
+                                    _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                                ),
+                            )
+                        if poison_candidate_detail is None or poison_episode is None:
+                            return False
+                        durable_cleared = await _abandon_durable_http_bridge_continuity(
+                            self,
+                            session,
+                            detail=poison_candidate_detail,
+                            settle_circuit=_http_bridge_abandonment_may_settle_circuit(pending_request_states),
+                            expected_continuity=poison_expected_anchor,
+                            authorized_episode=poison_episode,
+                        )
+                        if not durable_cleared:
+                            _log_http_bridge_event(
+                                "durable_anchor_poison_clear_failed",
+                                session.key,
+                                account_id=session.account.id,
+                                model=session.request_model,
+                                pending_count=session.admission_waiter_count,
+                                detail=poison_candidate_detail,
+                                cache_key_family=session.key.affinity_kind,
+                                model_class=(
+                                    _extract_model_class(session.request_model) if session.request_model else None
+                                ),
+                            )
+                            return False
+                        await self._http_bridge_mark_poison_anchor_cleared(session, episode=poison_episode)
                         await self._retire_stale_pending_http_bridge_session(
                             session,
-                            detail=poison_detail,
+                            detail=poison_candidate_detail,
                             response_events_seen=observed_response_events,
                             # Reader-failure retirement must never revive: the
                             # pending turns were already terminally failed and
@@ -1680,19 +1867,28 @@ class _HTTPBridgeUpstreamEventsMixin:
                             allow_liveness_revive=False,
                             **retry_circuit_attempt_kwargs,
                         )
-                        force_retire = True
-                    else:
-                        _log_http_bridge_event(
-                            "durable_anchor_poison_clear_failed",
-                            session.key,
-                            account_id=session.account.id,
-                            model=session.request_model,
-                            pending_count=session.admission_waiter_count,
-                            detail=poison_detail,
-                            cache_key_family=session.key.affinity_kind,
-                            model_class=_extract_model_class(session.request_model) if session.request_model else None,
-                        )
+                        return True
+
+                    # The failed requests are already drained and finalized,
+                    # so a cancellation escaping the strike, the episode
+                    # consult, or the rebind would leave an at-threshold
+                    # poisoned anchor stored with no retirement left to retry
+                    # the abandonment. Defer cancellation across the whole
+                    # settlement like the grouped path, then re-raise it.
+                    reader_settlement_task = asyncio.create_task(
+                        _reader_strike_and_clear(),
+                        name=f"http-bridge-reader-poison-settlement-{session.durable_session_id}",
+                    )
+                    reader_retired, reader_cancellation = await _await_task_deferring_cancellation(
+                        reader_settlement_task
+                    )
+                if reader_retired is True:
+                    force_retire = True
+                    if reader_cancellation is not None:
+                        raise reader_cancellation
                 else:
+                    if reader_cancellation is not None:
+                        raise reader_cancellation
                     _log_http_bridge_event(
                         "retire_deferred_for_admission_waiter",
                         session.key,
@@ -1705,34 +1901,54 @@ class _HTTPBridgeUpstreamEventsMixin:
                     )
             else:
                 if close_classification == "clean" and failed_pending_count > 0:
-                    await self._retire_stale_pending_http_bridge_session(
+                    waiterless_retirement = self._retire_stale_pending_http_bridge_session(
                         session,
                         detail=error_code,
                         retry_circuit_detail="clean_close",
                         response_events_seen=observed_response_events,
                         retired_request_count=failed_pending_count,
+                        retired_request_states=pending_request_states,
                         # See the poison branch above: reader-failure
                         # retirement never revives a condemned session.
                         allow_liveness_revive=False,
                         **retry_circuit_attempt_kwargs,
                     )
                 else:
-                    await self._retire_stale_pending_http_bridge_session(
+                    waiterless_retirement = self._retire_stale_pending_http_bridge_session(
                         session,
                         detail=retire_detail or error_code,
                         response_events_seen=observed_response_events,
                         # ``_fail_pending_websocket_requests`` has already
                         # claimed and drained these states. Carry the count
-                        # sampled under ``pending_lock`` across that ownership
-                        # transfer so normal reader failures still consume one
-                        # strike. The deferred/poison branch records its own
-                        # strike above and intentionally does not pass it.
+                        # and the pre-drain state snapshot sampled under
+                        # ``pending_lock`` across that ownership transfer, so
+                        # normal reader failures still consume one strike and
+                        # a drained safe-replay holder still blocks the
+                        # settlement. The deferred/poison branch records its
+                        # own strike above and intentionally does not pass it.
                         retired_request_count=failed_pending_count,
+                        retired_request_states=pending_request_states,
                         # See the poison branch above: reader-failure
                         # retirement never revives a condemned session.
                         allow_liveness_revive=False,
                         **retry_circuit_attempt_kwargs,
                     )
+                # The failed requests are already drained and finalized, so a
+                # relay cancellation escaping this direct retirement would
+                # skip the waiterless strike, the episode consult, the
+                # poisoned-anchor abandonment, and the detach/close work with
+                # no remaining request lifecycle to retry them. Defer
+                # cancellation across the whole retirement like the
+                # admission-waiter branch above, then re-raise it.
+                waiterless_retirement_task = asyncio.create_task(
+                    waiterless_retirement,
+                    name=f"http-bridge-waiterless-retirement-{session.durable_session_id}",
+                )
+                _waiterless_result, waiterless_cancellation = await _await_task_deferring_cancellation(
+                    waiterless_retirement_task
+                )
+                if waiterless_cancellation is not None:
+                    raise waiterless_cancellation
         return force_retire or session.admission_waiter_count == 0
 
     async def _relay_http_bridge_upstream_messages(
@@ -2569,6 +2785,73 @@ class _HTTPBridgeUpstreamEventsMixin:
                     )
                 )
 
+            # This grouped settlement returns before the single-request
+            # settlement path below, so without recording here a multi-request
+            # continuity failure fails every grouped request with a synthetic
+            # terminal event and never advances the circuit — leaving the anchor
+            # that failed them reusable. The detail is read back off the built
+            # event so it matches whatever the single-request path would have
+            # recorded for the same reason, and recording precedes the persist
+            # and delivery machinery below for the same reason it does there: a
+            # client resending on observed completion must not outrun it.
+            grouped_poison_strike_failures = 0
+            grouped_poison_detail: str | None = None
+            for (
+                grouped_request_state,
+                _grouped_terminal_block,
+                grouped_terminal_event,
+                _grouped_terminal_payload,
+                _grouped_terminal_event_type,
+                _grouped_terminal_operation_state,
+            ) in grouped_terminal_events:
+                # Same admission test the single-request settlement path
+                # applies: a request still holding a verified full resend is
+                # about to be replayed and claims the circuit generation at
+                # dispatch, so charging it here would let two safely
+                # replayable requests open the circuit between them and clear
+                # the anchor both of them could still have used.
+                if grouped_request_state.response_event_count != 0 or _http_bridge_request_state_holds_safe_replay(
+                    grouped_request_state
+                ):
+                    continue
+                if grouped_request_state.request_kind == "prewarm" or grouped_request_state.skip_request_log:
+                    # Same exclusion the single-request terminal branch
+                    # applies: an internal warmup probe carries no anchor
+                    # and proves nothing about the key's continuity, and
+                    # one warmup plus one client request must not open the
+                    # circuit between them after a single real failure.
+                    continue
+                grouped_terminal_error = (
+                    grouped_terminal_event.response.error
+                    if grouped_terminal_event is not None and grouped_terminal_event.response is not None
+                    else None
+                )
+                grouped_terminal_detail = _normalize_error_code(
+                    grouped_terminal_error.code if grouped_terminal_error else None,
+                    grouped_terminal_error.type if grouped_terminal_error else None,
+                )
+                if grouped_terminal_detail is None:
+                    continue
+                grouped_strike_failures = await self._record_http_bridge_retry_circuit_failure(
+                    session,
+                    detail=grouped_terminal_detail,
+                    attempt=grouped_request_state.response_create_attempt,
+                    terminal_pre_response_frame=True,
+                )
+                # A fan-out carrying two or more eventless requests advances the
+                # circuit through its threshold inside this loop, so the anchor
+                # that failed all of them is proven dead here just as it is on
+                # the single-request path. Keep the highest count and its poison
+                # detail; discarding them left the grouped branch returning with
+                # the durable anchor still stored.
+                grouped_poison_candidate = await self._http_bridge_effective_anchor_poison_detail(
+                    session, grouped_terminal_detail
+                )
+                if grouped_poison_candidate is not None and grouped_strike_failures is not None:
+                    if grouped_strike_failures > grouped_poison_strike_failures:
+                        grouped_poison_strike_failures = grouped_strike_failures
+                    grouped_poison_detail = grouped_poison_candidate
+
             append_terminal_batch = getattr(
                 getattr(self, "_http_bridge_operation_event_batcher", None),
                 "append_terminal_event",
@@ -2706,6 +2989,77 @@ class _HTTPBridgeUpstreamEventsMixin:
                 name=f"http-bridge-grouped-terminal-settlement-{session.durable_session_id}",
             )
             grouped_error, grouped_cancellation = await _await_task_deferring_cancellation(grouped_settlement_task)
+            if grouped_poison_detail is not None and grouped_poison_strike_failures > 0:
+                # The grouped frames have been published by here, so this mirrors
+                # the single-request ordering: the strikes precede delivery, the
+                # durable clear follows it.
+                #
+                # This runs under cancellation too. `_await_task_deferring_
+                # cancellation` has already waited for every grouped frame and
+                # finalization, so the requests this anchor failed are gone and
+                # no later retirement can retry the clear for them; skipping it
+                # here left the poisoned anchor stored for another replica or
+                # for reuse once the local quarantine expired. Defer the
+                # cancellation across the write the same way, then re-raise it
+                # below unchanged. The clear is internally exception-safe.
+                grouped_clear_detail = grouped_poison_detail
+                grouped_clear_strike_failures = grouped_poison_strike_failures
+
+                async def _consult_and_clear_grouped_anchor() -> None:
+                    # The episode consult is a durable await of its own: run
+                    # it inside the same cancellation-deferred task as the
+                    # clear, or a reader cancellation landing mid-consult
+                    # escapes with the grouped requests already finalized and
+                    # no retirement left to retry the abandonment. The
+                    # consult reads the live registered episode, so a
+                    # sibling settle during grouped publication vetoes the
+                    # clear.
+                    grouped_poison_episode, grouped_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
+                        session,
+                        consecutive_failures=grouped_clear_strike_failures,
+                        configured_threshold=(
+                            _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                        ),
+                    )
+                    if grouped_poison_episode is None:
+                        return
+                    durable_cleared = await _abandon_durable_http_bridge_continuity(
+                        self,
+                        session,
+                        detail=grouped_clear_detail,
+                        expected_continuity=grouped_expected_anchor,
+                        authorized_episode=grouped_poison_episode,
+                        # A mixed group can hold a member with a verified safe
+                        # replay whose dispatch claims the circuit generation;
+                        # settling under it would remove the fence it depends
+                        # on, same as the retirement funnels.
+                        settle_circuit=_http_bridge_abandonment_may_settle_circuit(
+                            grouped_previous_response_request_states
+                        ),
+                    )
+                    if not durable_cleared:
+                        return
+                    # A mixed group's abandonment deliberately leaves the
+                    # circuit alive for its safe member, so the episode
+                    # survives and must remember its anchor was already
+                    # cleared — one poisoned anchor is abandoned once. The
+                    # marker belongs inside this owned task: a cancellation
+                    # landing between the durable clear and the marker write
+                    # would otherwise leave the cleared episode unmarked, and
+                    # an ordinary load would re-arm quarantine from the
+                    # unchanged surviving row after the safe replay had
+                    # already recovered the conversation.
+                    await self._http_bridge_mark_poison_anchor_cleared(session, episode=grouped_poison_episode)
+
+                grouped_clear_task = asyncio.create_task(
+                    _consult_and_clear_grouped_anchor(),
+                    name=f"http-bridge-grouped-anchor-clear-{session.durable_session_id}",
+                )
+                _grouped_clear_result, grouped_clear_cancellation = await _await_task_deferring_cancellation(
+                    grouped_clear_task
+                )
+                if grouped_cancellation is None:
+                    grouped_cancellation = grouped_clear_cancellation
             if grouped_cancellation is not None:
                 if grouped_error is not None:
                     logger.warning(
@@ -3145,12 +3499,131 @@ class _HTTPBridgeUpstreamEventsMixin:
             and completed_usage.output_tokens == 0
         )
 
+        # The circuit settle and quarantine clear run BEFORE the fresh
+        # anchor is registered. A poison abandonment fences its continuity
+        # clear on the anchor captured when its episode was validated, and
+        # settle-first ordering is what makes that fence airtight: any
+        # consult that runs after this settle is vetoed by the reset row,
+        # and any abandonment authorized before it fences on the old anchor
+        # and cannot touch the one registered below.
+        completion_circuit_settlement_failed = False
+        completion_quarantine_clear_fence: int | None = None
+        completion_pre_settle_poison_detail: str | None = None
+        completion_settles_onto_tombstone = False
+        if (
+            event_type == "response.completed"
+            and terminal_request_state is not None
+            and not terminal_request_state.suppressed_duplicate_tool_call
+            and terminal_request_state.request_kind != "prewarm"
+            and not terminal_request_state.skip_request_log
+        ):
+            # Captured before the settle and registration awaits below: a
+            # concurrent request failing during those awaits arms a NEW
+            # same-key quarantine whose evidence this completion does not
+            # disprove, and the clear at the bottom must fence on what was
+            # armed when this response proved the session healthy, not on
+            # whatever owns the key by then.
+            # Adopt any durable-only poison row BEFORE the fences are
+            # captured: the settle's internal load would otherwise arm the
+            # quarantine after the fence read (leaving a healthy key
+            # suppressed for the TTL because the clear cannot match), and a
+            # failed registration would find no pre-settle poison detail to
+            # re-seed.
+            completion_pre_settle_load_succeeded = await self._load_http_bridge_retry_circuit(session)
+            completion_quarantine_clear_fence = _http_bridge_quarantine_clear_fence(self, session.key)
+            async with self._http_bridge_retry_circuit_lock:
+                pre_settle_state = self._http_bridge_retry_circuits.get(session.key)
+                if pre_settle_state is not None:
+                    completion_pre_settle_poison_detail = (
+                        pre_settle_state.last_detail
+                        if _http_bridge_anchor_poison_detail(pre_settle_state.last_detail) is not None
+                        else pre_settle_state.owed_poison_detail
+                    )
+                    # An episode already carrying the fail-closed tombstone
+                    # keeps it through the settle: erasing it before the
+                    # fresh anchor commits would drop the only durable
+                    # marker while the registration can still fail or never
+                    # run at all.
+                    completion_settles_onto_tombstone = (
+                        completion_pre_settle_poison_detail is not None
+                        or pre_settle_state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                    )
+            completion_registration_possible = (
+                response_id is not None and matched_request_state is not None and not completed_empty_prewarm
+            )
+            if (
+                not terminal_request_state.verified_stale_anchor_replay
+                and completion_settles_onto_tombstone
+                and not completion_registration_possible
+            ):
+                # No usable response id or matched request: the registration
+                # block below never runs, so settling here would replace the
+                # poison row with a zero-count tombstone while the OLD
+                # poisoned anchor stays stored — the next planning load
+                # reads the zero count as a disproved episode, revokes the
+                # quarantine, and a full resend gets the dead anchor
+                # injected. Keep the episode unsettled; a completion that
+                # can actually register a fresh anchor settles it.
+                completion_circuit_settlement_failed = True
+            elif not terminal_request_state.verified_stale_anchor_replay:
+                # A completion replacing a poison episode settles with the
+                # transitional tombstone: a crash or takeover between this
+                # settle and the registration below would otherwise leave
+                # the old poisoned anchor stored while the reset row reads
+                # as disproved. The tombstone is erased once the fresh
+                # anchor commits.
+                circuit_settled = await self._clear_http_bridge_retry_circuit(
+                    session,
+                    settled_detail=(
+                        _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                        if completion_settles_onto_tombstone
+                        else None
+                    ),
+                )
+                if not completion_pre_settle_load_succeeded:
+                    # The fence above was captured off a failed durable read;
+                    # the settle's own successful inner load may have armed
+                    # the poison quarantine AFTER that capture, and the final
+                    # fenced clear would then refuse to remove it — a healthy
+                    # key stuck for the whole poison window despite the fresh
+                    # anchor about to register. Recapture after the settle:
+                    # this still precedes the registration awaits, so a
+                    # quarantine armed by a genuinely concurrent strike
+                    # during those awaits stays outside the fence.
+                    completion_quarantine_clear_fence = _http_bridge_quarantine_clear_fence(self, session.key)
+                if not circuit_settled:
+                    # The old poison episode was restored. Its owed clear is
+                    # suppressed only once the fresh anchor actually
+                    # persists below: suppressing here and then failing the
+                    # registration would leave the old poisoned anchor
+                    # stored with no funnel willing to clear it after the
+                    # process-local quarantine expires.
+                    completion_circuit_settlement_failed = True
+
+        # False until a fresh durable anchor actually confirms: a completed
+        # event without a usable response id (or with no matched request)
+        # skips the registration block entirely, and clearing the quarantine
+        # then would leave the old poisoned anchor as the stored one for the
+        # next reattach.
+        completion_anchor_registration_confirmed = False
         if (
             response_id is not None
             and matched_request_state is not None
             and event_type == "response.completed"
             and not completed_empty_prewarm
         ):
+            anchor_advance_supersession = None
+            if completion_circuit_settlement_failed:
+                # Applied BEFORE the fresh anchor is published: a concurrent
+                # funnel's consult whose continuity read lands between the
+                # publication and a later suppression would validate the old
+                # poison row and fence its rebind on the anchor just
+                # registered, deleting it. The suppression is transitional —
+                # rolled back below when the registration fails, so the old
+                # anchor never becomes uncleareable.
+                anchor_advance_supersession = await self._http_bridge_suppress_poison_clear_after_anchor_advance(
+                    session
+                )
             alias_registered = await self._register_http_bridge_previous_response_id(
                 session,
                 response_id,
@@ -3162,6 +3635,35 @@ class _HTTPBridgeUpstreamEventsMixin:
                 ),
                 pending_tool_calls=_durable_pending_tool_call_manifest(matched_request_state, payload),
             )
+            completion_anchor_registration_confirmed = alias_registered
+            if not alias_registered and anchor_advance_supersession is not None:
+                await self._http_bridge_restore_poison_clear_after_failed_anchor_advance(
+                    session, anchor_advance_supersession
+                )
+            if alias_registered and anchor_advance_supersession is not None:
+                await self._http_bridge_promote_transitional_supersession(session, anchor_advance_supersession)
+            if alias_registered and not completion_circuit_settlement_failed and completion_settles_onto_tombstone:
+                # The fresh anchor committed: erase the transitional
+                # tombstone the settle left, fenced on the row's own
+                # values, with one reconcile round covering both a
+                # transient durable blip and a CAS miss under a sticky
+                # concurrent strike.
+                await self._http_bridge_reconcile_transitional_tombstone(session)
+            if (
+                not alias_registered
+                and not completion_circuit_settlement_failed
+                and completion_pre_settle_poison_detail is not None
+            ):
+                # The settle-before-registration ordering already zeroed the
+                # durable circuit, but the registration failure means the
+                # OLD poisoned anchor is still the stored one. Without
+                # durable evidence the next planning load revokes the kept
+                # local quarantine as a disproved episode and other replicas
+                # never arm; re-seed the row so the poison protection holds
+                # everywhere until a real recovery lands.
+                await self._http_bridge_restore_poison_row_after_failed_registration(
+                    session, completion_pre_settle_poison_detail
+                )
             if not alias_registered and is_http_bridge_account_neutral_replay(
                 kind=session.key.affinity_kind,
                 key=session.key.affinity_key,
@@ -3189,6 +3691,38 @@ class _HTTPBridgeUpstreamEventsMixin:
                 continuity_persistence_failed_after_ack = True
                 completed_usage = None
                 completed_empty_prewarm = False
+
+        if (
+            event_type == "response.completed"
+            and terminal_request_state is not None
+            and not terminal_request_state.suppressed_duplicate_tool_call
+            and terminal_request_state.request_kind != "prewarm"
+            and not terminal_request_state.skip_request_log
+            # A failed circuit settlement leaves the at-threshold poison row
+            # standing; the quarantine keeps covering it so the surviving
+            # cooldown cannot hand the next attach a poisoned injection while
+            # the settle retries at the next opportunity.
+            and not completion_circuit_settlement_failed
+            # A durable alias write that failed leaves the OLD anchor as the
+            # stored one even though this worker's completion succeeded: a
+            # replica or a restart would re-inject it, and the quarantine is
+            # the only protection left once the circuit was settled.
+            and completion_anchor_registration_confirmed
+        ):
+            # The quarantine clears only after the fresh anchor persisted:
+            # a failed alias write rewrites the event to response.failed
+            # above, this guard then skips, and the quarantine keeps
+            # covering the old anchor that is still stored. The circuit
+            # settle deliberately ran before registration for the
+            # abandonment fence; the quarantine surviving here is what
+            # protects the partial-failure window that ordering leaves.
+            _clear_http_bridge_quarantine(
+                self,
+                session,
+                key_generation=completion_quarantine_clear_fence,
+                additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
+                additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
+            )
 
         operation_state = _http_bridge_operation_state_for_event(event_type)
         if operation_state is not None:
@@ -3323,22 +3857,6 @@ class _HTTPBridgeUpstreamEventsMixin:
             if terminal_request_state.input_item_count > 0:
                 session.last_completed_input_count = terminal_request_state.input_item_count
                 session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
-
-        if (
-            event_type == "response.completed"
-            and terminal_request_state is not None
-            and not terminal_request_state.suppressed_duplicate_tool_call
-            and terminal_request_state.request_kind != "prewarm"
-            and not terminal_request_state.skip_request_log
-        ):
-            if not terminal_request_state.verified_stale_anchor_replay:
-                await self._clear_http_bridge_retry_circuit(session)
-            _clear_http_bridge_quarantine(
-                self,
-                session,
-                additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
-                additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
-            )
 
         normalize_error_event = (
             terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract
@@ -3499,103 +4017,24 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if retried:
                         return
 
-        matched_event_queue = (
-            completed_event_queue
-            if completed_event_queue_claimed and matched_request_state is terminal_request_state
-            else matched_request_state.event_queue
-            if matched_request_state is not None
-            else None
-        )
-        matched_deferred_texts = (
-            _pop_websocket_deferred_reasoning_downstream_texts(matched_request_state)
-            if matched_request_state is not None and not suppress_downstream_event
-            else []
-        )
-        matched_terminal_state = _http_bridge_operation_state_for_event(event_type)
-        if continuity_persistence_failed_after_ack and matched_request_state is not None:
-            # The upstream response was already accepted. The downstream
-            # failure only reports that its durable alias could not be
-            # persisted, so keep the operation fenced as acknowledged while
-            # retaining the failure SSE for the client.
-            matched_terminal_state = "acknowledged"
-        if matched_request_state is not None and not suppress_downstream_event:
-            for deferred_text in matched_deferred_texts:
-                await _persist_http_bridge_operation_event(
-                    self,
-                    session,
-                    matched_request_state,
-                    deferred_text,
-                    terminal=False,
-                )
-        if matched_request_state is not None and matched_event_queue is not None and not suppress_downstream_event:
-            for deferred_text in matched_deferred_texts:
-                await matched_event_queue.put(deferred_text)
-        matched_terminal_enqueued = False
-        if matched_request_state is not None and not suppress_downstream_event:
-            matched_terminal_enqueued = await _persist_http_bridge_operation_event(
-                self,
-                session,
-                matched_request_state,
-                event_block,
-                terminal=event_type in {"response.completed", "response.failed", "response.incomplete", "error"},
-                terminal_state=matched_terminal_state,
-                terminal_event_queue=matched_event_queue,
-                terminal_delivery_scope=(completed_delivery_scope if completed_event_queue_claimed else None),
-            )
-        if (
-            matched_request_state is not None
-            and matched_event_queue is not None
-            and not suppress_downstream_event
-            and matched_terminal_enqueued is not True
-        ):
-            await matched_event_queue.put(event_block)
+        terminal_strike_failures: int | None = None
+        terminal_poison_detail: str | None = None
 
-        if terminal_request_state is None:
-            return
-
-        terminal_event_queue = (
-            completed_event_queue if completed_event_queue_claimed else terminal_request_state.event_queue
-        )
-        terminal_enqueued = matched_terminal_enqueued if terminal_request_state is matched_request_state else False
-        if terminal_request_state is not matched_request_state:
-            deferred_texts = _pop_websocket_deferred_reasoning_downstream_texts(terminal_request_state)
-            for deferred_text in deferred_texts:
-                if not suppress_downstream_event:
-                    await _persist_http_bridge_operation_event(
-                        self,
-                        session,
-                        terminal_request_state,
-                        deferred_text,
-                        terminal=False,
-                    )
-                if terminal_event_queue is not None:
-                    await terminal_event_queue.put(deferred_text)
-            if not suppress_downstream_event:
-                terminal_enqueued = await _persist_http_bridge_operation_event(
-                    self,
-                    session,
-                    terminal_request_state,
-                    event_block,
-                    terminal=True,
-                    terminal_state=(
-                        "acknowledged"
-                        if continuity_persistence_failed_after_ack and terminal_request_state is matched_request_state
-                        else _http_bridge_operation_state_for_event(event_type)
-                    ),
-                    terminal_event_queue=terminal_event_queue,
-                    terminal_delivery_scope=(completed_delivery_scope if completed_event_queue_claimed else None),
+        async def _finalize_terminal_settlement(settled_request_state: _WebSocketRequestState) -> None:
+            try:
+                await self._finalize_websocket_request_state(
+                    settled_request_state,
+                    account=session.account,
+                    account_id_value=session.account.id,
+                    event=settlement_event,
+                    event_type=settlement_event_type,
+                    payload=settlement_payload,
+                    api_key=settled_request_state.api_key,
+                    upstream_control=session.upstream_control,
+                    response_create_gate=session.response_create_gate,
                 )
-            if terminal_event_queue is not None and terminal_enqueued is not True:
-                await terminal_event_queue.put(event_block)
-        if terminal_event_queue is not None:
-            if terminal_enqueued is not True:
-                await terminal_event_queue.put(None)
-            if completed_event_queue_claimed and completed_delivery_scope is not None:
-                async with session.pending_lock:
-                    # Keep the completed claim authoritative after its producer
-                    # returns. A concurrent timeout may still be finishing
-                    # awaited recovery work before it rechecks this scope.
-                    completed_delivery_scope.terminal_enqueued = True
+            finally:
+                await self._maybe_release_idle_http_bridge_session_lease(session)
 
         if settlement_event_type in {"response.failed", "response.incomplete", "error"}:
             error_code = None
@@ -3615,18 +4054,264 @@ class _HTTPBridgeUpstreamEventsMixin:
                 cache_key_family=session.key.affinity_kind,
                 model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
+            if (
+                error_code is not None
+                and terminal_request_state is not None
+                and terminal_request_state.response_event_count == 0
+                # Internal warmup probes carry no anchor and prove nothing
+                # about the key's continuity; charging them would open and
+                # quarantine the hard key before any real turn, exactly the
+                # states the completion settle already excludes.
+                and terminal_request_state.request_kind != "prewarm"
+                and not terminal_request_state.skip_request_log
+                # Only a held safe replay excludes the strike: an unanchored
+                # request with no replay is stranded like any other, and the
+                # delta spec's no-response/no-safe-replay rule applies to it
+                # the same way the retirement funnels apply it.
+                and not _http_bridge_request_state_holds_safe_replay(terminal_request_state)
+            ):
+                # An upstream terminal frame that fails the request before any
+                # response event is the same pre-response failure the circuit
+                # measures on eventless retirements; it reaches this settlement
+                # path instead of the retirement funnel, so it would otherwise
+                # never count. Attempt-scoped recording keeps a later
+                # retirement of the same lifecycle from double-counting, and
+                # the recorder itself drops non-circuit details and soft keys.
+                #
+                # This runs before the terminal frame and its queue sentinel
+                # reach the client: once completion is observable the client can
+                # resend the same anchor immediately, and the cooldown and
+                # quarantine have to already be visible to that resend rather
+                # than still awaiting durable I/O. Recovery paths that retry
+                # this request in place have all declined by here.
+                terminal_strike_failures = await self._record_http_bridge_retry_circuit_failure(
+                    session,
+                    detail=error_code,
+                    attempt=terminal_request_state.response_create_attempt,
+                    terminal_pre_response_frame=True,
+                )
+                terminal_poison_detail = await self._http_bridge_effective_anchor_poison_detail(session, error_code)
 
-        try:
-            await self._finalize_websocket_request_state(
-                terminal_request_state,
-                account=session.account,
-                account_id_value=session.account.id,
-                event=settlement_event,
-                event_type=settlement_event_type,
-                payload=settlement_payload,
-                api_key=terminal_request_state.api_key,
-                upstream_control=session.upstream_control,
-                response_create_gate=session.response_create_gate,
+        matched_event_queue = (
+            completed_event_queue
+            if completed_event_queue_claimed and matched_request_state is terminal_request_state
+            else matched_request_state.event_queue
+            if matched_request_state is not None
+            else None
+        )
+        matched_deferred_texts = (
+            _pop_websocket_deferred_reasoning_downstream_texts(matched_request_state)
+            if matched_request_state is not None and not suppress_downstream_event
+            else []
+        )
+        matched_terminal_state = _http_bridge_operation_state_for_event(event_type)
+        if continuity_persistence_failed_after_ack and matched_request_state is not None:
+            # The upstream response was already accepted. The downstream
+            # failure only reports that its durable alias could not be
+            # persisted, so keep the operation fenced as acknowledged while
+            # retaining the failure SSE for the client.
+            matched_terminal_state = "acknowledged"
+
+        async def _publish_matched_and_terminal_frames() -> None:
+            nonlocal matched_terminal_enqueued
+            if matched_request_state is not None and not suppress_downstream_event:
+                for deferred_text in matched_deferred_texts:
+                    await _persist_http_bridge_operation_event(
+                        self,
+                        session,
+                        matched_request_state,
+                        deferred_text,
+                        terminal=False,
+                    )
+            if matched_request_state is not None and matched_event_queue is not None and not suppress_downstream_event:
+                for deferred_text in matched_deferred_texts:
+                    await matched_event_queue.put(deferred_text)
+            if matched_request_state is not None and not suppress_downstream_event:
+                matched_terminal_enqueued = await _persist_http_bridge_operation_event(
+                    self,
+                    session,
+                    matched_request_state,
+                    event_block,
+                    terminal=event_type in {"response.completed", "response.failed", "response.incomplete", "error"},
+                    terminal_state=matched_terminal_state,
+                    terminal_event_queue=matched_event_queue,
+                    terminal_delivery_scope=(completed_delivery_scope if completed_event_queue_claimed else None),
+                )
+            if (
+                matched_request_state is not None
+                and matched_event_queue is not None
+                and not suppress_downstream_event
+                and matched_terminal_enqueued is not True
+            ):
+                await matched_event_queue.put(event_block)
+
+            if terminal_request_state is None:
+                return
+
+            terminal_event_queue = (
+                completed_event_queue if completed_event_queue_claimed else terminal_request_state.event_queue
             )
-        finally:
-            await self._maybe_release_idle_http_bridge_session_lease(session)
+            terminal_enqueued = matched_terminal_enqueued if terminal_request_state is matched_request_state else False
+            if terminal_request_state is not matched_request_state:
+                deferred_texts = _pop_websocket_deferred_reasoning_downstream_texts(terminal_request_state)
+                for deferred_text in deferred_texts:
+                    if not suppress_downstream_event:
+                        await _persist_http_bridge_operation_event(
+                            self,
+                            session,
+                            terminal_request_state,
+                            deferred_text,
+                            terminal=False,
+                        )
+                    if terminal_event_queue is not None:
+                        await terminal_event_queue.put(deferred_text)
+                if not suppress_downstream_event:
+                    terminal_enqueued = await _persist_http_bridge_operation_event(
+                        self,
+                        session,
+                        terminal_request_state,
+                        event_block,
+                        terminal=True,
+                        terminal_state=(
+                            "acknowledged"
+                            if continuity_persistence_failed_after_ack
+                            and terminal_request_state is matched_request_state
+                            else _http_bridge_operation_state_for_event(event_type)
+                        ),
+                        terminal_event_queue=terminal_event_queue,
+                        terminal_delivery_scope=(completed_delivery_scope if completed_event_queue_claimed else None),
+                    )
+                if terminal_event_queue is not None and terminal_enqueued is not True:
+                    await terminal_event_queue.put(event_block)
+            if terminal_event_queue is not None:
+                if terminal_enqueued is not True:
+                    await terminal_event_queue.put(None)
+                if completed_event_queue_claimed and completed_delivery_scope is not None:
+                    async with session.pending_lock:
+                        # Keep the completed claim authoritative after its producer
+                        # returns. A concurrent timeout may still be finishing
+                        # awaited recovery work before it rechecks this scope.
+                        completed_delivery_scope.terminal_enqueued = True
+
+        matched_terminal_enqueued = False
+        terminal_publication_cancellation: asyncio.CancelledError | None = None
+        if terminal_poison_detail is not None and terminal_strike_failures is not None:
+            # Publication and settlement share one deferral for a poison
+            # terminal: a cancellation landing inside the operation
+            # persistence, between the queued frame and its sentinel, or on
+            # any other publication await used to escape before the owned
+            # settlement task even existed — the outer abort finalized the
+            # popped request and the consult, abandonment, and marker never
+            # started, leaving the poisoned durable anchor reusable once the
+            # process-local quarantine expired.
+            terminal_publication_task = asyncio.create_task(
+                _publish_matched_and_terminal_frames(),
+                name=f"http-bridge-terminal-publication-{session.durable_session_id}",
+            )
+            _terminal_publication_result, terminal_publication_cancellation = await _await_task_deferring_cancellation(
+                terminal_publication_task
+            )
+        else:
+            await _publish_matched_and_terminal_frames()
+
+        if terminal_request_state is None:
+            return
+
+        if terminal_poison_detail is not None and terminal_strike_failures is not None:
+            # The strike above opens the circuit, but the durable anchor that
+            # failed is still stored. Only the retirement and close funnels ever
+            # reached the poison clear, and a terminal frame settles through
+            # neither, so the dead anchor survived every cooldown and re-poisoned
+            # the key on the next reattach. Quarantine suppresses the injection
+            # in the meantime, but it is process-local and expires; the durable
+            # row has to be cleared for the recovery to hold.
+            #
+            # This gates on the circuit's own threshold rather than the
+            # configurable anchor-poison threshold, and fires with the same
+            # evidence that already quarantines the key: one decision, the
+            # in-memory half suppressing the next injection and the durable half
+            # clearing the stored anchor. The configurable threshold governs the
+            # retirement and close funnels, where no circuit gates first. Here it
+            # is unreachable by construction, which is issue #1830/#1852 itself:
+            # the circuit opens at two failures and then refuses the key for
+            # 60-600s per strike, so its default of seven is tens of minutes of
+            # dead conversation away.
+            #
+            # Unlike the strike, this runs after the terminal frame is published.
+            # A resend arriving in between is already covered by the quarantine
+            # armed with the strike, so there is no reason to put a fenced
+            # durable write in front of the client's own failure.
+            #
+            # The terminal frame is already on its way to the client, so
+            # these awaits must not be the last thing that runs. If the
+            # reader is cancelled while the episode consult's durable lookup
+            # or the fenced write is in contention, the cancellation would
+            # otherwise escape before the finalization below is entered and
+            # the request would never be finalized despite having been
+            # answered. The consult reads the currently registered episode,
+            # not the detached count captured with the strike: a multiplexed
+            # sibling that completed during publication has settled the
+            # circuit and persisted a fresh anchor, and this clear must not
+            # delete it.
+            terminal_settlement_cancellation: asyncio.CancelledError | None = None
+            try:
+                terminal_settlement_detail = terminal_poison_detail
+
+                async def _terminal_consult_and_clear() -> None:
+                    consult_episode, consult_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
+                        session,
+                        consecutive_failures=terminal_strike_failures,
+                        configured_threshold=(
+                            _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                        ),
+                    )
+                    if consult_episode is not None:
+                        # A multiplexed survivor holding a verified safe
+                        # replay claims the source circuit generation right
+                        # before dispatch; settling under it would strip
+                        # that fence, so survivors count alongside the
+                        # terminal request, snapshotted at decision time.
+                        async with session.pending_lock:
+                            terminal_surviving_states = list(session.pending_requests)
+                        durable_cleared = await _abandon_durable_http_bridge_continuity(
+                            self,
+                            session,
+                            detail=terminal_settlement_detail,
+                            settle_circuit=_http_bridge_abandonment_may_settle_circuit(
+                                [terminal_request_state, *terminal_surviving_states]
+                            ),
+                            expected_continuity=consult_expected_anchor,
+                            authorized_episode=consult_episode,
+                        )
+                        if durable_cleared:
+                            # The abandonment succeeded even when its circuit
+                            # settlement remains outstanding: without the
+                            # marker, the next strike finds empty continuity,
+                            # refuses another abandonment, and the restored
+                            # cooldown backs off an anchor that is already
+                            # gone.
+                            await self._http_bridge_mark_poison_anchor_cleared(session, episode=consult_episode)
+
+                # The terminal frame is already published and the request is
+                # about to be finalized and removed: a cancellation escaping
+                # the consult or the fenced rebind would leave the owed clear
+                # with no lifecycle left to retry it, and once the
+                # process-local quarantine expires the stored dead anchor is
+                # reusable. Defer cancellation across the settlement like the
+                # grouped and reader funnels, finalize regardless, then
+                # re-raise.
+                terminal_settlement_task = asyncio.create_task(
+                    _terminal_consult_and_clear(),
+                    name=f"http-bridge-terminal-poison-settlement-{session.durable_session_id}",
+                )
+                _terminal_result, terminal_settlement_cancellation = await _await_task_deferring_cancellation(
+                    terminal_settlement_task
+                )
+            finally:
+                await _finalize_terminal_settlement(terminal_request_state)
+            if terminal_settlement_cancellation is None:
+                terminal_settlement_cancellation = terminal_publication_cancellation
+            if terminal_settlement_cancellation is not None:
+                raise terminal_settlement_cancellation
+        else:
+            await _finalize_terminal_settlement(terminal_request_state)

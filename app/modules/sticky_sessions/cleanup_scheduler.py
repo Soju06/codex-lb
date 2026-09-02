@@ -404,7 +404,12 @@ class StickySessionCleanupScheduler:
                                     "Purged abandoned HTTP bridge sessions deleted_count=%s", abandoned_deleted_count
                                 )
                             retry_circuit_deleted_count = await bridge_repo.purge_retry_circuits_before(
-                                time.time() - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+                                time.time() - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS,
+                                # Abandonment tombstones guard continuity for
+                                # the bridge-retention window, not the circuit
+                                # TTL.
+                                tombstone_cutoff_epoch=time.time()
+                                - _abandoned_bridge_retention_seconds(settings, get_settings()),
                             )
                             if retry_circuit_deleted_count > 0:
                                 logger.info(

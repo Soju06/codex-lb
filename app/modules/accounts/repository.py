@@ -52,6 +52,7 @@ from app.modules.accounts.usage_time_rollup import (
     mirror_account_hard_delete_into_time_rollups,
     mirror_account_soft_delete_into_time_rollups,
 )
+from app.modules.proxy.account_cache import ROUTING_UNAVAILABLE_STATUSES
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
 from app.modules.usage.plan_downgrade_observations import discard_plan_downgrade_observations
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
@@ -64,9 +65,6 @@ _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
 ACCOUNT_PENDING_DELETION_REASON = "pending_deletion"
 BUNDLE_IMPORT_VALIDATION_PAUSE_REASON = "pending_bundle_import_validation"
 _BUNDLE_IMPORT_MAX_CANDIDATE_MEMBERSHIPS = 10_000
-_BUNDLE_IMPORT_ROUTABLE_STATUSES = frozenset(
-    (AccountStatus.ACTIVE, AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED)
-)
 
 
 def credentials_replaced_since_wipe(
@@ -374,7 +372,7 @@ class AccountsRepository:
                     results.append(BundlePersistenceResult(account_id=existing.id, outcome="skipped"))
                     continue
                 if existing is not None:
-                    needs_quarantine = existing.status in _BUNDLE_IMPORT_ROUTABLE_STATUSES
+                    needs_quarantine = existing.status not in ROUTING_UNAVAILABLE_STATUSES
                     restore_status = existing.status if needs_quarantine else None
                     restore_deactivation_reason = existing.deactivation_reason if needs_quarantine else None
                     restore_reset_at = existing.reset_at if needs_quarantine else None
@@ -545,9 +543,7 @@ class AccountsRepository:
         result = await self._session.execute(
             select(Account)
             .where(Account.chatgpt_account_id == chatgpt_account_id)
-            .where(
-                Account.status.notin_((AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED))
-            )
+            .where(Account.status.notin_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
             .limit(1)
         )
         return result.scalar_one_or_none()
@@ -997,7 +993,7 @@ class AccountsRepository:
             updated_id = result.scalar_one_or_none()
             if updated_id is not None and self._hard_sticky_outage_started(previous_status, status):
                 await self._refresh_hard_sticky_outage_grace(account_id)
-            if updated_id is not None and status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+            if updated_id is not None and status == AccountStatus.DEACTIVATED:
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
@@ -1072,7 +1068,7 @@ class AccountsRepository:
             updated_id = result.scalar_one_or_none()
             if updated_id is not None and self._hard_sticky_outage_started(expected_status, status):
                 await self._refresh_hard_sticky_outage_grace(account_id)
-            if updated_id is not None and status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+            if updated_id is not None and status == AccountStatus.DEACTIVATED:
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()

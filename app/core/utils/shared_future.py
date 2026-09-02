@@ -20,9 +20,14 @@ touch the shared future's callback list.
 from __future__ import annotations
 
 import asyncio
-from typing import TypeVar
+from collections.abc import Awaitable
+from typing import TypeVar, cast
+
+import anyio
+from anyio.lowlevel import checkpoint_if_cancelled
 
 _T = TypeVar("_T")
+_TaskResultT = TypeVar("_TaskResultT")
 
 _WAITERS_ATTR = "_shared_future_fanout_waiters"
 
@@ -78,3 +83,54 @@ async def wait_on_shared_future(
         return await asyncio.wait_for(proxy, timeout)
     finally:
         waiters.discard(proxy)
+
+
+async def _await_task_deferring_cancellation(
+    task: asyncio.Task[_TaskResultT],
+) -> tuple[_TaskResultT, asyncio.CancelledError | None]:
+    """Finish critical cleanup while preserving the caller's cancellation."""
+
+    cancellation: asyncio.CancelledError | None = None
+    result: _TaskResultT | None = None
+    # The anyio shield keeps a level-cancelled Starlette scope from re-raising
+    # into every ``await``, which would otherwise busy-spin this loop until the
+    # owned task completes. ``wait_on_shared_future`` keeps the loop's waits
+    # off the task's done-callback list: Python 3.14's ``asyncio.shield``
+    # leaks a callback per cancelled wait, so re-shielding a task wedged on a
+    # lock grew 100k+ callbacks and O(n^2) remove scans in the 2026-08-30
+    # production event-loop livelock.
+    with anyio.CancelScope(shield=True):
+        while True:
+            try:
+                result = await wait_on_shared_future(task)
+                break
+            except asyncio.CancelledError as exc:
+                if task.cancelled():
+                    raise
+                cancellation = cancellation or exc
+    if cancellation is None:
+        # The shield also blocks the level cancellation this helper promises
+        # to surface. Probe for it without suspending so callers still get
+        # their cancellation marker after the owned task finished.
+        try:
+            await checkpoint_if_cancelled()
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+    return cast(_TaskResultT, result), cancellation
+
+
+async def _await_result_deferring_cancellation(
+    awaitable: "Awaitable[_TaskResultT]",
+) -> tuple[_TaskResultT, asyncio.CancelledError | None]:
+    """``_await_task_deferring_cancellation`` for a bare awaitable."""
+
+    return await _await_task_deferring_cancellation(asyncio.ensure_future(awaitable))
+
+
+async def _await_cleanup_deferring_cancellation(
+    awaitable: "Awaitable[object]",
+) -> asyncio.CancelledError | None:
+    """Finish required cleanup, returning the deferred cancellation marker."""
+
+    _, cancellation = await _await_result_deferring_cancellation(awaitable)
+    return cancellation

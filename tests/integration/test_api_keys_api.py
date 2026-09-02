@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import re
 from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
@@ -145,6 +146,29 @@ async def _create_model_source(
 
 
 @pytest.mark.asyncio
+async def test_api_key_collection_routes_accept_equivalent_slash_forms(async_client):
+    canonical_list = await async_client.get("/api/api-keys/")
+    unslashed_list = await async_client.get("/api/api-keys", follow_redirects=False)
+    unslashed_create = await async_client.post(
+        "/api/api-keys",
+        json={"name": "unslashed-key", "allowedModels": []},
+        follow_redirects=False,
+    )
+
+    assert {
+        "canonical_get": canonical_list.status_code,
+        "unslashed_get": unslashed_list.status_code,
+        "unslashed_post": unslashed_create.status_code,
+    } == {
+        "canonical_get": 200,
+        "unslashed_get": 200,
+        "unslashed_post": 200,
+    }
+    assert unslashed_list.json() == canonical_list.json()
+    assert unslashed_create.json()["key"].startswith("sk-clb-")
+
+
+@pytest.mark.asyncio
 async def test_api_keys_crud_and_regenerate(async_client):
     create = await async_client.post(
         "/api/api-keys/",
@@ -159,7 +183,7 @@ async def test_api_keys_crud_and_regenerate(async_client):
     assert create.status_code == 200
     payload = create.json()
     assert payload["name"] == "dev-key"
-    assert payload["key"].startswith("sk-clb-")
+    assert re.fullmatch(r"sk-clb-[0-9a-f]{48}", payload["key"])
     assert payload["accountAssignmentScopeEnabled"] is False
     assert payload["assignedAccountIds"] == []
     assert len(payload["limits"]) == 1
@@ -195,7 +219,7 @@ async def test_api_keys_crud_and_regenerate(async_client):
     assert regenerated.status_code == 200
     regenerated_payload = regenerated.json()
     assert regenerated_payload["id"] == key_id
-    assert regenerated_payload["key"].startswith("sk-clb-")
+    assert re.fullmatch(r"sk-clb-[0-9a-f]{48}", regenerated_payload["key"])
     assert regenerated_payload["key"] != first_key
 
     deleted = await async_client.delete(f"/api/api-keys/{key_id}")

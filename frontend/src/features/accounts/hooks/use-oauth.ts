@@ -30,6 +30,7 @@ export function useOauth() {
   const queryClient = useQueryClient();
   const [state, setState] = useState<OAuthState>(INITIAL_OAUTH_STATE);
   const stateRef = useRef<OAuthState>(INITIAL_OAUTH_STATE);
+  const generationRef = useRef(0);
   const pollTimerRef = useRef<number | null>(null);
   const countdownTimerRef = useRef<number | null>(null);
 
@@ -56,20 +57,34 @@ export function useOauth() {
   }, []);
 
   const reset = useCallback(() => {
+    generationRef.current += 1;
     clearPollTimer();
     clearCountdownTimer();
     setOauthState(INITIAL_OAUTH_STATE);
   }, [clearCountdownTimer, clearPollTimer, setOauthState]);
 
   const poll = useCallback(async () => {
+    const generation = generationRef.current;
+    const flowId = stateRef.current.flowId;
+    const deviceAuthId = stateRef.current.deviceAuthId;
+    const userCode = stateRef.current.userCode;
+    const isCurrent = () =>
+      generationRef.current === generation && stateRef.current.flowId === flowId;
+
     try {
-      const status = await getOauthStatus(stateRef.current.flowId ?? undefined);
+      const status = await getOauthStatus(flowId ?? undefined);
+      if (!isCurrent()) {
+        return;
+      }
       if (status.status === "success") {
         const response = await completeOauth({
-          ...(stateRef.current.flowId ? { flowId: stateRef.current.flowId } : {}),
-          deviceAuthId: stateRef.current.deviceAuthId ?? undefined,
-          userCode: stateRef.current.userCode ?? undefined,
+          ...(flowId ? { flowId } : {}),
+          deviceAuthId: deviceAuthId ?? undefined,
+          userCode: userCode ?? undefined,
         });
+        if (!isCurrent()) {
+          return;
+        }
         setOauthState((prev) =>
           OAuthStateSchema.parse({
             ...prev,
@@ -105,6 +120,9 @@ export function useOauth() {
         clearCountdownTimer();
       }
     } catch (error) {
+      if (!isCurrent()) {
+        return;
+      }
       clearPollTimer();
       clearCountdownTimer();
       setOauthState((prev) =>
@@ -147,12 +165,17 @@ export function useOauth() {
   }, [clearCountdownTimer, setOauthState]);
 
   const start = useCallback(async (forceMethod?: "browser" | "device", accountId?: string) => {
+    generationRef.current += 1;
+    const generation = generationRef.current;
     clearPollTimer();
     clearCountdownTimer();
     setOauthState((prev) => ({ ...prev, status: "starting", errorMessage: null }));
 
     try {
       const response = await startOauth({ forceMethod, accountId });
+      if (generationRef.current !== generation) {
+        return stateRef.current;
+      }
       const method = response.method === "device" ? "device" : "browser";
       const nextState = OAuthStateSchema.parse({
         flowId: response.flowId ?? null,
@@ -187,6 +210,9 @@ export function useOauth() {
 
       return nextState;
     } catch (error) {
+      if (generationRef.current !== generation) {
+        throw error;
+      }
       const message = error instanceof Error ? error.message : "Failed to start OAuth";
       clearPollTimer();
       clearCountdownTimer();

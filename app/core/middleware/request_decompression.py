@@ -77,16 +77,8 @@ def _decompress_deflate(data: bytes, max_size: int) -> bytes:
 
 
 def _decompress_zstd(data: bytes, max_size: int) -> bytes:
-    try:
-        decompressed = zstd.ZstdDecompressor().decompress(data, max_output_size=max_size)
-        if len(decompressed) > max_size:
-            raise _DecompressedBodyTooLarge(max_size)
-        return decompressed
-    except _DecompressedBodyTooLarge:
-        raise
-    except Exception:
-        with zstd.ZstdDecompressor().stream_reader(io.BytesIO(data)) as reader:
-            return _read_limited(reader, max_size)
+    with zstd.ZstdDecompressor().stream_reader(io.BytesIO(data)) as reader:
+        return _read_limited(reader, max_size)
 
 
 def _decompress_body(data: bytes, encodings: list[str], max_size: int) -> bytes:

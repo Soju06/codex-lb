@@ -1260,6 +1260,8 @@ class RequestLogsRepository:
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
         *,
+        cache_mode: str = "since",
+        timeframe: str | None = None,
         include_sensitive_metadata: bool = True,
     ) -> RequestLogsResult:
         since = _naive_utc(since) if since is not None else None
@@ -1316,9 +1318,10 @@ class RequestLogsRepository:
         ttl_seconds = _COUNT_CACHE_TTL_SECONDS
         if ttl_seconds <= 0:
             return RequestLogsResult(logs=logs, total=await self._count_recent(filters, demand_params))
+        window_identity = ("timeframe", timeframe) if cache_mode == "timeframe" else ("since", since)
         cache_key = (
             search,
-            since,
+            window_identity,
             until,
             conversation_id,
             tuple(account_ids or ()),

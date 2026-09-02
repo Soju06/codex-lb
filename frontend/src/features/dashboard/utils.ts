@@ -7,8 +7,10 @@ import type {
   DashboardProjections,
   Depletion,
   RequestLog,
+  ServerWeeklyCreditPace,
   TrendPoint,
   UsageWindow,
+  WeeklyCreditPaceStatus,
 } from "@/features/dashboard/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { buildDonutPalette } from "@/utils/colors";
@@ -57,38 +59,18 @@ export interface SafeLineView {
   riskLevel: "safe" | "warning" | "danger" | "critical";
 }
 
-export type WeeklyCreditPaceStatus = "behind" | "on_track" | "ahead" | "danger";
-
-export type WeeklyCreditPace = {
-  totalFullCredits: number;
-  totalActualRemainingCredits: number;
-  totalExpectedRemainingCredits: number;
-  actualUsedPercent: number;
-  scheduledUsedPercent: number;
-  deltaPercent: number;
-  scheduleGapCredits: number;
-  smoothedDeltaPercent?: number;
-  smoothedScheduleGapCredits?: number;
-  paceGapSmoothingMinutes?: number;
-  /** Legacy alias for scheduleGapCredits while older components migrate. */
-  overPlanCredits: number;
-  projectedShortfallCredits: number;
-  pauseForBreakEvenHours: number | null;
-  paceMultiplier: number | null;
-  throttleToPercent: number | null;
-  reduceByPercent: number | null;
-  proAccountEquivalentToCoverOverPlan: number | null;
-  proAccountsToCoverOverPlan: number | null;
-  projectedDepletionHours: number | null;
-  projectedMinimumRemainingCredits: number | null;
-  forecastBurnRateCreditsPerHour: number | null;
-  scheduledBurnRateCreditsPerHour: number;
-  status: WeeklyCreditPaceStatus;
-  accountCount: number;
-  staleAccountCount: number;
-  inactiveAccountCount: number;
-  confidence: "high" | "medium" | "low";
-};
+/**
+ * View-model weekly pace, derived from the Zod wire contract in schemas.ts so
+ * the shapes cannot drift apart. Runway fields are absent when the backend
+ * predates the runway model.
+ */
+export type WeeklyCreditPace = ServerWeeklyCreditPace;
+export type {
+  WeeklyCreditApiKeyAttribution,
+  WeeklyCreditPaceStatus,
+  WeeklyCreditResetEvent,
+  WeeklyCreditRunwayStatus,
+} from "@/features/dashboard/schemas";
 
 export type DashboardView = {
   stats: DashboardStat[];
@@ -881,11 +863,14 @@ export function buildDashboardView(
     requestLogs,
     safeLinePrimary: buildDepletionView(projections?.depletionPrimary ?? overview.depletionPrimary),
     safeLineSecondary: buildDepletionView(projections?.depletionSecondary ?? overview.depletionSecondary),
+    // A present overview pace is the freshest verdict and always wins.
+    // TanStack Query retains the last successful projections payload across
+    // later failures, so a stale projections copy must never override it.
+    // Older backends serve `weeklyCreditPace: null` (they cannot compute the
+    // runway model), which is indistinguishable from a fresh backend with no
+    // eligible accounts — so null falls back to the projections copy and then
+    // to the local projection instead of hiding the card entirely.
     weeklyCreditPace:
-      projections?.weeklyCreditPace !== undefined
-        ? projections.weeklyCreditPace
-        : overview.weeklyCreditPace !== undefined
-          ? overview.weeklyCreditPace
-          : buildWeeklyCreditPace(overview.accounts),
+      overview.weeklyCreditPace ?? projections?.weeklyCreditPace ?? buildWeeklyCreditPace(overview.accounts),
   };
 }

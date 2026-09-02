@@ -63,21 +63,25 @@ from app.core.clients.proxy_websocket import (
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
-from app.core.errors import (
-    PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE,
-)
+from app.core.errors import PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
 from app.core.errors import (
     OpenAIErrorEnvelope,
+    OpenAIErrorParam,
     ResponseFailedEvent,
+    coerce_error_param,
     is_previous_response_not_found_error,
     is_previous_response_not_found_message,
     openai_error,
     previous_response_id_from_not_found_message,
     previous_response_stream_incomplete_error,
     response_failed_event,
+    synthetic_transport_failure_event,
+)
+from app.core.errors import (
+    is_previous_response_not_found_public_shape as _is_previous_response_not_found_public_shape,  # noqa: F401
 )
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
@@ -501,9 +505,7 @@ from app.modules.proxy._service.response_create import (
 from app.modules.proxy._service.response_create import (
     _write_response_create_dump as _write_response_create_dump,
 )
-from app.modules.proxy._service.streaming import (
-    _StreamingMixin,
-)
+from app.modules.proxy._service.streaming import _StreamingMixin
 from app.modules.proxy._service.streaming.helpers import (
     _build_rewritten_stream_response_failed_event as _build_rewritten_stream_response_failed_event,
 )
@@ -548,6 +550,9 @@ from app.modules.proxy._service.streaming.helpers import (
 )
 from app.modules.proxy._service.streaming.helpers import (
     _upstream_turn_state_from_socket as _upstream_turn_state_from_socket,
+)
+from app.modules.proxy._service.streaming.retry import (
+    _http_bridge_allowed_by_transport_policy as _http_bridge_allowed_by_transport_policy,
 )
 from app.modules.proxy._service.streaming.retry import (
     _http_downstream_request_is_sticky as _http_downstream_request_is_sticky,
@@ -919,7 +924,7 @@ class ProxyService(
     ) -> None:
         self._repo_factory = repo_factory
         self._encryptor = TokenEncryptor()
-        self._load_balancer = LoadBalancer(repo_factory)
+        self._load_balancer = LoadBalancer(repo_factory, encryptor=self._encryptor)
         self._capability_router = CapabilityRouter(repo_factory)
         self._live_websocket_connector = live_websocket_connector
         self._ring_membership = RingMembershipService(SessionLocal)
@@ -935,6 +940,7 @@ class ProxyService(
         self._websocket_previous_response_account_index: dict[tuple[str, str | None, str | None], str] = {}
         self._websocket_continuity_index: dict[tuple[str, str | None], _WebSocketContinuityState] = {}
         self._background_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._http_bridge_background_cleanup_failed = False
         self._stream_api_key_release_retry_semaphore = asyncio.Semaphore(_STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY)
         self._file_pin_session_factory = SessionLocal
         self._http_bridge_lock = anyio.Lock()
@@ -1702,6 +1708,7 @@ class ProxyService(
         exclude_account_ids: Collection[str] | None = None,
         preferred_account_id: str | None = None,
         preferred_account_is_continuity_owner: bool = False,
+        preferred_account_overrides_single_account_routing: bool = False,
         require_security_work_authorized: bool = False,
         lease_kind: Literal["response_create", "stream"] | None = None,
         estimated_lease_tokens: float = 0.0,
@@ -1772,12 +1779,11 @@ class ProxyService(
                 required_preferred_account = (
                     preferred_account_id is not None and not fallback_on_preferred_account_unavailable
                 )
-                required_continuity_preferred_account = (
-                    required_preferred_account and preferred_account_is_continuity_owner
-                )
+                required_continuity = required_preferred_account and preferred_account_is_continuity_owner
                 single_account_routing_id: str | None = None
                 if _routing_strategy(settings) == "single_account" and (
-                    not required_preferred_account or required_continuity_preferred_account
+                    not required_preferred_account
+                    or (required_continuity and not preferred_account_overrides_single_account_routing)
                 ):
                     selected_account_id = (settings.single_account_id or "").strip()
                     if not selected_account_id:
@@ -1806,12 +1812,12 @@ class ProxyService(
                     and (
                         scoped_account_ids is None
                         or preferred_account_id in scoped_account_ids
-                        or required_continuity_preferred_account
+                        or (required_continuity and not preferred_account_overrides_single_account_routing)
                     )
                     and (
                         single_account_routing_id is None
                         or preferred_account_id == single_account_routing_id
-                        or required_continuity_preferred_account
+                        or required_continuity
                     )
                 )
                 if preferred_account_id is not None and not preferred_eligible:
@@ -1863,12 +1869,12 @@ class ProxyService(
                         additional_limit_name=additional_limit_name,
                         account_ids=(
                             {single_account_routing_id}
-                            if required_continuity_preferred_account and single_account_routing_id is not None
+                            if required_continuity and single_account_routing_id is not None
                             else scoped_account_ids
                         ),
                         required_account_id=preferred_account_id,
                         required_account_is_ownership_constraint=required_preferred_account,
-                        required_continuity_owner=(required_continuity_preferred_account),
+                        required_continuity_owner=required_continuity,
                         require_unambiguous_account=require_unambiguous_account,
                         require_security_work_authorized=require_security_work_authorized,
                         budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
@@ -2143,10 +2149,11 @@ def _is_missing_tool_output_message(message: str | None) -> bool:
 def _is_missing_tool_output_error(
     *,
     code: str | None,
-    param: str | None,
+    param: OpenAIErrorParam | JsonValue,
     message: str | None,
 ) -> bool:
-    if code != "invalid_request_error" or param != "input":
+    param_state = coerce_error_param(param)
+    if code != "invalid_request_error" or param_state.normalized != "input" or param_state.malformed:
         return False
     return _is_missing_tool_output_message(message)
 
@@ -2154,7 +2161,7 @@ def _is_missing_tool_output_error(
 def _is_previous_response_not_found_error(
     *,
     code: str | None,
-    param: str | None,
+    param: OpenAIErrorParam | JsonValue,
     message: str | None,
 ) -> bool:
     return is_previous_response_not_found_error(code=code, param=param, message=message)
@@ -2167,7 +2174,7 @@ def _compact_previous_response_not_found_error(exc: ProxyResponseError) -> Proxy
     code = _normalize_error_code(error.code, error.type)
     if not _is_previous_response_not_found_error(
         code=code,
-        param=error.param,
+        param=error.param_state,
         message=error.message,
     ):
         return None
@@ -2269,7 +2276,7 @@ def _partial_output_proxy_error_event_block(
         error_code=error_code,
         error_type=error.type if error else None,
         error_message=error_message,
-        error_param=error.param if error else None,
+        error_param=error.param_state if error else None,
     )
     if rewritten_error is not None:
         rewritten_code, rewritten_message, upstream_error_code = rewritten_error
@@ -2286,7 +2293,7 @@ def _partial_output_proxy_error_event_block(
         error_message or default_message,
         error_type=(error.type if error and error.type else "server_error"),
         response_id=response_id,
-        error_param=error.param if error else None,
+        error_param=error.param_state if error else None,
     )
     _apply_error_metadata(event["response"]["error"], error)
     return format_sse_event(event)
@@ -2344,11 +2351,8 @@ def _remaining_budget_seconds(deadline: float) -> float:
 
 
 def _proxy_request_timeout_event(request_id: str) -> ResponseFailedEvent:
-    return response_failed_event(
-        "upstream_request_timeout",
-        "Proxy request budget exhausted",
-        response_id=request_id,
-    )
+    event = response_failed_event("upstream_request_timeout", "Proxy request budget exhausted", response_id=request_id)
+    return synthetic_transport_failure_event(event)
 
 
 def _security_work_advisory_event(
@@ -2535,7 +2539,7 @@ def _mark_request_state_previous_response_not_found(
     request_state.error_code_override = error.get("code")
     request_state.error_message_override = error.get("message")
     request_state.error_type_override = error.get("type")
-    request_state.error_param_override = error.get("param")
+    request_state.error_param_override = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
 
 
 def _header_value_case_insensitive(headers: Mapping[str, str], name: str) -> str | None:

@@ -193,7 +193,7 @@ def test_scheduled_slot_key_depends_on_due_slot_and_account_only() -> None:
     assert first != different_slot
 
 
-def test_is_account_eligible_for_automation_skips_reauth_required() -> None:
+def test_is_account_eligible_for_automation_allows_reauth_required() -> None:
     account = Account(
         id="acct-reauth",
         email="reauth@example.com",
@@ -209,7 +209,7 @@ def test_is_account_eligible_for_automation_skips_reauth_required() -> None:
             account,
             include_paused_accounts=False,
         )
-        is False
+        is True
     )
 
 

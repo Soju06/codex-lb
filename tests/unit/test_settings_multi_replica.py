@@ -62,10 +62,18 @@ def test_settings_metrics_enabled_from_env(monkeypatch):
     assert settings.metrics_enabled is True
 
 
-def test_settings_metrics_port_from_env(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_METRICS_PORT", "8080")
+@pytest.mark.parametrize("port", [1, 65535])
+def test_settings_metrics_port_from_env(monkeypatch, port: int):
+    monkeypatch.setenv("CODEX_LB_METRICS_PORT", str(port))
     settings = Settings()
-    assert settings.metrics_port == 8080
+    assert settings.metrics_port == port
+
+
+@pytest.mark.parametrize("port", [0, -1, 65536, 70000])
+def test_settings_rejects_out_of_range_metrics_port(monkeypatch, port: int):
+    monkeypatch.setenv("CODEX_LB_METRICS_PORT", str(port))
+    with pytest.raises(ValidationError, match="metrics_port"):
+        Settings()
 
 
 def test_settings_rejects_metrics_port_2455(monkeypatch):
@@ -75,10 +83,17 @@ def test_settings_rejects_metrics_port_2455(monkeypatch):
     assert "metrics_port must not match the main application port (2455)" in str(exc_info.value)
 
 
-def test_settings_log_format_from_env(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_LOG_FORMAT", "json")
+@pytest.mark.parametrize("log_format", ["text", "json"])
+def test_settings_log_format_from_env(monkeypatch, log_format: str):
+    monkeypatch.setenv("CODEX_LB_LOG_FORMAT", log_format)
     settings = Settings()
-    assert settings.log_format == "json"
+    assert settings.log_format == log_format
+
+
+def test_settings_rejects_unknown_log_format(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_LOG_FORMAT", "jsoon")
+    with pytest.raises(ValidationError, match="log_format"):
+        Settings()
 
 
 def test_settings_conversation_archive_queue_max_bytes_from_env(monkeypatch):

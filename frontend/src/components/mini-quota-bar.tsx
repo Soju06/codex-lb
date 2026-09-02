@@ -27,7 +27,7 @@ export function MiniQuotaBar({ percent, testId, "aria-label": ariaLabel }: MiniQ
       >
         <div
           data-testid={`${testId}-fill`}
-          className={cn("h-full rounded-full", quotaBarColor(clamped))}
+          className={cn("h-full rounded-full transition-colors duration-500 motion-reduce:transition-none", quotaBarColor(clamped))}
           style={{ width: `${clamped}%` }}
         />
       </div>

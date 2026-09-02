@@ -20,6 +20,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     _as_image_fetch_session,
     _inline_content_images,
     _inline_input_image_urls,
+    _is_native_codex_request,
     _ws_transport_payload_budget_bytes,
     filter_inbound_headers,
     pop_compact_timeout_overrides,
@@ -38,9 +39,7 @@ from app.core.errors import (
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
-from app.core.errors import (
-    response_failed_event,
-)
+from app.core.errors import synthetic_stream_failure_event as response_failed_event
 from app.core.openai.parsing import (
     _LIFECYCLE_EVENT_TYPES,
     classify_event_type,
@@ -277,12 +276,12 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.helpers import (
     _mark_downstream_stream_cancelled,
     _mark_upstream_stream_incomplete,
+    _openai_error_fields,
     _raw_stream_error_code_or_upstream,
     _rewrite_malformed_stream_error_event,
+    _stream_transport_failure_event_or_raise,
 )
-from app.modules.proxy._service.streaming.helpers import (
-    _raw_stream_error_fields as _raw_error_fields,
-)
+from app.modules.proxy._service.streaming.helpers import _raw_stream_error_fields as _raw_error_fields
 from app.modules.proxy._service.streaming.helpers import (
     _resolve_upstream_route_for_account as _resolve_upstream_route_for_account_helper,
 )
@@ -496,6 +495,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
+        preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(headers)
         account_id_value = account.id
         access_token = proxy._encryptor.decrypt(account.access_token_encrypted)
         account_id = _header_account_id(account.chatgpt_account_id)
@@ -592,12 +592,11 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.record_success = False
                 terminal_event_seen = settlement.account_health_error = True
                 settlement.error = {"message": error_message}
-                yield format_sse_event(
-                    response_failed_event(
-                        error_code,
-                        error_message,
-                        response_id=request_id,
-                    )
+                yield _stream_transport_failure_event_or_raise(
+                    error_code,
+                    error_message,
+                    response_id=request_id,
+                    preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
                 )
                 return
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -610,12 +609,11 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.record_success = False
                 terminal_event_seen = settlement.account_health_error = True
                 settlement.error = {"message": error_message}
-                yield format_sse_event(
-                    response_failed_event(
-                        error_code,
-                        error_message,
-                        response_id=request_id,
-                    )
+                yield _stream_transport_failure_event_or_raise(
+                    error_code,
+                    error_message,
+                    response_id=request_id,
+                    preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
                 )
                 return
             response_create_lease.release()
@@ -665,7 +663,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 else:
                     raw_error_type = error.type if error else None
                     raw_error_message = error.message if error else None
-                    raw_error_param = error.param if error else None
+                    raw_error_param = error.param_state if error else None
                     code = _normalize_error_code(
                         error.code if error else None,
                         raw_error_type,
@@ -827,15 +825,15 @@ class _StreamingMixin(_StreamingRetryMixin):
                                 settlement.response_id = response_id
                         else:
                             error = event.error
+                        raw_error_type, raw_error_message, raw_error_param = _openai_error_fields(error)
                         if preserve_raw_sse_line and error is None:
-                            _, raw_error_message, _, raw_error_code = _raw_error_fields(event_type, event_payload)
+                            raw_error_type, raw_error_message, raw_error_param, raw_error_code = _raw_error_fields(
+                                event_type,
+                                event_payload,
+                            )
                             upstream_error = cast(UpstreamError, {"message": raw_error_message or "Upstream error"})
                         else:
-                            raw_error_code = _normalize_error_code(
-                                error.code if error else None,
-                                error.type if error else None,
-                            )
-                            raw_error_message = error.message if error else None
+                            raw_error_code = _normalize_error_code(error.code if error else None, raw_error_type)
                             upstream_error = _upstream_error_from_openai(error)
                         raw_error_code = _raw_stream_error_code_or_upstream(
                             event_type,
@@ -846,9 +844,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                             previous_response_id=payload.previous_response_id,
                             preferred_account_id=preferred_account_id,
                             error_code=raw_error_code,
-                            error_type=error.type if error else None,
-                            error_message=error.message if error else None,
-                            error_param=error.param if error else None,
+                            error_type=raw_error_type,
+                            error_message=raw_error_message,
+                            error_param=raw_error_param,
                         )
                         if rewritten_error is not None:
                             response_id = (
@@ -964,7 +962,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 ),
                 error_type=error.type if error else None,
                 error_message=error.message if error else None,
-                error_param=error.param if error else None,
+                error_param=error.param_state if error else None,
             )
             if rewritten_error is not None:
                 rewritten_code, rewritten_message, upstream_error_code = rewritten_error
@@ -1019,11 +1017,12 @@ class _StreamingMixin(_StreamingRetryMixin):
         except Exception:
             if settlement.downstream_visible:
                 status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)
-                yield _facade()._build_rewritten_stream_response_failed_event(
+                yield _stream_transport_failure_event_or_raise(
+                    error_code,
+                    error_message,
                     response_id=request_id,
-                    error_code=error_code,
-                    error_message=error_message,
-                )[0]
+                    preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
+                )
                 return
             raise
         finally:

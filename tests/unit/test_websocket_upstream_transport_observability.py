@@ -98,7 +98,7 @@ def _patch_websocket_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_direct_websocket_connect_egress_normalizes_selected_installation_metadata(
+async def test_direct_websocket_connect_egress_uses_selected_installation_metadata_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _DummyWebSocketService()
@@ -156,7 +156,7 @@ async def test_direct_websocket_connect_egress_normalizes_selected_installation_
     assert captured["route"] is None
     assert captured["allow_direct_egress"] is True
     upstream_headers = cast(dict[str, str], captured["headers"])
-    assert upstream_headers["x-codex-installation-id"] == "account-installation"
+    assert "x-codex-installation-id" not in upstream_headers
     assert json.loads(upstream_headers["x-codex-turn-metadata"]) == {
         "installation_id": "account-installation",
         "turn_id": "turn_123",

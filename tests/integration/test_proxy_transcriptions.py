@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from collections.abc import AsyncIterator
@@ -8,7 +9,7 @@ from tempfile import SpooledTemporaryFile
 import pytest
 import starlette.formparsers as starlette_formparsers
 from httpx import AsyncByteStream
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 import app.modules.proxy.api as proxy_api
 import app.modules.proxy.service as proxy_module
@@ -16,8 +17,9 @@ from app.core.auth.refresh import RefreshError
 from app.core.errors import openai_error
 from app.core.multipart import TRANSCRIPTION_MULTIPART_POLICY
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
-from app.db.models import ApiKeyLimit
+from app.db.models import ApiKeyLimit, ApiKeyUsageReservation
 from app.db.session import SessionLocal
+from app.modules.api_keys.repository import ApiKeysRepository
 
 pytestmark = pytest.mark.integration
 
@@ -466,6 +468,105 @@ async def test_v1_audio_transcriptions_forwards_prompt(async_client, monkeypatch
     assert captured["audio_bytes"] == b"\x0a\x0b"
     assert captured["prompt"] == "domain context"
     assert captured["account_id"] == "acc_transcribe_v1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_phase", ["forward", "release"])
+async def test_subscription_transcription_cancellation_releases_reservation(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_phase: str,
+) -> None:
+    await _enable_api_key_auth(async_client)
+    await _import_account(async_client, "acc_transcribe_cancel", "cancel-transcribe@example.com")
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "cancelled-transcription-key",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 100_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+
+    forward_started = asyncio.Event()
+    allow_upstream_finish = asyncio.Event()
+    allow_release_finish = asyncio.Event()
+
+    async def transcribe(
+        self,
+        *,
+        audio_bytes: bytes,
+        filename: str,
+        content_type: str | None,
+        prompt: str | None,
+        headers,
+        api_key=None,
+    ):
+        forward_started.set()
+        if cancel_phase == "forward":
+            await allow_upstream_finish.wait()
+        return {"text": "cancelled transcription"}
+
+    monkeypatch.setattr(proxy_module.ProxyService, "transcribe", transcribe)
+
+    release_started = asyncio.Event()
+    release_finished = asyncio.Event()
+    release_calls = 0
+    original_release = proxy_api._release_reservation
+
+    async def tracked_release(reservation):
+        nonlocal release_calls
+        release_calls += 1
+        release_started.set()
+        if cancel_phase == "release":
+            await allow_release_finish.wait()
+        else:
+            await asyncio.sleep(0)
+        await original_release(reservation)
+        release_finished.set()
+
+    monkeypatch.setattr(proxy_api, "_release_reservation", tracked_release)
+
+    request_task = asyncio.create_task(
+        async_client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {key}"},
+            data={"model": "gpt-4o-transcribe"},
+            files={"file": ("sample.wav", b"\x01\x02", "audio/wav")},
+        )
+    )
+    if cancel_phase == "forward":
+        await asyncio.wait_for(forward_started.wait(), timeout=1)
+    else:
+        await asyncio.wait_for(release_started.wait(), timeout=1)
+
+    request_task.cancel()
+    allow_release_finish.set()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+    finally:
+        allow_upstream_finish.set()
+        allow_release_finish.set()
+    assert release_started.is_set()
+    assert release_finished.is_set()
+    assert release_calls == 1
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ApiKeyUsageReservation).where(
+                ApiKeyUsageReservation.api_key_id == key_id,
+                ApiKeyUsageReservation.model == "gpt-4o-transcribe",
+            )
+        )
+        reservation = result.scalar_one()
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert (reservation.status, limits[0].current_value) == ("released", 0)
 
 
 @pytest.mark.asyncio

@@ -1366,6 +1366,51 @@ async def test_proxy_responses_native_codex_shape_preserves_vendor_events(async_
 
 
 @pytest.mark.asyncio
+async def test_proxy_responses_native_codex_openai_shape_aborts_incomplete_transport(
+    async_client,
+    monkeypatch,
+):
+    email = "backend-native-codex-incomplete@example.com"
+    raw_account_id = "acc_backend_native_codex_incomplete"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        yield (
+            'data: {"type":"response.created","sequence_number":0,'
+            '"response":{"id":"resp_native_codex_incomplete","object":"response","status":"in_progress",'
+            '"output":[]}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        "stream": True,
+        "truncation": "disabled",
+    }
+    with pytest.raises(proxy_client_module.ProxyResponseError) as exc_info:
+        async with async_client.stream(
+            "POST",
+            "/backend-api/codex/responses",
+            json=payload,
+            headers={
+                "accept": "text/event-stream",
+                "originator": "codex_exec",
+                "user-agent": "codex_exec/0.150.1 (Ubuntu 24.4.0; x86_64) dumb",
+            },
+        ):
+            pass
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_routes(async_client):
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
     request_id = "req_v1_stream_123"
@@ -2856,7 +2901,7 @@ async def test_v1_responses_sanitizes_interleaved_reasoning_fields(async_client,
 
 
 @pytest.mark.asyncio
-async def test_proxy_responses_forces_stream(async_client, monkeypatch):
+async def test_backend_responses_preserves_non_streaming_json_contract(async_client, monkeypatch):
     email = "stream-force@example.com"
     raw_account_id = "acc_stream_force"
     auth_json = _make_auth_json(raw_account_id, email)
@@ -2873,13 +2918,12 @@ async def test_proxy_responses_forces_stream(async_client, monkeypatch):
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": False}
-    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
-        assert resp.status_code == 200
-        lines = [line async for line in resp.aiter_lines() if line]
+    resp = await async_client.post("/backend-api/codex/responses", json=payload)
 
-    event = _extract_first_event(lines)
-    assert event["type"] == "response.completed"
-    assert observed_stream["value"] is True
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.json()["id"] == "resp_1"
+    assert observed_stream["value"] is False
 
 
 @pytest.mark.asyncio

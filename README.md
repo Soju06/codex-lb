@@ -48,6 +48,9 @@ docker run -d --name codex-lb \
 
 # or uvx
 uvx codex-lb
+
+# or nix
+nix run github:Soju06/codex-lb
 ```
 
 Open [localhost:2455](http://localhost:2455) → Add account → Done.
@@ -129,7 +132,11 @@ docker compose watch
 # Local
 uv sync && cd frontend && bun install && cd ..
 uv run codex-lb                              # backend :2455
-cd frontend && bun run dev                     # frontend :5173
+cd frontend && bun run dev                   # frontend :5173
+
+# Nix
+nix run .
+nix develop # enter dev environment
 ```
 
 ## Contributors ✨
@@ -307,6 +314,9 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/hanseo0507"><img src="https://avatars.githubusercontent.com/u/56479293?v=4?s=100" width="100px;" alt="HanSu Lee"/><br /><sub><b>HanSu Lee</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=hanseo0507" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=hanseo0507" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/dpearson2699"><img src="https://avatars.githubusercontent.com/u/32114370?v=4?s=100" width="100px;" alt="Derek Pearson"/><br /><sub><b>Derek Pearson</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=dpearson2699" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/JustYannicc"><img src="https://avatars.githubusercontent.com/u/52761674?v=4?s=100" width="100px;" alt="JustYannicc"/><br /><sub><b>JustYannicc</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=JustYannicc" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=JustYannicc" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/commits?author=JustYannicc" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/yigengjiang"><img src="https://avatars.githubusercontent.com/u/114665402?v=4?s=100" width="100px;" alt="ygx"/><br /><sub><b>ygx</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=yigengjiang" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=yigengjiang" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/aaravrav"><img src="https://avatars.githubusercontent.com/u/37036762?v=4?s=100" width="100px;" alt="Aarav"/><br /><sub><b>Aarav</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=aaravrav" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Evan-Haug"><img src="https://avatars.githubusercontent.com/u/90289817?v=4?s=100" width="100px;" alt="Evan Haug"/><br /><sub><b>Evan Haug</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Evan-Haug" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Evan-Haug" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>

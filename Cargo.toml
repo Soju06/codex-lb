@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/codex-lb-egress",
+    "crates/codex-lb-egress-worker",
+    "crates/codex-lb-protocol",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+repository = "https://github.com/Soju06/codex-lb"
+publish = false
+
+[workspace.dependencies]
+aws-lc-rs = "=1.16.2"
+base64 = "0.22.1"
+futures-util = { version = "0.3.31", features = ["sink"] }
+hyper = "=1.8.1"
+hyper-rustls = { version = "=0.27.7", default-features = false, features = ["http2", "native-tokio", "aws-lc-rs"] }
+hyper-util = "=0.1.20"
+reqwest = { version = "=0.12.28", default-features = false, features = ["http2", "rustls-tls-native-roots-no-provider", "socks"] }
+rustls = { version = "=0.23.36", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std", "tls12"] }
+rustls-native-certs = "0.8.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "=1.49.0", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["aws_lc_rs", "tls12"] }
+tokio-tungstenite = { version = "0.28.0", features = ["proxy", "rustls-tls-native-roots"] }
+tungstenite = { version = "0.27.0", features = ["deflate", "proxy"] }
+url = "2.5.7"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[patch.crates-io]
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }

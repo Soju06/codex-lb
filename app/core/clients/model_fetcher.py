@@ -14,14 +14,25 @@ from app.core.clients.codex import (
 )
 from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import lease_http_session
+from app.core.clients.native_egress import (
+    NativeEgressClient,
+    NativeEgressError,
+    NativeEgressRequest,
+    NativeEgressUnavailable,
+    discover_native_egress_client,
+)
+from app.core.clients.proxy import build_codex_user_agent
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.utils.proxy_env import resolve_http_proxy_from_env
 
 logger = logging.getLogger(__name__)
 
 _FETCH_TIMEOUT_SECONDS = 15.0
+_CODEX_CONTROL_ORIGINATOR = "codex_cli_rs"
+_MODEL_DISCOVERY_SKIP_AUTO_HEADERS = frozenset({aiohttp.hdrs.ACCEPT_ENCODING})
 
 
 class ModelFetchError(Exception):
@@ -101,6 +112,23 @@ def _parse_upstream_model(data: dict[str, JsonValue]) -> UpstreamModel:
     )
 
 
+def _build_model_discovery_headers(
+    access_token: str,
+    account_id: str | None,
+    *,
+    client_version: str,
+) -> dict[str, str]:
+    """Build the first-party Codex identity used by control-plane requests."""
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if account_id:
+        headers["chatgpt-account-id"] = account_id
+    headers["Accept"] = "*/*"
+    headers["originator"] = _CODEX_CONTROL_ORIGINATOR
+    headers["User-Agent"] = build_codex_user_agent(client_version)
+    return headers
+
+
 async def fetch_models_for_plan(
     access_token: str,
     account_id: str | None,
@@ -108,6 +136,7 @@ async def fetch_models_for_plan(
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
+    native_egress_client: NativeEgressClient | None = None,
 ) -> list[UpstreamModel]:
     settings = get_settings()
     upstream_base = settings.upstream_base_url.rstrip("/")
@@ -119,12 +148,11 @@ async def fetch_models_for_plan(
         operation="model discovery",
     )
 
-    headers: dict[str, str] = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/json",
-    }
-    if account_id:
-        headers["chatgpt-account-id"] = account_id
+    headers = _build_model_discovery_headers(
+        access_token,
+        account_id,
+        client_version=client_version,
+    )
 
     try:
         if route is not None:
@@ -136,6 +164,7 @@ async def fetch_models_for_plan(
                     url,
                     route=route,
                     headers=headers,
+                    skip_auto_headers=_MODEL_DISCOVERY_SKIP_AUTO_HEADERS,
                     timeout=_FETCH_TIMEOUT_SECONDS,
                 )
             finally:
@@ -149,19 +178,39 @@ async def fetch_models_for_plan(
                 raise ModelFetchError(status, f"HTTP {status}: {text[:200]}")
             data = await _codex_response_json(resp)
         else:
-            timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
-            async with lease_http_session() as session:
-                async with session.get(url, headers=headers, timeout=timeout) as resp:
-                    if resp.status >= 400:
-                        text = await resp.text()
-                        raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")
-
-                    data = await resp.json(content_type=None)
+            active_native_egress_client = native_egress_client or discover_native_egress_client()
+            if active_native_egress_client is not None:
+                try:
+                    native_response = await active_native_egress_client.request(
+                        NativeEgressRequest(
+                            method="GET",
+                            url=url,
+                            headers=headers,
+                            timeout_seconds=_FETCH_TIMEOUT_SECONDS,
+                            proxy_url=resolve_http_proxy_from_env(url),
+                        )
+                    )
+                except NativeEgressUnavailable:
+                    native_response = None
+                if native_response is not None:
+                    async with native_response:
+                        if native_response.status >= 400:
+                            text = await native_response.text()
+                            raise ModelFetchError(
+                                native_response.status,
+                                f"HTTP {native_response.status}: {text[:200]}",
+                            )
+                        data = await native_response.json(content_type=None)
+                    native_response = None
+                else:
+                    data = await _fetch_models_direct_python(url, headers)
+            else:
+                data = await _fetch_models_direct_python(url, headers)
     except ModelFetchError:
         raise
     except asyncio.TimeoutError as exc:
         raise ModelFetchError(504, "Upstream models API timed out", transport_error=True) from exc
-    except (aiohttp.ClientError, OSError, CodexTransportError) as exc:
+    except (aiohttp.ClientError, OSError, CodexTransportError, NativeEgressError) as exc:
         message = str(exc) or exc.__class__.__name__
         raise ModelFetchError(0, f"Transport error during model fetch: {message}", transport_error=True) from exc
 
@@ -188,6 +237,21 @@ async def fetch_models_for_plan(
             continue
 
     return result
+
+
+async def _fetch_models_direct_python(url: str, headers: dict[str, str]) -> object:
+    timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
+    async with lease_http_session() as session:
+        async with session.get(
+            url,
+            headers=headers,
+            skip_auto_headers=_MODEL_DISCOVERY_SKIP_AUTO_HEADERS,
+            timeout=timeout,
+        ) as resp:
+            if resp.status >= 400:
+                text = await resp.text()
+                raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")
+            return await resp.json(content_type=None)
 
 
 def _codex_response_status(response: object) -> int:

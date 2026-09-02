@@ -1,0 +1,25 @@
+[package]
+name = "codex-lb-egress-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "codex-lb-native-egress"
+path = "src/main.rs"
+
+[dependencies]
+codex-lb-egress = { version = "0.1.0", path = "../codex-lb-egress" }
+tokio.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+serde_json.workspace = true
+tokio-tungstenite.workspace = true
+tungstenite.workspace = true

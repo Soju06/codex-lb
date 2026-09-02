@@ -2622,7 +2622,7 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
     seen_headers = cast(dict[str, str], seen["headers"])
     assert seen_headers["session_id"] == "thread-ws-1"
     assert seen_headers["openai-beta"] == "responses_websockets=2026-02-06"
-    assert seen_headers["x-codex-turn-state"] != cast(str, seen["sticky_key"])
+    assert "x-codex-turn-state" not in seen_headers
     assert seen["sticky_key"] == _codex_session_selection_key("thread-ws-1")
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
     assert seen["prefer_earlier_reset"] is False
@@ -4019,10 +4019,9 @@ def test_backend_responses_websocket_accepts_and_reuses_generated_turn_state(app
             assert json.loads(websocket.receive_text())["type"] == "response.completed"
 
     assert turn_state
-    assert [cast(dict[str, str], selection["headers"])["x-codex-turn-state"] for selection in selections] == [
-        turn_state,
-        turn_state,
-    ]
+    selection_headers = [cast(dict[str, str], selection["headers"]) for selection in selections]
+    assert "x-codex-turn-state" not in selection_headers[0]
+    assert selection_headers[1]["x-codex-turn-state"] == turn_state
     assert selections[1]["sticky_key"] == turn_state
     assert selections[1]["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
     second_payload = json.loads(second_upstream.sent_text[0])
@@ -4161,10 +4160,9 @@ def test_backend_responses_websocket_echoed_generated_turn_state_reuses_continui
     assert "previous_response_id" not in first_upstream_payload
     assert second_upstream_payload["previous_response_id"] == "resp_generated_anchor"
     assert second_upstream_payload["input"] == [second_input]
-    assert [cast(dict[str, str], selection["headers"])["x-codex-turn-state"] for selection in selections] == [
-        turn_state,
-        turn_state,
-    ]
+    selection_headers = [cast(dict[str, str], selection["headers"]) for selection in selections]
+    assert "x-codex-turn-state" not in selection_headers[0]
+    assert selection_headers[1]["x-codex-turn-state"] == turn_state
 
 
 def test_backend_responses_websocket_goal_restart_retires_reused_socket_and_keeps_full_resend(
@@ -4424,7 +4422,7 @@ def test_backend_responses_websocket_reconnect_keeps_session_affinity_with_fresh
         proxy_module.StickySessionKind.CODEX_SESSION,
         proxy_module.StickySessionKind.CODEX_SESSION,
     ]
-    assert [cast(dict[str, str], selection["headers"])["x-codex-turn-state"] for selection in selections] == turn_states
+    assert all("x-codex-turn-state" not in cast(dict[str, str], selection["headers"]) for selection in selections)
 
 
 def test_backend_responses_websocket_echoes_existing_turn_state_header(app_instance, monkeypatch):
@@ -4967,7 +4965,7 @@ def test_v1_responses_websocket_accepts_and_reuses_generated_turn_state(app_inst
 
     seen_headers = cast(dict[str, str], seen["headers"])
     assert turn_state
-    assert seen_headers["x-codex-turn-state"] == turn_state
+    assert "x-codex-turn-state" not in seen_headers
     assert seen["sticky_key"] != turn_state
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.PROMPT_CACHE
 

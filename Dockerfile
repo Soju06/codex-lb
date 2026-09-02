@@ -1,5 +1,16 @@
 # syntax=docker/dockerfile:1.7
-FROM ghcr.io/astral-sh/uv:0.12.5 AS uv-bin
+FROM ghcr.io/astral-sh/uv:0.12.8 AS uv-bin
+
+FROM rust:1.96.0-slim-bookworm AS native-egress-build
+
+WORKDIR /src
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked --package codex-lb-egress-worker --bin codex-lb-native-egress \
+    && cp target/release/codex-lb-native-egress /tmp/codex-lb-native-egress
 
 FROM oven/bun:1.4.0-alpine AS frontend-build
 
@@ -57,6 +68,7 @@ RUN adduser --disabled-password --gecos "" app \
     && chown -R app:app /var/lib/codex-lb
 
 COPY --from=python-build /opt/venv /opt/venv
+COPY --from=native-egress-build /tmp/codex-lb-native-egress /usr/local/bin/codex-lb-native-egress
 COPY --chown=app:app app app
 COPY --chown=app:app config config
 COPY --chown=app:app scripts scripts
@@ -65,6 +77,7 @@ COPY --chown=app:app --from=frontend-build /app/app/static app/static
 # The runtime image copies source files instead of installing the project, so
 # recreate the console-script entry point that pyproject would normally install.
 RUN chmod +x /app/scripts/docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/codex-lb-native-egress \
     && printf '%s\n' '#!/bin/sh' 'exec python -m app.cli "$@"' > /usr/local/bin/codex-lb \
     && chmod +x /usr/local/bin/codex-lb
 

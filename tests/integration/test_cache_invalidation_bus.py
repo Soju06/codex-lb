@@ -107,7 +107,7 @@ async def _namespace_version(namespace: str) -> int | None:
 
 
 def _fake_bridge_session(account: Account) -> "_HTTPBridgeSession":
-    return cast("_HTTPBridgeSession", SimpleNamespace(account=account))
+    return cast("_HTTPBridgeSession", SimpleNamespace(account=account, access_token_expires_at=None))
 
 
 def _make_replica_b_routing() -> tuple[RoutingAvailabilityCache, CacheInvalidationPoller]:
@@ -218,9 +218,9 @@ async def test_failed_prime_recovery_stops_stale_bridge_session_reuse(db_setup, 
 
 
 @pytest.mark.asyncio
-async def test_reauth_on_peer_clears_local_routing_marker(db_setup, poller_slot) -> None:
-    """A routing-unavailable marker set locally is cleared when another replica
-    re-authenticates the account (previously permanent until restart)."""
+async def test_reauth_status_clears_legacy_local_routing_marker(db_setup, poller_slot) -> None:
+    """A converged REAUTH_REQUIRED snapshot is request-routable and clears any
+    stale local overlay left by an older replica's hard-blocking behavior."""
     account_id = "acct-bus-reauth"
     await _insert_account(account_id)
 
@@ -231,18 +231,21 @@ async def test_reauth_on_peer_clears_local_routing_marker(db_setup, poller_slot)
     await routing_cache.refresh_from_db()
     await local_poller._poll_once()
 
-    # Local permanent refresh failure: committed status write + local marker.
+    # Simulate an old replica committing REAUTH_REQUIRED and adding the former
+    # routing-unavailable overlay.
     await _set_account_status(account_id, AccountStatus.REAUTH_REQUIRED)
     mark_account_routing_unavailable(account_id)
     assert is_account_routing_unavailable(account_id) is True
 
-    # Replica A re-authenticates the account: committed status write + durable bump.
-    await _set_account_status(account_id, AccountStatus.ACTIVE)
+    # A current replica publishes the committed status. REAUTH_REQUIRED itself
+    # is now routable, so convergence clears the stale overlay.
     remote_poller = CacheInvalidationPoller(SessionLocal)
     assert await remote_poller.bump(NAMESPACE_ACCOUNT_ROUTING) is True
 
     await local_poller._poll_once()
     assert is_account_routing_unavailable(account_id) is False
+    reauth_session = _fake_bridge_session(_make_account(account_id, AccountStatus.REAUTH_REQUIRED))
+    assert _http_bridge_session_account_active(reauth_session) is True
 
 
 @pytest.mark.asyncio

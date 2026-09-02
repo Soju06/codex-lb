@@ -10,12 +10,14 @@ from math import isfinite
 from typing import cast
 
 import aiohttp
-import anyio
 
 from app.core.clients.http import lease_http_session
 from app.core.crypto import TokenEncryptor
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
+from app.core.utils.shared_future import (
+    _await_cleanup_deferring_cancellation as _shared_await_cleanup_deferring_cancellation,
+)
 from app.db.models import ModelSource
 
 _DEFAULT_SOURCE_TIMEOUT_SECONDS = 600
@@ -113,32 +115,13 @@ class SourceUsageHolder:
 async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> None:
     """Finish owned upstream cleanup even if the caller is cancelled again."""
 
-    task = asyncio.ensure_future(awaitable)
-    with anyio.CancelScope(shield=True):
-        while True:
-            try:
-                await asyncio.shield(task)
-                return
-            except asyncio.CancelledError:
-                if task.cancelled():
-                    raise
+    await _shared_await_cleanup_deferring_cancellation(awaitable)
 
 
 async def _await_result_deferring_cancellation(awaitable: Awaitable[object]) -> bool:
     """Finish owned cleanup and report whether cancellation arrived mid-flight."""
 
-    task = asyncio.ensure_future(awaitable)
-    cancellation_deferred = False
-    with anyio.CancelScope(shield=True):
-        while True:
-            try:
-                await asyncio.shield(task)
-                return cancellation_deferred
-            except asyncio.CancelledError:
-                if task.cancelled():
-                    raise
-                cancellation_deferred = True
-    raise RuntimeError("unreachable shielded cancellation-deferral state")
+    return await _shared_await_cleanup_deferring_cancellation(awaitable) is not None
 
 
 async def forward_chat_completion(

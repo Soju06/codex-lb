@@ -38,16 +38,22 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocket,
 )
 from app.core.errors import (
+    PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
+    PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+    SYNTHETIC_TRANSPORT_FAILURE_CODES,
+    OpenAIErrorParam,
+    openai_error,
+    response_failed_event,
+    synthetic_stream_failure_event,
+    synthetic_transport_failure_event,
+)
+from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE,
 )
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
-from app.core.errors import (
-    PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
-    response_failed_event,
-)
-from app.core.openai.models import OpenAIEvent
+from app.core.openai.models import OpenAIError, OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
@@ -519,7 +525,7 @@ def _rewrite_previous_response_stream_error(
     error_code: str | None,
     error_type: str | None,
     error_message: str | None,
-    error_param: str | None,
+    error_param: OpenAIErrorParam | JsonValue,
 ) -> tuple[str, str, str | None] | None:
     if previous_response_id is None:
         return None
@@ -555,6 +561,25 @@ def _rewrite_previous_response_stream_error(
             PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
             None,
         )
+    if _facade()._is_previous_response_not_found_public_shape(
+        code=error_code,
+        param=error_param,
+        message=error_message,
+    ):
+        # Preserve masking when malformed ``param`` metadata makes the
+        # recovery classifier fail closed. This branch never authorizes
+        # replay or account switching.
+        _record_continuity_fail_closed(
+            surface="http_stream",
+            reason=PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
+            previous_response_id=previous_response_id,
+            upstream_error_code=error_code,
+        )
+        return (
+            "stream_incomplete",
+            PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+            None,
+        )
     normalized_code = _normalize_error_code(error_code, error_type)
     if preferred_account_id is not None and normalized_code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES:
         _record_continuity_fail_closed(
@@ -574,7 +599,7 @@ def _rewrite_previous_response_stream_error(
 def _raw_stream_error_fields(
     event_type: str | None,
     event_payload: dict[str, JsonValue] | None,
-) -> tuple[str | None, str | None, str | None, str]:
+) -> tuple[str | None, str | None, OpenAIErrorParam | None, str]:
     raw_error_type = _websocket_event_error_type(event_type, event_payload)
     raw_error_message = _websocket_event_error_message(event_type, event_payload)
     raw_error_param = _websocket_event_error_param(event_type, event_payload)
@@ -584,6 +609,14 @@ def _raw_stream_error_fields(
         raw_error_param,
         _normalize_error_code(_websocket_event_error_code(event_type, event_payload), raw_error_type),
     )
+
+
+def _openai_error_fields(
+    error: OpenAIError | None,
+) -> tuple[str | None, str | None, OpenAIErrorParam | None]:
+    if error is None:
+        return None, None, None
+    return error.type, error.message, error.param_state
 
 
 def _raw_stream_error_code_or_upstream(
@@ -691,11 +724,29 @@ def _build_rewritten_stream_response_failed_event(
         error_type="server_error",
         response_id=response_id,
     )
+    if error_code in SYNTHETIC_TRANSPORT_FAILURE_CODES:
+        rewritten_event_payload = synthetic_transport_failure_event(rewritten_event_payload)
     rewritten_event_block = format_sse_event(rewritten_event_payload)
     rewritten_payload = parse_sse_data_json(rewritten_event_block)
     rewritten_event = parse_sse_event(rewritten_event_block)
     rewritten_event_type = _event_type_from_payload(rewritten_event, rewritten_payload)
     return rewritten_event_block, rewritten_event, rewritten_payload, rewritten_event_type
+
+
+def _stream_transport_failure_event_or_raise(
+    error_code: str,
+    error_message: str,
+    *,
+    response_id: str,
+    preserve_native_failure_lifecycle: bool,
+) -> str:
+    if preserve_native_failure_lifecycle:
+        raise ProxyResponseError(
+            502,
+            openai_error(error_code, error_message),
+            failure_phase="upstream",
+        )
+    return format_sse_event(synthetic_stream_failure_event(error_code, error_message, response_id=response_id))
 
 
 def _build_stream_incomplete_terminal_event_for_request(
@@ -712,16 +763,10 @@ def _build_stream_incomplete_terminal_event_for_request(
         error_code=error_code,
         error_message=error_message,
     )
+    if payload is None:  # pragma: no cover - formatter/parser contract
+        raise RuntimeError("rewritten stream failure event did not contain a JSON payload")
     downstream_text = json.dumps(
-        cast(
-            dict[str, JsonValue],
-            response_failed_event(
-                error_code,
-                error_message,
-                error_type="server_error",
-                response_id=_websocket_downstream_response_id(request_state),
-            ),
-        ),
+        payload,
         ensure_ascii=True,
         separators=(",", ":"),
     )
@@ -832,6 +877,7 @@ async def _select_account_with_budget_for_stream(proxy: Any, deadline: float, **
         "estimated_lease_tokens",
         "fallback_on_preferred_account_unavailable",
         "preferred_account_is_continuity_owner",
+        "preferred_account_overrides_single_account_routing",
         "spill_bare_session_on_account_cap",
         "require_unambiguous_account",
     )

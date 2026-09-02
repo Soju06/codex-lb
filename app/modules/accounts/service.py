@@ -90,6 +90,7 @@ from app.modules.accounts.schemas import (
 )
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.proxy.account_cache import (
+    ROUTING_UNAVAILABLE_STATUSES,
     clear_account_routing_unavailable,
     get_account_selection_cache,
     mark_account_routing_unavailable,
@@ -313,7 +314,7 @@ class AccountsService:
         account = await self._get_visible_account(account_id)
         if account is None:
             return None
-        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+        if account.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
             raise AccountUsageResetCreditsUnavailableError(
                 f"Account is {account.status.value} and cannot fetch usage reset credits",
             )
@@ -376,7 +377,7 @@ class AccountsService:
         account = await self._get_visible_account(account_id)
         if account is None:
             return None
-        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+        if account.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
             raise AccountUsageResetConsumeUnavailableError(
                 f"Account is {account.status.value} and cannot consume usage reset credits",
             )
@@ -787,11 +788,7 @@ class AccountsService:
                     except Exception:
                         restored = False
                 if restored:
-                    if result.restore_status not in (
-                        AccountStatus.PAUSED,
-                        AccountStatus.REAUTH_REQUIRED,
-                        AccountStatus.DEACTIVATED,
-                    ):
+                    if result.restore_status not in ROUTING_UNAVAILABLE_STATUSES:
                         get_account_selection_cache().invalidate(propagate=False)
                         clear_account_routing_unavailable(result.account_id)
                 else:
@@ -814,12 +811,7 @@ class AccountsService:
             return account, False, True
         updater = (
             self._bundle_validation_usage_updater
-            if result.restore_status
-            in (
-                AccountStatus.ACTIVE,
-                AccountStatus.RATE_LIMITED,
-                AccountStatus.QUOTA_EXCEEDED,
-            )
+            if result.restore_status is not None and result.restore_status not in ROUTING_UNAVAILABLE_STATUSES
             else self._bundle_nonreactivating_validation_usage_updater
         )
         refresh_result = await updater.force_refresh_result(
@@ -1106,7 +1098,7 @@ class AccountsService:
         account = await self._get_visible_account(account_id)
         if account is None:
             return None
-        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+        if account.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
             raise AccountNotProbableError(f"Account is {account.status.value} and cannot be probed")
 
         primary_before, secondary_before = await self._latest_usage_percents(account_id)

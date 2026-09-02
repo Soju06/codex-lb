@@ -98,3 +98,24 @@ error-code behavior.
 - **WHEN** non-sticky selection acquires a lease and the selection-input cache generation changes during persistence
 - **THEN** the acquired lease is released exactly once
 - **AND** non-sticky selection reloads its inputs and retries within the existing bound
+
+### Requirement: Rust migration preserves explicit ownership boundaries
+
+During incremental migration, Python and Rust MUST NOT both own routing policy
+or replay decisions for the same operation. Cross-language boundaries MUST
+state which side owns selection, persistence, cancellation, retry eligibility,
+and process lifecycle. Shared IPC data MUST live in a versioned protocol crate
+without async runtime or networking dependencies, while executable wiring MUST
+remain outside reusable transport and domain libraries.
+
+#### Scenario: Native egress remains a transport slice
+
+- **WHEN** Python submits a direct or routed native operation
+- **THEN** Python owns account and endpoint selection, health, and replay policy
+- **AND** Rust owns only the selected attempt's transport and framed result
+
+#### Scenario: A slice transfers ownership to Rust
+
+- **WHEN** a future migration cutover makes Rust authoritative for a domain
+- **THEN** the prior Python owner is removed after contract verification
+- **AND** no permanent dual implementation independently makes that domain decision

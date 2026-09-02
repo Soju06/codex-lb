@@ -15,6 +15,10 @@ class ResolvedProxyEndpoint:
 
     @property
     def proxy_url(self) -> str:
+        if self.scheme.lower() in {"http", "socks5", "socks5h"} and (
+            self.username is not None or self.password is not None
+        ):
+            raise ValueError("credential-bearing plaintext proxy URLs are forbidden")
         scheme = "socks5h" if self.scheme == "socks5" else self.scheme
         auth = ""
         if self.username:

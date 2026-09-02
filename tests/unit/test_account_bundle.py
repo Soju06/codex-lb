@@ -436,12 +436,13 @@ async def test_post_import_validation_success_preserves_non_active_replacement(m
 @pytest.mark.parametrize(
     ("restore_status", "restore_reason", "restore_reset_at", "restore_blocked_at"),
     [
+        (AccountStatus.REAUTH_REQUIRED, "destination-reauth", 505, 606),
         (AccountStatus.RATE_LIMITED, "destination-rate-limit", 101, 202),
         (AccountStatus.QUOTA_EXCEEDED, "destination-quota", 303, 404),
     ],
 )
 @pytest.mark.asyncio
-async def test_quarantined_rate_or_quota_replacement_rotates_expired_token_before_restoration(
+async def test_quarantined_routable_non_active_replacement_rotates_expired_token_before_restoration(
     monkeypatch,
     restore_status: AccountStatus,
     restore_reason: str,

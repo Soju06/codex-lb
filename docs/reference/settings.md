@@ -21,6 +21,15 @@ environment variable, not a `CODEX_LB_*` setting, and applies to host
 container always listens on 2455 (the entrypoint pins `--port 2455`); change
 the host side of the compose `ports` mapping instead.
 
+## `CODEX_LB_ENV_FILE` (special case, bootstrap only)
+
+`.env` / `.env.local` are discovered next to the installed module root (the
+repository checkout). `CODEX_LB_ENV_FILE` — an `os.pathsep`-separated list
+of paths — overrides that discovery for installs whose module root cannot
+contain env files (the Nix package wrapper points it at the launch
+directory). It must be set in the process environment, not in an env file:
+the env-file locations have to be known before env files are read.
+
 ## Core
 
 | Environment variable | Type | Default |
@@ -230,7 +239,7 @@ the host side of the compose `ports` mapping instead.
 
 | Environment variable | Type | Default |
 | --- | --- | --- |
-| `CODEX_LB_LOG_FORMAT` | `str` | `'text'` |
+| `CODEX_LB_LOG_FORMAT` | `'text' \| 'json'` | `'text'` |
 | `CODEX_LB_METRICS_ENABLED` | `bool` | `False` |
 | `CODEX_LB_METRICS_PORT` | `int` | `9090` |
 | `CODEX_LB_OTEL_ENABLED` | `bool` | `False` |

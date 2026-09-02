@@ -8,9 +8,10 @@ import pytest
 from app.core.auth import generate_unique_account_id
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardPermissionError
-from app.db.models import Account
+from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts import api as accounts_api_module
+from app.modules.accounts.repository import BUNDLE_IMPORT_VALIDATION_PAUSE_REASON
 
 from .test_account_opencode_auth_export import _make_auth_json
 
@@ -184,6 +185,75 @@ async def test_account_bundle_export_preflight_skip_and_replace(async_client) ->
     accounts = (await async_client.get("/api/accounts")).json()["accounts"]
     restored = next(account for account in accounts if account["accountId"] == account_id)
     assert restored["alias"] == "portable"
+
+
+@pytest.mark.asyncio
+async def test_account_bundle_replace_reauth_required_stays_quarantined_when_validation_fails(
+    async_client,
+    monkeypatch,
+) -> None:
+    raw_account_id = "bundle-reauth-quarantine"
+    email = "bundle-reauth-quarantine@example.invalid"
+    account_id = generate_unique_account_id(raw_account_id, email)
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_make_auth_json(raw_account_id, email)),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+
+    exported = await async_client.post(
+        "/api/accounts/bundle/export",
+        json={"accountIds": [account_id], "passphrase": "test-passphrase"},
+    )
+    assert exported.status_code == 200
+
+    async with SessionLocal() as session:
+        destination = await session.get(Account, account_id)
+        assert destination is not None
+        destination.status = AccountStatus.REAUTH_REQUIRED
+        destination.deactivation_reason = "destination-reauth-required"
+        await session.commit()
+
+    preflight = await async_client.post(
+        "/api/accounts/bundle/import/preflight",
+        files={"bundle": ("accounts.clb-account-bundle", exported.content)},
+        data={"passphrase": "test-passphrase"},
+    )
+    assert preflight.status_code == 200
+
+    async def fail_validation(_service, _result):
+        return None, False, False
+
+    monkeypatch.setattr(
+        "app.modules.accounts.service.AccountsService._validate_imported_bundle_account",
+        fail_validation,
+    )
+    committed = await async_client.post(
+        "/api/accounts/bundle/import/commit",
+        files={"bundle": ("accounts.clb-account-bundle", exported.content)},
+        data={
+            "passphrase": "test-passphrase",
+            "integrity_token": preflight.json()["integrityToken"],
+            "conflict_mode": "replace",
+            "confirm_replace": "true",
+        },
+    )
+
+    assert committed.status_code == 200
+    assert committed.json()["summary"] == {"imported": 0, "replaced": 1, "skipped": 0, "failed": 0}
+    assert committed.json()["results"][0]["warning"] == "Account validation could not be completed."
+    assert committed.json()["warnings"] == ["Some imported accounts could not be validated."]
+    async with SessionLocal() as session:
+        quarantined = await session.get(Account, account_id)
+        assert quarantined is not None
+        assert quarantined.status == AccountStatus.PAUSED
+        assert quarantined.deactivation_reason == BUNDLE_IMPORT_VALIDATION_PAUSE_REASON
 
 
 @pytest.mark.asyncio

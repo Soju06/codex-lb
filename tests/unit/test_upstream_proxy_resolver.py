@@ -9,7 +9,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.crypto import TokenEncryptor
-from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
+from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_proxy_endpoint, resolve_upstream_route
 from app.core.upstream_proxy.resolver import _is_missing_upstream_proxy_schema
 from app.db.models import (
     Account,
@@ -70,7 +70,7 @@ async def _pool_with_endpoints(session: AsyncSession, encryptor: TokenEncryptor,
     first = ProxyEndpoint(
         id=f"{pool_id}_ep_1",
         name="first",
-        scheme="http",
+        scheme="https",
         host="proxy-one.test",
         port=8080,
         username="user",
@@ -122,9 +122,28 @@ async def test_account_binding_uses_bound_pool_and_same_pool_fallbacks(
     assert route.mode == "account_bound"
     assert route.pool_id == "bound_pool"
     assert route.endpoint.id == "bound_pool_ep_1"
-    assert route.endpoint.proxy_url == "http://user:secret@proxy-one.test:8080"
+    assert route.endpoint.proxy_url == "https://user:secret@proxy-one.test:8080"
     assert [fallback.id for fallback in route.fallbacks] == ["bound_pool_ep_2"]
     assert route.fallbacks[0].proxy_url == "socks5h://proxy-two.test:1080"
+
+
+@pytest.mark.parametrize("scheme", ["http", "socks5", "socks5h"])
+def test_resolver_rejects_credentials_on_plaintext_proxy(scheme: str) -> None:
+    encryptor = _encryptor()
+    endpoint = ProxyEndpoint(
+        id="unsafe",
+        name="unsafe",
+        scheme=scheme,
+        host="proxy.test",
+        port=8080,
+        username="user",
+        password_encrypted=encryptor.encrypt("secret"),
+    )
+
+    with pytest.raises(UpstreamProxyRouteError) as exc_info:
+        resolve_proxy_endpoint(endpoint, encryptor=encryptor)
+
+    assert exc_info.value.reason == "plaintext_proxy_credentials_forbidden"
 
 
 @pytest.mark.asyncio

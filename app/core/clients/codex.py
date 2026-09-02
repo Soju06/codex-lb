@@ -1,13 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import secrets
 from dataclasses import dataclass
 from typing import Any, Mapping
+from urllib.parse import urlencode
 
 import aiohttp
 from aiohttp_socks import ProxyConnector
 from python_socks import ProxyType
+from yarl import URL
 
+from app.core.clients.native_egress import (
+    NativeEgressClient,
+    NativeEgressError,
+    NativeEgressRequest,
+    NativeEgressTransportError,
+    NativeEgressUnavailable,
+    NativeWebSocketRequest,
+    discover_native_egress_client,
+)
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
     is_pre_dispatch_connection_failure,
@@ -16,6 +29,7 @@ from app.core.resilience.network_recovery import (
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 _RESERVED = frozenset({"akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy"})
+_CODEX_SKIP_AUTO_IDENTITY_HEADERS = frozenset({aiohttp.hdrs.ACCEPT, aiohttp.hdrs.ACCEPT_ENCODING})
 
 
 class CodexTransportError(RuntimeError):
@@ -35,6 +49,8 @@ class CodexTransportError(RuntimeError):
         retryable_same_contract: bool = False,
         failure_phase: str | None = None,
         is_tls_verification_failure: bool = False,
+        handshake_headers: Mapping[str, str] | None = None,
+        handshake_message: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -42,6 +58,13 @@ class CodexTransportError(RuntimeError):
         self.retryable_same_contract = retryable_same_contract
         self.failure_phase = failure_phase
         self.is_tls_verification_failure = is_tls_verification_failure
+        # Handshake response metadata preserved across the sanitizing
+        # boundary so callers can classify edge-level rejections (for
+        # example Cloudflare browser challenges) that the sanitized message
+        # and status alone cannot prove. In-process only; never surfaced to
+        # clients.
+        self.handshake_headers = handshake_headers
+        self.handshake_message = handshake_message
 
 
 def require_route_or_direct_egress_opt_in(
@@ -67,6 +90,7 @@ class CodexWebSocketResult:
     context: Any | None
     route: ResolvedUpstreamRoute
     fallback_used: bool
+    native: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,9 +107,17 @@ class _BufferedResponse:
         return self.content.decode("utf-8", errors="replace")
 
     def json(self) -> Any:
-        import json
-
         return json.loads(self.content)
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedNativeRequest:
+    url: str
+    headers: dict[str, str]
+    body: bytes | None
+    timeout_seconds: float
+    connect_timeout_seconds: float | None
+    response_head_timeout_seconds: float | None
 
 
 class _SessionOwnedContent:
@@ -159,8 +191,16 @@ class _SessionOwnedWebSocketContext:
 
 
 class CodexClient:
-    def __init__(self, session: Any) -> None:
+    def __init__(
+        self,
+        session: Any,
+        *,
+        native_egress_client: NativeEgressClient | None = None,
+    ) -> None:
         self._session = session
+        self._native_egress_client = (
+            native_egress_client if native_egress_client is not None else discover_native_egress_client()
+        )
 
     async def request(self, method: str, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any) -> Any:
         return (await self.request_with_route_metadata(method, url, route=route, **kwargs)).response
@@ -171,24 +211,54 @@ class CodexClient:
         if route is None:
             raise ValueError("Codex upstream calls require a resolved upstream proxy route")
         buffer_response = bool(kwargs.pop("buffer_response", True))
-        _normalize_aiohttp_request_kwargs(kwargs)
         _reject_reserved(kwargs)
+        native_request = _prepare_native_request(url, kwargs)
+        aiohttp_kwargs = dict(kwargs)
+        _normalize_aiohttp_request_kwargs(aiohttp_kwargs)
         endpoints = (route.endpoint, *route.fallbacks)
         allow_fallback = _is_idempotent_method(method)
         for index, endpoint in enumerate(endpoints):
             candidate = route.with_endpoint(endpoint, tuple(endpoints[index + 1 :]))
             try:
-                if endpoint.scheme.startswith("socks"):
+                response: Any | None = None
+                if self._native_egress_client is not None and native_request is not None:
+                    try:
+                        response = await self._native_egress_client.request(
+                            NativeEgressRequest(
+                                method=method,
+                                url=native_request.url,
+                                headers=native_request.headers,
+                                body=native_request.body,
+                                timeout_seconds=native_request.timeout_seconds,
+                                connect_timeout_seconds=native_request.connect_timeout_seconds,
+                                response_head_timeout_seconds=native_request.response_head_timeout_seconds,
+                                proxy_url=endpoint.proxy_url,
+                            )
+                        )
+                        if buffer_response:
+                            response = await _buffer_response(response)
+                    except NativeEgressUnavailable:
+                        response = None
+                    except NativeEgressError as exc:
+                        raise _native_transport_error("request", endpoint.id, exc) from None
+                if response is not None:
+                    pass
+                elif endpoint.scheme.startswith("socks"):
                     response = await _request_via_socks_proxy(
                         method,
                         url,
                         endpoint,
                         buffer_response=buffer_response,
-                        **kwargs,
+                        **aiohttp_kwargs,
                     )
                 else:
                     try:
-                        response = await self._session.request(method, url, proxy=endpoint.proxy_url, **kwargs)
+                        response = await self._session.request(
+                            method,
+                            url,
+                            proxy=endpoint.proxy_url,
+                            **aiohttp_kwargs,
+                        )
                     except Exception as exc:
                         raise _transport_error(
                             "request",
@@ -262,7 +332,28 @@ class CodexClient:
             context: Any | None = None
             entered_context: Any | None = None
             try:
-                if endpoint.scheme.startswith("socks"):
+                websocket: Any | None = None
+                native_request = _prepare_native_websocket_request(
+                    url,
+                    endpoint.proxy_url,
+                    kwargs,
+                )
+                if self._native_egress_client is not None and native_request is not None:
+                    try:
+                        websocket = await self._native_egress_client.websocket(native_request)
+                    except NativeEgressUnavailable:
+                        websocket = None
+                    except NativeEgressError as exc:
+                        raise _native_transport_error("websocket", endpoint.id, exc) from None
+                if websocket is not None:
+                    return CodexWebSocketResult(
+                        websocket,
+                        None,
+                        candidate,
+                        index > 0,
+                        native=True,
+                    )
+                elif endpoint.scheme.startswith("socks"):
                     websocket, context = await _open_ws_via_socks_proxy(url, endpoint, **kwargs)
                     entered_context = context
                 else:
@@ -284,6 +375,17 @@ class CodexClient:
                     candidate,
                     index > 0,
                 )
+            except CodexTransportError as exc:
+                if entered_context is not None and hasattr(entered_context, "__aexit__"):
+                    await entered_context.__aexit__(None, None, None)
+                if exc.is_tls_verification_failure:
+                    raise
+                if exc.status_code is not None and not retry_handshake_status:
+                    raise _without_same_contract_retry(exc) from None
+                if exc.status_code is None and not retry_network_errors:
+                    raise _without_same_contract_retry(exc) from None
+                if index == len(endpoints) - 1:
+                    raise
             except Exception as exc:
                 if entered_context is not None and hasattr(entered_context, "__aexit__"):
                     await entered_context.__aexit__(None, None, None)
@@ -331,7 +433,12 @@ def create_codex_session(*, max_clients: int = 10) -> Any:
     from app.core.clients.http import _build_ssl_context
 
     connector = aiohttp.TCPConnector(limit=max_clients, ssl=_build_ssl_context())
-    return aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=None), trust_env=False)
+    return aiohttp.ClientSession(
+        connector=connector,
+        timeout=aiohttp.ClientTimeout(total=None),
+        trust_env=False,
+        skip_auto_headers=_CODEX_SKIP_AUTO_IDENTITY_HEADERS,
+    )
 
 
 async def _request_via_socks_proxy(
@@ -347,6 +454,7 @@ async def _request_via_socks_proxy(
         connector=connector,
         timeout=aiohttp.ClientTimeout(total=None),
         trust_env=False,
+        skip_auto_headers=_CODEX_SKIP_AUTO_IDENTITY_HEADERS,
     )
     try:
         try:
@@ -385,6 +493,7 @@ async def _open_ws_via_socks_proxy(url: str, endpoint: ResolvedProxyEndpoint, **
         connector=connector,
         timeout=aiohttp.ClientTimeout(total=None),
         trust_env=False,
+        skip_auto_headers=_CODEX_SKIP_AUTO_IDENTITY_HEADERS,
     )
     try:
         context = session.ws_connect(url, **kwargs)
@@ -428,6 +537,230 @@ def _normalize_aiohttp_request_kwargs(kwargs: dict[str, Any]) -> None:
     for name, value in file_items:
         _add_form_file(form, str(name), value)
     kwargs["data"] = form
+
+
+def _prepare_native_request(
+    url: str,
+    kwargs: Mapping[str, Any],
+) -> _PreparedNativeRequest | None:
+    supported = {
+        "data",
+        "files",
+        "headers",
+        "json",
+        "params",
+        "skip_auto_headers",
+        "timeout",
+    }
+    if set(kwargs).difference(supported):
+        return None
+
+    raw_headers = kwargs.get("headers") or {}
+    if not isinstance(raw_headers, Mapping):
+        return None
+    headers = {str(name): str(value) for name, value in raw_headers.items()}
+
+    params = kwargs.get("params")
+    if params is not None:
+        try:
+            url = str(URL(url).update_query(params))
+        except (TypeError, ValueError):
+            return None
+
+    has_json = "json" in kwargs
+    data = kwargs.get("data")
+    files = kwargs.get("files")
+    if has_json and (data is not None or files is not None):
+        return None
+
+    body: bytes | None
+    if has_json:
+        try:
+            body = json.dumps(
+                kwargs.get("json"),
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            return None
+        _set_header_default(headers, "Content-Type", "application/json")
+    elif files is not None:
+        encoded = _encode_native_multipart(data, files)
+        if encoded is None:
+            return None
+        body, content_type = encoded
+        _set_header_default(headers, "Content-Type", content_type)
+    elif data is None:
+        body = None
+    elif isinstance(data, bytes):
+        body = data
+    elif isinstance(data, (bytearray, memoryview)):
+        body = bytes(data)
+    elif isinstance(data, str):
+        body = data.encode("utf-8")
+        _set_header_default(headers, "Content-Type", "text/plain; charset=utf-8")
+    elif isinstance(data, Mapping):
+        body = urlencode([(str(name), str(value)) for name, value in data.items()], doseq=True).encode()
+        _set_header_default(headers, "Content-Type", "application/x-www-form-urlencoded")
+    else:
+        return None
+
+    timeout_seconds, connect_timeout_seconds, response_head_timeout_seconds = _native_timeout_parts(
+        kwargs.get("timeout")
+    )
+    if timeout_seconds is None:
+        return None
+    return _PreparedNativeRequest(
+        url=url,
+        headers=headers,
+        body=body,
+        timeout_seconds=timeout_seconds,
+        connect_timeout_seconds=connect_timeout_seconds,
+        response_head_timeout_seconds=response_head_timeout_seconds,
+    )
+
+
+def _native_timeout_parts(value: Any) -> tuple[float | None, float | None, float | None]:
+    if value is None:
+        return 60.0, None, None
+    if isinstance(value, aiohttp.ClientTimeout):
+        total = float(value.total) if value.total is not None else 60.0
+        connect = float(value.sock_connect) if value.sock_connect is not None else None
+        response_head = float(value.sock_read) if value.sock_read is not None else None
+    else:
+        try:
+            total = float(value)
+        except (TypeError, ValueError):
+            return None, None, None
+        connect = None
+        response_head = None
+    if total <= 0 or (connect is not None and connect <= 0) or (response_head is not None and response_head <= 0):
+        return None, None, None
+    return total, connect, response_head
+
+
+def _encode_native_multipart(data: Any, files: Any) -> tuple[bytes, str] | None:
+    data_items = _form_items(data)
+    file_items = _form_items(files)
+    if data_items is None or file_items is None:
+        return None
+    boundary = f"codex-lb-{secrets.token_hex(16)}"
+    chunks: list[bytes] = []
+    for name, value in data_items:
+        if not isinstance(value, (str, bytes, bytearray, memoryview, int, float, bool)):
+            return None
+        payload = (
+            value.encode()
+            if isinstance(value, str)
+            else bytes(value)
+            if not isinstance(value, (int, float, bool))
+            else str(value).encode()
+        )
+        chunks.extend(
+            (
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{_multipart_parameter(name)}"\r\n\r\n'.encode(),
+                payload,
+                b"\r\n",
+            )
+        )
+    for name, value in file_items:
+        if not isinstance(value, tuple) or len(value) < 2:
+            return None
+        filename = str(value[0] or name)
+        file_value = value[1]
+        content_type = str(value[2]) if len(value) >= 3 and value[2] else "application/octet-stream"
+        if isinstance(file_value, str):
+            payload = file_value.encode()
+        elif isinstance(file_value, (bytes, bytearray, memoryview)):
+            payload = bytes(file_value)
+        else:
+            return None
+        chunks.extend(
+            (
+                f"--{boundary}\r\n".encode(),
+                (
+                    f'Content-Disposition: form-data; name="{_multipart_parameter(name)}"; '
+                    f'filename="{_multipart_parameter(filename)}"\r\n'
+                ).encode(),
+                f"Content-Type: {content_type}\r\n\r\n".encode(),
+                payload,
+                b"\r\n",
+            )
+        )
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def _form_items(value: Any) -> list[tuple[str, Any]] | None:
+    if value is None:
+        return []
+    items = value.items() if isinstance(value, Mapping) else value
+    try:
+        return [(str(name), item) for name, item in items]
+    except (TypeError, ValueError):
+        return None
+
+
+def _multipart_parameter(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", "")
+
+
+def _set_header_default(headers: dict[str, str], name: str, value: str) -> None:
+    if not any(existing.lower() == name.lower() for existing in headers):
+        headers[name] = value
+
+
+def _prepare_native_websocket_request(
+    url: str,
+    proxy_url: str,
+    kwargs: Mapping[str, Any],
+) -> NativeWebSocketRequest | None:
+    supported = {
+        "compress",
+        "headers",
+        "heartbeat",
+        "max_msg_size",
+        "protocols",
+        "timeout",
+    }
+    if set(kwargs).difference(supported):
+        return None
+    raw_headers = kwargs.get("headers") or {}
+    if not isinstance(raw_headers, Mapping):
+        return None
+    headers = {str(name): str(value) for name, value in raw_headers.items()}
+    protocols = kwargs.get("protocols")
+    if protocols:
+        try:
+            headers["sec-websocket-protocol"] = ", ".join(str(value) for value in protocols)
+        except TypeError:
+            return None
+    try:
+        connect_timeout = float(kwargs.get("timeout", 10.0))
+        max_message_bytes = int(kwargs.get("max_msg_size", 4 * 1024 * 1024))
+        compress = int(kwargs.get("compress", 0))
+        heartbeat = kwargs.get("heartbeat")
+        ping_interval_seconds = float(heartbeat) if heartbeat is not None else None
+        ping_timeout_seconds = ping_interval_seconds / 2 if ping_interval_seconds is not None else None
+    except (TypeError, ValueError):
+        return None
+    if (
+        compress != 15
+        or connect_timeout <= 0
+        or max_message_bytes <= 0
+        or (ping_interval_seconds is not None and ping_interval_seconds <= 0)
+    ):
+        return None
+    return NativeWebSocketRequest(
+        url=url,
+        headers=headers,
+        connect_timeout_seconds=connect_timeout,
+        max_message_bytes=max_message_bytes,
+        ping_interval_seconds=ping_interval_seconds,
+        ping_timeout_seconds=ping_timeout_seconds,
+        proxy_url=proxy_url,
+    )
 
 
 def _add_form_file(form: aiohttp.FormData, name: str, value: Any) -> None:
@@ -512,6 +845,72 @@ def _transport_error(
         retryable_same_contract=retryable_same_contract,
         failure_phase=failure_phase,
         is_tls_verification_failure=isinstance(exc, aiohttp.ClientSSLError),
+        handshake_headers=_transport_error_handshake_headers(exc),
+        handshake_message=_transport_error_handshake_message(exc),
+    )
+
+
+def _transport_error_handshake_headers(exc: Exception) -> Mapping[str, str] | None:
+    """Handshake response headers of a wrapped upgrade rejection, else ``None``.
+
+    ``aiohttp.WSServerHandshakeError`` carries the response headers directly;
+    exceptions wrapping a response object carry them one level down.
+    """
+
+    response = getattr(exc, "response", None)
+    for source in (exc, response):
+        if source is None:
+            continue
+        headers = getattr(source, "headers", None)
+        if headers is not None:
+            return headers
+    return None
+
+
+def _transport_error_handshake_message(exc: Exception) -> str | None:
+    message = getattr(exc, "message", None)
+    return message if isinstance(message, str) else None
+
+
+def _native_transport_error(
+    operation: str,
+    endpoint_id: str,
+    exc: NativeEgressError,
+) -> CodexTransportError:
+    if isinstance(exc, NativeEgressTransportError):
+        process_failure = exc.failure_phase in {
+            "helper_exit",
+            "helper_read",
+            "helper_write",
+            "shutdown",
+        }
+        return CodexTransportError(
+            codex_transport_error_message(operation, endpoint_id, exc),
+            status_code=exc.status_code,
+            error_code=PROCESS_NETWORK_UNAVAILABLE_CODE if process_failure else None,
+            retryable_same_contract=(exc.retryable_same_contract and not exc.is_tls_verification_failure),
+            failure_phase=exc.failure_phase,
+            is_tls_verification_failure=exc.is_tls_verification_failure,
+            handshake_headers=dict(exc.headers) if exc.headers else None,
+            handshake_message=(exc.body.decode("utf-8", errors="replace") if exc.body else None),
+        )
+    return CodexTransportError(
+        codex_transport_error_message(operation, endpoint_id, exc),
+        retryable_same_contract=False,
+        failure_phase="protocol",
+    )
+
+
+def _without_same_contract_retry(exc: CodexTransportError) -> CodexTransportError:
+    return CodexTransportError(
+        str(exc),
+        status_code=exc.status_code,
+        error_code=exc.error_code,
+        retryable_same_contract=False,
+        failure_phase=exc.failure_phase,
+        is_tls_verification_failure=exc.is_tls_verification_failure,
+        handshake_headers=exc.handshake_headers,
+        handshake_message=exc.handshake_message,
     )
 
 

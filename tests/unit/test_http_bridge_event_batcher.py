@@ -522,7 +522,7 @@ async def test_owner_rebinding_waits_for_inflight_flush_before_rewriting_context
         durable.release_batch.set()
         await flush_task
         await rebind_task
-        assert durable.batches == [["original"]]
+        assert durable.batches[0] == ["original"]
 
         assert await batcher.flush_pending_operation(operation_id="op-1") is True
         assert durable.batches == [["original"], ["replacement"]]

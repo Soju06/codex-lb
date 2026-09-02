@@ -2144,6 +2144,40 @@ def test_recent_unknown_index_migration_preserves_preexisting_index(monkeypatch)
     drop_ownership_table_if_empty.assert_called_once_with(bind)
 
 
+def test_persisted_recovery_schema_repair_records_parent_index_ownership(monkeypatch) -> None:
+    migration = importlib.import_module("app.db.alembic.versions.20260901_000000_repair_persisted_schema_drift")
+    bind = SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+    create_index = Mock()
+    ensure_ownership_table = Mock()
+    mark_created = Mock()
+
+    monkeypatch.setattr(
+        migration,
+        "op",
+        SimpleNamespace(get_bind=lambda: bind, create_index=create_index),
+    )
+    monkeypatch.setattr(migration, "_has_table", lambda _bind, table_name: table_name == migration._OPERATIONS_TABLE)
+    monkeypatch.setattr(migration, "_has_index", lambda _bind, _table_name, _index_name: False)
+    monkeypatch.setattr(migration, "ensure_ownership_table", ensure_ownership_table)
+    monkeypatch.setattr(migration, "mark_created", mark_created)
+
+    migration.upgrade()
+
+    ensure_ownership_table.assert_called_once_with(bind)
+    create_index.assert_called_once_with(
+        migration._OPERATIONS_INDEX,
+        migration._OPERATIONS_TABLE,
+        ["session_id", "state", "created_at"],
+        unique=False,
+    )
+    mark_created.assert_called_once_with(
+        bind,
+        migration._OPERATIONS_INDEX_REVISION,
+        "index",
+        migration._OPERATIONS_INDEX,
+    )
+
+
 def test_replica_guardrails_migration_round_trips_with_version_backfill(tmp_path: Path) -> None:
     from alembic.script import ScriptDirectory
 

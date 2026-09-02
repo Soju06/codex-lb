@@ -8775,18 +8775,21 @@ async def _collect_responses_payload(
                 _public_contract_error_message(error_kind),
             )
 
+    contract_error_kind = contract_violation_kind
+    if contract_error_kind is None and (output_lifecycle_invalid or added_output_indexes - done_output_indexes):
+        contract_error_kind = "invalid_output_item"
     if terminal_result is not None:
-        if output_lifecycle_invalid or added_output_indexes - done_output_indexes:
+        if contract_error_kind is not None:
             return _public_contract_error_envelope(
-                "invalid_output_item",
-                _public_contract_error_message("invalid_output_item"),
+                contract_error_kind,
+                _public_contract_error_message(contract_error_kind),
             )
         return terminal_result
     if nonterminal_result is not None:
-        if output_lifecycle_invalid or added_output_indexes - done_output_indexes:
+        if contract_error_kind is not None:
             return _public_contract_error_envelope(
-                "invalid_output_item",
-                _public_contract_error_message("invalid_output_item"),
+                contract_error_kind,
+                _public_contract_error_message(contract_error_kind),
             )
         return nonterminal_result
     error_kind = contract_violation_kind or "upstream_stream_truncated"

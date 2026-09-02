@@ -17,6 +17,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
+from app.db.alembic.http_bridge_migration_ownership import ensure_ownership_table, mark_created
+
 revision = "20260901_000000_repair_persisted_schema_drift"
 down_revision = "20260828_020000_merge_http_bridge_recovery_heads"
 branch_labels = None
@@ -24,6 +26,7 @@ depends_on = None
 
 _OPERATIONS_TABLE = "http_bridge_operations"
 _OPERATIONS_INDEX = "idx_http_bridge_operations_session_state_created"
+_OPERATIONS_INDEX_REVISION = "20260815_000000_add_http_bridge_recent_unknown_index"
 _QUOTA_TABLE = "quota_planner_decisions"
 _LEASE_COLUMN = "lease_expires_at"
 _LEGACY_CLAIM_LEASE_WINDOW_SECONDS = 7200
@@ -45,12 +48,14 @@ def upgrade() -> None:
     bind = op.get_bind()
 
     if _has_table(bind, _OPERATIONS_TABLE) and not _has_index(bind, _OPERATIONS_TABLE, _OPERATIONS_INDEX):
+        ensure_ownership_table(bind)
         op.create_index(
             _OPERATIONS_INDEX,
             _OPERATIONS_TABLE,
             ["session_id", "state", "created_at"],
             unique=False,
         )
+        mark_created(bind, _OPERATIONS_INDEX_REVISION, "index", _OPERATIONS_INDEX)
 
     if _has_table(bind, _QUOTA_TABLE):
         columns = _quota_columns(bind)

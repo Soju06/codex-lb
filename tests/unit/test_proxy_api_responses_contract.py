@@ -572,12 +572,27 @@ async def test_collect_responses_payload_rejects_invalid_output_item_before_nont
         _iter_blocks(
             'data: {"type":"response.in_progress","response":{"id":"resp_1",'
             '"object":"response","status":"in_progress","output":[]}}\n\n',
-            'data: {"type":"response.output_item.added","output_index":0,"item":{}}\n\n',
+            'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"item_1","type":"message"}}\n\n',
+            'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"item_2","type":"message"}}\n\n',
         )
     )
 
     body = result.model_dump(mode="json", exclude_none=True)
     assert body["error"]["code"] == "invalid_output_item"
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_payload_rejects_malformed_sse_before_nonterminal_progress() -> None:
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks(
+            "data: {not-json}\n\n",
+            'data: {"type":"response.in_progress","response":{"id":"resp_1",'
+            '"object":"response","status":"in_progress","output":[]}}\n\n',
+        )
+    )
+
+    body = result.model_dump(mode="json", exclude_none=True)
+    assert body["error"]["code"] == "invalid_json"
 
 
 @pytest.mark.asyncio

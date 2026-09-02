@@ -3372,11 +3372,19 @@ class _HTTPBridgeRequestSubmitMixin:
         if (
             request_state.recovery_attempt_fingerprint is not None
             and not request_state.recovery_attempt_dispatched
-            and (request_state.recovery_attempt_session_id or session.durable_session_id) is not None
-            and (request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch) is not None
+            and (request_state.recovery_attempt_session_id is not None or session.durable_session_id is not None)
+            and (request_state.recovery_attempt_owner_epoch is not None or session.durable_owner_epoch is not None)
         ):
-            recovery_session_id = request_state.recovery_attempt_session_id or session.durable_session_id
-            recovery_owner_epoch = request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch
+            recovery_session_id = (
+                request_state.recovery_attempt_session_id
+                if request_state.recovery_attempt_session_id is not None
+                else session.durable_session_id
+            )
+            recovery_owner_epoch = (
+                request_state.recovery_attempt_owner_epoch
+                if request_state.recovery_attempt_owner_epoch is not None
+                else session.durable_owner_epoch
+            )
             rollback_method = (
                 "rollback_recovery_attempt_replayed"
                 if request_state.recovery_attempt_claimed

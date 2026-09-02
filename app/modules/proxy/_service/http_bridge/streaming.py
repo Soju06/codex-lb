@@ -1860,7 +1860,9 @@ class _HTTPBridgeStreamingMixin:
                         update={"previous_response_id": durable_lookup.latest_response_id}
                     )
                     proxy_injected_previous_response_id = True
-                    _fresh_request_state, fresh_upstream_request_text = prepare_bridge_request(payload)
+                    _fresh_request_state, fresh_upstream_request_text = prepare_bridge_request(
+                        _http_bridge_payload_without_previous_response_id(payload)
+                    )
                     del _fresh_request_state
                     _log_http_bridge_event(
                         "fresh_reattach_anchor_injected",
@@ -1876,7 +1878,9 @@ class _HTTPBridgeStreamingMixin:
                     update={"previous_response_id": durable_lookup.latest_response_id}
                 )
                 proxy_injected_previous_response_id = True
-                _fresh_request_state, fresh_upstream_request_text = prepare_bridge_request(payload)
+                _fresh_request_state, fresh_upstream_request_text = prepare_bridge_request(
+                    _http_bridge_payload_without_previous_response_id(payload)
+                )
                 del _fresh_request_state
                 _log_http_bridge_event(
                     "fresh_reattach_anchor_injected",
@@ -1937,7 +1941,9 @@ class _HTTPBridgeStreamingMixin:
                     retained_response_target = previous_response_alias_lookup.latest_response_id
                     effective_payload = payload.model_copy(update={"previous_response_id": retained_response_target})
                     proxy_injected_previous_response_id = True
-                    _fresh_request_state, fresh_upstream_request_text = prepare_bridge_request(payload)
+                    _fresh_request_state, fresh_upstream_request_text = prepare_bridge_request(
+                        _http_bridge_payload_without_previous_response_id(payload)
+                    )
                     del _fresh_request_state
                     _log_http_bridge_event(
                         "previous_response_alias_translated",

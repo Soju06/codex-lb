@@ -27555,6 +27555,44 @@ async def test_cleanup_http_bridge_submit_interruption_restores_recovery_event_f
 
 
 @pytest.mark.asyncio
+async def test_cleanup_http_bridge_submit_interruption_preserves_zero_owner_epoch() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    rollback_recovery_attempt = AsyncMock(return_value=True)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(rollback_recovery_attempt_before_dispatch=rollback_recovery_attempt),
+    )
+    session = _make_bridge_session(key_value="preserve-zero-owner-epoch")
+    session.durable_session_id = "durable-preserve-zero-owner-epoch"
+    session.durable_owner_epoch = 7
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-preserve-zero-owner-epoch",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        recovery_attempt_fingerprint="fingerprint-zero-owner-epoch",
+        recovery_attempt_session_id="durable-preserve-zero-owner-epoch",
+        recovery_attempt_owner_epoch=0,
+    )
+
+    await service._cleanup_http_bridge_submit_interruption(
+        session,
+        request_state=request_state,
+        gate_acquired=False,
+        request_enqueued=False,
+        counted_in_queue=False,
+    )
+
+    rollback_recovery_attempt.assert_awaited_once()
+    assert rollback_recovery_attempt.await_args is not None
+    assert rollback_recovery_attempt.await_args.kwargs["session_id"] == "durable-preserve-zero-owner-epoch"
+    assert rollback_recovery_attempt.await_args.kwargs["owner_epoch"] == 0
+    assert rollback_recovery_attempt.await_args.kwargs["request_fingerprint"] == "fingerprint-zero-owner-epoch"
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_capacity_retry_reclaims_unknown_operation_before_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -16468,6 +16468,145 @@ async def test_stream_responses_route_keyed_owner_rewrite_settles_before_origina
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "upstream_path",
+    ["first_event", "later_event", "proxy_response_error"],
+)
+async def test_stream_responses_route_keyed_owner_rewrite_preserves_health_after_disconnect_during_settlement(
+    monkeypatch,
+    upstream_path: str,
+):
+    """A body-task disconnect must not drop owner health after keyed settlement."""
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account(f"acc_keyed_owner_disconnect_{upstream_path}")
+    api_key = _make_api_key_data(f"key_keyed_owner_disconnect_{upstream_path}")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id=f"resv_keyed_owner_disconnect_{upstream_path}",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    order: list[str] = []
+    settlement_started = asyncio.Event()
+    release_settlement = asyncio.Event()
+
+    async def skip_limits(*_args: object, **_kwargs: object) -> proxy_service.ApiKeyUsageReservationData:
+        return reservation
+
+    async def no_rate_limit_headers(*_args: object, **_kwargs: object) -> dict[str, str]:
+        return {}
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        assert kwargs.get("wait_for_settlement") is True
+        settlement.usage_settlement_transferred = True
+        order.append("settle")
+        settlement_started.set()
+        with anyio.CancelScope(shield=True):
+            await release_settlement.wait()
+        return True
+
+    async def handle_stream_error(
+        failed_account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, http_status
+        assert failed_account is account
+        await asyncio.sleep(0)
+        order.append(f"health:{code}")
+        return {"failure_class": "rate_limit"}
+
+    async def core_stream(*_args: object, **_kwargs: object):
+        if upstream_path == "proxy_response_error":
+            raise proxy_module.ProxyResponseError(
+                429,
+                proxy_module.openai_error("usage_limit_reached", "owner quota exhausted"),
+            )
+        if upstream_path == "later_event":
+            yield 'data: {"type":"response.created","response":{"id":"resp_owner_disconnect"}}\n\n'
+        yield (
+            'data: {"type":"response.failed","response":{"id":"resp_owner_disconnect","status":"failed",'
+            '"error":{"code":"usage_limit_reached","message":"owner quota exhausted"}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", no_rate_limit_headers)
+    monkeypatch.setattr(proxy_service, "core_stream_responses", core_stream)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(
+        service,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value=account.id),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": "continue",
+            "previous_response_id": "resp_owner_anchor",
+            "stream": True,
+        }
+    )
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=api_key,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    chunks: list[str] = []
+    cancel_scope_ready = asyncio.Event()
+    body_cancel_scope: anyio.CancelScope | None = None
+
+    async def consume_body() -> None:
+        nonlocal body_cancel_scope
+        with anyio.CancelScope() as cancel_scope:
+            body_cancel_scope = cancel_scope
+            cancel_scope_ready.set()
+            async for chunk in response.body_iterator:
+                chunks.append(chunk.decode() if isinstance(chunk, bytes) else str(chunk))
+
+    body_task = asyncio.create_task(consume_body())
+    try:
+        await asyncio.wait_for(cancel_scope_ready.wait(), timeout=1)
+        await asyncio.wait_for(settlement_started.wait(), timeout=1)
+        assert body_cancel_scope is not None
+        body_cancel_scope.cancel()
+        release_settlement.set()
+        await asyncio.wait_for(body_task, timeout=1)
+    finally:
+        release_settlement.set()
+        if not body_task.done():
+            body_task.cancel()
+        await asyncio.gather(body_task, return_exceptions=True)
+
+    assert '"code":"previous_response_owner_unavailable"' in "".join(chunks)
+    assert request_logs.calls[-1]["error_code"] == "previous_response_owner_unavailable"
+    assert order == ["settle", "health:usage_limit_reached"]
+    service._load_balancer.record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("terminal_outcome", "settlement_confirmed", "close_after_terminal", "expected_order"),
     [
         ("health", True, False, ["settle", "health:rate_limit_exceeded"]),

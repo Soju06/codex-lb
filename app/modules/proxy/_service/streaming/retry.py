@@ -2474,15 +2474,22 @@ class _StreamingRetryMixin:
                             break  # outer loop: select different account
                         finally:
                             pop_stream_timeout_overrides(stream_timeout_tokens)
-                        settled = await _settle_stream_usage_before_pending_penalty(settlement)
-                        if settled and settlement.account_health_error:
-                            await proxy._handle_stream_error(
+                        if settlement.settlement_order_required:
+                            await _finalize_terminal_settlement_after_downstream_close(
+                                settlement,
                                 account,
-                                _stream_settlement_error_payload(settlement),
-                                settlement.error_code or "upstream_error",
+                                settlement_order_required=True,
                             )
-                        elif settled and settlement.record_success:
-                            await proxy._load_balancer.record_success(account)
+                        else:
+                            settled = await _settle_stream_usage_before_pending_penalty(settlement)
+                            if settled and settlement.account_health_error:
+                                await proxy._handle_stream_error(
+                                    account,
+                                    _stream_settlement_error_payload(settlement),
+                                    settlement.error_code or "upstream_error",
+                                )
+                            elif settled and settlement.record_success:
+                                await proxy._load_balancer.record_success(account)
                         network_recovery.log_recovered()
                         upstream_transport_metric_status = settlement.status
                         _record_upstream_transport_metric_once(settlement.status)
@@ -2535,13 +2542,20 @@ class _StreamingRetryMixin:
                     )
                     continue
                 except _TerminalStreamError:
-                    health_write_allowed = await _settle_stream_usage_before_pending_penalty(settlement)
-                    if health_write_allowed and settlement.account_health_error:
-                        await proxy._handle_stream_error(
+                    if settlement.settlement_order_required:
+                        await _finalize_terminal_settlement_after_downstream_close(
+                            settlement,
                             account,
-                            _stream_settlement_error_payload(settlement),
-                            settlement.error_code or "upstream_error",
+                            settlement_order_required=True,
                         )
+                    else:
+                        health_write_allowed = await _settle_stream_usage_before_pending_penalty(settlement)
+                        if health_write_allowed and settlement.account_health_error:
+                            await proxy._handle_stream_error(
+                                account,
+                                _stream_settlement_error_payload(settlement),
+                                settlement.error_code or "upstream_error",
+                            )
                     return
                 except ProxyResponseError as exc:
                     if _facade()._is_proxy_budget_exhausted_error(exc):

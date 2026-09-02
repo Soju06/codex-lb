@@ -17,6 +17,7 @@ depends_on = None
 
 _TABLE = "http_bridge_operations"
 _COLUMN = "response_replay_input_turn_count"
+_created_column = False
 
 
 def _columns(bind) -> set[str]:
@@ -27,16 +28,19 @@ def _columns(bind) -> set[str]:
 
 
 def upgrade() -> None:
+    global _created_column
     bind = op.get_bind()
+    _created_column = False
     if not _columns(bind) or _COLUMN in _columns(bind):
         return
     with op.batch_alter_table(_TABLE) as batch_op:
         batch_op.add_column(sa.Column(_COLUMN, sa.Integer(), nullable=False, server_default=sa.text("0")))
+    _created_column = True
 
 
 def downgrade() -> None:
     bind = op.get_bind()
-    if _COLUMN not in _columns(bind):
+    if not _created_column or _COLUMN not in _columns(bind):
         return
     with op.batch_alter_table(_TABLE) as batch_op:
         batch_op.drop_column(_COLUMN)

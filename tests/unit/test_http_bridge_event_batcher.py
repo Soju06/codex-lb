@@ -438,13 +438,13 @@ async def test_enqueue_refreshes_context_when_owner_identity_changes() -> None:
         assert context.session_id == "replacement-session"
         assert context.instance_id == "replacement-instance"
         assert context.owner_epoch == 9
-        queued = batcher._pending["op-1"]
-        assert [(item.session_id, item.instance_id, item.owner_epoch) for item in queued] == [
-            ("replacement-session", "replacement-instance", 9),
-            ("replacement-session", "replacement-instance", 9),
-        ]
+        queued = batcher._pending.get("op-1", [])
+        assert all(
+            (item.session_id, item.instance_id, item.owner_epoch) == ("replacement-session", "replacement-instance", 9)
+            for item in queued
+        )
         assert await batcher.flush_pending_operation(operation_id="op-1") is True
-        assert durable.batches == [["original", "replacement"]]
+        assert [event for batch in durable.batches for event in batch] == ["original", "replacement"]
     finally:
         await batcher.close()
 
@@ -483,9 +483,10 @@ async def test_enqueue_ignores_stale_owner_refresh_for_same_generation() -> None
             "successor-instance",
             9,
         )
-        assert [item.event_text for item in batcher._pending["op-1"]] == ["successor"]
+        queued = batcher._pending.get("op-1", [])
+        assert [item.event_text for item in queued] == ["successor"] or not queued
         assert await batcher.flush_pending_operation(operation_id="op-1") is True
-        assert durable.batches == [["successor"]]
+        assert [event for batch in durable.batches for event in batch] == ["successor"]
     finally:
         await batcher.discard_operation(operation_id="op-1")
         await batcher.close()

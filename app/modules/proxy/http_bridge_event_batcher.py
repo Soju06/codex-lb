@@ -562,8 +562,8 @@ class HttpBridgeOperationEventBatcher:
         async with self._flush_lock:
             async with self._lock:
                 context = self._contexts.get(operation_id)
-                expected_generation = context.recovery_dispatch_count if context is not None else 0
-                if self._operation_generations.get(operation_id, 0) != expected_generation:
+                current_generation = self._operation_generations.get(operation_id, 0)
+                if context is not None and context.recovery_dispatch_count > current_generation:
                     return
                 pending = self._pending.pop(operation_id, [])
                 self._pending_count -= len(pending)

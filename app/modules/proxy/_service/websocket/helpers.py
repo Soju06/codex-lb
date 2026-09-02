@@ -459,6 +459,8 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.response_output_items_by_index = {}
     request_state.response_output_item_added_indexes = set()
     request_state.response_output_item_added_identities = {}
+    request_state.added_tool_call_item_ids = set()
+    request_state.tool_call_manifest_invalid = False
     request_state.response_output_items_event_invalid = False
     request_state.response_output_items_complete = False
     request_state.replay_downstream_response_id = downstream_response_id
@@ -1016,6 +1018,8 @@ def _prepare_websocket_request_state_for_auth_replay(
     request_state.response_output_items_by_index = {}
     request_state.response_output_item_added_indexes = set()
     request_state.response_output_item_added_identities = {}
+    request_state.added_tool_call_item_ids = set()
+    request_state.tool_call_manifest_invalid = False
     request_state.response_output_items_event_invalid = False
     request_state.response_output_items_complete = False
     _clear_websocket_request_error_overrides(request_state)

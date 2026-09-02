@@ -612,6 +612,34 @@ async def test_collect_responses_payload_rejects_done_missing_added_identity_fie
 
 
 @pytest.mark.asyncio
+async def test_collect_responses_payload_rejects_added_item_without_type_identity() -> None:
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks(
+            'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"item_1"}}\n\n',
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"item_1","type":"message"}}\n\n',
+            'data: {"type":"response.completed","response":{"id":"resp_1","output":[]}}\n\n',
+        )
+    )
+
+    body = result.model_dump(mode="json", exclude_none=True)
+    assert body["error"]["code"] == "invalid_output_item"
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_payload_rejects_terminal_output_identity_conflict() -> None:
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks(
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"item_a","type":"message"}}\n\n',
+            'data: {"type":"response.completed","response":{"id":"resp_1",'
+            '"output":[{"id":"item_b","type":"message"}]}}\n\n',
+        )
+    )
+
+    body = result.model_dump(mode="json", exclude_none=True)
+    assert body["error"]["code"] == "invalid_output_item"
+
+
+@pytest.mark.asyncio
 async def test_collect_responses_payload_captures_turn_state_metadata_before_failed_response() -> None:
     captured_headers: dict[str, str] = {}
 
@@ -1355,9 +1383,44 @@ async def test_normalize_public_responses_stream_rejects_added_done_identity_mis
 
 
 @pytest.mark.asyncio
-async def test_normalize_public_responses_stream_preserves_existing_terminal_output() -> None:
-    """G3 inverse: when upstream already includes terminal `output`,
-    the normalizer MUST NOT overwrite it from collected items."""
+async def test_normalize_public_responses_stream_rejects_terminal_output_identity_conflict() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.created","sequence_number":0,'
+                    '"response":{"id":"resp_1","status":"in_progress","output":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.output_item.done","sequence_number":1,"output_index":0,'
+                    '"item":{"id":"item_a","type":"message","role":"assistant",'
+                    '"content":[{"type":"output_text","text":"a"}]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.completed","sequence_number":2,'
+                    '"response":{"id":"resp_1","status":"completed",'
+                    '"output":[{"id":"item_b","type":"message","role":"assistant",'
+                    '"content":[{"type":"output_text","text":"b"}]}]}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    failed = payloads[-1]
+    assert failed is not None
+    assert failed.get("type") == "response.failed"
+    response = failed["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "invalid_output_item"
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_rejects_conflicting_terminal_output() -> None:
+    """A terminal output that disagrees with lifecycle items must fail closed."""
     blocks = [
         block
         async for block in proxy_api_module._normalize_public_responses_stream(
@@ -1382,14 +1445,14 @@ async def test_normalize_public_responses_stream_preserves_existing_terminal_out
     ]
 
     payloads = [proxy_api_module._parse_sse_payload(b) for b in blocks]
-    completed = next(p for p in payloads if p and p.get("type") == "response.completed")
-    response_obj = completed["response"]
-    assert isinstance(response_obj, dict)
-    output = response_obj["output"]
-    assert isinstance(output, list)
-    assert len(output) == 1
-    output_item = cast(dict[str, Any], output[0])
-    assert output_item["id"] == "msg_terminal"
+    failed = payloads[-1]
+    assert failed is not None
+    assert failed.get("type") == "response.failed"
+    response = failed["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "invalid_output_item"
 
 
 @pytest.mark.asyncio

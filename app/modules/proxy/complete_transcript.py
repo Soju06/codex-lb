@@ -59,13 +59,19 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
             if event_type == "response.output_item.added":
                 if output_index in added_indexes or output_index in done_indexes:
                     return None
+                identity = _output_item_identity(item)
+                if not _output_item_identity_is_valid(identity):
+                    return None
                 added_indexes.add(output_index)
-                added_identities[output_index] = _output_item_identity(item)
+                added_identities[output_index] = identity
                 continue
             if output_index in done_indexes:
                 return None
+            done_identity = _output_item_identity(item)
+            if not _output_item_identity_is_valid(done_identity):
+                return None
             if output_index in added_identities and not _output_item_identities_match(
-                added_identities[output_index], _output_item_identity(item)
+                added_identities[output_index], done_identity
             ):
                 return None
             existing = output_items.get(output_index)
@@ -673,6 +679,12 @@ def _output_item_identity(item: Mapping[str, JsonValue]) -> dict[str, str]:
         if isinstance(value, str) and value:
             identity[field] = value
     return identity
+
+
+def _output_item_identity_is_valid(identity: Mapping[str, str]) -> bool:
+    """Require the output-item type discriminator for lifecycle validation."""
+    item_type = identity.get("type")
+    return isinstance(item_type, str) and bool(item_type)
 
 
 def _output_item_identities_match(added: Mapping[str, str], done: Mapping[str, str]) -> bool:

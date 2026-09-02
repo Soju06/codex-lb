@@ -4397,7 +4397,22 @@ class _HTTPBridgeRequestSubmitMixin:
                         proxy_injected=False,
                     )
                     request_state.request_text = retry_text_data
-                await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text_data)
+                retry_send_started = False
+
+                def mark_retry_send_started() -> None:
+                    nonlocal retry_send_started
+                    retry_send_started = True
+
+                try:
+                    await _send_http_bridge_request_text_with_archive_id(
+                        session,
+                        request_state,
+                        retry_text_data,
+                        on_send_started=mark_retry_send_started,
+                    )
+                except BaseException:
+                    request_state.operation_dispatched = request_state.operation_id is not None and retry_send_started
+                    raise
                 request_state.operation_dispatched = request_state.operation_id is not None
             _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = _service_time().monotonic()

@@ -1407,6 +1407,23 @@ def test_materialize_output_items_rejects_done_missing_added_identity_field() ->
     assert materialize_output_items_from_events(events) is None
 
 
+def test_materialize_output_items_rejects_added_item_without_type_identity() -> None:
+    events = [
+        (
+            "event: response.output_item.added\ndata: "
+            '{"type":"response.output_item.added","output_index":0,"item":{"id":"item_1"}}\n\n'
+        ),
+        (
+            "event: response.output_item.done\ndata: "
+            '{"type":"response.output_item.done","output_index":0,"item":{"id":"item_1",'
+            '"type":"message"}}\n\n'
+        ),
+        'event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n',
+    ]
+
+    assert materialize_output_items_from_events(events) is None
+
+
 def test_materialize_output_items_rejects_duplicate_done_indexes() -> None:
     done = (
         "event: response.output_item.done\ndata: "

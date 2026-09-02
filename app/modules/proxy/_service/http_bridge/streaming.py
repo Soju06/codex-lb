@@ -3432,8 +3432,16 @@ class _HTTPBridgeStreamingMixin:
                             "The recovery checkpoint was not proven safe for replay; retry the request.",
                         ),
                     )
-                recovery_session_id = request_state.recovery_attempt_session_id or session.durable_session_id
-                recovery_owner_epoch = request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch
+                recovery_session_id = (
+                    request_state.recovery_attempt_session_id
+                    if request_state.recovery_attempt_session_id is not None
+                    else session.durable_session_id
+                )
+                recovery_owner_epoch = (
+                    request_state.recovery_attempt_owner_epoch
+                    if request_state.recovery_attempt_owner_epoch is not None
+                    else session.durable_owner_epoch
+                )
                 if recovery_session_id is None or recovery_owner_epoch is None:
                     raise ProxyResponseError(
                         502,
@@ -3918,9 +3926,15 @@ class _HTTPBridgeStreamingMixin:
                     logger.warning("Failed to fence HTTP bridge recovery attempt", exc_info=True)
                 if marked:
                     durable_recovery_retry_armed = True
-                    recovery_origin_session_id = request_state.recovery_attempt_session_id or session.durable_session_id
+                    recovery_origin_session_id = (
+                        request_state.recovery_attempt_session_id
+                        if request_state.recovery_attempt_session_id is not None
+                        else session.durable_session_id
+                    )
                     recovery_origin_owner_epoch = (
-                        request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch
+                        request_state.recovery_attempt_owner_epoch
+                        if request_state.recovery_attempt_owner_epoch is not None
+                        else session.durable_owner_epoch
                     )
                     request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint
                     request_state.recovery_attempt_session_id = recovery_origin_session_id
@@ -4096,8 +4110,16 @@ class _HTTPBridgeStreamingMixin:
                 await capture_verified_stale_anchor_circuit_generation(session)
                 capture_verified_stale_anchor_quarantine_generation(session)
                 await reset_previous_response_recovery_operation_spool(session, request_state)
-                recovery_origin_session_id = request_state.recovery_attempt_session_id or session.durable_session_id
-                recovery_origin_owner_epoch = request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch
+                recovery_origin_session_id = (
+                    request_state.recovery_attempt_session_id
+                    if request_state.recovery_attempt_session_id is not None
+                    else session.durable_session_id
+                )
+                recovery_origin_owner_epoch = (
+                    request_state.recovery_attempt_owner_epoch
+                    if request_state.recovery_attempt_owner_epoch is not None
+                    else session.durable_owner_epoch
+                )
                 recovery_origin_api_key_id = bridge_session_key.api_key_id
                 recovery_origin_fingerprint = request_state.recovery_attempt_fingerprint
                 recovery_was_already_claimed = request_state.recovery_attempt_claimed
@@ -4162,8 +4184,16 @@ class _HTTPBridgeStreamingMixin:
                 )
                 if retry_injected_input is not None:
                     retry_payload = retry_payload.model_copy(update={"input": retry_injected_input})
-                recovery_origin_session_id = request_state.recovery_attempt_session_id or session.durable_session_id
-                recovery_origin_owner_epoch = request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch
+                recovery_origin_session_id = (
+                    request_state.recovery_attempt_session_id
+                    if request_state.recovery_attempt_session_id is not None
+                    else session.durable_session_id
+                )
+                recovery_origin_owner_epoch = (
+                    request_state.recovery_attempt_owner_epoch
+                    if request_state.recovery_attempt_owner_epoch is not None
+                    else session.durable_owner_epoch
+                )
                 recovery_origin_api_key_id = bridge_session_key.api_key_id
                 recovery_origin_fingerprint = request_state.recovery_attempt_fingerprint
                 recovery_was_already_claimed = request_state.recovery_attempt_claimed

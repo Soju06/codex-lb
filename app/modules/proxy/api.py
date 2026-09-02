@@ -253,7 +253,11 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import required_capability_metadata_values
-from app.modules.proxy.complete_transcript import _output_item_identities_match, _output_item_identity
+from app.modules.proxy.complete_transcript import (
+    _output_item_identities_match,
+    _output_item_identity,
+    _output_item_identity_is_valid,
+)
 from app.modules.proxy.helpers import _openai_error_param, _parse_openai_error, _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.images_observability import (
@@ -8751,6 +8755,11 @@ async def _collect_responses_payload(
         if event_type in ("response.completed", "response.incomplete", "response.queued", "response.in_progress"):
             response = payload.get("response")
             if is_json_mapping(response):
+                terminal_output_valid = _terminal_output_matches_collected_items(response, output_items)
+                if event_type in {"response.completed", "response.incomplete"} and not terminal_output_valid:
+                    contract_violation_kind = contract_violation_kind or "invalid_output_item"
+                    output_lifecycle_invalid = True
+                    continue
                 normalized_response, violation_kind = _normalize_public_response_mapping(response, output_items)
                 if violation_kind is not None:
                     contract_violation_kind = contract_violation_kind or violation_kind
@@ -8808,13 +8817,19 @@ def _collect_output_item_event(
     if event_type == "response.output_item.added":
         if output_index in added_indexes or output_index in done_indexes:
             return False
+        identity = _output_item_identity(item)
+        if not _output_item_identity_is_valid(identity):
+            return False
         added_indexes.add(output_index)
-        added_identities[output_index] = _output_item_identity(item)
+        added_identities[output_index] = identity
     else:
         if output_index in done_indexes:
             return False
+        identity = _output_item_identity(item)
+        if not _output_item_identity_is_valid(identity):
+            return False
         if output_index in added_identities and not _output_item_identities_match(
-            added_identities[output_index], _output_item_identity(item)
+            added_identities[output_index], identity
         ):
             return False
         done_indexes.add(output_index)
@@ -8836,6 +8851,28 @@ def _merge_collected_output_items(
 
     merged["output"] = [item for _, item in sorted(output_items.items())]
     return merged
+
+
+def _terminal_output_matches_collected_items(
+    response: Mapping[str, JsonValue],
+    output_items: Mapping[int, Mapping[str, JsonValue]],
+) -> bool:
+    """Reject a non-empty terminal output that conflicts with lifecycle frames."""
+    if not output_items:
+        return True
+    terminal_output = response.get("output")
+    if not isinstance(terminal_output, list) or not terminal_output:
+        return True
+    output_indexes = sorted(output_items)
+    if output_indexes != list(range(len(output_indexes))) or len(terminal_output) != len(output_items):
+        return False
+    for terminal_item, output_index in zip(terminal_output, output_indexes):
+        if not isinstance(terminal_item, Mapping):
+            return False
+        done_item = output_items[output_index]
+        if _output_item_identity(terminal_item) != _output_item_identity(done_item):
+            return False
+    return True
 
 
 async def _normalize_public_responses_stream(
@@ -8999,6 +9036,20 @@ async def _normalize_public_responses_stream(
         ):
             response_obj = payload.get("response")
             if is_json_mapping(response_obj):
+                if (
+                    output_lifecycle_invalid
+                    or added_output_indexes - done_output_indexes
+                    or not _terminal_output_matches_collected_items(response_obj, output_items)
+                ):
+                    contract_violation_kind = contract_violation_kind or "invalid_output_item"
+                    output_lifecycle_invalid = True
+                    for formatted_payload in _public_response_failed_event_blocks(
+                        "invalid_output_item",
+                        include_created=False,
+                        sequence_number=next_sequence_number,
+                    ):
+                        yield formatted_payload
+                    return
                 existing_output = response_obj.get("output")
                 needs_backfill = not (isinstance(existing_output, list) and existing_output)
                 if needs_backfill and output_items:

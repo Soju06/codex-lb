@@ -90,10 +90,6 @@ def test_build_complete_replay_payload_inserts_prior_assistant_output() -> None:
     assert "previous_response_id" not in parsed
     assert [item["role"] for item in parsed["input"]] == ["user", "assistant", "user"]
     assert all("id" not in item for item in parsed["input"])
-    parsed = json.loads(payload)
-    assert "previous_response_id" not in parsed
-    assert [item["role"] for item in parsed["input"]] == ["user", "assistant", "user"]
-    assert all("id" not in item for item in parsed["input"])
 
 
 def test_build_complete_replay_payload_preserves_latest_output_from_full_history() -> None:

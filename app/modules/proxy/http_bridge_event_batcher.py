@@ -153,6 +153,10 @@ class HttpBridgeOperationEventBatcher:
                         or current_context.owner_epoch != owner_epoch
                     )
                 )
+                if owner_context_changed and owner_epoch <= current_context.owner_epoch:
+                    # Owner epochs are monotonic durable fences. A detached
+                    # predecessor must not rebind a successor's context.
+                    return
                 if owner_context_changed:
                     # All events in one generation must carry the same durable
                     # owner context. Rebind events queued before a handoff so a
@@ -404,6 +408,10 @@ class HttpBridgeOperationEventBatcher:
                         or current_context.owner_epoch != owner_epoch
                     )
                 )
+                if owner_context_changed and owner_epoch <= current_context.owner_epoch:
+                    # A terminal event from a detached predecessor must not
+                    # steal the successor's owner context.
+                    return TerminalOperationEventAppendResult(persisted=False)
                 if owner_context_changed:
                     queued = self._pending.get(operation_id)
                     if queued:

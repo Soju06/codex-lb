@@ -450,6 +450,48 @@ async def test_enqueue_refreshes_context_when_owner_identity_changes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_enqueue_ignores_stale_owner_refresh_for_same_generation() -> None:
+    durable = _OwnerConsistentDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    try:
+        await batcher.enqueue(
+            operation_id="op-1",
+            session_id="successor-session",
+            instance_id="successor-instance",
+            owner_epoch=9,
+            event_text="successor",
+            recovery_dispatch_count=1,
+        )
+        await batcher.enqueue(
+            operation_id="op-1",
+            session_id="predecessor-session",
+            instance_id="predecessor-instance",
+            owner_epoch=8,
+            event_text="stale-predecessor",
+            recovery_dispatch_count=1,
+        )
+
+        context = batcher._contexts["op-1"]
+        assert (context.session_id, context.instance_id, context.owner_epoch) == (
+            "successor-session",
+            "successor-instance",
+            9,
+        )
+        assert [item.event_text for item in batcher._pending["op-1"]] == ["successor"]
+        assert await batcher.flush_pending_operation(operation_id="op-1") is True
+        assert durable.batches == [["successor"]]
+    finally:
+        await batcher.discard_operation(operation_id="op-1")
+        await batcher.close()
+
+
+@pytest.mark.asyncio
 async def test_owner_rebinding_waits_for_inflight_flush_before_rewriting_context() -> None:
     durable = _BlockingBatchAppendDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(
@@ -632,6 +674,49 @@ async def test_terminal_append_refreshes_context_for_same_recovery_generation() 
         assert durable.terminal_kwargs[0]["owner_epoch"] == 9
         assert durable.terminal_kwargs[0]["expected_recovery_dispatch_count"] == 0
     finally:
+        await batcher.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_append_rejects_stale_owner_for_same_generation() -> None:
+    durable = _FakeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    try:
+        await batcher.enqueue(
+            operation_id="op-1",
+            session_id="successor-session",
+            instance_id="successor-instance",
+            owner_epoch=9,
+            event_text="successor",
+            recovery_dispatch_count=1,
+        )
+        result = await batcher.append_terminal_event(
+            operation_id="op-1",
+            session_id="predecessor-session",
+            instance_id="predecessor-instance",
+            owner_epoch=8,
+            event_text="stale-terminal",
+            max_bytes=1024,
+            state="completed",
+            expected_recovery_dispatch_count=1,
+        )
+
+        assert result.persisted is False
+        assert durable.terminal_rows == []
+        context = batcher._contexts["op-1"]
+        assert (context.session_id, context.instance_id, context.owner_epoch) == (
+            "successor-session",
+            "successor-instance",
+            9,
+        )
+    finally:
+        await batcher.discard_operation(operation_id="op-1")
         await batcher.close()
 
 

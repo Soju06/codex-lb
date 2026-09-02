@@ -1254,6 +1254,18 @@ def _record_http_bridge_tool_call_lifecycle(
     if isinstance(event_type, str) and event_type.startswith(_UNSUPPORTED_DURABLE_TOOL_CALL_EVENT_PREFIXES):
         request_state.tool_call_manifest_invalid = True
         return
+    if event_type in {"response.function_call_arguments.delta", "response.output_tool_call.delta"}:
+        # A tool delta without a previously validated output-item lifecycle
+        # is ambiguous: the client may already have observed side effects,
+        # so an unsafe partial retry must not regenerate it.
+        call_id = payload.get("call_id") if isinstance(payload, dict) else None
+        item_id = payload.get("item_id") if isinstance(payload, dict) else None
+        if (
+            (not isinstance(call_id, str) or call_id not in request_state.added_tool_call_types)
+            and (not isinstance(item_id, str) or item_id not in request_state.added_tool_call_item_ids)
+        ):
+            request_state.tool_call_manifest_invalid = True
+        return
     if event_type not in {"response.output_item.added", "response.output_item.done"}:
         return
     item = payload.get("item") if isinstance(payload, dict) else None
@@ -1278,6 +1290,10 @@ def _record_http_bridge_tool_call_lifecycle(
         return
     if item_type in _SAFE_DURABLE_OUTPUT_ITEM_TYPES:
         return
+    if event_type == "response.output_item.added":
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id:
+            request_state.added_tool_call_item_ids.add(item_id)
     call_id = item.get("call_id")
     if not isinstance(call_id, str) or not call_id:
         request_state.tool_call_manifest_invalid = True
@@ -2298,6 +2314,7 @@ async def _try_unsafe_partial_transcript_recovery(
     request_state.pending_function_call_ids = []
     request_state.pending_tool_call_types = {}
     request_state.added_tool_call_types = {}
+    request_state.added_tool_call_item_ids = set()
     request_state.tool_call_manifest_invalid = False
     request_state.response_output_items = []
     request_state.response_output_items_by_index = {}

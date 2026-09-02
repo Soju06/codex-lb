@@ -2206,6 +2206,59 @@ async def test_parked_recovery_claims_unknown_operation_once_concurrently(
     assert {call["operation_id"] for call in claim_calls} == {"op-hard-fence-claim"}
 
 
+@pytest.mark.asyncio
+async def test_parked_recovery_claim_defers_cancellation_until_claim_state_is_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-claim-cancel")
+    session.durable_session_id = "durable-hard-fence-claim-cancel"
+    session.durable_owner_epoch = 3
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_instance_id="instance-1",
+        ),
+    )
+    claim_started = asyncio.Event()
+    release_claim = asyncio.Event()
+
+    async def claim_unknown_operation_for_recovery(**kwargs: object) -> bool:
+        del kwargs
+        claim_started.set()
+        await release_claim.wait()
+        return True
+
+    service._durable_bridge = SimpleNamespace(
+        claim_unknown_operation_for_recovery=claim_unknown_operation_for_recovery,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-claim-cancel",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        operation_id="op-hard-fence-claim-cancel",
+        operation_registered=True,
+        operation_attempt_generation=2,
+    )
+
+    claim_task = asyncio.create_task(
+        service._claim_http_bridge_operation_fenced_continuity_replay(session, request_state)
+    )
+    await claim_started.wait()
+    claim_task.cancel()
+    release_claim.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await claim_task
+    assert request_state.operation_recovery_claimed is True
+    assert request_state.operation_attempt_generation == 3
+
+
 def _make_app_settings(*, bridge_enabled: bool = True, **overrides: Any) -> Settings:
     return Settings(http_responses_session_bridge_enabled=bridge_enabled, **overrides)
 
@@ -5893,6 +5946,55 @@ def test_durable_tool_call_manifest_requires_complete_added_and_done_lifecycle()
             payload=event_payload,
         )
     assert duplicate_done_state.tool_call_manifest_invalid is True
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    ["response.function_call_arguments.delta", "response.output_tool_call.delta"],
+)
+def test_durable_tool_call_manifest_rejects_unvalidated_tool_delta(event_type: str) -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-unvalidated-tool-delta",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+        state,
+        event_type=event_type,
+        payload={"type": event_type, "call_id": "call_unvalidated", "item_id": "item_unvalidated"},
+    )
+
+    assert state.tool_call_manifest_invalid is True
+
+
+def test_durable_tool_call_manifest_accepts_tool_delta_after_added_item() -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-validated-tool-delta",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+    http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+        state,
+        event_type="response.output_item.added",
+        payload={
+            "type": "response.output_item.added",
+            "item": {"id": "item_validated", "type": "function_call", "call_id": "call_validated"},
+        },
+    )
+    http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+        state,
+        event_type="response.function_call_arguments.delta",
+        payload={"type": "response.function_call_arguments.delta", "item_id": "item_validated", "delta": "{}"},
+    )
+
+    assert state.tool_call_manifest_invalid is False
 
 
 def test_durable_tool_call_manifest_rejects_unobserved_terminal_call() -> None:

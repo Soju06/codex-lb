@@ -1205,6 +1205,7 @@ class _WebSocketRequestState:
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)
     added_tool_call_types: dict[str, str] = field(default_factory=dict)
+    added_tool_call_item_ids: set[str] = field(default_factory=set)
     tool_call_manifest_invalid: bool = False
     # The terminal response output is retained independently of the SSE event
     # spool.  It is the assistant side of the durable replay transcript.

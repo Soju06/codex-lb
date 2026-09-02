@@ -1481,17 +1481,19 @@ class _HTTPBridgeRequestSubmitMixin:
             "fail_closed",
         )
         optional_kwargs = {"max_recovery_dispatches": 1} if recovery_mode == "server_anchored_replay_once" else {}
-        try:
-            claimed = bool(
-                await _call_with_supported_optional_kwargs(
-                    claim_unknown_operation,
-                    optional_kwargs=optional_kwargs,
-                    operation_id=operation_id,
-                    session_id=session.durable_session_id,
-                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                    owner_epoch=session.durable_owner_epoch,
-                )
+        claim_task = asyncio.create_task(
+            _call_with_supported_optional_kwargs(
+                claim_unknown_operation,
+                optional_kwargs=optional_kwargs,
+                operation_id=operation_id,
+                session_id=session.durable_session_id,
+                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                owner_epoch=session.durable_owner_epoch,
             )
+        )
+        try:
+            claimed_value, cancellation = await _await_task_deferring_cancellation(claim_task)
+            claimed = bool(claimed_value)
         except Exception:
             logger.warning(
                 "Failed to claim hard-continuity operation before parked recovery operation_id=%s",
@@ -1500,9 +1502,13 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             return False
         if not claimed:
+            if cancellation is not None:
+                raise cancellation
             return False
         request_state.operation_recovery_claimed = True
         request_state.operation_attempt_generation = max(0, int(request_state.operation_attempt_generation)) + 1
+        if cancellation is not None:
+            raise cancellation
         return True
 
     async def _submit_http_bridge_request_with_handoff(

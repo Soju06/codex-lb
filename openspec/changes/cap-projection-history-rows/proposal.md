@@ -21,8 +21,13 @@ equal-weight consumer is already protected by the uncapped floor.
 - Size the per-account row cap to the EWMA tail (64 rows) instead of a
   time window at a write cadence: rows older than the uncapped floor feed
   only the count-decaying EWMA consumers (depletion rate, weekly-pace recent
-  burn), whose replay over the tail equals the full replay to floating-point
-  noise whenever the tail spans at least 64 distinct recorded seconds. The
+  burn). The first tail row seeds the EWMA, so the 64-row tail performs 63
+  updates and the pre-tail residual on the rate is at most
+  `0.6**63 * <largest per-second slope>` (~1.1e-12 %/s at the theoretical
+  100 %/s step, far smaller at real slopes); derived fields inherit that
+  residual through their formulas, and the exhaustion ETA (emitted only for
+  a strictly positive rate) may be absent from the tail replay for an
+  account flat at 100% whose full replay still carries a ghost rate. The
   EWMA advances once per distinct integer epoch second, so a same-second
   write burst older than the floor that is never followed by newer rows
   may leave the tail short of that many updates; the bound is stated as a
@@ -58,8 +63,9 @@ equal-weight consumer is already protected by the uncapped floor.
   account's rows older than the uncapped floor to a fixed EWMA tail, MUST
   exempt the wider of the pace-smoothing and fleet-burn windows from the
   cap on every projections fetch, MUST keep floor-covered consumers exact
-  and tail-weighted consumers equivalent within floating-point tolerance
-  whenever the tail spans cap-many distinct recorded seconds, and the
+  and tail-weighted consumers' EWMA rate within the seed-row residual bound
+  whenever the tail spans cap-many distinct recorded seconds (derived
+  fields inherit it; a saturated account's exhaustion ETA MAY be absent), and the
   depletion cache MUST use a fixed-width content signature.
 
 ## Impact
@@ -69,5 +75,7 @@ equal-weight consumer is already protected by the uncapped floor.
 fetch loops), `app/modules/usage/depletion_service.py` (content signature),
 unit and PostgreSQL regression coverage. Dashboard values are unchanged
 (equal-weight consumers exact; EWMA-derived fields equal to within
-floating-point noise) — no API, response-schema, setting, migration, or
+floating-point noise, except that an account flat at 100% whose full replay
+carried only a ghost rate now reports no exhaustion ETA instead of an
+immediate one — fields the dashboard UI does not read) — no API, response-schema, setting, migration, or
 dashboard UI change.

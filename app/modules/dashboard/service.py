@@ -48,16 +48,23 @@ from app.modules.usage.repository import NormalizedUsageWindow
 # fingerprint moves, so one busy account's 7-day window can hold tens of
 # thousands of rows while the consumers only read the recent tail. Rows
 # older than the equal-weight floor below feed only count-decaying EWMAs
-# (depletion rate, weekly-pace recent burn; alpha 0.4): a sample's weight
-# after ``n`` newer EWMA updates is ``0.6**n``, which is below double
-# precision (``0.6**64`` ~ 6e-15) past this many updates, so the tail
-# reproduces the full-window replay to within floating-point noise whenever
-# it spans at least this many distinct recorded seconds. The EWMA advances
-# once per distinct integer epoch second (``ewma_update`` skips a sample
-# whose ``naive_utc_to_epoch`` equals the previous one), so rows written
-# faster than one per second share an update: a tail packed into fewer
-# distinct seconds than the cap — a same-second write burst older than the
-# floor with no newer rows to decay it — may diverge from the full replay.
+# (depletion rate, weekly-pace recent burn; alpha 0.4). The first tail row
+# only seeds the EWMA, so a cap-row tail performs cap-1 updates and the
+# pre-tail state's residual on the replayed rate is at most
+# ``0.6**(cap-1)`` times the largest per-second sample slope: below
+# ~1.1e-12 %/s even at the theoretical 100 %/s step, and far below that at
+# real slopes, so the tail reproduces the full-window replay to
+# floating-point noise on the rate. Fields derived from the rate inherit
+# that residual scaled by their formulas (burn rate multiplies it by
+# seconds-until-reset over remaining percent), and the exhaustion ETA,
+# which is emitted only for a strictly positive rate, may be absent from
+# the tail replay when the full replay still carries a ghost rate below
+# the residual (an account flat at 100%). The EWMA advances once per
+# distinct integer epoch second (``ewma_update`` skips a sample whose
+# ``naive_utc_to_epoch`` equals the previous one), so rows written faster
+# than one per second share an update: a tail packed into fewer distinct
+# seconds than the cap — a same-second write burst older than the floor
+# with no newer rows to decay it — may diverge from the full replay.
 # Every equal-weight consumer is protected by the floor instead.
 _PROJECTION_EWMA_TAIL_ROWS = 64
 

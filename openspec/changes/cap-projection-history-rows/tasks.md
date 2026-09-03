@@ -6,9 +6,11 @@
 - [x] 1.2 Exempt an uncapped recent floor from the cap (disjoint floor +
       capped-tail branches in the lateral probe) so a per-request write burst
       can never truncate an equal-weight consumer window.
-- [x] 1.3 Size the cap to the EWMA tail (64 rows; `0.6**64` is below double
-      precision after 64 EWMA updates, one per distinct recorded second)
-      instead of a time window at an assumed write cadence, and
+- [x] 1.3 Size the cap to the EWMA tail (64 rows; the first row seeds the
+      EWMA so the tail performs 63 updates, one per distinct recorded
+      second, leaving a pre-tail residual of at most `0.6**63` times the
+      largest per-second slope, ~1e-12 %/s worst case) instead of a time
+      window at an assumed write cadence, and
       derive the floor as the wider of the configured pace-smoothing window
       and the 3-hour fleet-burn window on both projections fetches
       (weekly-only accounts sourced from the primary stream feed the weekly
@@ -39,6 +41,10 @@
       tail); a tail spanning 64 distinct recorded seconds matches within
       1e-12 however many rows share each second while a 64-row tail packed
       into fewer distinct seconds is the documented divergence boundary;
+      a zero-to-high step followed by 64 flat one-per-second rows pins the
+      seed-row residual (`0.6**63` times the step slope) and a saturated
+      account pins the ghost-rate exhaustion-ETA divergence (risk and burn
+      rate identical);
       weekly pace over a 7-day per-minute history equals the
       tail-bounded history within 1e-12; the content signature is stable
       for identical rows and changes for any corrected field including

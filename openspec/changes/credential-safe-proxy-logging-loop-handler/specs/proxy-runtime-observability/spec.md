@@ -17,7 +17,7 @@ diagnostic is lost.
 - **GIVEN** an aiohttp connection is finalized without release and its connection key holds a credentialed proxy URL
 - **WHEN** the loop exception handler receives `Unclosed connection` with the connection object in its context
 - **THEN** the `asyncio` log record already contains `proxy=URL('scheme://[REDACTED]@host:port')`
-- **AND** the password appears nowhere in the record, independent of the formatter in use
+- **AND** the password appears nowhere in the record, independent of the formatter in use, including passwords carrying sub-delims such as `'` that yarl leaves unencoded
 
 #### Scenario: Unretrieved task exception repr is redacted
 

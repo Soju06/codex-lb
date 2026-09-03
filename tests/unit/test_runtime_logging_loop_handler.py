@@ -21,9 +21,17 @@ _PROXY_AUTHORITY = "183.110.26.193:6014"
 
 
 class _LeakyConnection:
+    password = "SECRETPW"
+
     def __repr__(self) -> str:
-        proxy_url = runtime_basic_auth_url("smart-user", "SECRETPW", _PROXY_AUTHORITY)
+        proxy_url = runtime_basic_auth_url("smart-user", self.password, _PROXY_AUTHORITY)
         return f"Connection<ConnectionKey(host='chatgpt.com', port=443, proxy=URL('{proxy_url}'), proxy_auth=None)>"
+
+
+class _ApostropheLeakyConnection(_LeakyConnection):
+    # yarl leaves the RFC 3986 sub-delim ' unencoded in userinfo, so this is
+    # the exact repr aiohttp produces for such a password.
+    password = "S'ECRETPW"
 
 
 class _ExplodingRepr:
@@ -77,6 +85,17 @@ def test_handler_redacts_credentialed_context_reprs(loop, asyncio_log) -> None:
     assert message.startswith("Unclosed connection\nclient_connection: Connection<ConnectionKey(")
     assert "SECRETPW" not in message
     assert f"[REDACTED]@{_PROXY_AUTHORITY}" in message
+
+
+def test_handler_redacts_apostrophe_password_in_context_repr(loop, asyncio_log) -> None:
+    install_redacting_loop_exception_handler(loop)
+
+    loop.call_exception_handler({"message": "Unclosed connection", "client_connection": _ApostropheLeakyConnection()})
+
+    (message,) = asyncio_log.messages
+    assert "S'ECRETPW" not in message
+    assert "ECRETPW" not in message
+    assert f"proxy=URL('http://[REDACTED]@{_PROXY_AUTHORITY}')" in message
 
 
 def test_handler_keeps_secret_free_context_byte_identical(loop, asyncio_log) -> None:

@@ -25,6 +25,7 @@ from app.core.balancer import (
 )
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
+from app.db.snapshot import clone_row
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy._load_balancer.types import (
     MAX_SELECTION_ATTEMPTS,
@@ -1845,5 +1846,4 @@ def _best_health_tier_states(states: list[AccountState]) -> list[AccountState]:
 
 
 def _clone_account(account: Account) -> Account:
-    data = {column.name: getattr(account, column.name) for column in Account.__table__.columns}
-    return Account(**data)
+    return clone_row(account)

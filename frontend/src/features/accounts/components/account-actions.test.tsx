@@ -65,6 +65,66 @@ describe("AccountActions", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("does not offer resume for re-auth required accounts", () => {
+    // The reactivate endpoint refuses this status, so a resume control here
+    // would only ever produce a conflict.
+    const account = createAccountSummary({ status: "reauth_required" });
+
+    render(
+      <AccountActions
+        account={account}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onResetCredit={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+  });
+
+  it("resumes a deactivated account alongside re-authentication", async () => {
+    const user = userEvent.setup();
+    const onResume = vi.fn();
+    const account = createAccountSummary({
+      accountId: "acc_deactivated",
+      status: "deactivated",
+    });
+
+    render(
+      <AccountActions
+        account={account}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={onResume}
+        onProbe={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onResetCredit={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    // Both recoveries stay available: resume clears a stale deactivation,
+    // re-authentication replaces credentials that are actually gone.
+    expect(
+      screen.getByRole("button", { name: "Re-authenticate" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Resume" }));
+    expect(onResume).toHaveBeenCalledWith("acc_deactivated");
+  });
+
   it("fires the per-account probe callback for active accounts", async () => {
     const user = userEvent.setup();
     const account = createAccountSummary();

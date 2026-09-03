@@ -54,7 +54,7 @@ from app.core.openai.requests import (
     ResponsesRequest,
 )
 from app.core.resilience.overload import is_local_overload_error_code
-from app.core.types import JsonValue
+from app.core.types import JsonObject, JsonValue
 from app.core.utils.request_id import (
     ensure_request_id,
     ensure_request_scope_id,
@@ -687,6 +687,9 @@ class _HTTPBridgeRequestSubmitMixin:
         enforce_openai_sdk_contract: bool = True,
         preserve_responses_lite_client_metadata: bool = False,
     ) -> tuple[_WebSocketRequestState, str]:
+        # One dump feeds client-metadata derivation, the frame and the usage
+        # budget; ``to_payload`` is deterministic so sharing it is exact.
+        base_payload = payload.to_payload()
         request_state, text_data = self._prepare_response_bridge_request_state(
             payload,
             api_key=api_key,
@@ -695,7 +698,7 @@ class _HTTPBridgeRequestSubmitMixin:
             attach_event_queue=True,
             transport=_REQUEST_TRANSPORT_HTTP,
             client_metadata=_response_create_client_metadata(
-                payload.to_payload(),
+                base_payload,
                 headers=headers,
                 preserve_existing_responses_lite=preserve_responses_lite_client_metadata,
             ),
@@ -703,6 +706,7 @@ class _HTTPBridgeRequestSubmitMixin:
             session_id=_owner_lookup_session_id_from_headers(headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            upstream_payload_base=base_payload,
         )
         (
             request_state.useragent,
@@ -727,6 +731,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_id: str | None = None,
         request_log_id: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        upstream_payload_base: JsonObject | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
         deduped_replayed_input_count: int | None = None
         deduped_replayed_input_fingerprint: str | None = None
@@ -741,12 +746,19 @@ class _HTTPBridgeRequestSubmitMixin:
                 deduped_replayed_input_count = len(replayed_input_items)
                 deduped_replayed_input_fingerprint = _fingerprint_input_items(replayed_input_items)
                 payload = payload.model_copy(update={"input": deduped_input_items})
+                # The caller's dump describes the un-deduped input; it must not
+                # become the forwarded frame or the budget base.
+                upstream_payload_base = None
         protected_agent_control_output_occurrences = (
             _historical_agent_control_output_occurrences(cast(list[JsonValue], payload.input))
             if isinstance(payload.input, list)
             else {}
         )
-        upstream_payload = dict(payload.to_payload())
+        if upstream_payload_base is None:
+            upstream_payload_base = payload.to_payload()
+        # Shallow copy: every mutation below rebinds top-level keys only, so
+        # ``upstream_payload_base`` stays the pristine dump for the budget.
+        upstream_payload = dict(upstream_payload_base)
         upstream_payload.pop("stream", None)
         upstream_payload.pop("background", None)
         if include_type_field:
@@ -792,7 +804,7 @@ class _HTTPBridgeRequestSubmitMixin:
             transport=transport,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             api_key=api_key,
-            request_usage_budget=estimate_api_key_request_usage(payload),
+            request_usage_budget=estimate_api_key_request_usage(payload, upstream_payload=upstream_payload_base),
             previous_response_id=payload.previous_response_id,
             session_id=_normalize_session_id(session_id),
             hard_continuity_anchor=(

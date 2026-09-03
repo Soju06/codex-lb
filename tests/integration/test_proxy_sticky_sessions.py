@@ -844,6 +844,9 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         seen.append(account_id)
+        assert payload.model == "gpt-5.6-sol"
+        assert payload.reasoning is not None
+        assert payload.reasoning.effort == "xhigh"
         if account_id == acc_a.id:
             event = {
                 "type": "response.failed",
@@ -858,7 +861,8 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
     payload = {
-        "model": "gpt-5.1",
+        "model": "gpt-5.6-sol",
+        "reasoning": {"effort": "xhigh"},
         "instructions": "hi",
         "input": [],
         "stream": True,

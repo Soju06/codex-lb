@@ -2282,8 +2282,9 @@ def _state_from_account(
         effective_secondary_entry,
         secondary_entry,
     )
+    quota_primary_used = _health_tier_primary_used(plan_type=account.plan_type, primary_used=primary_used)
     quota_available = usage_windows_allow_recovery(
-        primary_used, secondary_used, credits_has, credits_unlimited, credits_balance
+        quota_primary_used, secondary_used, credits_has, credits_unlimited, credits_balance
     )
 
     # If the usage window has reset (reset_at is in the past), the last

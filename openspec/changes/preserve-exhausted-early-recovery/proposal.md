@@ -11,8 +11,6 @@ therefore reactivate the account and send a sticky session back to it.
   can clear an unexpired upstream rate-limit block through early recovery.
 - Preserve the existing expiry, credit override, and active-account routing
   contracts; do not turn advisory usage into new account blocks.
-- Keep the Docker entrypoint LF-normalized so images built from a Windows
-  checkout remain executable on Linux.
 - Cover primary and long-window exhaustion plus repeated sticky HTTP requests.
 
 ## Impact

@@ -27,3 +27,10 @@ advisory usage routing or existing credit-backed recovery behavior.
 - **GIVEN** the marking replica's retry backoff has elapsed
 - **WHEN** all applicable known windows have available quota and the required post-block sample is fresh
 - **THEN** the existing early-recovery path remains available
+
+#### Scenario: Non-applicable primary rows do not prevent recovery
+
+- **GIVEN** a plan has no primary-window capacity and retains a synthetic primary usage row at 100%
+- **AND** the marking replica's retry backoff has elapsed
+- **WHEN** fresh post-block usage shows available quota in the applicable long window
+- **THEN** the non-applicable primary row SHALL NOT prevent the existing early-recovery path

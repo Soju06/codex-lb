@@ -2906,11 +2906,11 @@ def test_state_from_account_zero_capacity_recovery_respects_recent_blocked_at_fl
     assert state.reset_at == pytest.approx(blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS)
 
 
-def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_block_usage(monkeypatch):
-    # The marking replica's early-recovery gate is unchanged: once its local
-    # cooldown elapsed and a usage snapshot recorded after the block shows
-    # quota, the zero-primary recovery may proceed before the persisted
-    # deadline.
+@pytest.mark.parametrize("primary_used", [None, 100.0], ids=["missing-primary", "synthetic-exhausted-primary"])
+def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_block_usage(monkeypatch, primary_used):
+    # Once the local cooldown elapsed, fresh applicable quota may recover the
+    # marking replica early. A synthetic primary row must not block a plan
+    # with zero primary-window capacity.
     now = 1_700_000_000.0
     blocked_at = now - 10.0
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
@@ -2933,7 +2933,17 @@ def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_blo
 
     state = _state_from_account(
         account=account,
-        primary_entry=None,
+        primary_entry=(
+            _make_test_usage(
+                window="primary",
+                used_percent=primary_used,
+                reset_at=int(now + 3600),
+                recorded_at=_epoch_to_naive_utc(now - 2),
+                window_minutes=43200,
+            )
+            if primary_used is not None
+            else None
+        ),
         secondary_entry=monthly_entry,
         runtime=RuntimeState(cooldown_until=now - 1, blocked_at=blocked_at),
     )
@@ -3459,7 +3469,8 @@ def test_state_from_account_fresh_exhausted_usage_keeps_unexpired_rate_limit(mon
     assert state.blocked_at == blocked
 
 
-def test_state_from_account_rate_limited_clears_with_fresh_primary(monkeypatch):
+@pytest.mark.parametrize("secondary_used,credits_balance", [(None, None), (10.0, None), (100.0, 25.0)])
+def test_state_from_account_rate_limited_clears_with_fresh_primary(monkeypatch, secondary_used, credits_balance):
     now = 1_700_000_000.0
     blocked = now - 130.0
     future_reset = int(now + 3600)
@@ -3472,6 +3483,7 @@ def test_state_from_account_rate_limited_clears_with_fresh_primary(monkeypatch):
         used_percent=10.0,
         reset_at=future_reset,
         recorded_at=_epoch_to_naive_utc(now - 10),
+        credits_balance=credits_balance,
     )
 
     runtime = RuntimeState()
@@ -3481,7 +3493,16 @@ def test_state_from_account_rate_limited_clears_with_fresh_primary(monkeypatch):
     state = _state_from_account(
         account=account,
         primary_entry=fresh_primary,
-        secondary_entry=None,
+        secondary_entry=(
+            _make_test_usage(
+                window="secondary",
+                used_percent=secondary_used,
+                reset_at=int(now + 5 * 24 * 3600),
+                recorded_at=_epoch_to_naive_utc(now - 10),
+            )
+            if secondary_used is not None
+            else None
+        ),
         runtime=runtime,
     )
     assert state.status == AccountStatus.ACTIVE

@@ -61,11 +61,13 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ssl-keyfile", default=os.getenv("SSL_KEYFILE"))
     parser.add_argument(
         "--timeout-keep-alive",
-        default=os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "7200"),
+        default=os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "300"),
         help=(
-            "Seconds to keep idle HTTP connections open. Codex CLI reuses local "
-            "connections for large compact POSTs; short keepalive windows can leave the "
-            "client writing to a stale socket before the request reaches the app."
+            "Seconds an idle keep-alive HTTP connection stays open. Must exceed the "
+            "client's connection-pool idle timeout (Codex CLI/reqwest: 90s) so a pooled "
+            "connection is never reused at the moment the server closes it — that race "
+            "leaves the client writing a non-retryable POST into a stale socket. Every "
+            "idle connection is held for the full window, so keep it well under an hour."
         ),
     )
     parser.add_argument(

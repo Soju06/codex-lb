@@ -35,7 +35,7 @@ def test_main_passes_timestamped_log_config(monkeypatch):
     formatters = log_config["formatters"]
     assert formatters["default"]["fmt"].startswith("%(asctime)s ")
     assert formatters["access"]["fmt"].startswith("%(asctime)s ")
-    assert kwargs["timeout_keep_alive"] == 7200
+    assert kwargs["timeout_keep_alive"] == 300
     assert kwargs["ws_max_size"] == 128 * 1024 * 1024
     assert "workers" not in kwargs
     assert kwargs["proxy_headers"] is False

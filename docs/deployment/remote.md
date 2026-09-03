@@ -25,7 +25,8 @@ CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS=172.18.0.0/16
 Only sources inside the trusted CIDRs may set forwarded headers; everything else is treated as the direct peer address.
 
 - **Optionally delegate dashboard auth** to the proxy with `trusted_header` mode — see [Authentication](../authentication.md).
+- **Leave the idle keep-alive window alone unless a client needs more.** codex-lb closes idle client connections after 300 s (`--timeout-keep-alive` / `UVICORN_TIMEOUT_KEEP_ALIVE`, process environment only). The value must stay above the connection-pool idle timeout of your proxy and clients (Codex CLI: 90 s) so a pooled connection is never reused at the moment the server closes it; raising it into hours only holds idle sockets longer.
 
 ---
 
-*Specs: [deployment-networking](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-networking) · [api-firewall](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/api-firewall)*
+*Specs: [deployment-networking](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-networking) · [api-firewall](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/api-firewall) · [http-ingress-limits](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/http-ingress-limits)*

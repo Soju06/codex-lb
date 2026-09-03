@@ -1879,10 +1879,33 @@ The Accounts page SHALL support account import, untargeted OAuth account
 addition, and targeted OAuth reauthentication. Reauthentication MUST preserve
 separate local seats that share one workspace `chatgpt_account_id`.
 
+The account import flow SHALL allow one or more `auth.json` files to be selected
+at once. It MUST import the selected files sequentially in selection order by
+sending each file through one existing `POST /api/accounts/import` request, so
+the server's single-file multipart contract and resource limits remain
+unchanged. The dialog SHALL close and clear its selection only after every file
+succeeds.
+
+If an import fails after earlier files succeeded, the flow MUST stop before
+attempting later files, keep the dialog open, and retain the failed file and all
+unattempted files for retry without retaining already successful files. Every
+successful request MUST continue to refresh the account list.
+
 #### Scenario: Account import
 
-- **WHEN** a user opens the import flow and uploads an auth.json file
-- **THEN** the app calls `POST /api/accounts/import` and refreshes the account list on success
+- **WHEN** a user selects multiple auth.json files and submits the import flow
+- **THEN** the app calls `POST /api/accounts/import` once per file, sequentially in selection order
+- **AND** refreshes the account list after each successful request
+- **AND** closes and clears the import dialog after every selected file succeeds
+
+#### Scenario: Multi-file account import stops on failure
+
+- **GIVEN** a user submits multiple selected auth.json files
+- **AND** at least one earlier file has imported successfully
+- **WHEN** a later file fails to import
+- **THEN** the app does not attempt any files after the failed file
+- **AND** the dialog remains open with the failed and unattempted files retained for retry
+- **AND** files that already succeeded are not retained for retry
 
 #### Scenario: OAuth add account
 
@@ -3347,4 +3370,3 @@ The x-axis tick format of the Account Trend and API Trend charts SHALL be `MM-DD
 
 - **WHEN** the API Trend chart renders with timestamp data
 - **THEN** the x-axis tick labels SHALL be in `MM-DD` format (e.g., `"08-09"`)
-

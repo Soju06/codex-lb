@@ -408,94 +408,33 @@ test("the model source dialogs stay inside supported viewports", async ({ page }
     // Enabling Reasoning reveals the effort fields, which is what pushed the
     // form past the viewport: with the capability off the default form still
     // fits on a desktop viewport. The capability checkboxes are Radix buttons
-    // with no accessible name, so drive the wrapping label instead.
-    await dialog.locator("label", { hasText: /^Reasoning$/ }).click();
-
-    // TEMP DIAGNOSTIC (remove before merge): CI reports the dialog at y=-370
-    // while this passes locally, so dump what the shell actually resolves to.
-    const diagnostic = await dialog.evaluate((element, viewport) => {
-      const style = getComputedStyle(element);
-      const scroller = element.querySelector<HTMLElement>(
-        '[data-testid="model-source-create-scroll-region"]',
-      );
-      return {
-        viewport,
-        innerHeight: window.innerHeight,
-        supportsDvh: CSS.supports("max-height", "calc(100dvh - 2rem)"),
-        dialogClass: element.className,
-        computedMaxHeight: style.maxHeight,
-        computedDisplay: style.display,
-        computedOverflow: style.overflow,
-        dialogHeight: Math.round(element.getBoundingClientRect().height),
-        dialogTop: Math.round(element.getBoundingClientRect().top),
-        scrollerPresent: !!scroller,
-        scrollerOverflowY: scroller ? getComputedStyle(scroller).overflowY : null,
-        scrollerClient: scroller?.clientHeight ?? null,
-        scrollerScroll: scroller?.scrollHeight ?? null,
-        reasoningFieldPresent: !!element.querySelector("#model-source-reasoning-efforts"),
-      };
-    }, size);
-    console.log(`MODEL_SOURCE_DIAGNOSTIC ${JSON.stringify(diagnostic)}`);
-
-    const boxes = {
-      dialog: await dialog.boundingBox(),
-      title: await title.boundingBox(),
-      closeButton: await closeButton.boundingBox(),
-      createButton: await createButton.boundingBox(),
-    };
-    console.log(`MODEL_SOURCE_BOXES ${JSON.stringify(boxes)}`);
-    console.log(
-      `MODEL_SOURCE_COUNTS ${JSON.stringify({
-        dialogs: await dialog.count(),
-        titles: await title.count(),
-        closeButtons: await closeButton.count(),
-        createButtons: await createButton.count(),
-      })}`,
-    );
-    const dom = await page.evaluate(() => {
-      const rect = (el: Element) => {
-        const r = el.getBoundingClientRect();
-        return { y: Math.round(r.top), h: Math.round(r.height), w: Math.round(r.width) };
-      };
-      return {
-        dialogContents: [...document.querySelectorAll('[data-slot="dialog-content"]')].map((el) => ({
-          maxHeight: getComputedStyle(el).maxHeight,
-          heading: el.querySelector("h2")?.textContent ?? null,
-          ...rect(el),
-        })),
-        headings: [...document.querySelectorAll("h2")]
-          .filter((el) => /Create model source/.test(el.textContent || ""))
-          .map((el) => ({ inDialog: !!el.closest('[data-slot="dialog-content"]'), ...rect(el) })),
-        createButtons: [...document.querySelectorAll("button")]
-          .filter((el) => (el.textContent || "").trim() === "Create")
-          .map((el) => ({ inDialog: !!el.closest('[data-slot="dialog-content"]'), ...rect(el) })),
-      };
-    });
-    console.log(`MODEL_SOURCE_DOM ${JSON.stringify(dom)}`);
+    // with no accessible name, so drive the wrapping label instead. The draft
+    // survives closing the dialog, so toggle only when it is actually off.
+    const reasoningToggle = dialog.locator("label", { hasText: /^Reasoning$/ });
+    const reasoningCheckbox = reasoningToggle.locator('[role="checkbox"]');
+    if ((await reasoningCheckbox.getAttribute("data-state")) !== "checked") {
+      await reasoningToggle.click();
+    }
+    await expect(reasoningCheckbox).toHaveAttribute("data-state", "checked");
+    await expect(dialog.locator("#model-source-reasoning-efforts")).toBeVisible();
 
     // The regression this covers: the dialog rendered taller than the viewport
-    // with no scroll container, so the submit button was unreachable.
+    // with no scroll container, so the submit button was unreachable. These are
+    // retrying assertions on purpose — the dialog opens with a zoom/fade
+    // animation and the Reasoning toggle relayouts it, so a single
+    // boundingBox() read can catch mid-animation geometry.
     for (const element of [dialog, title, closeButton, createButton]) {
-      const box = await element.boundingBox();
-      expect(box).not.toBeNull();
-      if (!box) {
-        throw new Error("Expected dialog element to have a bounding box");
-      }
-      expect(box.x).toBeGreaterThanOrEqual(0);
-      expect(box.y).toBeGreaterThanOrEqual(0);
-      expect(box.x + box.width).toBeLessThanOrEqual(size.width);
-      expect(box.y + box.height).toBeLessThanOrEqual(size.height);
+      await expect(element).toBeInViewport({ ratio: 1 });
     }
 
     const scrollRegion = dialog.getByTestId("model-source-create-scroll-region");
     await expect(scrollRegion).toHaveCount(1);
-    const scrollState = await scrollRegion.evaluate((element) => ({
-      clientHeight: element.clientHeight,
-      overflowY: getComputedStyle(element).overflowY,
-      scrollHeight: element.scrollHeight,
-    }));
-    expect(scrollState.overflowY).toBe("auto");
-    expect(scrollState.scrollHeight).toBeGreaterThan(scrollState.clientHeight);
+    await expect(scrollRegion).toHaveCSS("overflow-y", "auto");
+    await expect
+      .poll(async () =>
+        scrollRegion.evaluate((element) => element.scrollHeight - element.clientHeight),
+      )
+      .toBeGreaterThan(0);
 
     // The numeric and capability inputs carry no accessible name, so prove
     // reachability through the scroller itself: the end of the content must be
@@ -514,9 +453,9 @@ test("the model source dialogs stay inside supported viewports", async ({ page }
     );
 
     // Scrolling the body must not carry the header or footer out of view.
-    await expect(title).toBeInViewport();
-    await expect(closeButton).toBeInViewport();
-    await expect(createButton).toBeInViewport();
+    await expect(title).toBeInViewport({ ratio: 1 });
+    await expect(closeButton).toBeInViewport({ ratio: 1 });
+    await expect(createButton).toBeInViewport({ ratio: 1 });
 
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();

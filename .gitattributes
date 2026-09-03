@@ -1,1 +1,2 @@
 frontend/bun.nix linguist-generated=true
+scripts/docker-entrypoint.sh text eol=lf

@@ -127,3 +127,24 @@ def _has_usable_credits(
         return float(credits_balance) > 0.0
     except (TypeError, ValueError):
         return False
+
+
+def usage_windows_allow_recovery(
+    primary_used: float | None,
+    secondary_used: float | None,
+    credits_has: bool | None,
+    credits_unlimited: bool | None,
+    credits_balance: float | None,
+) -> bool:
+    """Return whether every known applicable quota window has capacity."""
+    primary_available = primary_used is None or primary_used < 100.0
+    secondary_available = (
+        secondary_used is None
+        or secondary_used < 100.0
+        or _has_usable_credits(
+            credits_has=credits_has,
+            credits_unlimited=credits_unlimited,
+            credits_balance=credits_balance,
+        )
+    )
+    return primary_available and secondary_available and (primary_used is not None or secondary_used is not None)

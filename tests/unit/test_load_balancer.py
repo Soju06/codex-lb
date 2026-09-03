@@ -3422,6 +3422,43 @@ def test_state_from_account_rate_limited_checks_primary_freshness(monkeypatch):
     assert state.status == AccountStatus.RATE_LIMITED
 
 
+@pytest.mark.parametrize("primary_used,secondary_used", [(10.0, 100.0), (100.0, 10.0), (100.0, 100.0)])
+def test_state_from_account_fresh_exhausted_usage_keeps_unexpired_rate_limit(monkeypatch, primary_used, secondary_used):
+    now = 1_700_000_000.0
+    blocked = now - 130.0
+    future_reset = int(now + 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=future_reset,
+        blocked_at=int(blocked),
+    )
+    primary = _make_test_usage(
+        window="primary",
+        used_percent=primary_used,
+        reset_at=future_reset,
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+    secondary = _make_test_usage(
+        window="secondary",
+        used_percent=secondary_used,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=primary,
+        secondary_entry=secondary,
+        runtime=RuntimeState(cooldown_until=now - 1, blocked_at=blocked),
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == future_reset
+    assert state.blocked_at == blocked
+
+
 def test_state_from_account_rate_limited_clears_with_fresh_primary(monkeypatch):
     now = 1_700_000_000.0
     blocked = now - 130.0

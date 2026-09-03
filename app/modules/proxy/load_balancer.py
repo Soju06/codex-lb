@@ -59,7 +59,7 @@ from app.core.plan_types import account_plan_matches_allowed, normalize_account_
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
-from app.core.usage.quota import apply_usage_quota
+from app.core.usage.quota import apply_usage_quota, usage_windows_allow_recovery
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.proxy._load_balancer.model_eligibility import (
@@ -2282,6 +2282,9 @@ def _state_from_account(
         effective_secondary_entry,
         secondary_entry,
     )
+    quota_available = usage_windows_allow_recovery(
+        primary_used, secondary_used, credits_has, credits_unlimited, credits_balance
+    )
 
     # If the usage window has reset (reset_at is in the past), the last
     # recorded sample describes an expired window at ANY used percentage:
@@ -2356,10 +2359,8 @@ def _state_from_account(
                 primary_entry=primary_entry,
                 long_window_entry=effective_secondary_entry,
             )
-            if early_freshness_entry is not None and early_freshness_entry.recorded_at is not None:
-                recorded_epoch = early_freshness_entry.recorded_at.replace(tzinfo=timezone.utc).timestamp()
-                if recorded_epoch > effective_blocked_at:
-                    rate_limited_cooldown_deadline = None
+            if quota_available and _usage_entry_recorded_after_block(early_freshness_entry, effective_blocked_at):
+                rate_limited_cooldown_deadline = None
 
     if usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0 and (
         account.status != AccountStatus.RATE_LIMITED
@@ -2474,10 +2475,9 @@ def _state_from_account(
             )
         else:
             freshness_entry = None
-        if freshness_entry and freshness_entry.recorded_at is not None:
-            recorded_epoch = freshness_entry.recorded_at.replace(tzinfo=timezone.utc).timestamp()
-            if recorded_epoch > effective_blocked_at:
-                effective_runtime_reset = None
+        recovery_quota_available = account.status != AccountStatus.RATE_LIMITED or quota_available
+        if recovery_quota_available and _usage_entry_recorded_after_block(freshness_entry, effective_blocked_at):
+            effective_runtime_reset = None
 
     rejected_reset_recovery_evidence = False
     if rejected_persisted_rate_limit_reset:

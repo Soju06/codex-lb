@@ -55,6 +55,68 @@ docker compose -f docker-compose.prod.yml up -d
 
 For PostgreSQL profiles and the Postgres 16 → 18 upgrade runbook, see [Database](../database.md).
 
+## Blue/green deployment with HAProxy
+
+The opt-in HA Compose topology keeps HAProxy bound to public port `2455` while `server-blue` and
+`server-green` alternate behind it. A healthy rollout starts and checks the inactive slot before
+HAProxy sends it new connections, then drains and stops the previous slot. The stock Compose files
+above remain the simpler single-replica option.
+
+This topology has multi-replica prerequisites. Before bootstrapping it:
+
+- Set `CODEX_LB_DATABASE_URL` in `.env.local` to one shared PostgreSQL database. SQLite is rejected.
+- Keep leader election enabled; omit `CODEX_LB_LEADER_ELECTION_ENABLED` or set it to `true`.
+- Keep the encryption key in the shared `codex-lb-data` volume. The default
+  `/var/lib/codex-lb/encryption.key` does this automatically.
+- Back up the database and `codex-lb-data` volume, and use expand/contract database migrations that
+  remain compatible while the old and new application versions overlap.
+
+From the repository root, migrate an existing stock Compose deployment once:
+
+```bash
+./scripts/deploy-compose-ha.sh bootstrap
+```
+
+The command builds the blue slot before stopping the stock server. Rebinding port `2455` from the
+stock container to HAProxy causes one short interruption during this initial topology migration.
+If HAProxy fails its public readiness check, the script restarts the previous stock server. Later
+healthy blue/green deployments do not have that port-binding gap:
+
+```bash
+./scripts/deploy-compose-ha.sh deploy
+./scripts/deploy-compose-ha.sh status
+```
+
+For Codex-driven operations, the repository includes the implicitly discoverable
+`$codex-lb-ha-deploy` skill. After this one-time bootstrap, a request such as “deploy the current
+changes” automatically uses the command above, waits for drain completion, and verifies the active
+slot plus public readiness. The skill does not commit or push code. On an uninitialized host it asks
+for acknowledgement before bootstrap because the initial public-port rebind is not downtime-free.
+
+The default HAProxy drain window is 300 seconds. Pass a positive number of seconds as the second
+argument to `bootstrap`, `deploy`, or `rollback` when a different bound is required. During the
+visible drain window, a second terminal can return traffic to the still-healthy predecessor:
+
+```bash
+./scripts/deploy-compose-ha.sh rollback 300
+```
+
+Rollback is no longer available after the predecessor has drained and stopped; deploy the desired
+revision as the next rollout instead. Deployment commands are serialized, and configuration,
+candidate readiness, runtime cutover, and public readiness failures leave or restore the previous
+active slot.
+
+Here, “zero downtime” means continuous admission of new HTTP, SSE, and WebSocket connections during
+a healthy application cutover. Connections already assigned to the old slot can be terminated when
+the configured HAProxy drain bound and the application's bounded SIGTERM drain expire. The Docker
+host, Docker daemon, and single HAProxy container remain one front-door failure domain; use the Helm
+multi-replica deployment across failure domains when host-level availability is required.
+
+Port `1455` is intentionally not proxied because the OAuth callback listener is opened temporarily
+inside one application process. Add accounts before migrating, or perform account onboarding in a
+planned maintenance window with port `1455` published directly to the active slot. Never publish
+both backend application ports during normal HA operation.
+
 ## Auth mode examples
 
 **Authelia / trusted header**
@@ -84,4 +146,4 @@ For Helm, pass the same values through `extraEnv`. What these modes mean and whe
 
 ---
 
-*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [deployment-networking](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-networking)*
+*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [deployment-networking](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-networking) · [replica-operations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/replica-operations)*

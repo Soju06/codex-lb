@@ -4,6 +4,28 @@
 
 Define the supported multi-replica deployment topology contract: what an operator must provision (shared PostgreSQL, leader election, bridge ring identity, shared encryption key) and how startup guardrails, settings concurrency control, and metrics semantics behave across replicas.
 ## Requirements
+
+### Requirement: Blue/green overlap satisfies multi-replica invariants
+
+The HAProxy blue/green Compose workflow MUST refuse to start an overlapping candidate unless both slots use a shared PostgreSQL database, identical shared encryption-key material, unique stable bridge instance identifiers, and distinct replica-specific bridge advertise URLs reachable between slots. Leader election MUST remain enabled during overlap. Both slots MUST use the project-owned graceful-drain launcher and MUST NOT publish their application ports on the host.
+
+#### Scenario: SQLite configuration is rejected
+
+- **WHEN** the HA deployment command resolves an absent, SQLite, or otherwise non-PostgreSQL database URL
+- **THEN** it exits before starting a second application slot
+- **AND** the active deployment remains unchanged
+
+#### Scenario: Replica identity is deterministic and unique
+
+- **WHEN** blue and green overlap
+- **THEN** each slot has its own stable bridge instance ID and matching replica-specific advertise URL
+- **AND** both share the same encryption-key volume and database
+
+#### Scenario: Leader election is explicitly disabled
+
+- **WHEN** the HA deployment environment disables leader election
+- **THEN** deployment exits before starting a second slot
+- **AND** reports that leader election is required for overlapping replicas
 ### Requirement: Multi-replica deployments require shared PostgreSQL coordination
 
 Running more than one application replica SHALL require: a shared PostgreSQL database through which all cross-replica coordination flows (`scheduler_leader` lease, `bridge_ring_members`, `http_bridge_sessions`, `cache_invalidation`, `sticky_sessions`, `runtime_sentinels`); leader election enabled (`CODEX_LB_LEADER_ELECTION_ENABLED`, which defaults to `true`) so singleton schedulers run on exactly one replica; a unique instance id and a reachable replica-specific advertise URL per replica for bridge owner forwarding; and identical encryption key material mounted on every replica. Explicitly setting `CODEX_LB_LEADER_ELECTION_ENABLED=false` is the single-instance escape hatch that makes every replica treat itself as leader and MUST NOT be used with more than one replica.
@@ -328,4 +350,3 @@ seat mismatch, identity conflict, and unexpected errors).
   durable `error` write that the monotonic guard rejects
 - **THEN** the loser reports the durable `success` (not an error) and does not
   leave the local flow in `error`
-

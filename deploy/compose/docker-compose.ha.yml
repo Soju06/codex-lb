@@ -1,0 +1,101 @@
+# Opt-in single-host blue/green topology for application rollouts.
+# The stock Compose files intentionally remain single-replica.
+x-codex-lb-server: &codex-lb-server
+  image: codex-lb-ha:${CODEX_LB_HA_IMAGE_TAG:-local}
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  env_file:
+    - ../../.env.local
+  expose:
+    - "2455"
+  command:
+    - python
+    - -m
+    - app.cli
+    - --host
+    - 0.0.0.0
+    - --port
+    - "2455"
+    - --ws-max-size
+    - "134217728"
+  volumes:
+    - codex-lb-data:/var/lib/codex-lb
+  healthcheck:
+    test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://localhost:2455/health/ready')
+    interval: 5s
+    timeout: 3s
+    retries: 12
+    start_period: 30s
+  stop_grace_period: 75s
+  restart: unless-stopped
+  deploy:
+    resources:
+      limits:
+        memory: 1G
+      reservations:
+        memory: 256M
+
+services:
+  haproxy:
+    image: haproxy:3.2-alpine@sha256:6343ce34a132a5dceaa24767d739df2bd519f8f7c1079ae39e4821334e8eb42e
+    ports:
+      - "2455:2455"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ../../.codex-lb-ha:/var/lib/haproxy:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "3", "-O", "/dev/null", "http://127.0.0.1:2455/health/ready"]
+      interval: 5s
+      timeout: 4s
+      retries: 6
+    restart: unless-stopped
+    networks:
+      ha-edge:
+        ipv4_address: 172.31.245.254
+
+  server-blue:
+    <<: *codex-lb-server
+    environment:
+      FORWARDED_ALLOW_IPS: 172.31.245.254
+      CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS: "true"
+      CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS: 172.31.245.254/32
+      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID: server-blue
+      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: server-blue,server-green
+      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL: http://server-blue:2455
+    networks:
+      ha-edge: {}
+      data: {}
+
+  server-green:
+    <<: *codex-lb-server
+    environment:
+      FORWARDED_ALLOW_IPS: 172.31.245.254
+      CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS: "true"
+      CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS: 172.31.245.254/32
+      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID: server-green
+      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: server-blue,server-green
+      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL: http://server-green:2455
+    networks:
+      ha-edge: {}
+      data: {}
+
+networks:
+  ha-edge:
+    name: codex-lb-ha-edge
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.245.0/24
+  data:
+    name: ${CODEX_LB_HA_NETWORK:-codex-lb_default}
+    external: true
+
+volumes:
+  codex-lb-data:
+    name: codex-lb-data
+    external: true

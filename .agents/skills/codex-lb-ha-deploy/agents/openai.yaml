@@ -1,0 +1,7 @@
+interface:
+  display_name: "codex-lb HA Deploy"
+  short_description: "Blue/green HAProxy deployment for codex-lb"
+  default_prompt: "Use $codex-lb-ha-deploy to deploy the current codex-lb changes through the HAProxy blue/green workflow."
+
+policy:
+  allow_implicit_invocation: true

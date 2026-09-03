@@ -150,6 +150,36 @@ input and is passed through unchanged.
 For example, a TCP peer at `10.0.0.8` may project client `192.168.65.1` and
 scheme `https`; raw-peer authorization still evaluates `10.0.0.8`.
 
+## Opt-in single-host HAProxy rollout
+
+`deploy/compose/docker-compose.ha.yml` is deliberately separate from the stock Compose path. The
+stock files keep their zero-config single-replica contract, while the HA topology pays the
+operational cost of two named application slots only for operators who already provide shared
+PostgreSQL and multi-replica-safe key material. HAProxy owns public port `2455`; its runtime control
+listener and both application ports remain private.
+
+The host-side `scripts/deploy-compose-ha.sh` avoids a persistent Docker-socket controller. It
+serializes commands, performs direct and public readiness checks, changes HAProxy server state in
+ready-before-drain order, and snapshots that state for proxy restart. A one-time bootstrap must
+rebind the public port from stock Compose to HAProxy and therefore has a short interruption. Later
+healthy blue/green cutovers continuously admit new connections. Long-lived connections still have
+a finite drain bound, and the host plus HAProxy remain a single failure domain.
+
+The inactive slot has static HAProxy weight zero. Candidate activation therefore uses an absolute
+positive runtime weight (`weight 1`) before assigning the predecessor weight zero. A percentage
+such as `100%` would remain zero because HAProxy evaluates it against the candidate's static
+zero-weight baseline, temporarily leaving the backend with no eligible server.
+
+OAuth callback port `1455` is excluded because the callback listener exists temporarily inside one
+application process. Account onboarding is therefore completed before bootstrap or handled in a
+maintenance window by publishing `1455` directly to the active slot.
+
+The repository-owned `$codex-lb-ha-deploy` skill makes the tested script the default path for later
+Codex-operated deployments on an initialized Compose host. Agent instructions intentionally contain
+no duplicate HAProxy mutation logic: they inspect status, invoke the script, wait through drain, and
+verify the resulting slot and public readiness. A deploy request does not implicitly authorize
+source-control changes, rollback, or the one-time bootstrap interruption.
+
 ## NEXT-RELEASE QUEUE (do not lose)
 
 Work queued for the release after the one that shipped the

@@ -12,9 +12,9 @@ polled several times a minute while a tab is open, each row hydrated
 through SQLAlchemy `Row` attribute access and hashed field-by-field with
 `blake2b(repr(...))` for the depletion cache signature. That work is ~5% of
 the single worker core's GIL time and buys nothing the response can show:
-with alpha 0.4 a sample's EWMA weight after `n` newer samples is `0.6**n`,
-below double precision past a few dozen rows, and every equal-weight
-consumer is already protected by the uncapped floor.
+with alpha 0.4 a sample's EWMA weight after `n` newer EWMA updates is
+`0.6**n`, below double precision past a few dozen updates, and every
+equal-weight consumer is already protected by the uncapped floor.
 
 ## What Changes
 
@@ -22,7 +22,11 @@ consumer is already protected by the uncapped floor.
   time window at a write cadence: rows older than the uncapped floor feed
   only the count-decaying EWMA consumers (depletion rate, weekly-pace recent
   burn), whose replay over the tail equals the full replay to floating-point
-  noise regardless of write density.
+  noise whenever the tail spans at least 64 distinct recorded seconds. The
+  EWMA advances once per distinct integer epoch second, so a same-second
+  write burst older than the floor that is never followed by newer rows
+  may leave the tail short of that many updates; the bound is stated as a
+  distinct-second guarantee rather than a per-row one.
 - Widen the uncapped recent floor to the wider of the configured
   pace-smoothing window and the fixed 3-hour fleet-burn window, so every
   equal-weight consumer (smoothing mean, fleet burn sum/span, latest row)
@@ -54,8 +58,9 @@ consumer is already protected by the uncapped floor.
   account's rows older than the uncapped floor to a fixed EWMA tail, MUST
   exempt the wider of the pace-smoothing and fleet-burn windows from the
   cap on every projections fetch, MUST keep floor-covered consumers exact
-  and tail-weighted consumers equivalent within floating-point tolerance,
-  and the depletion cache MUST use a fixed-width content signature.
+  and tail-weighted consumers equivalent within floating-point tolerance
+  whenever the tail spans cap-many distinct recorded seconds, and the
+  depletion cache MUST use a fixed-width content signature.
 
 ## Impact
 

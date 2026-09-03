@@ -613,10 +613,11 @@ def _dense_history(
 @pytest.mark.parametrize("reset_drop_at", [None, 20])
 def test_depletion_over_ewma_tail_matches_full_history_replay(reset_drop_at: int | None) -> None:
     """The dashboard fetch caps rows older than the equal-weight floor to the
-    newest 64: with alpha 0.4 a sample's weight after 64 newer samples is
-    0.6**64 ~ 6e-15, so the tail replay must reproduce the full replay to
-    floating-point noise. A usage drop (window reset) inside the tail
-    discards all earlier state, so those cases must match exactly."""
+    newest 64: with alpha 0.4 a sample's weight after 64 newer EWMA updates
+    is 0.6**64 ~ 6e-15, so at this per-minute cadence (one update per row)
+    the tail replay must reproduce the full replay to floating-point noise.
+    A usage drop (window reset) inside the tail discards all earlier state,
+    so those cases must match exactly."""
     from app.modules.dashboard.service import _PROJECTION_EWMA_TAIL_ROWS
 
     start = BASE_TIME - timedelta(minutes=5000)
@@ -646,6 +647,67 @@ def test_depletion_over_ewma_tail_matches_full_history_replay(reset_drop_at: int
     assert tail_result.risk == pytest.approx(full_result.risk, abs=1e-12, rel=1e-12)
     assert full_result.seconds_until_exhaustion is not None
     assert tail_result.seconds_until_exhaustion == pytest.approx(full_result.seconds_until_exhaustion, rel=1e-12)
+
+
+def _burst_history(rows_per_second: int, *, seconds: int, reset_at: int, end: datetime) -> list[_FakeEntry]:
+    """48h of sparse rows followed by ``seconds`` recorded seconds each
+    holding ``rows_per_second`` fingerprint-changing rows, ending at ``end``."""
+    burst_start = end - timedelta(seconds=seconds)
+    rows: list[_FakeEntry] = []
+    used = 1.0
+    for index in range(288):
+        used += 0.01
+        recorded_at = burst_start - timedelta(minutes=10 * (288 - index))
+        rows.append(_entry(round(used, 6), recorded_at, reset_at=reset_at, window_minutes=10080))
+    for second in range(seconds):
+        for slot in range(rows_per_second):
+            used += 0.01 + 0.003 * ((second * 31 + slot * 7) % 5)
+            recorded_at = burst_start + timedelta(seconds=second, microseconds=(slot * 1_000_000) // rows_per_second)
+            rows.append(_entry(round(used, 6), recorded_at, reset_at=reset_at, window_minutes=10080))
+    return rows
+
+
+@pytest.mark.parametrize("rows_per_second", [1, 3, 8])
+def test_depletion_ewma_tail_guarantee_counts_distinct_recorded_seconds(rows_per_second: int) -> None:
+    """``ewma_update`` advances once per distinct integer epoch second
+    (``naive_utc_to_epoch`` truncates and ``dt == 0`` keeps the state), so
+    the tail cap's ``0.6**64`` argument counts distinct recorded seconds, not
+    rows. A tail spanning 64 distinct seconds must match the full replay
+    within 1e-12 however many rows share each second. A 64-row tail packed
+    into fewer distinct seconds is the documented boundary of the guarantee:
+    it diverges, which is why the spec states the bound per distinct second.
+    The burst is followed by 3h of idleness so nothing newer decays it — the
+    shape the projections fetch hands the depletion EWMA."""
+    from app.modules.dashboard.service import _PROJECTION_EWMA_TAIL_ROWS
+
+    cap = _PROJECTION_EWMA_TAIL_ROWS
+    burst_end = BASE_TIME - timedelta(hours=3)
+    now = BASE_TIME
+    reset_epoch = int((BASE_TIME + timedelta(days=2)).timestamp())
+    full = _burst_history(rows_per_second, seconds=cap, reset_at=reset_epoch, end=burst_end)
+
+    def _depletion(history: list[_FakeEntry]) -> DepletionMetrics | None:
+        reset_ewma_state()
+        return compute_depletion_for_account("acc1", "standard", "secondary", _signed(history), now=now)
+
+    full_result = _depletion(full)
+    assert full_result is not None
+
+    # cap-many distinct seconds, regardless of rows per second: equivalent.
+    by_seconds = _depletion(full[-(cap * rows_per_second) :])
+    assert by_seconds is not None
+    assert by_seconds.rate_per_second == pytest.approx(full_result.rate_per_second, abs=1e-12, rel=1e-12)
+    assert by_seconds.burn_rate == pytest.approx(full_result.burn_rate, abs=1e-12, rel=1e-12)
+    assert by_seconds.risk == pytest.approx(full_result.risk, abs=1e-12, rel=1e-12)
+
+    # cap-many rows: only equivalent when that is also cap-many distinct seconds.
+    by_rows = _depletion(full[-cap:])
+    assert by_rows is not None
+    if rows_per_second == 1:
+        assert by_rows.rate_per_second == pytest.approx(full_result.rate_per_second, abs=1e-12, rel=1e-12)
+        return
+    assert full_result.rate_per_second is not None and by_rows.rate_per_second is not None
+    assert abs(by_rows.rate_per_second - full_result.rate_per_second) > 1e-12 * abs(full_result.rate_per_second)
 
 
 def test_history_signature_content_hash_tracks_row_content() -> None:

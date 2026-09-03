@@ -7,7 +7,8 @@
       capped-tail branches in the lateral probe) so a per-request write burst
       can never truncate an equal-weight consumer window.
 - [x] 1.3 Size the cap to the EWMA tail (64 rows; `0.6**64` is below double
-      precision) instead of a time window at an assumed write cadence, and
+      precision after 64 EWMA updates, one per distinct recorded second)
+      instead of a time window at an assumed write cadence, and
       derive the floor as the wider of the configured pace-smoothing window
       and the 3-hour fleet-burn window on both projections fetches
       (weekly-only accounts sourced from the primary stream feed the weekly
@@ -35,7 +36,10 @@
       primary-source account with and without `include_primary`.
 - [x] 2.4 Unit tests: depletion over a 5000-row history equals the 64-row
       tail replay within 1e-12 (exactly when a reset lands inside the
-      tail); weekly pace over a 7-day per-minute history equals the
+      tail); a tail spanning 64 distinct recorded seconds matches within
+      1e-12 however many rows share each second while a 64-row tail packed
+      into fewer distinct seconds is the documented divergence boundary;
+      weekly pace over a 7-day per-minute history equals the
       tail-bounded history within 1e-12; the content signature is stable
       for identical rows and changes for any corrected field including
       `None` variants.

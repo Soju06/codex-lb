@@ -19,9 +19,13 @@ the floor on every projections bulk fetch, including the primary-window
 fetch (weekly-only accounts sourced from the primary stream feed the weekly
 pace from it). The cap MUST be sized to the tail-weighted consumers' EWMA
 decay rather than to a time window at an assumed write cadence: with the
-EWMA smoothing factor in use, a sample's weight after cap-many newer
-samples MUST be below double precision, so the tail replay reproduces the
-full replay within floating-point tolerance. Returned slices MUST keep the
+EWMA smoothing factor in use, a sample's weight after cap-many newer EWMA
+updates MUST be below double precision. The EWMA advances once per distinct
+recorded second (its epoch resolution), so the tail replay reproduces the
+full replay within floating-point tolerance whenever the returned tail spans
+at least cap-many distinct recorded seconds; a tail packed into fewer
+distinct seconds (a same-second write burst older than the floor) MAY
+diverge from the full replay. Returned slices MUST keep the
 newest in-cutoff rows and MUST remain ordered oldest-first. For accounts
 whose in-cutoff rows do not exceed the cap, the returned histories MUST
 equal the shared-floor fetch after the existing per-account trimming; for
@@ -32,7 +36,8 @@ sample in a fixed time window equally MUST read only rows at or after the
 floor and MUST produce values identical to the uncapped fetch; consumers
 that replay a count-decaying EWMA MAY read the capped tail and MUST
 produce rate-bearing values equal to the uncapped fetch within
-floating-point tolerance (1e-12 relative or absolute).
+floating-point tolerance (1e-12 relative or absolute) whenever the tail
+spans at least cap-many distinct recorded seconds.
 
 #### Scenario: One weekly account does not widen the fetch for short-window accounts
 - **GIVEN** one account with a 7-day window and several accounts with 5-hour windows
@@ -61,9 +66,16 @@ floating-point tolerance (1e-12 relative or absolute).
 
 #### Scenario: EWMA consumers agree with the full replay over the tail
 - **GIVEN** an account with thousands of in-cutoff rows older than the floor
+- **AND** the newest cap-many of those rows span at least cap-many distinct recorded seconds
 - **WHEN** depletion or the weekly-pace recent burn rate is computed from the capped fetch and from the uncapped fetch
 - **THEN** the rate-bearing results MUST agree within 1e-12 (relative or absolute)
 - **AND** when a usage drop or window reset lands inside the returned tail the results MUST be identical
+
+#### Scenario: A same-second write burst older than the floor bounds the tail guarantee
+- **GIVEN** an account whose newest rows older than the floor were written several per recorded second, so the cap-many returned tail rows span fewer distinct recorded seconds than the cap
+- **WHEN** depletion is computed from the capped fetch and from the uncapped fetch
+- **THEN** the EWMA replays MAY diverge, because each recorded second contributes one EWMA update regardless of how many rows share it
+- **AND** a tail whose rows span cap-many distinct recorded seconds MUST agree within 1e-12 however many rows share each second
 
 #### Scenario: Capped probes stay index-only
 - **GIVEN** usage history rows for multiple accounts and a populated visibility map

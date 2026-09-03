@@ -455,7 +455,8 @@ def test_weekly_pace_is_unchanged_by_ewma_tail_cap_under_fleet_burn_floor() -> N
     plus only the newest 64 older rows. The equal-weight consumers (fleet
     burn, smoothing mean, latest) read nothing older than the floor, so they
     are exact; the 6h recent-burn EWMA sees a 64-row tail instead of the full
-    3h..6h stretch and must agree to floating-point noise."""
+    3h..6h stretch and must agree to floating-point noise (the per-minute
+    cadence here gives the tail one EWMA update per row)."""
     from app.modules.dashboard.service import _PROJECTION_EWMA_TAIL_ROWS
     from app.modules.dashboard.weekly_pace import FLEET_BURN_WINDOW
 

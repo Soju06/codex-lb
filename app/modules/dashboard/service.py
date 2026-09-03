@@ -49,10 +49,16 @@ from app.modules.usage.repository import NormalizedUsageWindow
 # thousands of rows while the consumers only read the recent tail. Rows
 # older than the equal-weight floor below feed only count-decaying EWMAs
 # (depletion rate, weekly-pace recent burn; alpha 0.4): a sample's weight
-# after ``n`` newer samples is ``0.6**n``, which is below double precision
-# (``0.6**64`` ~ 6e-15) past this many rows, so the tail reproduces the
-# full-window replay to within floating-point noise regardless of write
-# cadence. Every equal-weight consumer is protected by the floor instead.
+# after ``n`` newer EWMA updates is ``0.6**n``, which is below double
+# precision (``0.6**64`` ~ 6e-15) past this many updates, so the tail
+# reproduces the full-window replay to within floating-point noise whenever
+# it spans at least this many distinct recorded seconds. The EWMA advances
+# once per distinct integer epoch second (``ewma_update`` skips a sample
+# whose ``naive_utc_to_epoch`` equals the previous one), so rows written
+# faster than one per second share an update: a tail packed into fewer
+# distinct seconds than the cap — a same-second write burst older than the
+# floor with no newer rows to decay it — may diverge from the full replay.
+# Every equal-weight consumer is protected by the floor instead.
 _PROJECTION_EWMA_TAIL_ROWS = 64
 
 

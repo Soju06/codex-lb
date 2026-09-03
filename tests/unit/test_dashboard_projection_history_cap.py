@@ -66,8 +66,9 @@ def _usage_entry(account_id: str, window: str, window_minutes: int, recorded_at:
 
 def test_projection_tail_cap_is_a_fixed_ewma_tail() -> None:
     # The cap is sized for the count-decaying EWMA consumers (alpha 0.4): a
-    # sample's weight after the cap-many newer samples is below double
-    # precision, so the tail replay equals the full replay to fp noise.
+    # sample's weight after cap-many newer EWMA updates (one per distinct
+    # recorded second) is below double precision, so a tail spanning that
+    # many distinct seconds replays to fp noise of the full replay.
     # Equal-weight consumers are covered by the floor, not the cap.
     assert _PROJECTION_EWMA_TAIL_ROWS == 64
     assert 0.6**_PROJECTION_EWMA_TAIL_ROWS < 1e-14

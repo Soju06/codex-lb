@@ -9,6 +9,7 @@ import pytest
 from aiohttp.client_reqrep import ConnectionKey
 from python_socks import ProxyType
 
+import app.core.clients.codex as codex_module
 from app.core.clients.codex import CodexClient, CodexTransportError, require_route_or_direct_egress_opt_in
 from app.core.clients.native_egress import (
     NativeEgressRequest,
@@ -898,3 +899,37 @@ async def test_socks_websocket_cancel_during_enter_closes_local_session(
     assert session.closed == 1
     assert session.context.exited is False
     assert session.context.owned is False
+
+
+async def test_socks_session_owned_response_releases_before_closing_session() -> None:
+    order: list[str] = []
+
+    async def _noop() -> None:
+        return None
+
+    class _Content:
+        async def iter_chunked(self, size: int):
+            del size
+            yield b"data: first\n\n"
+            yield b"data: second\n\n"
+
+    class _RawResponse:
+        status = 200
+        headers: dict[str, str] = {}
+        content = _Content()
+
+        def release(self) -> Any:
+            order.append("release")
+            return _noop()
+
+    class _Session:
+        async def close(self) -> None:
+            order.append("session_close")
+
+    owned = codex_module._SessionOwnedResponse(_RawResponse(), cast(Any, _Session()))
+
+    async for _ in owned.content.iter_chunked(1024):
+        break
+    await owned.release()
+
+    assert order == ["release", "session_close"]

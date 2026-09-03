@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import App from "@/App";
+import { KEY_DASHBOARD_API_KEY_STORAGE_KEY } from "@/features/key-dashboard/storage";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
@@ -40,10 +41,45 @@ const safeLog = {
   latencyQueueMs: 20,
 };
 
+const safeProfile = {
+  name: "Production client",
+  keyPrefix: "sk-clb-key-dash…",
+  isActive: true,
+  createdAt: "2026-08-01T08:00:00Z",
+  expiresAt: "2027-08-01T08:00:00Z",
+  lastUsedAt: "2026-09-03T11:59:00Z",
+  allowedModels: ["gpt-5.1", "gpt-5.2"],
+  enforcedModel: null,
+  allowedReasoningEfforts: ["low", "medium"],
+  enforcedReasoningEffort: null,
+  enforcedServiceTier: "priority",
+  trafficClass: "foreground",
+  transportPolicyOverride: "always_websocket",
+};
+
+const usagePayload = {
+  request_count: 9,
+  total_tokens: 12_500,
+  cached_input_tokens: 2_500,
+  total_cost_usd: 0.42,
+  limits: [{
+    limit_type: "total_tokens",
+    limit_window: "weekly",
+    max_value: 50_000,
+    current_value: 12_500,
+    remaining_value: 37_500,
+    model_filter: "gpt-5.1",
+    reset_at: "2026-09-10T08:00:00Z",
+    source: "api_key_limit",
+  }],
+  upstream_limits: [],
+  account_pool_usage: null,
+};
+
 describe("API key dashboard integration", () => {
   beforeEach(() => {
     window.history.pushState({}, "", "/key-dashboard");
-    window.localStorage.removeItem(TEST_KEY);
+    window.localStorage.removeItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY);
   });
 
   it("bypasses administrator auth and loads only key-scoped safe data", async () => {
@@ -61,15 +97,13 @@ describe("API key dashboard integration", () => {
         credentials.push(request.credentials);
         usageCalls += 1;
         expect(request.headers.get("Authorization")).toBe(`Bearer ${TEST_KEY}`);
-        return HttpResponse.json({
-          request_count: 9,
-          total_tokens: 12_500,
-          cached_input_tokens: 2_500,
-          total_cost_usd: 0.42,
-          limits: [],
-          upstream_limits: [],
-          account_pool_usage: null,
-        });
+        return HttpResponse.json(usagePayload);
+      }),
+      http.get("/api/key-dashboard/profile", ({ request }) => {
+        seenPaths.push("/api/key-dashboard/profile");
+        credentials.push(request.credentials);
+        expect(request.headers.get("Authorization")).toBe(`Bearer ${TEST_KEY}`);
+        return HttpResponse.json(safeProfile);
       }),
       http.get("/api/key-dashboard/request-logs", ({ request }) => {
         seenPaths.push("/api/key-dashboard/request-logs");
@@ -98,29 +132,80 @@ describe("API key dashboard integration", () => {
     expect(screen.queryByText("User agent")).not.toBeInTheDocument();
     await user.keyboard("{Escape}");
     expect(screen.getByText("12.5K")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Production client" })).toBeInTheDocument();
+    expect(screen.getByText("sk-clb-key-dash…")).toBeInTheDocument();
+    expect(screen.getByText("Usage limits")).toBeInTheDocument();
+    expect(screen.getByText("37.5K remaining")).toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "Account" })).not.toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "API Key" })).not.toBeInTheDocument();
-    expect(seenPaths).toEqual(expect.arrayContaining(["/v1/usage", "/api/key-dashboard/request-logs"]));
+    expect(screen.getByRole("columnheader", { name: "Time" })).toHaveStyle({ width: "136px" });
+    expect(seenPaths).toEqual(expect.arrayContaining([
+      "/api/key-dashboard/profile",
+      "/v1/usage",
+      "/api/key-dashboard/request-logs",
+    ]));
     expect(seenPaths).not.toContain("/api/dashboard-auth/session");
-    expect(credentials).toEqual(["omit", "omit"]);
+    expect(credentials).toHaveLength(3);
+    expect(credentials.every((credential) => credential === "omit")).toBe(true);
     expect(window.location.pathname).toBe("/key-dashboard");
     expect(window.location.search).toBe("");
-    expect(Object.values(window.localStorage)).not.toContain(TEST_KEY);
+    expect(window.localStorage.getItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY)).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(usageCalls).toBe(2));
     await user.click(screen.getByRole("button", { name: "Next page" }));
     await waitFor(() => expect(logOffsets).toEqual(["0", "0", "25"]));
-    expect(credentials).toEqual(["omit", "omit", "omit", "omit", "omit", "omit"]);
+    expect(credentials).toHaveLength(9);
+    expect(credentials.every((credential) => credential === "omit")).toBe(true);
     expect(window.location.search).toBe("");
 
     await user.click(screen.getByRole("button", { name: "Disconnect" }));
     expect(await screen.findByRole("heading", { name: "View your API key usage" })).toBeInTheDocument();
     expect(screen.getByLabelText("API key")).toHaveValue("");
+    expect(window.localStorage.getItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY)).toBeNull();
+  });
+
+  it("remembers a valid key only after opt-in and restores it on the next mount", async () => {
+    let profileCalls = 0;
+    server.use(
+      http.get("/api/key-dashboard/profile", ({ request }) => {
+        profileCalls += 1;
+        expect(request.headers.get("Authorization")).toBe(`Bearer ${TEST_KEY}`);
+        return HttpResponse.json(safeProfile);
+      }),
+      http.get("/v1/usage", () => HttpResponse.json(usagePayload)),
+      http.get("/api/key-dashboard/request-logs", () =>
+        HttpResponse.json({ requests: [safeLog], total: 1, hasMore: false }),
+      ),
+    );
+    const user = userEvent.setup();
+    const firstRender = renderWithProviders(<App />);
+
+    await user.click(await screen.findByRole("checkbox", { name: /Remember on this browser/ }));
+    await user.type(screen.getByLabelText("API key"), TEST_KEY);
+    await user.click(screen.getByRole("button", { name: "Open dashboard" }));
+
+    expect(await screen.findByRole("heading", { name: "Production client" })).toBeInTheDocument();
+    expect(window.localStorage.getItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY)).toBe(TEST_KEY);
+
+    firstRender.unmount();
+    renderWithProviders(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Production client" })).toBeInTheDocument();
+    await waitFor(() => expect(profileCalls).toBe(2));
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+    expect(window.localStorage.getItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY)).toBeNull();
   });
 
   it("returns to key entry with an independent invalid-key error", async () => {
+    window.localStorage.setItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY, TEST_KEY);
     server.use(
+      http.get("/api/key-dashboard/profile", () =>
+        HttpResponse.json(
+          { error: { code: "invalid_api_key", message: "Invalid API key" } },
+          { status: 401 },
+        ),
+      ),
       http.get("/v1/usage", () =>
         HttpResponse.json(
           { error: { code: "invalid_api_key", message: "Invalid API key" } },
@@ -134,13 +219,10 @@ describe("API key dashboard integration", () => {
         ),
       ),
     );
-    const user = userEvent.setup();
     renderWithProviders(<App />);
-
-    await user.type(await screen.findByLabelText("API key"), TEST_KEY);
-    await user.click(screen.getByRole("button", { name: "Open dashboard" }));
 
     expect(await screen.findByText("This API key is invalid, inactive, or expired.")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("API key")).toHaveValue(""));
+    expect(window.localStorage.getItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY)).toBeNull();
   });
 });

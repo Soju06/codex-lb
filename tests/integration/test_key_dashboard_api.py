@@ -64,12 +64,92 @@ _EXPECTED_LOG_FIELDS = {
     "latencyQueueMs",
 }
 
+_EXPECTED_PROFILE_FIELDS = {
+    "name",
+    "keyPrefix",
+    "isActive",
+    "createdAt",
+    "expiresAt",
+    "lastUsedAt",
+    "allowedModels",
+    "enforcedModel",
+    "allowedReasoningEfforts",
+    "enforcedReasoningEffort",
+    "enforcedServiceTier",
+    "trafficClass",
+    "transportPolicyOverride",
+}
+
 
 async def _create_api_key(name: str) -> ApiKeyCreatedData:
     async with SessionLocal() as session:
         return await ApiKeysService(ApiKeysRepository(session)).create_key(
             ApiKeyCreateData(name=name, allowed_models=None, limits=[])
         )
+
+
+@pytest.mark.asyncio
+async def test_key_dashboard_profile_is_authenticated_and_strictly_allowlisted(
+    async_client,
+    db_setup,
+):
+    del db_setup
+    expires_at = utcnow() + timedelta(days=30)
+    async with SessionLocal() as session:
+        created = await ApiKeysService(ApiKeysRepository(session)).create_key(
+            ApiKeyCreateData(
+                name="profile-dashboard-key",
+                allowed_models=["gpt-5.1", "gpt-5.2"],
+                allowed_reasoning_efforts=["low", "medium"],
+                enforced_service_tier="priority",
+                traffic_class="opportunistic",
+                transport_policy_override="always_websocket",
+                expires_at=expires_at,
+                limits=[],
+            )
+        )
+
+    missing = await async_client.get("/api/key-dashboard/profile")
+    invalid = await async_client.get(
+        "/api/key-dashboard/profile",
+        headers={"Authorization": "Bearer sk-clb-not-a-real-key"},
+    )
+    response = await async_client.get(
+        "/api/key-dashboard/profile",
+        headers={"Authorization": f"Bearer {created.key}"},
+    )
+
+    assert missing.status_code == 401
+    assert invalid.status_code == 401
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == _EXPECTED_PROFILE_FIELDS
+    assert payload == {
+        "name": "profile-dashboard-key",
+        "keyPrefix": f"{created.key_prefix}…",
+        "isActive": True,
+        "createdAt": created.created_at.isoformat() + "Z",
+        "expiresAt": expires_at.isoformat() + "Z",
+        "lastUsedAt": None,
+        "allowedModels": ["gpt-5.1", "gpt-5.2"],
+        "enforcedModel": None,
+        "allowedReasoningEfforts": ["low", "medium"],
+        "enforcedReasoningEffort": None,
+        "enforcedServiceTier": "priority",
+        "trafficClass": "opportunistic",
+        "transportPolicyOverride": "always_websocket",
+    }
+    serialized = response.text
+    assert created.key not in serialized
+    assert created.id not in serialized
+    for forbidden in (
+        "keyHash",
+        "assignedAccountIds",
+        "assignedSourceIds",
+        "pooledCredits",
+        "usageSections",
+    ):
+        assert forbidden not in payload
 
 
 async def _seed_log(*, api_key_id: str, request_id: str, requested_at, deleted_at=None) -> None:
@@ -144,23 +224,23 @@ async def test_key_dashboard_request_logs_requires_valid_key_even_when_proxy_aut
 
 
 @pytest.mark.asyncio
-async def test_key_dashboard_request_logs_rejects_inactive_key(async_client, db_setup):
+async def test_key_dashboard_endpoints_reject_inactive_key(async_client, db_setup):
     del db_setup
     created = await _create_api_key("inactive-dashboard-key")
     async with SessionLocal() as session:
         await session.execute(update(ApiKey).where(ApiKey.id == created.id).values(is_active=False))
         await session.commit()
 
-    response = await async_client.get(
-        "/api/key-dashboard/request-logs",
-        headers={"Authorization": f"Bearer {created.key}"},
-    )
-
-    assert response.status_code == 401
+    for path in ("/api/key-dashboard/profile", "/api/key-dashboard/request-logs"):
+        response = await async_client.get(
+            path,
+            headers={"Authorization": f"Bearer {created.key}"},
+        )
+        assert response.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_key_dashboard_request_logs_rejects_expired_key(async_client, db_setup):
+async def test_key_dashboard_endpoints_reject_expired_key(async_client, db_setup):
     del db_setup
     created = await _create_api_key("expired-dashboard-key")
     async with SessionLocal() as session:
@@ -171,12 +251,12 @@ async def test_key_dashboard_request_logs_rejects_expired_key(async_client, db_s
         )
         await session.commit()
 
-    response = await async_client.get(
-        "/api/key-dashboard/request-logs",
-        headers={"Authorization": f"Bearer {created.key}"},
-    )
-
-    assert response.status_code == 401
+    for path in ("/api/key-dashboard/profile", "/api/key-dashboard/request-logs"):
+        response = await async_client.get(
+            path,
+            headers={"Authorization": f"Bearer {created.key}"},
+        )
+        assert response.status_code == 401
 
 
 @pytest.mark.asyncio

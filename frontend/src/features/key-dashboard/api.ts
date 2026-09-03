@@ -1,7 +1,9 @@
 import { get } from "@/lib/api-client";
 import {
+  KeyDashboardProfileSchema,
   KeyDashboardRequestLogsResponseSchema,
   KeyUsageSchema,
+  type KeyDashboardProfile,
   type KeyDashboardRequestLogsResponse,
   type KeyUsage,
 } from "@/features/key-dashboard/schemas";
@@ -17,6 +19,14 @@ function keyRequestOptions(apiKey: string) {
 
 export function getKeyUsage(apiKey: string): Promise<KeyUsage> {
   return get("/v1/usage", KeyUsageSchema, keyRequestOptions(apiKey));
+}
+
+export function getKeyDashboardProfile(apiKey: string): Promise<KeyDashboardProfile> {
+  return get(
+    "/api/key-dashboard/profile",
+    KeyDashboardProfileSchema,
+    keyRequestOptions(apiKey),
+  );
 }
 
 export function getKeyDashboardRequestLogs(
@@ -36,10 +46,15 @@ export async function getKeyDashboardData(
   apiKey: string,
   limit: number,
   offset: number,
-): Promise<{ usage: KeyUsage; logs: KeyDashboardRequestLogsResponse }> {
-  const [usage, logs] = await Promise.all([
+): Promise<{
+  profile: KeyDashboardProfile;
+  usage: KeyUsage;
+  logs: KeyDashboardRequestLogsResponse;
+}> {
+  const [profile, usage, logs] = await Promise.all([
+    getKeyDashboardProfile(apiKey),
     getKeyUsage(apiKey),
     getKeyDashboardRequestLogs(apiKey, limit, offset),
   ]);
-  return { usage, logs };
+  return { profile, usage, logs };
 }

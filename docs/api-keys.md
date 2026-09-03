@@ -29,9 +29,9 @@ Keys can also be scoped to specific accounts, so a key draws quota only from the
 
 ## Self-service key dashboard
 
-Open `/key-dashboard` and enter an active API key to view that key's lifetime request, token, cached-token, and cost totals together with its latest request logs. This page does not require the administrator dashboard password.
+Open `/key-dashboard` and enter an active API key to view that key's name and masked prefix, lifecycle and policy details, configured usage limits, lifetime request/token/cost totals, and latest request logs. This page does not require the administrator dashboard password.
 
-The key is sent only as a Bearer header and is kept in the current tab's memory; it is cleared when you disconnect or reload the page. The request grid intentionally omits account identity, account plan, API key identity, client metadata, conversation/archive identifiers, routing identifiers, and detailed failure text.
+The key is sent only as a Bearer header and stays in the current tab's memory by default. Enable **Remember on this browser** to store it in browser-local storage after successful authentication; use this only on a trusted device. Disconnecting or an invalid-key response removes the stored credential. The page intentionally omits the raw key, key database ID/hash, account/source assignments, pooled account data, client metadata, conversation/archive identifiers, routing identifiers, and detailed failure text.
 
 ## Reasoning effort policies
 

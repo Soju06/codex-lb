@@ -1,10 +1,29 @@
-# API Key Dashboard Specification
+## ADDED Requirements
 
-## Purpose
+### Requirement: Privacy-safe API key profile
 
-Provide API key holders with a privacy-safe self-service dashboard for their own lifetime usage and recent requests without granting access to the password-protected operator dashboard.
+The system SHALL expose `GET /api/key-dashboard/profile` using the same mandatory Bearer API key validation as the other self-service endpoints. The response MUST use a dedicated allowlist schema and MAY contain the key name, masked stored prefix, active state, creation/expiration/last-use timestamps, allowed and enforced model settings, allowed and enforced reasoning settings, enforced service tier, traffic class, and transport policy override.
 
-## Requirements
+The response MUST NOT contain the raw key, key hash, key database identifier, account or source assignments, pooled account usage, usage-section configuration, or internal routing identifiers.
+
+#### Scenario: Return details for the authenticated key
+
+- **WHEN** an active, unexpired API key requests its profile
+- **THEN** the endpoint returns only metadata and policy belonging to that validated key
+- **AND** no input parameter can select another key
+
+#### Scenario: Exclude secrets and assignments
+
+- **WHEN** a key profile is returned
+- **THEN** the response contains neither the raw key nor its hash or database identifier
+- **AND** the response contains no account assignment, source assignment, pooled usage, or internal routing data
+
+#### Scenario: Reject an invalid profile credential
+
+- **WHEN** a missing, unknown, inactive, or expired API key requests the profile
+- **THEN** the endpoint returns 401 using the key-dashboard error format
+
+## MODIFIED Requirements
 
 ### Requirement: Standalone API key dashboard authentication
 
@@ -50,55 +69,6 @@ The client MUST NOT place the raw API key in a URL, query-cache key, or log mess
 - **GIVEN** `api_key_auth_enabled` is false
 - **WHEN** a user requests key-dashboard data
 - **THEN** a valid Bearer API key is still required
-
-### Requirement: Privacy-safe API key profile
-
-The system SHALL expose `GET /api/key-dashboard/profile` using the same mandatory Bearer API key validation as the other self-service endpoints. The response MUST use a dedicated allowlist schema and MAY contain the key name, masked stored prefix, active state, creation/expiration/last-use timestamps, allowed and enforced model settings, allowed and enforced reasoning settings, enforced service tier, traffic class, and transport policy override.
-
-The response MUST NOT contain the raw key, key hash, key database identifier, account or source assignments, pooled account usage, usage-section configuration, or internal routing identifiers.
-
-#### Scenario: Return details for the authenticated key
-
-- **WHEN** an active, unexpired API key requests its profile
-- **THEN** the endpoint returns only metadata and policy belonging to that validated key
-- **AND** no input parameter can select another key
-
-#### Scenario: Exclude secrets and assignments
-
-- **WHEN** a key profile is returned
-- **THEN** the response contains neither the raw key nor its hash or database identifier
-- **AND** the response contains no account assignment, source assignment, pooled usage, or internal routing data
-
-#### Scenario: Reject an invalid profile credential
-
-- **WHEN** a missing, unknown, inactive, or expired API key requests the profile
-- **THEN** the endpoint returns 401 using the key-dashboard error format
-
-### Requirement: API key scoped recent request logs
-
-The system SHALL expose `GET /api/key-dashboard/request-logs` with `limit` and `offset` pagination. The endpoint MUST derive the API key identifier exclusively from the validated Bearer credential, MUST return only request logs owned by that key, MUST exclude soft-deleted logs, and MUST order results by request time descending with a deterministic newest-first tie break.
-
-The response MUST be defined by a dedicated allowlist schema and MUST NOT contain account identifiers or email, account plan, API key identifier/name/prefix/hash, client IP or user-agent, conversation/archive identifiers, model-source identifiers, upstream-proxy route/pool/endpoint identifiers, or free-form error/failure details. It MAY contain request time and ID, request kind, model and reasoning effort, service tier, transport, normalized status, error code, token/cost totals and breakdown, and latency metrics.
-
-#### Scenario: Return only the authenticated key's logs
-
-- **GIVEN** request logs exist for two different API keys
-- **WHEN** one key calls `GET /api/key-dashboard/request-logs`
-- **THEN** every returned row belongs to the authenticated key
-- **AND** no input parameter can select the other key
-
-#### Scenario: Redact account and API key information
-
-- **WHEN** an authenticated key requests recent logs
-- **THEN** no response object contains an account or API key identity field
-- **AND** no response object contains client, conversation, source, proxy-route, or free-form failure identity/detail fields
-
-#### Scenario: Paginate newest logs
-
-- **GIVEN** the authenticated key has more logs than the requested limit
-- **WHEN** it requests a page with `limit` and `offset`
-- **THEN** the response contains the corresponding newest-first slice
-- **AND** returns `total` and `hasMore` pagination metadata scoped to that key
 
 ### Requirement: API key self-service usage dashboard
 

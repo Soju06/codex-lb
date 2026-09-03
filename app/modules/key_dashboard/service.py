@@ -10,8 +10,10 @@ from app.core.usage.logs import (
     total_tokens_from_log,
 )
 from app.db.models import RequestLog
+from app.modules.api_keys.service import ApiKeyData
 from app.modules.key_dashboard.schemas import (
     KeyDashboardCostBreakdown,
+    KeyDashboardProfile,
     KeyDashboardRequestLog,
     KeyDashboardRequestLogsResponse,
 )
@@ -22,6 +24,24 @@ from app.modules.request_logs.repository import RequestLogsRepository
 class KeyDashboardService:
     def __init__(self, repository: RequestLogsRepository) -> None:
         self._repository = repository
+
+    @staticmethod
+    def get_profile(api_key: ApiKeyData) -> KeyDashboardProfile:
+        return KeyDashboardProfile(
+            name=api_key.name,
+            key_prefix=f"{api_key.key_prefix}…",
+            is_active=api_key.is_active,
+            created_at=api_key.created_at,
+            expires_at=api_key.expires_at,
+            last_used_at=api_key.last_used_at,
+            allowed_models=api_key.allowed_models,
+            enforced_model=api_key.enforced_model,
+            allowed_reasoning_efforts=api_key.allowed_reasoning_efforts,
+            enforced_reasoning_effort=api_key.enforced_reasoning_effort,
+            enforced_service_tier=api_key.enforced_service_tier,
+            traffic_class=api_key.traffic_class,
+            transport_policy_override=api_key.transport_policy_override,
+        )
 
     async def list_recent_requests(
         self,

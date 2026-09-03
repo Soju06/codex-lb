@@ -47,6 +47,7 @@ export type DashboardStat = {
   icon: LucideIcon;
   trend: { value: number }[];
   trendColor: string;
+  accentClassName?: string;
 };
 
 export type DashboardStatComparison = {

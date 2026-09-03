@@ -2,14 +2,41 @@ import { z } from "zod";
 
 import { RequestLogSchema, type RequestLog } from "@/features/dashboard/schemas";
 
+export const KeyUsageLimitSchema = z.strictObject({
+  limit_type: z.string(),
+  limit_window: z.string(),
+  max_value: z.number().int().nonnegative(),
+  current_value: z.number().int().nonnegative(),
+  remaining_value: z.number().int().nonnegative(),
+  model_filter: z.string().nullable(),
+  reset_at: z.iso.datetime({ offset: true }),
+  source: z.string(),
+});
+
 export const KeyUsageSchema = z.object({
   request_count: z.number().int().nonnegative(),
   total_tokens: z.number().int().nonnegative(),
   cached_input_tokens: z.number().int().nonnegative(),
   total_cost_usd: z.number().nonnegative(),
-  limits: z.array(z.unknown()),
+  limits: z.array(KeyUsageLimitSchema),
   upstream_limits: z.array(z.unknown()).optional(),
   account_pool_usage: z.unknown().nullable().optional(),
+});
+
+export const KeyDashboardProfileSchema = z.strictObject({
+  name: z.string(),
+  keyPrefix: z.string(),
+  isActive: z.boolean(),
+  createdAt: z.iso.datetime({ offset: true }),
+  expiresAt: z.iso.datetime({ offset: true }).nullable(),
+  lastUsedAt: z.iso.datetime({ offset: true }).nullable(),
+  allowedModels: z.array(z.string()).nullable(),
+  enforcedModel: z.string().nullable(),
+  allowedReasoningEfforts: z.array(z.string()).nullable(),
+  enforcedReasoningEffort: z.string().nullable(),
+  enforcedServiceTier: z.string().nullable(),
+  trafficClass: z.string(),
+  transportPolicyOverride: z.string().nullable(),
 });
 
 const KeyDashboardCostBreakdownSchema = z.strictObject({
@@ -52,6 +79,8 @@ export const KeyDashboardRequestLogsResponseSchema = z.strictObject({
 });
 
 export type KeyUsage = z.infer<typeof KeyUsageSchema>;
+export type KeyUsageLimit = z.infer<typeof KeyUsageLimitSchema>;
+export type KeyDashboardProfile = z.infer<typeof KeyDashboardProfileSchema>;
 export type KeyDashboardRequestLogsResponse = z.infer<typeof KeyDashboardRequestLogsResponseSchema>;
 
 export function toDashboardRequestLog(

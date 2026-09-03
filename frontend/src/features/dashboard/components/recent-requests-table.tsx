@@ -196,7 +196,7 @@ function RequestLogTableHead({
         "relative text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80",
         className,
       )}
-      style={onWidthChange ? { width: resolvedWidth } : undefined}
+      style={width !== undefined || onWidthChange ? { width: resolvedWidth } : undefined}
     >
       {label}
       {onWidthChange ? (

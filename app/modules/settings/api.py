@@ -19,7 +19,7 @@ from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
-from app.core.clients.http import _build_ssl_context
+from app.core.clients.http import _shared_ssl_context
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -567,7 +567,7 @@ async def _probe_upstream_proxy_endpoint(endpoint) -> int:
             username=endpoint.username,
             password=endpoint.password,
             rdns=endpoint.proxy_url.split(":", 1)[0] == "socks5h",
-            ssl=_build_ssl_context(),
+            ssl=_shared_ssl_context(),
         )
         async with aiohttp.ClientSession(
             connector=connector,

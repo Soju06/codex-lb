@@ -457,9 +457,9 @@ class CodexClient:
 
 
 def create_codex_session(*, max_clients: int = 10) -> Any:
-    from app.core.clients.http import _build_ssl_context
+    from app.core.clients.http import _shared_ssl_context
 
-    connector = aiohttp.TCPConnector(limit=max_clients, ssl=_build_ssl_context())
+    connector = aiohttp.TCPConnector(limit=max_clients, ssl=_shared_ssl_context())
     return aiohttp.ClientSession(
         connector=connector,
         timeout=aiohttp.ClientTimeout(total=None),
@@ -534,7 +534,7 @@ async def _open_ws_via_socks_proxy(url: str, endpoint: ResolvedProxyEndpoint, **
 
 
 def _socks_proxy_connector(endpoint: ResolvedProxyEndpoint) -> ProxyConnector:
-    from app.core.clients.http import _build_ssl_context
+    from app.core.clients.http import _shared_ssl_context
 
     proxy_scheme = endpoint.proxy_url.split(":", 1)[0]
     return ProxyConnector(
@@ -544,7 +544,7 @@ def _socks_proxy_connector(endpoint: ResolvedProxyEndpoint) -> ProxyConnector:
         username=endpoint.username,
         password=endpoint.password,
         rdns=proxy_scheme == "socks5h",
-        ssl=_build_ssl_context(),
+        ssl=_shared_ssl_context(),
     )
 
 

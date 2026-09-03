@@ -1351,10 +1351,9 @@ def _reset_at(reset_at: int | None, reset_after_seconds: int | None, now_epoch: 
     return now_epoch + max(0, int(reset_after_seconds))
 
 
-# The usage endpoint can return 403 for accounts that are still otherwise usable
-# for proxy traffic, so treat it as a refresh failure instead of a permanent
-# account-level deactivation signal.
-_DEACTIVATING_USAGE_STATUS_CODES = {402, 404}
+# Bare HTTP status codes from the usage endpoint are ambiguous and do not prove
+# that an account is permanently unavailable. Only explicit error content may
+# trigger an account-level status change.
 _DEACTIVATING_USAGE_MESSAGE_HINTS = (
     "your openai account has been deactivated",
     "account has been deactivated",
@@ -1362,8 +1361,6 @@ _DEACTIVATING_USAGE_MESSAGE_HINTS = (
 
 
 def _should_deactivate_for_usage_error(exc: UsageFetchError) -> bool:
-    if exc.status_code in _DEACTIVATING_USAGE_STATUS_CODES:
-        return True
     if exc.code in PERMANENT_FAILURE_CODES:
         return True
     lowered = exc.message.lower()

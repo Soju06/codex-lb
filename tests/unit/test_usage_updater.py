@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Collection
 from contextlib import asynccontextmanager
@@ -12,6 +13,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.core.auth.refresh import RefreshError
+from app.core.balancer import account_status_for_permanent_failure
+from app.core.clients import usage as usage_client_module
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
@@ -3186,34 +3189,64 @@ class StubAccountsRepository:
         return (email, chatgpt_account_id, workspace_id) in self.taken_workspace_slots
 
 
+@pytest.mark.parametrize(
+    ("status_code", "error_payload", "expected_message"),
+    [
+        (402, {"message": "Payment Required"}, "Payment Required"),
+        (404, {}, "Usage fetch failed (404)"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_usage_updater_deactivates_on_account_invalid_4xx(monkeypatch) -> None:
+async def test_usage_updater_keeps_account_active_on_bare_402_or_404(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    status_code: int,
+    error_payload: dict[str, Any],
+    expected_message: str,
+) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.clients.usage import UsageFetchError
     from app.core.config.settings import get_settings
 
     get_settings.cache_clear()
 
-    async def stub_fetch_usage_402(**_: Any) -> UsagePayload:
-        raise UsageFetchError(402, "Payment Required")
+    fetch_calls = 0
 
-    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage_402)
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return usage_client_module._usage_payload_or_raise(error_payload, status_code)
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+    routing_unavailable_calls: list[str] = []
+    monkeypatch.setattr(
+        usage_updater_module,
+        "mark_account_routing_unavailable",
+        routing_unavailable_calls.append,
+    )
 
     usage_repo = StubUsageRepository()
     accounts_repo = StubAccountsRepository()
     updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
 
-    acc = _make_account("acc_402", "workspace_402", email="payment@example.com")
+    acc = _make_account(
+        f"acc_{status_code}",
+        f"workspace_{status_code}",
+        email=f"status-{status_code}@example.com",
+    )
     accounts_repo.accounts_by_id[acc.id] = acc
 
-    await updater.refresh_accounts([acc], latest_usage={})
+    with caplog.at_level(logging.WARNING, logger="app.core.clients.usage"):
+        refresh_results = [
+            await updater.refresh_accounts([acc], latest_usage={}),
+            await updater.refresh_accounts([acc], latest_usage={}),
+        ]
 
-    assert len(accounts_repo.status_updates) == 1
-    update = accounts_repo.status_updates[0]
-    assert update["account_id"] == "acc_402"
-    assert update["status"] == AccountStatus.DEACTIVATED
-    assert "402" in update["deactivation_reason"]
-    assert "Payment Required" in update["deactivation_reason"]
+    assert refresh_results == [False, False]
+    assert fetch_calls == 2
+    assert acc.status == AccountStatus.ACTIVE
+    assert accounts_repo.status_updates == []
+    assert routing_unavailable_calls == []
+    assert expected_message in caplog.text
 
 
 @pytest.mark.asyncio
@@ -3336,7 +3369,7 @@ async def test_usage_updater_marks_session_failures_as_reauth_required(
     assert len(accounts_repo.status_updates) == 1
     update = accounts_repo.status_updates[0]
     assert update["account_id"] == f"acc_401_{error_code}"
-    assert update["status"] == AccountStatus.REAUTH_REQUIRED
+    assert update["status"] == account_status_for_permanent_failure(error_code)
     assert "401" in update["deactivation_reason"]
     assert message_hint in update["deactivation_reason"]
     assert acc.status == AccountStatus.REAUTH_REQUIRED
@@ -3390,6 +3423,12 @@ async def test_usage_updater_deactivates_on_401_deactivated_message_without_code
         )
 
     monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage_401_deactivated_message)
+    routing_unavailable_calls: list[str] = []
+    monkeypatch.setattr(
+        usage_updater_module,
+        "mark_account_routing_unavailable",
+        routing_unavailable_calls.append,
+    )
 
     usage_repo = StubUsageRepository()
     accounts_repo = StubAccountsRepository()
@@ -3402,6 +3441,56 @@ async def test_usage_updater_deactivates_on_401_deactivated_message_without_code
 
     assert len(accounts_repo.status_updates) == 1
     assert accounts_repo.status_updates[0]["status"] == AccountStatus.DEACTIVATED
+    assert routing_unavailable_calls == [acc.id]
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_retry_keeps_account_active_on_bare_404(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.clients.usage import UsageFetchError
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        if fetch_calls == 1:
+            raise UsageFetchError(401, "Unauthorized")
+        return usage_client_module._usage_payload_or_raise({}, 404)
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+    routing_unavailable_calls: list[str] = []
+    monkeypatch.setattr(
+        usage_updater_module,
+        "mark_account_routing_unavailable",
+        routing_unavailable_calls.append,
+    )
+
+    usage_repo = StubUsageRepository()
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    assert updater._auth_manager is not None
+
+    acc = _make_account("acc_retry_404", "workspace_retry_404", email="retry-404@example.com")
+    accounts_repo.accounts_by_id[acc.id] = acc
+    ensure_fresh = AsyncMock(return_value=acc)
+    monkeypatch.setattr(updater._auth_manager, "ensure_fresh", ensure_fresh)
+
+    with caplog.at_level(logging.WARNING, logger="app.core.clients.usage"):
+        refreshed = await updater.refresh_accounts([acc], latest_usage={})
+
+    assert refreshed is False
+    assert fetch_calls == 2
+    ensure_fresh.assert_awaited_once_with(acc, force=True)
+    assert acc.status == AccountStatus.ACTIVE
+    assert accounts_repo.status_updates == []
+    assert routing_unavailable_calls == []
+    assert "Usage fetch failed (404)" in caplog.text
 
 
 @pytest.mark.asyncio

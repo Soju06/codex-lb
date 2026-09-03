@@ -11,6 +11,12 @@ depends_on = None
 
 def upgrade() -> None:
     bind = op.get_bind()
+    # Force SQLite to use WAL mode and busy_timeout to prevent self-sustaining write-lock stalls
+    # that block leader lease renewals and re-election. (Fixes #1682)
+    if bind.dialect.name == "sqlite":
+        bind.execute(sa.text("PRAGMA journal_mode=WAL;"))
+        bind.execute(sa.text("PRAGMA busy_timeout=5000;"))
+
     inspector = sa.inspect(bind)
     if not inspector.has_table("scheduler_leader"):
         op.create_table(

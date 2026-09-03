@@ -352,8 +352,8 @@ def test_signature_cache_stores_compact_digest_not_per_row_tuple() -> None:
     assert result is not None
     signature = depletion_service._history_signatures[("acc1", "codex_other", "primary")]
     assert signature.row_count == 100
-    assert isinstance(signature.content_digest, str)
-    assert len(signature.content_digest) == 32
+    # A single fixed-width hash, not a per-row structure.
+    assert isinstance(signature.content_digest, int)
 
 
 def test_prune_depletion_cache_drops_absent_account_window_entries() -> None:
@@ -589,3 +589,94 @@ def test_post_reset_window_returns_none() -> None:
     now = BASE_TIME + timedelta(minutes=10)
     result = compute_depletion_for_account("acc1", "codex_other", "primary", history, now=now)
     assert result is None
+
+
+def _dense_history(
+    row_count: int,
+    *,
+    reset_at: int,
+    start: datetime,
+    reset_drop_at: int | None = None,
+) -> list[_FakeEntry]:
+    """Monotonic 1-minute cadence with a non-uniform slope; optionally one
+    usage drop (window reset) ``reset_drop_at`` rows before the end."""
+    rows: list[_FakeEntry] = []
+    used = 5.0
+    for index in range(row_count):
+        used += 0.012 + 0.006 * ((index * 7919) % 13) / 13.0
+        if reset_drop_at is not None and index == row_count - reset_drop_at:
+            used = 1.0
+        rows.append(_entry(round(used, 6), start + timedelta(minutes=index), reset_at=reset_at, window_minutes=10080))
+    return rows
+
+
+@pytest.mark.parametrize("reset_drop_at", [None, 20])
+def test_depletion_over_ewma_tail_matches_full_history_replay(reset_drop_at: int | None) -> None:
+    """The dashboard fetch caps rows older than the equal-weight floor to the
+    newest 64: with alpha 0.4 a sample's weight after 64 newer samples is
+    0.6**64 ~ 6e-15, so the tail replay must reproduce the full replay to
+    floating-point noise. A usage drop (window reset) inside the tail
+    discards all earlier state, so those cases must match exactly."""
+    from app.modules.dashboard.service import _PROJECTION_EWMA_TAIL_ROWS
+
+    start = BASE_TIME - timedelta(minutes=5000)
+    now = BASE_TIME + timedelta(seconds=30)
+    reset_epoch = int((BASE_TIME + timedelta(days=2)).timestamp())
+    full = _dense_history(5000, reset_at=reset_epoch, start=start, reset_drop_at=reset_drop_at)
+    tail = full[-_PROJECTION_EWMA_TAIL_ROWS:]
+
+    reset_ewma_state()
+    full_result = compute_depletion_for_account("acc1", "standard", "secondary", _signed(full), now=now)
+    reset_ewma_state()
+    tail_result = compute_depletion_for_account("acc1", "standard", "secondary", _signed(tail), now=now)
+
+    assert full_result is not None
+    assert tail_result is not None
+    assert tail_result.risk_level == full_result.risk_level
+    assert tail_result.safe_usage_percent == full_result.safe_usage_percent
+    if reset_drop_at is not None:
+        # The reset inside the tail makes both replays start from the same row.
+        assert tail_result.rate_per_second == full_result.rate_per_second
+        assert tail_result.burn_rate == full_result.burn_rate
+        assert tail_result.risk == full_result.risk
+        assert tail_result.seconds_until_exhaustion == full_result.seconds_until_exhaustion
+        return
+    assert tail_result.rate_per_second == pytest.approx(full_result.rate_per_second, abs=1e-12, rel=1e-12)
+    assert tail_result.burn_rate == pytest.approx(full_result.burn_rate, abs=1e-12, rel=1e-12)
+    assert tail_result.risk == pytest.approx(full_result.risk, abs=1e-12, rel=1e-12)
+    assert full_result.seconds_until_exhaustion is not None
+    assert tail_result.seconds_until_exhaustion == pytest.approx(full_result.seconds_until_exhaustion, rel=1e-12)
+
+
+def test_history_signature_content_hash_tracks_row_content() -> None:
+    """The compact signature must be stable for identical content and change
+    for any value-bearing field, including ``None`` variants (id/reset_at)."""
+    from app.modules.usage.depletion_service import _history_signature_from_rows
+
+    reset_epoch = int((BASE_TIME + timedelta(minutes=30)).timestamp())
+    rows = [
+        _entry(10.0, BASE_TIME, reset_at=reset_epoch, window_minutes=60),
+        _entry(20.0, BASE_TIME + timedelta(minutes=1), reset_at=reset_epoch, window_minutes=60),
+        _entry(30.0, BASE_TIME + timedelta(minutes=2), reset_at=reset_epoch, window_minutes=60),
+    ]
+    baseline = _history_signature_from_rows(rows)
+    assert _history_signature_from_rows(list(rows)) == baseline
+    assert isinstance(baseline.content_digest, int)
+
+    middle = rows[1]
+    variants = [
+        [rows[0], _entry(25.0, middle.recorded_at, reset_at=reset_epoch, window_minutes=60), rows[2]],
+        [rows[0], _entry(20.0, middle.recorded_at, reset_at=None, window_minutes=60), rows[2]],
+        [rows[0], _entry(20.0, middle.recorded_at, reset_at=reset_epoch, window_minutes=None), rows[2]],
+        [
+            rows[0],
+            _entry(20.0, middle.recorded_at + timedelta(seconds=1), reset_at=reset_epoch, window_minutes=60),
+            rows[2],
+        ],
+    ]
+    for variant in variants:
+        changed = _history_signature_from_rows(variant)
+        assert changed.row_count == baseline.row_count
+        assert changed.first == baseline.first
+        assert changed.latest == baseline.latest
+        assert changed.content_digest != baseline.content_digest

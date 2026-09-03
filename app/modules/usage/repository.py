@@ -1075,16 +1075,16 @@ class UsageRepository:
         )
         result = await self._session.execute(stmt)
         grouped: dict[str, list[UsageHistorySnapshot]] = {}
-        for row in result.all():
+        for id_, account_id, used_percent, recorded_at, reset_at, window_minutes in result.tuples():
             snapshot = UsageHistorySnapshot(
-                id=int(row.id),
-                account_id=row.account_id,
-                used_percent=float(row.used_percent),
-                recorded_at=row.recorded_at,
-                reset_at=float(row.reset_at) if row.reset_at is not None else None,
-                window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
+                id=int(id_),
+                account_id=account_id,
+                used_percent=float(used_percent),
+                recorded_at=recorded_at,
+                reset_at=float(reset_at) if reset_at is not None else None,
+                window_minutes=int(window_minutes) if window_minutes is not None else None,
             )
-            grouped.setdefault(snapshot.account_id, []).append(snapshot)
+            grouped.setdefault(account_id, []).append(snapshot)
         return grouped
 
     async def _bulk_history_since_capped_postgresql(
@@ -1170,16 +1170,19 @@ class UsageRepository:
         stmt = select(recent).select_from(account_cutoffs.join(recent, true()))
         result = await self._session.execute(stmt)
         grouped: dict[str, list[UsageHistorySnapshot]] = {}
-        for row in result.all():
+        # Positional unpacking: Row attribute lookups dominated the per-row
+        # cost of this loop on dense deployments (dashboard polls hydrate
+        # thousands of rows per call). Column order follows snapshot_columns.
+        for id_, account_id, used_percent, recorded_at, reset_at, window_minutes in result.tuples():
             snapshot = UsageHistorySnapshot(
-                id=int(row.id),
-                account_id=row.account_id,
-                used_percent=float(row.used_percent),
-                recorded_at=row.recorded_at,
-                reset_at=float(row.reset_at) if row.reset_at is not None else None,
-                window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
+                id=int(id_),
+                account_id=account_id,
+                used_percent=float(used_percent),
+                recorded_at=recorded_at,
+                reset_at=float(reset_at) if reset_at is not None else None,
+                window_minutes=int(window_minutes) if window_minutes is not None else None,
             )
-            grouped.setdefault(snapshot.account_id, []).append(snapshot)
+            grouped.setdefault(account_id, []).append(snapshot)
         for snapshots in grouped.values():
             snapshots.sort(key=lambda snapshot: (snapshot.recorded_at, snapshot.id))
         return grouped

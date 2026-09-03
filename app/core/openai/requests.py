@@ -6,7 +6,16 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializeAsAny,
+    SkipValidation,
+    field_validator,
+    model_validator,
+)
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.tool_call_safety import is_downstream_side_effect_tool_call_item
@@ -14,6 +23,19 @@ from app.core.types import JsonObject, JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 
 type MutableJsonObject = dict[str, JsonValue]
+
+# Passthrough request fields (``input``, ``tools``, ``messages``, ``schema``)
+# arrive from ``json.loads`` and are forwarded upstream as-is, so validating
+# every node against the recursive ``JsonValue`` union only burns CPU (a
+# Python-level ``Mapping`` ABC ``isinstance`` per dict node) and copies the
+# tree. ``SkipValidation`` keeps the client's objects; ``SerializeAsAny``
+# (inner) serializes them by runtime type instead of through a wrap
+# serializer, which keeps ``model_dump(mode="json")`` byte-identical and
+# faster. Field validators still run, so shape checks live there. The
+# subscript form expands to ``Annotated[T, SerializeAsAny(), SkipValidation()]``
+# (``SerializeAsAny`` inner, ``SkipValidation`` outermost) and type-checks as ``T``.
+type PassthroughJsonValue = SkipValidation[SerializeAsAny[JsonValue]]
+type PassthroughJsonList = SkipValidation[SerializeAsAny[list[JsonValue]]]
 
 _RESPONSES_INCLUDE_ALLOWLIST = {
     "code_interpreter_call.outputs",
@@ -90,6 +112,10 @@ def normalize_tool_choice(choice: JsonValue | None) -> JsonValue | None:
 
 
 def validate_tool_types(tools: list[JsonValue], *, allow_builtin_tools: bool = False) -> list[JsonValue]:
+    # ``tools`` skips pydantic's ``list`` validation, so the array check that
+    # used to yield ``list_type`` lives here (same ``param``: ``tools``).
+    if not isinstance(tools, list):
+        raise ValueError("tools must be an array")
     normalized_tools: list[JsonValue] = []
     for tool in tools:
         if not is_json_mapping(tool):
@@ -599,7 +625,7 @@ class ResponsesTextFormat(BaseModel):
 
     type: str | None = None
     strict: bool | None = None
-    schema_: JsonValue | None = Field(default=None, alias="schema")
+    schema_: PassthroughJsonValue = Field(default=None, alias="schema")
     name: str | None = None
 
 
@@ -622,8 +648,8 @@ class ResponsesRequest(BaseModel):
 
     model: str = Field(min_length=1)
     instructions: str
-    input: JsonValue
-    tools: list[JsonValue] = Field(default_factory=list)
+    input: PassthroughJsonValue
+    tools: PassthroughJsonList = Field(default_factory=list)
     tool_choice: str | JsonObject | None = None
     parallel_tool_calls: bool | None = None
     reasoning: ResponsesReasoning | None = None
@@ -752,7 +778,7 @@ class ResponsesCompactRequest(BaseModel):
 
     model: str = Field(min_length=1)
     instructions: str
-    input: JsonValue
+    input: PassthroughJsonValue
     reasoning: ResponsesReasoning | None = None
     store: bool = False
     service_tier: str | None = None

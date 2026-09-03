@@ -1102,7 +1102,10 @@ async def wham_agent_identities_jwks(
 )
 async def responses(
     request: Request,
-    payload: dict[str, JsonValue] = Body(...),
+    # ``dict[str, Any]``: the body is ``json.loads`` output that the request
+    # models validate right below; re-validating it against the recursive
+    # ``JsonValue`` union here only walked the whole tree a second time.
+    payload: dict[str, Any] = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:

@@ -444,6 +444,34 @@ test("the model source dialogs stay inside supported viewports", async ({ page }
       createButton: await createButton.boundingBox(),
     };
     console.log(`MODEL_SOURCE_BOXES ${JSON.stringify(boxes)}`);
+    console.log(
+      `MODEL_SOURCE_COUNTS ${JSON.stringify({
+        dialogs: await dialog.count(),
+        titles: await title.count(),
+        closeButtons: await closeButton.count(),
+        createButtons: await createButton.count(),
+      })}`,
+    );
+    const dom = await page.evaluate(() => {
+      const rect = (el: Element) => {
+        const r = el.getBoundingClientRect();
+        return { y: Math.round(r.top), h: Math.round(r.height), w: Math.round(r.width) };
+      };
+      return {
+        dialogContents: [...document.querySelectorAll('[data-slot="dialog-content"]')].map((el) => ({
+          maxHeight: getComputedStyle(el).maxHeight,
+          heading: el.querySelector("h2")?.textContent ?? null,
+          ...rect(el),
+        })),
+        headings: [...document.querySelectorAll("h2")]
+          .filter((el) => /Create model source/.test(el.textContent || ""))
+          .map((el) => ({ inDialog: !!el.closest('[data-slot="dialog-content"]'), ...rect(el) })),
+        createButtons: [...document.querySelectorAll("button")]
+          .filter((el) => (el.textContent || "").trim() === "Create")
+          .map((el) => ({ inDialog: !!el.closest('[data-slot="dialog-content"]'), ...rect(el) })),
+      };
+    });
+    console.log(`MODEL_SOURCE_DOM ${JSON.stringify(dom)}`);
 
     // The regression this covers: the dialog rendered taller than the viewport
     // with no scroll container, so the submit button was unreachable.

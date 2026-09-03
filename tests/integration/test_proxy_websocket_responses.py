@@ -8657,7 +8657,21 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
     assert first_upstream.closed is True
 
 
-@pytest.mark.parametrize("frame", ['{"type":"response.create"', "[]"])
+def _deeply_nested_response_create_frame() -> str:
+    # Past pydantic-core's ~250-level serializer limit: the depth guard must
+    # yield a 400 event instead of raising out of the per-frame handler.
+    deep: object = {"leaf": 1}
+    for _ in range(300):
+        deep = [deep]
+    item = {"role": "user", "content": [{"type": "input_text", "text": "x", "n": deep}]}
+    return json.dumps({"type": "response.create", "model": "gpt-5.6-sol", "instructions": "", "input": [item]})
+
+
+@pytest.mark.parametrize(
+    "frame",
+    ['{"type":"response.create"', "[]", _deeply_nested_response_create_frame()],
+    ids=["truncated-json", "array", "deeply-nested-input"],
+)
 def test_backend_responses_websocket_rejects_malformed_first_frame_as_invalid_payload(app_instance, monkeypatch, frame):
     called = {"connect": False}
 

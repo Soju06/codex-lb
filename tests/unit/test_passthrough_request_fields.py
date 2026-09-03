@@ -20,9 +20,11 @@ from pydantic import BaseModel, ValidationError
 
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.requests import (
+    PASSTHROUGH_MAX_DEPTH,
     ResponsesCompactRequest,
     ResponsesRequest,
     ResponsesTextFormat,
+    validate_passthrough_depth,
     validate_tool_types,
 )
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
@@ -163,19 +165,6 @@ def test_text_format_schema_is_forwarded_verbatim() -> None:
     assert dumped == {"type": "json_schema", "name": "n", "schema": schema}
 
 
-def test_chat_assistant_refusal_null_is_accepted_and_mapped_like_omitted() -> None:
-    # Pre-change the ``OpenAIMessage`` TypedDict rejected ``refusal: null``
-    # (``string_type``); the mapping only ever consumed non-empty strings, so
-    # the passthrough form accepts the null and maps it identically.
-    base = {"model": "gpt-5", "messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}]}
-    with_null = json.loads(json.dumps(base))
-    with_null["messages"][1]["refusal"] = None
-    assert (
-        ChatCompletionsRequest.model_validate(with_null).to_responses_request().to_payload()
-        == ChatCompletionsRequest.model_validate(base).to_responses_request().to_payload()
-    )
-
-
 def test_chat_message_shape_errors_still_reject_with_messages_param() -> None:
     cases: list[JsonValue] = [
         {"role": "assistant", "content": "x", "tool_calls": "nope"},
@@ -184,8 +173,66 @@ def test_chat_message_shape_errors_still_reject_with_messages_param() -> None:
         "not-an-object",
     ]
     for message in cases:
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             ChatCompletionsRequest.model_validate({"model": "gpt-5", "messages": [message]})
+        # The message list is opaque to pydantic now: these shapes are caught
+        # by the mapping's model-level validator, so the envelope carries no
+        # item path (pre-change pydantic reported ``messages.0...``).
+        assert "param" not in openai_validation_error(exc_info.value)["error"], message
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"refusal": None},
+        {"refusal": 5},
+        {"refusal": True},
+        {"refusal": []},
+        {"refusal": {"k": 1}},
+        {"tool_calls": None},
+    ],
+    ids=["refusal-null", "refusal-number", "refusal-bool", "refusal-array", "refusal-object", "tool_calls-null"],
+)
+def test_chat_assistant_uninspected_key_types_are_ignored(extra: dict[str, JsonValue]) -> None:
+    # Documented leniency: pre-change the ``OpenAIMessage`` TypedDict rejected
+    # these with ``string_type``/``list_type``; the mapping only consumes
+    # non-empty string refusals and treats ``tool_calls: null`` as omitted,
+    # so they map identically to the message without the key.
+    base = {"model": "gpt-5", "messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}]}
+    lenient = json.loads(json.dumps(base))
+    lenient["messages"][1].update(extra)
+    assert (
+        ChatCompletionsRequest.model_validate(lenient).to_responses_request().to_payload()
+        == ChatCompletionsRequest.model_validate(base).to_responses_request().to_payload()
+    )
+
+
+def test_non_finite_floats_in_passthrough_fields_serialize_as_null() -> None:
+    # ``json.loads("1e400")`` is ``inf``; pydantic serializes it as ``null``
+    # (pre-change ``json.dumps`` emitted the non-JSON ``Infinity`` upstream).
+    payload = json.loads('{"model":"gpt-5","instructions":"i","input":[{"role":"user","content":"hi","n":1e400}]}')
+    forwarded = ResponsesRequest.model_validate(payload).to_payload()
+    assert cast(list[JsonValue], forwarded["input"])[0] == {"role": "user", "content": "hi", "n": None}
+
+
+def test_normalizing_the_same_raw_payload_twice_leaves_it_untouched() -> None:
+    # The WebSocket handler normalizes one ``response.create`` payload twice
+    # (continuity wait), so normalization must never mutate the client's
+    # nested objects even though the model now aliases them.
+    payload: dict[str, JsonValue] = {
+        "model": "gpt-5",
+        "input": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}], "reasoning_content": "x"},
+        ],
+        "tools": [{"type": "web_search_preview"}, {"type": "function", "name": "f", "parameters": {"a": [1]}}],
+        "reasoning_effort": "high",
+    }
+    before = _dumps(payload)
+    first = normalize_responses_request_payload(payload, openai_compat=True).to_payload()
+    second = normalize_responses_request_payload(payload, openai_compat=True).to_payload()
+    assert _dumps(payload) == before
+    assert _dumps(first) == _dumps(second)
 
 
 def test_normalized_request_aliases_client_tool_objects() -> None:
@@ -235,8 +282,86 @@ def _names_loaded_after_normalization(path: Path, function_name: str) -> set[str
     ],
 )
 def test_raw_payload_is_not_consumed_after_normalization(relative_path: str, function_name: str) -> None:
+    # Callers may re-normalize the same dict (the WebSocket continuity wait
+    # does); ``test_normalizing_the_same_raw_payload_twice_leaves_it_untouched`` covers that.
     loaded = _names_loaded_after_normalization(_REPO_ROOT / relative_path, function_name)
     assert "payload" not in loaded, (
         f"{function_name} reads the raw body after normalize_responses_request_payload(); "
         "the normalized request aliases the raw body's nested objects, so copy before mutating."
     )
+
+
+def _nested(depth: int) -> JsonValue:
+    value: JsonValue = {"leaf": 1}
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def _deep_cases(depth: int) -> dict[str, tuple[type[BaseModel], dict[str, JsonValue], str]]:
+    deep = _nested(depth)
+    item: JsonValue = {"role": "user", "content": [{"type": "input_text", "text": "x", "n": deep}]}
+    message: JsonValue = {"role": "user", "content": [{"type": "text", "text": "x", "n": deep}]}
+    tool: JsonValue = {"type": "function", "name": "f", "parameters": deep}
+    chat_tool: JsonValue = {"type": "function", "function": {"name": "f", "parameters": deep}}
+    hello: JsonValue = [{"role": "user", "content": "hi"}]
+    native: dict[str, JsonValue] = {"model": "m", "instructions": ""}
+    return {
+        "responses.input": (ResponsesRequest, {**native, "input": [item]}, "input"),
+        "responses.tools": (ResponsesRequest, {**native, "input": "hi", "tools": [tool]}, "tools"),
+        "compact.input": (ResponsesCompactRequest, {**native, "input": [item]}, "input"),
+        "v1.input": (V1ResponsesRequest, {"model": "m", "input": [item]}, "input"),
+        "v1.messages": (V1ResponsesRequest, {"model": "m", "messages": [message]}, "messages"),
+        "v1.tools": (V1ResponsesRequest, {"model": "m", "input": "hi", "tools": [tool]}, "tools"),
+        "v1compact.input": (V1ResponsesCompactRequest, {"model": "m", "input": [item]}, "input"),
+        "v1compact.messages": (V1ResponsesCompactRequest, {"model": "m", "messages": [message]}, "messages"),
+        "chat.messages": (ChatCompletionsRequest, {"model": "m", "messages": [message]}, "messages"),
+        "chat.tools": (ChatCompletionsRequest, {"model": "m", "messages": hello, "tools": [chat_tool]}, "tools"),
+        "chat.input": (ChatCompletionsRequest, {"model": "m", "input": [item]}, "input"),
+        "text.schema": (ResponsesTextFormat, {"type": "json_schema", "name": "n", "schema": deep}, "schema"),
+    }
+
+
+_DEEP_KINDS = list(_deep_cases(1))
+
+
+def _forward(model: BaseModel) -> object:
+    converted = getattr(model, "to_responses_request", None) or getattr(model, "to_compact_request", None)
+    request = converted() if converted is not None else model
+    to_payload = getattr(request, "to_payload", None)
+    return to_payload() if to_payload is not None else request.model_dump(mode="json")
+
+
+@pytest.mark.parametrize("depth", [300, 5000], ids=["serializer-limit", "python-recursion-limit"])
+@pytest.mark.parametrize("kind", _DEEP_KINDS)
+def test_deeply_nested_passthrough_fields_are_rejected_with_field_param(kind: str, depth: int) -> None:
+    # Past ~250 container levels pydantic-core's serializer raised on
+    # ``to_payload`` (a 500); depth 5000 also proves nothing before the guard
+    # recurses into the value (no RecursionError).
+    model_cls, payload, param = _deep_cases(depth)[kind]
+    with pytest.raises(ValidationError) as exc_info:
+        _forward(model_cls.model_validate(payload))
+    assert [error["loc"] for error in exc_info.value.errors()] == [(param,)]
+    assert openai_validation_error(exc_info.value)["error"]["param"] == param
+
+
+@pytest.mark.parametrize("kind", _DEEP_KINDS)
+def test_passthrough_nesting_at_the_limit_is_accepted_and_serializable(kind: str) -> None:
+    # The fixtures wrap the value in up to four containers (list, item,
+    # content list, part), so ``limit - 5`` keeps the whole field at the limit.
+    model_cls, payload, _param = _deep_cases(PASSTHROUGH_MAX_DEPTH - 5)[kind]
+    _forward(model_cls.model_validate(payload))
+
+
+def test_validate_passthrough_depth_counts_container_levels_including_dict_subclasses() -> None:
+    # The WebSocket frame parser decodes objects with an ``object_pairs_hook``
+    # dict subclass; the guard must not stop at those nodes.
+    class _Obj(dict[str, JsonValue]):
+        pass
+
+    validate_passthrough_depth("scalar")
+    validate_passthrough_depth(_nested(2), limit=3)
+    with pytest.raises(ValueError, match="nesting exceeds 3 levels"):
+        validate_passthrough_depth(_nested(3), limit=3)
+    with pytest.raises(ValueError, match="nesting exceeds 2 levels"):
+        validate_passthrough_depth([_Obj(a=[_Obj(b=1)])], limit=2)

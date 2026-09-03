@@ -11,6 +11,7 @@ from app.core.openai.requests import (
     ResponsesReasoning,
     ResponsesRequest,
     ResponsesTextControls,
+    validate_passthrough_depth,
     validate_tool_types,
 )
 from app.core.types import JsonValue
@@ -19,8 +20,11 @@ from app.core.types import JsonValue
 def _validate_optional_messages_array(value: list[JsonValue] | None) -> list[JsonValue] | None:
     # ``messages`` skips pydantic's ``list`` validation; keep the array check
     # at field level so the error still names ``param="messages"``.
-    if value is not None and not isinstance(value, list):
+    if value is None:
+        return value
+    if not isinstance(value, list):
         raise ValueError("messages must be an array")
+    validate_passthrough_depth(value)
     return value
 
 
@@ -50,7 +54,10 @@ class V1ResponsesRequest(BaseModel):
     def _validate_input_type(cls, value: JsonValue | None) -> JsonValue | None:
         if value is None:
             return value
-        if isinstance(value, str) or isinstance(value, list):
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            validate_passthrough_depth(value)
             return value
         raise ValueError("input must be a string or array")
 
@@ -67,7 +74,9 @@ class V1ResponsesRequest(BaseModel):
     @field_validator("tools")
     @classmethod
     def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
-        return validate_tool_types(value, allow_builtin_tools=True)
+        validated = validate_tool_types(value, allow_builtin_tools=True)
+        validate_passthrough_depth(validated)
+        return validated
 
     @model_validator(mode="after")
     def _validate_input(self) -> "V1ResponsesRequest":
@@ -136,7 +145,10 @@ class V1ResponsesCompactRequest(BaseModel):
     def _validate_input_type(cls, value: JsonValue | None) -> JsonValue | None:
         if value is None:
             return value
-        if isinstance(value, str) or isinstance(value, list):
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            validate_passthrough_depth(value)
             return value
         raise ValueError("input must be a string or array")
 

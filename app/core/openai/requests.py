@@ -37,6 +37,13 @@ type MutableJsonObject = dict[str, JsonValue]
 type PassthroughJsonValue = SkipValidation[SerializeAsAny[JsonValue]]
 type PassthroughJsonList = SkipValidation[SerializeAsAny[list[JsonValue]]]
 
+# pydantic-core's serializer refuses container nesting deeper than ~250 levels
+# (a 500 from ``model_dump`` long after validation); deep validation used to
+# reject such bodies first (``recursion_loop`` -> 400), so the passthrough
+# validators keep that contract with an explicit, cheaper depth check.
+PASSTHROUGH_MAX_DEPTH = 200
+_JSON_CONTAINER_TYPES = (dict, list)
+
 _RESPONSES_INCLUDE_ALLOWLIST = {
     "code_interpreter_call.outputs",
     "computer_call_output.output.image_url",
@@ -109,6 +116,24 @@ def normalize_tool_choice(choice: JsonValue | None) -> JsonValue | None:
             updated["type"] = normalized_type
             return updated
     return choice
+
+
+def validate_passthrough_depth(value: object, *, limit: int = PASSTHROUGH_MAX_DEPTH) -> None:
+    """Reject JSON nested deeper than ``limit`` container levels (iterative walk over
+    ``dict``/``list`` nodes; ``isinstance`` because the WebSocket parser yields ``dict`` subclasses)."""
+    if not isinstance(value, _JSON_CONTAINER_TYPES):
+        return
+    frontier: list[object] = [value]
+    depth = 0
+    while frontier:
+        depth += 1
+        if depth > limit:
+            raise ValueError(f"nesting exceeds {limit} levels")
+        next_frontier: list[object] = []
+        for node in frontier:
+            children: Iterable[object] = node.values() if isinstance(node, dict) else cast(list[object], node)
+            next_frontier.extend([child for child in children if isinstance(child, _JSON_CONTAINER_TYPES)])
+        frontier = next_frontier
 
 
 def validate_tool_types(tools: list[JsonValue], *, allow_builtin_tools: bool = False) -> list[JsonValue]:
@@ -628,6 +653,12 @@ class ResponsesTextFormat(BaseModel):
     schema_: PassthroughJsonValue = Field(default=None, alias="schema")
     name: str | None = None
 
+    @field_validator("schema_")
+    @classmethod
+    def _validate_schema_depth(cls, value: JsonValue) -> JsonValue:
+        validate_passthrough_depth(value)
+        return value
+
 
 class ResponsesTextControls(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -675,8 +706,8 @@ class ResponsesRequest(BaseModel):
             normalized = _normalize_input_text(value)
             return _sanitize_input_items(normalized)
         if is_json_list(value):
-            input_items = value
-            return _sanitize_input_items(input_items)
+            validate_passthrough_depth(value)
+            return _sanitize_input_items(value)
         raise ValueError("input must be a string or array")
 
     @field_validator("include")
@@ -712,7 +743,9 @@ class ResponsesRequest(BaseModel):
     @field_validator("tools")
     @classmethod
     def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
-        return validate_tool_types(value, allow_builtin_tools=True)
+        validated = validate_tool_types(value, allow_builtin_tools=True)
+        validate_passthrough_depth(validated)
+        return validated
 
     @field_validator("tool_choice")
     @classmethod
@@ -793,8 +826,8 @@ class ResponsesCompactRequest(BaseModel):
             normalized = _normalize_input_text(value)
             return _sanitize_input_items(normalized)
         if is_json_list(value):
-            input_items = value
-            return _sanitize_input_items(input_items)
+            validate_passthrough_depth(value)
+            return _sanitize_input_items(value)
         raise ValueError("input must be a string or array")
 
     @model_validator(mode="before")

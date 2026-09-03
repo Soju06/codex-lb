@@ -11,6 +11,8 @@
 - [x] 1.3 Attach passthrough fields directly in the compat converters instead of
   round-tripping them through `model_dump`.
 - [x] 1.4 Accept the `/backend-api/codex/responses` body as `dict[str, Any]`.
+- [x] 1.5 Reject passthrough fields nested deeper than 200 container levels in
+  the same field validators (pydantic-core's serializer fails past ~250).
 
 ## 2. Regression coverage
 
@@ -23,10 +25,16 @@
   `/v1/chat/completions`; non-array `messages` rejected with `param=messages`.
 - [x] 2.3 `input` type check, tool-type alias normalization, input sanitation
   and omitted-`tools` propagation still run on the passthrough fields.
-- [x] 2.4 Chat `refusal: null` accepted and mapped like an omitted refusal.
+- [x] 2.4 Chat `refusal` of any non-string type and `tool_calls: null` accepted
+  and mapped like the omitted key; model-level shape errors carry no param.
 - [x] 2.5 Source-level guard: the raw body is not read after
-  `normalize_responses_request_payload()` on the HTTP and WebSocket paths.
+  `normalize_responses_request_payload()` on the HTTP and WebSocket paths,
+  plus a behavioural check that normalizing the same raw payload twice leaves
+  it untouched (the WebSocket continuity wait re-normalizes).
 - [x] 2.6 OpenAPI document still generates for the request models.
+- [x] 2.7 Depth guard: every passthrough field at depth 300/5000 rejected with
+  the field param, four HTTP routes and the Responses WebSocket return 400,
+  depth at the limit still serializes; non-finite floats serialize as `null`.
 
 ## 3. Validation
 

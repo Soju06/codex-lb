@@ -15,6 +15,7 @@ from app.core.openai.requests import (
     ResponsesTextFormat,
     normalize_reasoning_aliases,
     normalize_tool_type,
+    validate_passthrough_depth,
     validate_tool_types,
 )
 from app.core.types import JsonValue
@@ -79,6 +80,7 @@ class ChatCompletionsRequest(BaseModel):
         # Keep the array check at field level so the error names ``param="tools"``.
         if not isinstance(value, list):
             raise ValueError("tools must be an array")
+        validate_passthrough_depth(value)
         return value
 
     @field_validator("messages")
@@ -88,6 +90,7 @@ class ChatCompletionsRequest(BaseModel):
             return value
         if not isinstance(value, list):
             raise ValueError("messages must be an array")
+        validate_passthrough_depth(value)
         for message in value:
             message_mapping = _json_mapping(message)
             if message_mapping is None:

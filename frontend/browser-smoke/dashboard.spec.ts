@@ -437,6 +437,14 @@ test("the model source dialogs stay inside supported viewports", async ({ page }
     }, size);
     console.log(`MODEL_SOURCE_DIAGNOSTIC ${JSON.stringify(diagnostic)}`);
 
+    const boxes = {
+      dialog: await dialog.boundingBox(),
+      title: await title.boundingBox(),
+      closeButton: await closeButton.boundingBox(),
+      createButton: await createButton.boundingBox(),
+    };
+    console.log(`MODEL_SOURCE_BOXES ${JSON.stringify(boxes)}`);
+
     // The regression this covers: the dialog rendered taller than the viewport
     // with no scroll container, so the submit button was unreachable.
     for (const element of [dialog, title, closeButton, createButton]) {

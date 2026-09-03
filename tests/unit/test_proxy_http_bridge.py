@@ -44190,3 +44190,94 @@ def test_suppression_message_names_the_timer_that_is_refusing_the_request() -> N
     assert "cooling down" not in half_open
     assert "480s" in half_open
     assert "42s" in cooldown
+
+
+def _make_relay_parity_request_state(
+    *,
+    response_id: str | None = "resp_relay_parity",
+    replay_downstream_response_id: str | None = None,
+) -> proxy_service._WebSocketRequestState:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-relay-parity",
+        response_id=response_id,
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.replay_downstream_response_id = replay_downstream_response_id
+    return request_state
+
+
+def _relay_parity_downstream_block(request_state: proxy_service._WebSocketRequestState) -> str:
+    assert request_state.event_queue is not None
+    event_block = request_state.event_queue.get_nowait()
+    assert isinstance(event_block, str)
+    return event_block
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_relays_unchanged_event_as_upstream_json_text() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_relay_parity_request_state()
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+    payload = {
+        "type": "response.output_text.delta",
+        "item_id": "msg_1",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": "\ud55c\uae00 \u2028 caf\u00e9",
+    }
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    event_block = _relay_parity_downstream_block(request_state)
+    assert event_block == f"event: response.output_text.delta\ndata: {text}\n\n"
+    # JSON-equivalent to the re-serialized block the reader used to emit; only the
+    # escaping differs (upstream UTF-8 is kept, not ``\\uXXXX``-escaped).
+    legacy_block = proxy_service.format_sse_event(payload)
+    assert proxy_service.parse_sse_data_json(event_block) == proxy_service.parse_sse_data_json(legacy_block)
+    assert event_block != legacy_block
+    assert request_state.downstream_visible is True
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_ascii_relay_is_byte_identical_to_serialization() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_relay_parity_request_state()
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+    payload = {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": "hello"}
+    text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    assert _relay_parity_downstream_block(request_state) == proxy_service.format_sse_event(payload)
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_reserializes_when_response_id_is_rewritten() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_relay_parity_request_state(
+        response_id="resp_upstream",
+        replay_downstream_response_id="resp_client_visible",
+    )
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+    payload = {
+        "type": "response.in_progress",
+        "response": {"id": "resp_upstream", "status": "in_progress", "metadata": {"note": "caf\u00e9"}},
+    }
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    event_block = _relay_parity_downstream_block(request_state)
+    rewritten = proxy_service.parse_sse_data_json(event_block)
+    assert rewritten is not None
+    assert cast(dict[str, Any], rewritten["response"])["id"] == "resp_client_visible"
+    assert event_block == proxy_service.format_sse_event(rewritten)
+    assert text not in event_block

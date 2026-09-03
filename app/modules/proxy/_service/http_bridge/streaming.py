@@ -54,7 +54,7 @@ from app.core.openai.requests import (
 )
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.request_id import ensure_request_id, ensure_request_scope_id
-from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.sse import format_sse_event, parse_sse_data_json, sse_block_with_payload
 from app.core.utils.time import utcnow
 from app.db.models import (
     HttpBridgeSessionState,
@@ -5219,7 +5219,9 @@ class _HTTPBridgeStreamingMixin:
                         request_state.error_http_status_override,
                         _openai_error_envelope_from_response_failed_payload(block_payload),
                     )
-                yield event_block
+                # Carry the parsed payload so the API-layer normalizers reuse
+                # it instead of parsing the same block again.
+                yield sse_block_with_payload(event_block, block_payload)
                 yielded_any = True
         finally:
             with anyio.CancelScope(shield=True):

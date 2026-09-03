@@ -9850,6 +9850,10 @@ def _looks_like_sse_data_block(event_block: str) -> bool:
 
 
 def _looks_like_sse_comment_block(event_block: str) -> bool:
+    if event_block.startswith(("event: ", "data: ")):
+        # Canonical event blocks open with a field line, which is neither
+        # blank nor a comment; skip the per-line scan on the hot path.
+        return False
     return bool(event_block.strip()) and all(
         not line.strip() or line.lstrip().startswith(":") for line in event_block.splitlines()
     )

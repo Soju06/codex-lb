@@ -2609,13 +2609,20 @@ class _HTTPBridgeUpstreamEventsMixin:
                     suppress_downstream_event = True
                 if payload is not None:
                     rewritten_payload = _rewrite_websocket_downstream_response_id(payload, matched_request_state)
-                    if rewritten_payload is not payload:
+                    # ``text`` is the serialization ``payload`` was parsed from (or the
+                    # tool-call rewrite's compact re-dump). Relaying it verbatim is
+                    # only valid while nothing above mutated ``payload`` in place:
+                    # ``mark_duplicate_tool_call_downstream_event`` trims partially
+                    # duplicated ``multi_tool_use.parallel`` arguments on
+                    # ``response.output_item.done`` items without returning a new
+                    # object, so those (rare, per-item) events are always
+                    # re-serialized. Every other pre-framing step is read-only.
+                    if rewritten_payload is not payload or event_type == "response.output_item.done":
                         payload = rewritten_payload
                         event_block = format_sse_event(payload)
                     else:
                         # Identity fast path: nothing changed, so frame the
-                        # upstream JSON text (or the tool-call rewrite's compact
-                        # re-dump) instead of serializing the dict again.
+                        # upstream JSON text instead of serializing the dict again.
                         event_block = format_sse_event_from_text(payload, text)
                 if _websocket_should_defer_reasoning_prelude(matched_request_state, event_type, payload):
                     matched_request_state.deferred_reasoning_downstream_texts.append(event_block)

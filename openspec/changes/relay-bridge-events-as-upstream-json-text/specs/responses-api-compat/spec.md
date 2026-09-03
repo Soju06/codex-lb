@@ -41,6 +41,17 @@ rewritten payload.
   carries the downstream response id
 - **AND** the upstream JSON text does not appear in the relayed block
 
+#### Scenario: In-place trimmed parallel tool uses are re-serialized
+
+- **GIVEN** an HTTP bridge request that already relayed a
+  `response.output_item.done` `multi_tool_use.parallel` call containing a
+  side-effect tool use
+- **WHEN** the upstream emits a second `response.output_item.done`
+  `multi_tool_use.parallel` call whose tool uses only partially repeat the first
+- **THEN** the relayed block is re-serialized from the trimmed payload and
+  carries only the non-duplicate tool uses
+- **AND** the untrimmed upstream JSON text does not appear in the relayed block
+
 #### Scenario: Typeless error frame stays data-only
 
 - **WHEN** an upstream frame is a JSON object without a string `type` field

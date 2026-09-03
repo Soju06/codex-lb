@@ -16,6 +16,9 @@
 - [x] 2.2 Honor the identity contract of `_rewrite_websocket_downstream_response_id`
       in `_process_parsed_http_bridge_upstream_event`: re-serialize only when the
       payload object changed
+- [x] 2.3 Always re-serialize `response.output_item.done` events: the parallel
+      tool-use dedupe trims duplicated tool uses by mutating the payload in place,
+      so the upstream text can be stale for that event type
 
 ## 3. Carry the parsed payload downstream
 
@@ -31,4 +34,6 @@
       response ids are re-serialized
 - [x] 4.2 Carrier survives both API-layer normalizers with byte-identical output and
       a frozen shared payload (mutation-freedom contract)
+- [x] 4.4 Bridge-level regression: partially duplicated parallel tool uses reach the
+      client trimmed; the fast path only frames text that still serializes its payload
 - [x] 4.3 Existing bridge streaming, transcript codec, and public contract tests pass

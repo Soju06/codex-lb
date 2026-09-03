@@ -470,12 +470,68 @@ async def _settle_claimed_http_bridge_liveness_failure(
         )
 
 
+_CLIENT_METADATA_TAIL_KEY = ',"client_metadata":'
+
+
+def _dumps_compact(value: JsonValue) -> str:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+
+def _splice_account_installation_id(text_data: str, codex_installation_id: str | None) -> str | None:
+    """Stamp ``client_metadata`` without decoding the rest of the frame.
+
+    Compact ``json.dumps`` (fixed separators, ``ensure_ascii``, insertion
+    order) is compositional: an object encodes as the concatenation of its
+    independently encoded members. For a frame produced by that encoder,
+    rewriting only the trailing top-level ``client_metadata`` value therefore
+    yields exactly the bytes a full decode/rewrite/encode would. This covers the
+    two dominant shapes -- ``client_metadata`` as the last key, or absent -- and
+    returns ``None`` for anything else so the caller falls back to the full
+    round trip.
+    """
+    if len(text_data) < 3 or text_data[0] != "{" or text_data[-1] != "}":
+        return None
+    index = text_data.rfind(_CLIENT_METADATA_TAIL_KEY)
+    if index < 0:
+        if '"client_metadata"' in text_data:
+            # Leading or nested key: not provably absent at the top level.
+            return None
+        inserted: dict[str, JsonValue] = {}
+        apply_codex_installation_metadata(inserted, codex_installation_id)
+        inserted_metadata = inserted.get("client_metadata")
+        if inserted_metadata is None:
+            return text_data
+        return f"{text_data[:-1]}{_CLIENT_METADATA_TAIL_KEY}{_dumps_compact(inserted_metadata)}}}"
+    encoded_metadata = text_data[index + len(_CLIENT_METADATA_TAIL_KEY) : -1]
+    if not encoded_metadata.startswith("{"):
+        return None
+    try:
+        raw_metadata = json.loads(encoded_metadata)
+    except json.JSONDecodeError:
+        # Nested match, or a value followed by further keys: not the trailing top-level key.
+        return None
+    if not isinstance(raw_metadata, dict):
+        return None
+    container: dict[str, JsonValue] = {"client_metadata": cast(dict[str, JsonValue], raw_metadata)}
+    apply_codex_installation_metadata(container, codex_installation_id)
+    metadata = container.get("client_metadata")
+    if metadata is None:
+        return f"{text_data[:index]}}}"
+    updated_metadata = _dumps_compact(metadata)
+    if updated_metadata == encoded_metadata:
+        return text_data
+    return f"{text_data[:index]}{_CLIENT_METADATA_TAIL_KEY}{updated_metadata}}}"
+
+
 def _text_with_account_installation_id(text_data: str, codex_installation_id: str | None) -> str:
+    spliced = _splice_account_installation_id(text_data, codex_installation_id)
+    if spliced is not None:
+        return spliced
     payload = json.loads(text_data)
     if not isinstance(payload, dict):
         return text_data
     apply_codex_installation_metadata(cast(dict[str, JsonValue], payload), codex_installation_id)
-    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    return _dumps_compact(payload)
 
 
 def _text_with_operation_id(text_data: str, operation_id: str | None) -> str:
@@ -805,18 +861,30 @@ class _HTTPBridgeRequestSubmitMixin:
         text_data: str,
     ) -> str:
         codex_installation_id = getattr(session.account, "codex_installation_id", None)
-        updated_text = _text_with_account_installation_id(text_data, codex_installation_id)
-        if request_state.fresh_upstream_request_text is not None:
-            updated_fresh_text = _text_with_account_installation_id(
-                request_state.fresh_upstream_request_text,
-                codex_installation_id,
-            )
+        # The memo holds the exact objects the previous call returned for this
+        # installation id; a text rewrite yields a new object and an account
+        # swap changes the id, so both miss and take the full stamp below.
+        memo_valid = request_state.installation_stamp_installation_id == codex_installation_id
+        if memo_valid and (
+            text_data is request_state.installation_stamp_text
+            or text_data is request_state.installation_stamp_fresh_text
+        ):
+            updated_text = text_data
+        else:
+            updated_text = _text_with_account_installation_id(text_data, codex_installation_id)
+        fresh_text = request_state.fresh_upstream_request_text
+        if fresh_text is not None and not (memo_valid and fresh_text is request_state.installation_stamp_fresh_text):
+            updated_fresh_text = _text_with_account_installation_id(fresh_text, codex_installation_id)
             _enforce_http_bridge_response_create_text_size(request_state, updated_fresh_text)
             request_state.fresh_upstream_request_text = updated_fresh_text
         if updated_text == text_data:
-            return text_data
-        request_state.request_text = updated_text
-        _enforce_response_create_size_limit(request_state)
+            updated_text = text_data
+        else:
+            request_state.request_text = updated_text
+            _enforce_response_create_size_limit(request_state)
+        request_state.installation_stamp_installation_id = codex_installation_id
+        request_state.installation_stamp_text = updated_text
+        request_state.installation_stamp_fresh_text = request_state.fresh_upstream_request_text
         return updated_text
 
     async def _inline_http_bridge_image_urls(

@@ -1057,6 +1057,16 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    # Memo for the account installation-id stamp applied to ``request_text`` /
+    # ``fresh_upstream_request_text`` on the HTTP bridge submit path. The stamp
+    # is re-applied at several submit and retry sites; these fields remember the
+    # exact ``str`` objects the last stamp returned for ``codex_installation_id``
+    # so an already-stamped object is recognised by identity instead of being
+    # decoded and re-encoded again. Every text rewrite yields a new ``str``
+    # object and an account swap changes the id, so both miss automatically.
+    installation_stamp_installation_id: str | None = None
+    installation_stamp_text: str | None = None
+    installation_stamp_fresh_text: str | None = None
     # Set only on the internally constructed one-shot request that replaces an
     # explicitly rejected stale anchor with a verified full-history payload.
     # It may bypass an older hard-key retry circuit without deleting that

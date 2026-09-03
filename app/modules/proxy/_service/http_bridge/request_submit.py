@@ -12,8 +12,6 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
 
-import anyio
-
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import (  # noqa: F401
@@ -55,6 +53,7 @@ from app.core.openai.requests import (
 )
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonObject, JsonValue
+from app.core.utils.locks import fast_lock
 from app.core.utils.request_id import (
     ensure_request_id,
     ensure_request_scope_id,
@@ -2432,7 +2431,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     account=session.account,
                     account_id_value=session.account.id,
                     pending_requests=deque([request_state]),
-                    pending_lock=anyio.Lock(),
+                    pending_lock=fast_lock(),
                     error_code=error_code,
                     error_message=failure_error_message,
                     api_key=None,

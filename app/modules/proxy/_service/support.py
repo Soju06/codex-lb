@@ -31,6 +31,7 @@ from app.core.resilience.network_recovery import PROCESS_NETWORK_UNAVAILABLE_COD
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.utils.locks import fast_lock
 from app.core.utils.sse import sse_event_type_from_block
 from app.db.models import Account
 from app.modules.api_keys.service import (
@@ -1283,8 +1284,8 @@ class _HTTPBridgeSession:
     admission_waiter_count: int = 0
     request_service_tier: str | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
-    lifecycle_lock: anyio.Lock = field(default_factory=anyio.Lock)
-    recovery_alias_lock: anyio.Lock = field(default_factory=anyio.Lock)
+    lifecycle_lock: anyio.Lock = field(default_factory=fast_lock)
+    recovery_alias_lock: anyio.Lock = field(default_factory=fast_lock)
     api_key: ApiKeyData | None = None
     codex_session: bool = False
     prewarmed: bool = False

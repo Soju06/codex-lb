@@ -411,6 +411,32 @@ test("the model source dialogs stay inside supported viewports", async ({ page }
     // with no accessible name, so drive the wrapping label instead.
     await dialog.locator("label", { hasText: /^Reasoning$/ }).click();
 
+    // TEMP DIAGNOSTIC (remove before merge): CI reports the dialog at y=-370
+    // while this passes locally, so dump what the shell actually resolves to.
+    const diagnostic = await dialog.evaluate((element, viewport) => {
+      const style = getComputedStyle(element);
+      const scroller = element.querySelector<HTMLElement>(
+        '[data-testid="model-source-create-scroll-region"]',
+      );
+      return {
+        viewport,
+        innerHeight: window.innerHeight,
+        supportsDvh: CSS.supports("max-height", "calc(100dvh - 2rem)"),
+        dialogClass: element.className,
+        computedMaxHeight: style.maxHeight,
+        computedDisplay: style.display,
+        computedOverflow: style.overflow,
+        dialogHeight: Math.round(element.getBoundingClientRect().height),
+        dialogTop: Math.round(element.getBoundingClientRect().top),
+        scrollerPresent: !!scroller,
+        scrollerOverflowY: scroller ? getComputedStyle(scroller).overflowY : null,
+        scrollerClient: scroller?.clientHeight ?? null,
+        scrollerScroll: scroller?.scrollHeight ?? null,
+        reasoningFieldPresent: !!element.querySelector("#model-source-reasoning-efforts"),
+      };
+    }, size);
+    console.log(`MODEL_SOURCE_DIAGNOSTIC ${JSON.stringify(diagnostic)}`);
+
     // The regression this covers: the dialog rendered taller than the viewport
     // with no scroll container, so the submit button was unreachable.
     for (const element of [dialog, title, closeButton, createButton]) {

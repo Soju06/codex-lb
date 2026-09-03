@@ -65,21 +65,26 @@ export function ModelSourceCreateDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader>
+      <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
+        <DialogHeader className="px-6 pt-6 pr-12 pb-2">
 	          <DialogTitle>{t("modelSources.createDialog.title")}</DialogTitle>
 	          <DialogDescription>{t("modelSources.createDialog.description")}</DialogDescription>
         </DialogHeader>
 
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-4">
-            <ModelSourceFormFields
-              control={form.control}
-              draft={draft}
-              updateDraft={updateDraft}
-	              apiKeyLabel={t("modelSources.fields.upstreamApiKey")}
-            />
-            <DialogFooter>
+          <form onSubmit={form.handleSubmit(handleSubmit)} className="flex min-h-0 flex-1 flex-col">
+            <div
+              className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pb-4"
+              data-testid="model-source-create-scroll-region"
+            >
+              <ModelSourceFormFields
+                control={form.control}
+                draft={draft}
+                updateDraft={updateDraft}
+                apiKeyLabel={t("modelSources.fields.upstreamApiKey")}
+              />
+            </div>
+            <DialogFooter className="border-t px-6 py-4">
               <Button type="submit" disabled={busy || form.formState.isSubmitting}>
 	                {t("common.actions.create")}
               </Button>

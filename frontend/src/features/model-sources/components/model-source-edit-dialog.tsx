@@ -216,15 +216,20 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
 
   return (
     <Form {...form}>
-      <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-4">
-        <ModelSourceFormFields
-          control={form.control}
-          draft={draft}
-          updateDraft={updateDraft}
-	          apiKeyLabel={t("modelSources.fields.upstreamApiKey")}
-	          apiKeyPlaceholder={t("modelSources.editDialog.keepCurrentKey")}
-        />
-        <DialogFooter>
+      <form onSubmit={form.handleSubmit(handleSubmit)} className="flex min-h-0 flex-1 flex-col">
+        <div
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pb-4"
+          data-testid="model-source-edit-scroll-region"
+        >
+          <ModelSourceFormFields
+            control={form.control}
+            draft={draft}
+            updateDraft={updateDraft}
+            apiKeyLabel={t("modelSources.fields.upstreamApiKey")}
+            apiKeyPlaceholder={t("modelSources.editDialog.keepCurrentKey")}
+          />
+        </div>
+        <DialogFooter className="border-t px-6 py-4">
           <Button type="submit" disabled={busy || form.formState.isSubmitting}>
 	            {t("common.actions.save")}
           </Button>
@@ -244,8 +249,8 @@ export function ModelSourceEditDialog({
   const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader>
+      <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
+        <DialogHeader className="px-6 pt-6 pr-12 pb-2">
 	          <DialogTitle>{t("modelSources.editDialog.title")}</DialogTitle>
 	          <DialogDescription>{t("modelSources.editDialog.description")}</DialogDescription>
         </DialogHeader>
@@ -259,7 +264,7 @@ export function ModelSourceEditDialog({
             onClose={() => onOpenChange(false)}
           />
         ) : (
-	          <p className="text-sm text-muted-foreground">{t("modelSources.editDialog.selectSource")}</p>
+          <p className="px-6 pb-6 text-sm text-muted-foreground">{t("modelSources.editDialog.selectSource")}</p>
         )}
       </DialogContent>
     </Dialog>

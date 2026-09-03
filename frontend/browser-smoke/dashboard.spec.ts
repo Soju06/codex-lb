@@ -380,3 +380,83 @@ test("the API key create dialog stays inside supported viewports", async ({ page
   await page.mouse.click(8, Math.floor(viewportCases[0].size.height / 2));
   await expect(dialog).toBeHidden();
 });
+
+test("the model source dialogs stay inside supported viewports", async ({ page }) => {
+  const viewportSizes = [
+    { width: 320, height: 568 },
+    { width: 390, height: 844 },
+    { width: 1440, height: 900 },
+  ] as const;
+
+  await page.goto("/settings", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await acceptTelemetryConsentIfShown(page);
+
+  await page.getByRole("button", { name: "Show advanced settings" }).click();
+  await expect(page.getByRole("heading", { name: "Model sources", exact: true })).toBeVisible();
+
+  const openDialogButton = page.getByRole("button", { name: "Add source" });
+  const dialog = page.getByRole("dialog", { name: "Create model source" });
+  const title = dialog.getByRole("heading", { name: "Create model source" });
+  const closeButton = dialog.getByRole("button", { name: "Close" });
+  const createButton = dialog.getByRole("button", { name: "Create" });
+
+  for (const size of viewportSizes) {
+    await page.setViewportSize(size);
+    await openDialogButton.click();
+
+    // Enabling Reasoning reveals the effort fields, which is what pushed the
+    // form past the viewport: with the capability off the default form still
+    // fits on a desktop viewport. The capability checkboxes are Radix buttons
+    // with no accessible name, so drive the wrapping label instead.
+    await dialog.locator("label", { hasText: /^Reasoning$/ }).click();
+
+    // The regression this covers: the dialog rendered taller than the viewport
+    // with no scroll container, so the submit button was unreachable.
+    for (const element of [dialog, title, closeButton, createButton]) {
+      const box = await element.boundingBox();
+      expect(box).not.toBeNull();
+      if (!box) {
+        throw new Error("Expected dialog element to have a bounding box");
+      }
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(size.width);
+      expect(box.y + box.height).toBeLessThanOrEqual(size.height);
+    }
+
+    const scrollRegion = dialog.getByTestId("model-source-create-scroll-region");
+    await expect(scrollRegion).toHaveCount(1);
+    const scrollState = await scrollRegion.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      overflowY: getComputedStyle(element).overflowY,
+      scrollHeight: element.scrollHeight,
+    }));
+    expect(scrollState.overflowY).toBe("auto");
+    expect(scrollState.scrollHeight).toBeGreaterThan(scrollState.clientHeight);
+
+    // The numeric and capability inputs carry no accessible name, so prove
+    // reachability through the scroller itself: the end of the content must be
+    // scrollable into view.
+    const scrolled = await scrollRegion.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      return {
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+      };
+    });
+    expect(scrolled.scrollTop).toBeGreaterThan(0);
+    expect(scrolled.scrollTop + scrolled.clientHeight).toBeGreaterThanOrEqual(
+      scrolled.scrollHeight - 1,
+    );
+
+    // Scrolling the body must not carry the header or footer out of view.
+    await expect(title).toBeInViewport();
+    await expect(closeButton).toBeInViewport();
+    await expect(createButton).toBeInViewport();
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+  }
+});

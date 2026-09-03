@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import extract_id_token_claims, resolve_seat_identity
 from app.core.crypto import TokenEncryptor
+from app.core.upstream_proxy.assignment import assign_new_account_to_proxy_pool
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
 from app.db.account_identity_lock import advisory_lock_key, lock_postgresql_account_identities
@@ -563,7 +564,10 @@ class AccountsRepository:
                 return existing_by_email
 
         self._session.add(account)
+        proxy_binding_created = await assign_new_account_to_proxy_pool(self._session, account)
         await self._session.commit()
+        if proxy_binding_created:
+            await get_upstream_route_cache().invalidate()
         await self._session.refresh(account)
         return account
 

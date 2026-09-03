@@ -58,6 +58,7 @@ from app.core.resilience.bulkhead import BulkheadMiddleware, get_bulkhead
 from app.core.resilience.loop_lag_monitor import run_event_loop_lag_monitor
 from app.core.resilience.memory_monitor import configure as configure_memory_monitor
 from app.core.retention.scheduler import build_data_retention_scheduler
+from app.core.runtime_logging import install_redacting_loop_exception_handler
 from app.core.scheduling.leader_election import get_leader_election
 from app.core.shutdown import close_control_plane_task_admission
 from app.core.timeout_invariants import validate_runtime_timeout_invariants
@@ -447,6 +448,10 @@ async def lifespan(app: FastAPI):
     import app.core.startup as startup_module
 
     shutdown_state = import_module("app.core.shutdown")
+    # First app code on uvicorn's loop: mask credential-bearing object reprs
+    # (aiohttp ConnectionKey proxy URLs, BasicAuth) before the default handler
+    # renders them into the 'asyncio' logger.
+    install_redacting_loop_exception_handler(asyncio.get_running_loop())
     metrics_server = None
     metrics_server_task: asyncio.Task[None] | None = None
     ring_service = None

@@ -22,7 +22,7 @@ The service MUST treat the `input`, `tools` and `text.format.schema` fields of `
 
 #### Scenario: Deeply nested passthrough values are rejected with the field param
 
-- **WHEN** a client sends `/backend-api/codex/responses`, `/v1/responses` or `/backend-api/codex/responses/compact` (HTTP or the Responses WebSocket) with `input`, `tools`, `messages` or `text.format.schema` containing objects/arrays nested more than 200 levels deep
+- **WHEN** a client sends `/backend-api/codex/responses` or `/v1/responses` (HTTP or the Responses WebSocket) with `input`, `tools`, `messages` or `text.format.schema` containing objects/arrays nested more than 200 levels deep, or `/backend-api/codex/responses/compact` with `input` nested more than 200 levels deep (`input` is the only passthrough field the compact model declares; `/v1/responses/compact` guards `input` and `messages`)
 - **THEN** the proxy returns HTTP 400 (or a `status: 400` WebSocket error event) with `error.type = "invalid_request_error"` and `error.param` naming the field (`text.format.schema` for the schema)
 - **AND** no upstream connection is opened
 

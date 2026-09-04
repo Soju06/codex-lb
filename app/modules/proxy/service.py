@@ -1708,6 +1708,7 @@ class ProxyService(
         exclude_account_ids: Collection[str] | None = None,
         preferred_account_id: str | None = None,
         preferred_account_is_continuity_owner: bool = False,
+        preferred_account_overrides_single_account_routing: bool = False,
         require_security_work_authorized: bool = False,
         lease_kind: Literal["response_create", "stream"] | None = None,
         estimated_lease_tokens: float = 0.0,
@@ -1778,12 +1779,11 @@ class ProxyService(
                 required_preferred_account = (
                     preferred_account_id is not None and not fallback_on_preferred_account_unavailable
                 )
-                required_continuity_preferred_account = (
-                    required_preferred_account and preferred_account_is_continuity_owner
-                )
+                required_continuity = required_preferred_account and preferred_account_is_continuity_owner
                 single_account_routing_id: str | None = None
                 if _routing_strategy(settings) == "single_account" and (
-                    not required_preferred_account or required_continuity_preferred_account
+                    not required_preferred_account
+                    or (required_continuity and not preferred_account_overrides_single_account_routing)
                 ):
                     selected_account_id = (settings.single_account_id or "").strip()
                     if not selected_account_id:
@@ -1812,12 +1812,12 @@ class ProxyService(
                     and (
                         scoped_account_ids is None
                         or preferred_account_id in scoped_account_ids
-                        or required_continuity_preferred_account
+                        or (required_continuity and not preferred_account_overrides_single_account_routing)
                     )
                     and (
                         single_account_routing_id is None
                         or preferred_account_id == single_account_routing_id
-                        or required_continuity_preferred_account
+                        or required_continuity
                     )
                 )
                 if preferred_account_id is not None and not preferred_eligible:
@@ -1869,12 +1869,12 @@ class ProxyService(
                         additional_limit_name=additional_limit_name,
                         account_ids=(
                             {single_account_routing_id}
-                            if required_continuity_preferred_account and single_account_routing_id is not None
+                            if required_continuity and single_account_routing_id is not None
                             else scoped_account_ids
                         ),
                         required_account_id=preferred_account_id,
                         required_account_is_ownership_constraint=required_preferred_account,
-                        required_continuity_owner=(required_continuity_preferred_account),
+                        required_continuity_owner=required_continuity,
                         require_unambiguous_account=require_unambiguous_account,
                         require_security_work_authorized=require_security_work_authorized,
                         budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),

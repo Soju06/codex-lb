@@ -52,9 +52,9 @@ from app.core.metrics.prometheus import (
 from app.core.openai.requests import (
     ResponsesRequest,
 )
-from app.core.types import JsonValue
+from app.core.types import JsonObject, JsonValue
 from app.core.utils.request_id import ensure_request_id, ensure_request_scope_id
-from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.sse import format_sse_event, parse_sse_data_json, sse_block_with_payload
 from app.core.utils.time import utcnow
 from app.db.models import (
     HttpBridgeSessionState,
@@ -979,8 +979,11 @@ class _HTTPBridgeStreamingMixin:
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
         request_id = ensure_request_id()
         self._raise_for_unsupported_input_image_references(payload)
+        # This dump is shared with the bridge attempt below (``bridge_payload``);
+        # the size gate itself must stay here, ahead of the bridge/WS decision.
+        bridge_payload = payload.to_payload()
         payload_size_estimate_bytes = len(
-            json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+            json.dumps(bridge_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         )
         rewritten_file_account_id = await self._resolve_forwarded_file_account_for_responses(
             payload,
@@ -1090,6 +1093,7 @@ class _HTTPBridgeStreamingMixin:
                     capacity_startup_wait_event=capacity_startup_wait_event,
                     capacity_startup_ready_event=capacity_startup_ready_event,
                     deferred_account_backoff_tracker=deferred_account_backoff_tracker,
+                    bridge_payload=bridge_payload,
                 ):
                     bridge_yielded_any = True
                     yield line
@@ -1240,6 +1244,7 @@ class _HTTPBridgeStreamingMixin:
         capacity_startup_wait_event: asyncio.Event | None = None,
         capacity_startup_ready_event: asyncio.Event | None = None,
         deferred_account_backoff_tracker: _DeferredAccountBackoffTracker | None = None,
+        bridge_payload: JsonObject | None = None,
         _denied_anchor_request_id: str | None = None,
     ) -> AsyncIterator[str]:
         del suppress_text_done_events
@@ -1250,7 +1255,10 @@ class _HTTPBridgeStreamingMixin:
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
         if deferred_account_backoff_tracker is None:
             deferred_account_backoff_tracker = _DeferredAccountBackoffTracker()
-        bridge_payload = payload.to_payload()
+        if bridge_payload is None:
+            # ``_stream_http_bridge_or_retry`` passes its size-gate dump of this
+            # same ``payload``; direct callers fall back to a fresh dump.
+            bridge_payload = payload.to_payload()
         bridge_client_metadata = _response_create_client_metadata(
             bridge_payload,
             headers=headers,
@@ -5211,7 +5219,9 @@ class _HTTPBridgeStreamingMixin:
                         request_state.error_http_status_override,
                         _openai_error_envelope_from_response_failed_payload(block_payload),
                     )
-                yield event_block
+                # Carry the parsed payload so the API-layer normalizers reuse
+                # it instead of parsing the same block again.
+                yield sse_block_with_payload(event_block, block_payload)
                 yielded_any = True
         finally:
             with anyio.CancelScope(shield=True):

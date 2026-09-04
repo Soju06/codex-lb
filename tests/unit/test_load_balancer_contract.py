@@ -370,6 +370,7 @@ async def test_deleted_required_continuity_owner_returns_typed_miss_without_glob
     assert selection.account is None
     assert selection.error_message == "Required continuity owner account no longer exists"
     assert selection.error_code == load_balancer_module.CONTINUITY_OWNER_UNAVAILABLE
+    assert selection.continuity_owner_no_longer_exists is True
     assert degraded_reasons == []
     assert normal_calls == []
 
@@ -570,6 +571,41 @@ async def test_hard_sticky_owner_miss_does_not_mark_healthy_pool_degraded(
     assert selection.error_code == "hard_affinity_saturated"
     assert degraded_reasons == []
     assert normal_calls == []
+
+
+@pytest.mark.asyncio
+async def test_required_continuity_owner_preserves_transient_hard_affinity_saturation(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _account("contract-required-sticky-owner")
+    balancer, _, _, sticky_repo = _balancer([owner], selection_cache)
+    sticky_repo.account_id = owner.id
+
+    async def saturated_selection(_owner: object, *, request: Any) -> object:
+        return SimpleNamespace(
+            selection_inputs=request.selection_inputs,
+            selected_snapshot=None,
+            selected_lease=None,
+            error_message="Hard affinity owner account is unavailable",
+            error_code="hard_affinity_saturated",
+            resets_at=None,
+            disposition="shared_result",
+        )
+
+    monkeypatch.setattr(load_balancer_module, "run_sticky_selection_path", saturated_selection)
+
+    selection = await balancer.select_account(
+        sticky_key="hard-required-owned-turn-state",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        required_account_id=owner.id,
+        required_continuity_owner=True,
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_message == "Hard affinity owner account is unavailable"
+    assert selection.error_code == "hard_affinity_saturated"
 
 
 @pytest.mark.asyncio

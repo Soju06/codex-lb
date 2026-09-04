@@ -31,6 +31,7 @@ from app.core.resilience.network_recovery import PROCESS_NETWORK_UNAVAILABLE_COD
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.utils.locks import fast_lock
 from app.core.utils.sse import sse_event_type_from_block
 from app.db.models import Account
 from app.modules.api_keys.service import (
@@ -49,6 +50,7 @@ from app.modules.proxy.tool_call_dedupe import ToolCallDedupeKey
 from app.modules.proxy.work_admission import AdmissionLease
 
 logger = logging.getLogger(__name__)
+
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
@@ -1056,6 +1058,16 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    # Memo for the account installation-id stamp applied to ``request_text`` /
+    # ``fresh_upstream_request_text`` on the HTTP bridge submit path. The stamp
+    # is re-applied at several submit and retry sites; these fields remember the
+    # exact ``str`` objects the last stamp returned for ``codex_installation_id``
+    # so an already-stamped object is recognised by identity instead of being
+    # decoded and re-encoded again. Every text rewrite yields a new ``str``
+    # object and an account swap changes the id, so both miss automatically.
+    installation_stamp_installation_id: str | None = None
+    installation_stamp_text: str | None = None
+    installation_stamp_fresh_text: str | None = None
     # Set only on the internally constructed one-shot request that replaces an
     # explicitly rejected stale anchor with a verified full-history payload.
     # It may bypass an older hard-key retry circuit without deleting that
@@ -1272,8 +1284,8 @@ class _HTTPBridgeSession:
     admission_waiter_count: int = 0
     request_service_tier: str | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
-    lifecycle_lock: anyio.Lock = field(default_factory=anyio.Lock)
-    recovery_alias_lock: anyio.Lock = field(default_factory=anyio.Lock)
+    lifecycle_lock: anyio.Lock = field(default_factory=fast_lock)
+    recovery_alias_lock: anyio.Lock = field(default_factory=fast_lock)
     api_key: ApiKeyData | None = None
     codex_session: bool = False
     prewarmed: bool = False

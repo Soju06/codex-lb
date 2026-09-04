@@ -20,6 +20,7 @@ from enum import Enum
 from typing import (
     Any,
     AsyncContextManager,
+    AsyncGenerator,
     AsyncIterator,
     Awaitable,
     Callable,
@@ -44,6 +45,7 @@ from app.core.clients.codex import (
     CodexTransportError,
     codex_transport_error_message,
     create_codex_session,
+    release_codex_response,
     require_route_or_direct_egress_opt_in,
 )
 from app.core.clients.codex_version import get_codex_version_cache
@@ -560,6 +562,9 @@ class _CodexSSEResponse:
     async def text(self, *, encoding: str | None = None, errors: str = "strict") -> str:
         del encoding, errors
         return await _codex_response_text(self._response)
+
+    async def release(self) -> None:
+        await release_codex_response(self._response)
 
 
 class ProxyResponseError(Exception):
@@ -1425,7 +1430,7 @@ async def _iter_sse_events(
     resp: SSEResponse,
     idle_timeout_seconds: float,
     max_event_bytes: int,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     async def _next_chunk() -> bytes:
         return await iterator.__anext__()
 
@@ -3569,26 +3574,33 @@ async def stream_responses(
     native_egress_client: NativeEgressClient | None = None,
 ) -> AsyncIterator[str]:
     effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
-    async with lease_http_session(session) as client_session:
-        async for event_block in _stream_responses_with_session(
-            payload=payload,
-            headers=headers,
-            access_token=access_token,
-            account_id=account_id,
-            base_url=base_url,
-            raise_for_status=raise_for_status,
-            session=client_session,
-            upstream_stream_transport_override=upstream_stream_transport_override,
-            route=route,
-            codex_client=codex_client,
-            route_trace=route_trace,
-            allow_direct_egress=effective_allow_direct_egress,
-            codex_installation_id=codex_installation_id,
-            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-            codex_lb_account_id=codex_lb_account_id,
-            suppress_live_usage=suppress_live_usage,
-            native_egress_client=native_egress_client,
-        ):
+    # aclosing() at every hop lets a consumer's aclose() reach the upstream
+    # response teardown synchronously instead of via the asyncgen finalizer.
+    async with (
+        lease_http_session(session) as client_session,
+        contextlib.aclosing(
+            _stream_responses_with_session(
+                payload=payload,
+                headers=headers,
+                access_token=access_token,
+                account_id=account_id,
+                base_url=base_url,
+                raise_for_status=raise_for_status,
+                session=client_session,
+                upstream_stream_transport_override=upstream_stream_transport_override,
+                route=route,
+                codex_client=codex_client,
+                route_trace=route_trace,
+                allow_direct_egress=effective_allow_direct_egress,
+                codex_installation_id=codex_installation_id,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                codex_lb_account_id=codex_lb_account_id,
+                suppress_live_usage=suppress_live_usage,
+                native_egress_client=native_egress_client,
+            )
+        ) as upstream_events,
+    ):
+        async for event_block in upstream_events:
             if not suppress_live_usage and (codex_lb_account_id or account_id) and EVENT_MARKER in event_block:
                 publish_live_usage(
                     parse_rate_limit_event_text(event_block),
@@ -3616,7 +3628,7 @@ async def _stream_responses_with_session(
     codex_lb_account_id: str | None = None,
     suppress_live_usage: bool = False,
     native_egress_client: NativeEgressClient | None = None,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     settings = get_settings()
     headers = apply_codex_installation_headers(
         headers,
@@ -3757,10 +3769,11 @@ async def _stream_responses_with_session(
     async def _stream_via_http(
         current_headers: Mapping[str, str],
         current_timeout: aiohttp.ClientTimeout,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncGenerator[str, None]:
         try:
-            async for event_block in _stream_via_http_attempt(current_headers, current_timeout):
-                yield event_block
+            async with contextlib.aclosing(_stream_via_http_attempt(current_headers, current_timeout)) as attempt:
+                async for event_block in attempt:
+                    yield event_block
         except aiohttp.SocketTimeoutError as exc:
             # A socket read timeout means the connection was established and
             # then produced nothing. That is an idle stream, not a transport
@@ -3771,12 +3784,13 @@ async def _stream_responses_with_session(
     async def _stream_via_http_attempt(
         current_headers: Mapping[str, str],
         current_timeout: aiohttp.ClientTimeout,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncGenerator[str, None]:
         nonlocal status_code, last_stream_activity_at, error_code, error_message, seen_terminal
 
         if route is not None:
             owns_codex_client = codex_client is None
             active_codex_client = codex_client or CodexClient(create_codex_session())
+            raw_resp: Any = None
             try:
                 request_kwargs: dict[str, Any] = {
                     "json": payload_dict,
@@ -3866,41 +3880,53 @@ async def _stream_responses_with_session(
                     yield event_block
                     return
 
-                async for event_block in _iter_sse_events(
-                    cast(SSEResponse, resp),
-                    effective_idle_timeout,
-                    settings.max_sse_event_bytes,
-                ):
-                    last_stream_activity_at = time.monotonic()
-                    event_block = _normalize_sse_event_block(event_block)
-                    event_block, normalized_event_type = _normalize_stream_payload_for_http_block(
-                        event_block,
-                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                async with contextlib.aclosing(
+                    _iter_sse_events(
+                        cast(SSEResponse, resp),
+                        effective_idle_timeout,
+                        settings.max_sse_event_bytes,
                     )
-                    if isinstance(normalized_event_type, str) and (
-                        normalized_event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES
-                        or (normalized_event_type == "error" and not enforce_openai_sdk_contract)
-                    ):
-                        seen_terminal = True
-                    archive_text(
-                        direction="server_to_codex",
-                        kind="responses",
-                        transport="http",
-                        text=event_block,
-                        account_id=account_id,
-                        method="POST",
-                        url=url,
-                        status_code=status_code,
-                        headers=current_headers,
-                        extra={"event_format": "sse"},
-                    )
-                    yield event_block
-                    if seen_terminal:
-                        break
+                ) as routed_events:
+                    async for event_block in routed_events:
+                        last_stream_activity_at = time.monotonic()
+                        event_block = _normalize_sse_event_block(event_block)
+                        event_block, normalized_event_type = _normalize_stream_payload_for_http_block(
+                            event_block,
+                            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                        )
+                        if isinstance(normalized_event_type, str) and (
+                            normalized_event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES
+                            or (normalized_event_type == "error" and not enforce_openai_sdk_contract)
+                        ):
+                            seen_terminal = True
+                        archive_text(
+                            direction="server_to_codex",
+                            kind="responses",
+                            transport="http",
+                            text=event_block,
+                            account_id=account_id,
+                            method="POST",
+                            url=url,
+                            status_code=status_code,
+                            headers=current_headers,
+                            extra={"event_format": "sse"},
+                        )
+                        yield event_block
+                        if seen_terminal:
+                            break
                 return
             finally:
-                if owns_codex_client:
-                    await active_codex_client.close()
+                # The stream normally stops before body EOF (terminal event,
+                # idle timeout, cancellation, downstream disconnect). Release the
+                # response before the session goes away so the connection is
+                # returned or closed now instead of being finalized by the GC
+                # as "Unclosed connection".
+                try:
+                    if raw_resp is not None:
+                        await release_codex_response(raw_resp)
+                finally:
+                    if owns_codex_client:
+                        await active_codex_client.close()
 
         @asynccontextmanager
         async def _direct_response_context() -> AsyncIterator[aiohttp.ClientResponse | NativeEgressResponse]:
@@ -4005,37 +4031,40 @@ async def _stream_responses_with_session(
                 yield event_block
                 return
 
-            async for event_block in _iter_sse_events(
-                resp,
-                effective_idle_timeout,
-                settings.max_sse_event_bytes,
-            ):
-                last_stream_activity_at = time.monotonic()
-                event_block = _normalize_sse_event_block(event_block)
-                event_block, normalized_event_type = _normalize_stream_payload_for_http_block(
-                    event_block,
-                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            async with contextlib.aclosing(
+                _iter_sse_events(
+                    resp,
+                    effective_idle_timeout,
+                    settings.max_sse_event_bytes,
                 )
-                if isinstance(normalized_event_type, str) and (
-                    normalized_event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES
-                    or (normalized_event_type == "error" and not enforce_openai_sdk_contract)
-                ):
-                    seen_terminal = True
-                archive_text(
-                    direction="server_to_codex",
-                    kind="responses",
-                    transport="http",
-                    text=event_block,
-                    account_id=account_id,
-                    method="POST",
-                    url=url,
-                    status_code=status_code,
-                    headers=current_headers,
-                    extra={"event_format": "sse"},
-                )
-                yield event_block
-                if seen_terminal:
-                    break
+            ) as direct_events:
+                async for event_block in direct_events:
+                    last_stream_activity_at = time.monotonic()
+                    event_block = _normalize_sse_event_block(event_block)
+                    event_block, normalized_event_type = _normalize_stream_payload_for_http_block(
+                        event_block,
+                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    )
+                    if isinstance(normalized_event_type, str) and (
+                        normalized_event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES
+                        or (normalized_event_type == "error" and not enforce_openai_sdk_contract)
+                    ):
+                        seen_terminal = True
+                    archive_text(
+                        direction="server_to_codex",
+                        kind="responses",
+                        transport="http",
+                        text=event_block,
+                        account_id=account_id,
+                        method="POST",
+                        url=url,
+                        status_code=status_code,
+                        headers=current_headers,
+                        extra={"event_format": "sse"},
+                    )
+                    yield event_block
+                    if seen_terminal:
+                        break
 
     _maybe_log_upstream_request_start(
         kind="responses",
@@ -4061,7 +4090,7 @@ async def _stream_responses_with_session(
         *,
         rejection_status: int | None,
         rejection_message: str,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncGenerator[str, None]:
         nonlocal transport, upstream_headers, method, remaining_request_timeout, timeout, started_at, payload_dict
         nonlocal payload_json
 
@@ -4126,8 +4155,9 @@ async def _stream_responses_with_session(
             url=url,
             headers=upstream_headers,
         )
-        async for event_block in _stream_via_http(upstream_headers, timeout):
-            yield event_block
+        async with contextlib.aclosing(_stream_via_http(upstream_headers, timeout)) as http_events:
+            async for event_block in http_events:
+                yield event_block
 
     try:
         if transport == "websocket":
@@ -4177,22 +4207,29 @@ async def _stream_responses_with_session(
                     )
                     return
 
-                async for event_block in _stream_via_http_after_websocket_rejection(
-                    rejection_status=exc.status,
-                    rejection_message=str(exc),
-                ):
-                    yield event_block
+                async with contextlib.aclosing(
+                    _stream_via_http_after_websocket_rejection(
+                        rejection_status=exc.status,
+                        rejection_message=str(exc),
+                    )
+                ) as fallback_events:
+                    async for event_block in fallback_events:
+                        yield event_block
             except CodexTransportError as exc:
                 if not _should_fallback_to_http_after_codex_transport_error(transport_mode, exc):
                     raise
-                async for event_block in _stream_via_http_after_websocket_rejection(
-                    rejection_status=exc.status_code,
-                    rejection_message=str(exc),
-                ):
-                    yield event_block
+                async with contextlib.aclosing(
+                    _stream_via_http_after_websocket_rejection(
+                        rejection_status=exc.status_code,
+                        rejection_message=str(exc),
+                    )
+                ) as fallback_events:
+                    async for event_block in fallback_events:
+                        yield event_block
         else:
-            async for event_block in _stream_via_http(upstream_headers, timeout):
-                yield event_block
+            async with contextlib.aclosing(_stream_via_http(upstream_headers, timeout)) as http_events:
+                async for event_block in http_events:
+                    yield event_block
     except ProxyResponseError as exc:
         status_code = exc.status_code
         raise

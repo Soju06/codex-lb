@@ -49,7 +49,7 @@ from app.core.types import JsonValue
 from app.core.usage.live_hub import publish_live_usage
 from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
 from app.core.utils.request_id import reset_request_id, set_request_id
-from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.sse import format_sse_event, format_sse_event_from_text, parse_sse_data_json_text
 from app.db.models import Account
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -2003,6 +2003,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # clear is represented by its timestamp; a send after it leaves
                 # the event set and wakes the persistent receive wait below.
                 session.upstream_reader_wakeup.clear()
+                # The wakeup waiter is reused across iterations while it is
+                # still pending. A set() that landed while the previous
+                # message was being processed completed it; that send is
+                # already represented in the snapshot below, so consume the
+                # fired waiter here without awaiting and re-arm it before the
+                # next wait.
+                if wakeup_task is not None and wakeup_task.done():
+                    wakeup_task.result()
+                    wakeup_task = None
                 receive_timeout = await self._next_websocket_receive_timeout(
                     session.pending_requests,
                     pending_lock=session.pending_lock,
@@ -2033,7 +2042,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                 elif receive_timeout is not None and receive_timeout.timeout_seconds <= 0:
                     timed_out = True
                 else:
-                    wakeup_task = asyncio.create_task(session.upstream_reader_wakeup.wait())
+                    # Event.wait() waiters are level-triggered: a waiter
+                    # registered before clear() still fires on the next set(),
+                    # so a pending waiter stays valid across iterations and is
+                    # only re-created after it fires. Cancelling it per
+                    # message cost a create_task + sleep(0) + cancel + timed
+                    # asyncio.wait round trip; the finally below cancels the
+                    # long-lived waiter once at loop exit.
+                    if wakeup_task is None:
+                        wakeup_task = asyncio.create_task(session.upstream_reader_wakeup.wait())
                     done, _pending = await asyncio.wait(
                         (receive_task, wakeup_task),
                         timeout=receive_timeout.timeout_seconds if receive_timeout is not None else None,
@@ -2048,13 +2065,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                         continue
                     else:
                         timed_out = True
-                    if wakeup_task is not None:
-                        await _cancel_http_bridge_reader_child(
-                            wakeup_task,
-                            label="HTTP bridge reader wakeup wait",
-                            cleanup_tasks=self._background_cleanup_tasks,
-                        )
-                        wakeup_task = None
 
                 if timed_out:
                     if receive_timeout is None:
@@ -2378,6 +2388,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                         **({"force_retire": True} if error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE else {}),
                     )
         finally:
+            # Mark the socket this reader owned closed before the child
+            # cancellations below suspend: the persistent wakeup waiter is
+            # normally still pending here, and a recovery that replaces the
+            # socket during that suspension clears the flag itself after
+            # swapping ``session.upstream``.
+            if session.upstream is relay_upstream:
+                session.closed = True
             await _cancel_http_bridge_reader_child(
                 wakeup_task,
                 label="HTTP bridge reader wakeup wait",
@@ -2388,16 +2405,17 @@ class _HTTPBridgeUpstreamEventsMixin:
                 label="HTTP bridge upstream receive",
                 cleanup_tasks=self._background_cleanup_tasks,
             )
-            if session.upstream is relay_upstream:
-                session.closed = True
 
     async def _process_http_bridge_upstream_text(
         self: Any,
         session: "_HTTPBridgeSession",
         text: str,
     ) -> None:
+        # One JSON document per websocket text frame: parse it directly instead
+        # of framing it as SSE and running the line parser over it. The
+        # data-only block is what unmatched events relay.
         event_block = f"data: {text}\n\n"
-        payload = parse_sse_data_json(event_block)
+        payload = parse_sse_data_json_text(text)
         event_type = classify_event_type(payload)
         event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
         completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
@@ -2641,8 +2659,22 @@ class _HTTPBridgeUpstreamEventsMixin:
                     matched_request_state.suppress_next_created_downstream = False
                     suppress_downstream_event = True
                 if payload is not None:
-                    payload = _rewrite_websocket_downstream_response_id(payload, matched_request_state)
-                    event_block = format_sse_event(payload)
+                    rewritten_payload = _rewrite_websocket_downstream_response_id(payload, matched_request_state)
+                    # ``text`` is the serialization ``payload`` was parsed from (or the
+                    # tool-call rewrite's compact re-dump). Relaying it verbatim is
+                    # only valid while nothing above mutated ``payload`` in place:
+                    # ``mark_duplicate_tool_call_downstream_event`` trims partially
+                    # duplicated ``multi_tool_use.parallel`` arguments on
+                    # ``response.output_item.done`` items without returning a new
+                    # object, so those (rare, per-item) events are always
+                    # re-serialized. Every other pre-framing step is read-only.
+                    if rewritten_payload is not payload or event_type == "response.output_item.done":
+                        payload = rewritten_payload
+                        event_block = format_sse_event(payload)
+                    else:
+                        # Identity fast path: nothing changed, so frame the
+                        # upstream JSON text instead of serializing the dict again.
+                        event_block = format_sse_event_from_text(payload, text)
                 if _websocket_should_defer_reasoning_prelude(matched_request_state, event_type, payload):
                     matched_request_state.deferred_reasoning_downstream_texts.append(event_block)
                     matched_request_state.last_upstream_activity_at = now

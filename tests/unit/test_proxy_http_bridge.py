@@ -21,12 +21,18 @@ import aiohttp
 import anyio
 import pytest
 from fastapi import WebSocket
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
 from app.core.auth.refresh import RefreshError
-from app.core.clients.proxy import CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY, ProxyResponseError
+from app.core.clients.proxy import (
+    CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY,
+    ProxyResponseError,
+    apply_codex_installation_metadata,
+)
 from app.core.clients.proxy_websocket import (
     UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
     CodexUpstreamWebSocket,
@@ -69,6 +75,7 @@ from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_e
 from app.modules.proxy.http_bridge_event_batcher import TerminalOperationEventAppendResult
 from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, CatalogOmissionQuotaAdmission
+from tests.unit.hypothesis_strategies import json_values as hypothesis_json_values
 
 pytestmark = pytest.mark.unit
 
@@ -8112,6 +8119,254 @@ def test_submit_http_bridge_request_uses_bridge_installation_metadata_helper() -
     assert source.count("_http_bridge_text_with_account_installation_id(") >= 3
 
 
+_real_json_loads = json.loads
+
+
+def _reference_text_with_account_installation_id(text_data: str, codex_installation_id: str | None) -> str:
+    """The pre-splice decode/rewrite/encode implementation, kept as the byte oracle."""
+    payload = _real_json_loads(text_data)
+    if not isinstance(payload, dict):
+        return text_data
+    apply_codex_installation_metadata(payload, codex_installation_id)
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _count_json_loads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every ``json.loads`` input (frame, client_metadata segment, turn metadata)."""
+    decoded: list[str] = []
+    real_loads = json.loads
+
+    def counting_loads(text: str, *args: Any, **kwargs: Any) -> Any:
+        decoded.append(text)
+        return real_loads(text, *args, **kwargs)
+
+    monkeypatch.setattr(http_bridge_request_submit_module.json, "loads", counting_loads)
+    return decoded
+
+
+def _prepare_stamp_fixture(
+    service: proxy_service.ProxyService,
+) -> tuple[proxy_service._WebSocketRequestState, str]:
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "caf\u00e9 \u2014 large",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi " * 2000}]}],
+        }
+    )
+    return service._prepare_http_bridge_request(
+        payload,
+        {"x-codex-turn-metadata": '{"installation_id":"client-installation","turn_id":"payload-turn"}'},
+        api_key=None,
+        api_key_reservation=None,
+    )
+
+
+def test_http_bridge_installation_stamp_decodes_frame_once_across_sequential_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.account.codex_installation_id = "account-installation"
+    request_state, text_data = _prepare_stamp_fixture(service)
+    expected = _reference_text_with_account_installation_id(text_data, "account-installation")
+    decoded = _count_json_loads(monkeypatch)
+
+    first = service._http_bridge_text_with_account_installation_id(session, request_state, text_data)
+    decodes_after_first = len(decoded)
+    second = service._http_bridge_text_with_account_installation_id(session, request_state, first)
+    third = service._http_bridge_text_with_account_installation_id(session, request_state, second)
+    fourth = service._http_bridge_text_with_account_installation_id(session, request_state, third)
+
+    assert first == expected
+    assert second is first and third is first and fourth is first
+    assert request_state.request_text is first
+    # The splice decodes the client_metadata segment (and its turn metadata), never the frame.
+    assert [text for text in decoded if len(text) >= 1024] == []
+    assert decoded and all(text.startswith("{") for text in decoded)
+    assert len(decoded) == decodes_after_first
+    assert http_bridge_request_submit_module._text_without_account_installation_id(
+        first
+    ) == http_bridge_request_submit_module._text_without_account_installation_id(text_data)
+
+
+def test_http_bridge_installation_stamp_memo_misses_on_account_swap_and_text_rewrite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.account.codex_installation_id = "account-a"
+    request_state, text_data = _prepare_stamp_fixture(service)
+    decoded = _count_json_loads(monkeypatch)
+
+    stamped_a = service._http_bridge_text_with_account_installation_id(session, request_state, text_data)
+    decodes = len(decoded)
+    assert decodes > 0
+    assert service._http_bridge_text_with_account_installation_id(session, request_state, stamped_a) is stamped_a
+    assert len(decoded) == decodes
+
+    session.account.codex_installation_id = "account-b"
+    stamped_b = service._http_bridge_text_with_account_installation_id(session, request_state, stamped_a)
+    assert stamped_b is not stamped_a
+    assert stamped_b == _reference_text_with_account_installation_id(stamped_a, "account-b")
+    assert _real_json_loads(stamped_b)["client_metadata"]["x-codex-installation-id"] == "account-b"
+    assert len(decoded) > decodes
+    decodes = len(decoded)
+
+    cast(Any, session.account).codex_installation_id = None
+    unstamped = service._http_bridge_text_with_account_installation_id(session, request_state, stamped_b)
+    assert unstamped == _reference_text_with_account_installation_id(stamped_b, None)
+    assert "x-codex-installation-id" not in _real_json_loads(unstamped)["client_metadata"]
+    assert len(decoded) > decodes
+    decodes = len(decoded)
+
+    session.account.codex_installation_id = "account-b"
+    restamped = service._http_bridge_text_with_account_installation_id(session, request_state, unstamped)
+    assert restamped == stamped_b
+    assert len(decoded) > decodes
+
+    rewritten = http_bridge_request_submit_module._text_with_operation_id(restamped, "op_rewrite")
+    decoded.clear()
+    stamped_rewritten = service._http_bridge_text_with_account_installation_id(session, request_state, rewritten)
+    assert stamped_rewritten == _reference_text_with_account_installation_id(rewritten, "account-b")
+    decodes = len(decoded)
+    assert decodes > 0
+    assert service._http_bridge_text_with_account_installation_id(session, request_state, stamped_rewritten) is (
+        stamped_rewritten
+    )
+    assert len(decoded) == decodes
+    # No path above decoded the whole frame: every stamp went through the splice.
+    assert [text for text in decoded if len(text) >= 1024] == []
+
+
+def test_http_bridge_installation_stamp_memoizes_fresh_text_and_size_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.account.codex_installation_id = "account-installation"
+    request_state, text_data = _prepare_stamp_fixture(service)
+    fresh_text = json.dumps(
+        {"type": "response.create", "model": "gpt-5.4", "input": [], "client_metadata": {"k": "v"}},
+        separators=(",", ":"),
+    )
+    request_state.fresh_upstream_request_text = fresh_text
+    size_checks: list[str] = []
+    real_size_check = http_bridge_request_submit_module._enforce_http_bridge_response_create_text_size
+
+    def counting_size_check(state: proxy_service._WebSocketRequestState, checked: str) -> None:
+        size_checks.append(checked)
+        real_size_check(state, checked)
+
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_enforce_http_bridge_response_create_text_size",
+        counting_size_check,
+    )
+    decoded = _count_json_loads(monkeypatch)
+
+    stamped = service._http_bridge_text_with_account_installation_id(session, request_state, text_data)
+    stamped_fresh = request_state.fresh_upstream_request_text
+    assert stamped_fresh == _reference_text_with_account_installation_id(fresh_text, "account-installation")
+    assert size_checks == [stamped_fresh]
+    decodes = len(decoded)
+    assert decodes > 0
+
+    for _ in range(3):
+        assert service._http_bridge_text_with_account_installation_id(session, request_state, stamped) is stamped
+    assert request_state.fresh_upstream_request_text is stamped_fresh
+    assert size_checks == [stamped_fresh]
+    assert len(decoded) == decodes
+
+    # The pre-admission retry path submits the fresh text itself as the request text.
+    assert (
+        service._http_bridge_text_with_account_installation_id(session, request_state, stamped_fresh) is stamped_fresh
+    )
+    assert len(decoded) == decodes
+
+    # A new fresh object (equal bytes) is a different stamp target and is size-checked again.
+    request_state.fresh_upstream_request_text = "".join(stamped_fresh)
+    assert service._http_bridge_text_with_account_installation_id(session, request_state, stamped) is stamped
+    assert request_state.fresh_upstream_request_text is not None
+    assert size_checks == [stamped_fresh, request_state.fresh_upstream_request_text]
+    assert len(decoded) > decodes
+
+    # A size failure on the fresh text keeps the memo untouched so the next call re-checks.
+    oversized_fresh = json.dumps({"type": "response.create", "input": "x" * 64}, separators=(",", ":"))
+    request_state.fresh_upstream_request_text = oversized_fresh
+    monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_WARN_BYTES", 65, raising=False)
+    monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 64, raising=False)
+    with pytest.raises(proxy_service.ProxyResponseError):
+        service._http_bridge_text_with_account_installation_id(session, request_state, stamped)
+    assert request_state.installation_stamp_fresh_text is not oversized_fresh
+    with pytest.raises(proxy_service.ProxyResponseError):
+        service._http_bridge_text_with_account_installation_id(session, request_state, stamped)
+
+
+_STAMP_SPLICE_METADATA = st.dictionaries(
+    st.text(max_size=12).filter(lambda key: key.lower() not in {"client_metadata", "x-codex-installation-id"}),
+    hypothesis_json_values,
+    max_size=4,
+)
+_STAMP_SPLICE_TURN_METADATA = st.one_of(
+    st.none(),
+    st.just('{"installation_id":"client","turn_id":"t"}'),
+    st.just('{"turn_id":"t"}'),
+    st.just("not json"),
+    st.just("[1]"),
+)
+
+
+@given(
+    metadata=_STAMP_SPLICE_METADATA,
+    turn_metadata=_STAMP_SPLICE_TURN_METADATA,
+    include_client_installation_id=st.booleans(),
+    codex_installation_id=st.sampled_from(["account-installation", None, ""]),
+    position=st.sampled_from(["first", "middle", "last", "absent"]),
+    extra=hypothesis_json_values,
+)
+@settings(deadline=None, max_examples=300)
+def test_http_bridge_installation_stamp_splice_matches_reference_bytes(
+    metadata: dict[str, Any],
+    turn_metadata: str | None,
+    include_client_installation_id: bool,
+    codex_installation_id: str | None,
+    position: str,
+    extra: Any,
+) -> None:
+    client_metadata = dict(metadata)
+    if turn_metadata is not None:
+        client_metadata["x-codex-turn-metadata"] = turn_metadata
+    if include_client_installation_id:
+        client_metadata["x-codex-installation-id"] = "client-installation"
+    payload: dict[str, Any] = {}
+    if position == "first":
+        payload["client_metadata"] = client_metadata
+    payload.update({"model": "gpt-5.4", "input": [{"role": "user", "content": "caf\u00e9 \U0001f600"}], "extra": extra})
+    if position == "middle":
+        payload["client_metadata"] = client_metadata
+    payload.update({"reasoning": {"effort": "high"}, "store": False, "type": "response.create"})
+    if position == "last":
+        payload["client_metadata"] = client_metadata
+    text_data = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+    expected = _reference_text_with_account_installation_id(text_data, codex_installation_id)
+    stamped = http_bridge_request_submit_module._text_with_account_installation_id(text_data, codex_installation_id)
+    spliced = http_bridge_request_submit_module._splice_account_installation_id(text_data, codex_installation_id)
+
+    assert stamped == expected
+    assert http_bridge_request_submit_module._text_with_account_installation_id(stamped, codex_installation_id) == (
+        expected
+    )
+    if position in {"first", "middle"}:
+        assert spliced is None
+    elif text_data.count('"client_metadata"') == (1 if position == "last" else 0):
+        # Trailing or absent top-level key with no look-alike elsewhere: the splice must run.
+        assert spliced == expected
+        if spliced == text_data:
+            assert spliced is text_data
+
+
 @pytest.mark.asyncio
 async def test_get_or_create_http_bridge_session_skips_prune_when_pending_lock_is_wedged(
     monkeypatch: pytest.MonkeyPatch,
@@ -9746,6 +10001,47 @@ async def test_select_account_with_budget_classifies_continuity_owner_outside_as
 
 
 @pytest.mark.asyncio
+async def test_select_account_with_budget_file_pin_continuity_override_respects_assignment_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # given
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    select_account = AsyncMock()
+    service._load_balancer = cast(Any, SimpleNamespace(select_account=select_account))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    routing_strategy="single_account",
+                    single_account_id="acc-dashboard-selected",
+                    sticky_reallocation_budget_threshold_pct=95.0,
+                )
+            )
+        ),
+    )
+
+    # when
+    selection = await service._select_account_with_budget(
+        time.monotonic() + 60.0,
+        request_id="req-file-pin-continuity-scope",
+        kind="http_bridge",
+        request_stage="reattach",
+        api_key=_make_api_key(key_id="key-1", assigned_account_ids=["acc-allowed"]),
+        prefer_earlier_reset_window="primary",
+        preferred_account_id="acc-file-owner",
+        preferred_account_is_continuity_owner=True,
+        preferred_account_overrides_single_account_routing=True,
+        fallback_on_preferred_account_unavailable=False,
+    )
+
+    # then
+    assert selection.error_code == "preferred_account_unavailable"
+    select_account.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_create_http_bridge_session_passes_dashboard_reset_window_to_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -10163,6 +10459,7 @@ async def test_reconnect_account_neutral_recovery_requires_typed_owner_without_c
             account=None,
             error_message="Required continuity owner account no longer exists",
             error_code=CONTINUITY_OWNER_UNAVAILABLE,
+            continuity_owner_no_longer_exists=True,
         )
 
     request_state = proxy_service._WebSocketRequestState(
@@ -10189,6 +10486,52 @@ async def test_reconnect_account_neutral_recovery_requires_typed_owner_without_c
     assert selection_kwargs[0]["preferred_account_id"] == session.account.id
     assert selection_kwargs[0]["preferred_account_is_continuity_owner"] is True
     assert selection_kwargs[0]["fallback_on_preferred_account_unavailable"] is False
+    assert selection_kwargs[0]["preferred_account_overrides_single_account_routing"] is False
+
+
+@pytest.mark.asyncio
+async def test_reconnect_previous_response_owner_keeps_required_preferred_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    selection_kwargs: list[dict[str, object]] = []
+
+    async def select_account(_deadline: float, **kwargs: object) -> proxy_service.AccountSelection:
+        selection_kwargs.append(kwargs)
+        return proxy_service.AccountSelection(account=session.account, error_message=None)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-reconnect-previous-response-owner",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-required-owner",
+        preferred_account_id=session.account.id,
+    )
+    upstream = cast(Any, SimpleNamespace(response_header=lambda _name: None, close=AsyncMock()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=_bridge_selection_settings())),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=session.account))
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=upstream))
+
+    await service._reconnect_http_bridge_session(
+        session,
+        request_state=request_state,
+        require_preferred_account=True,
+    )
+
+    assert selection_kwargs[0]["preferred_account_id"] == session.account.id
+    assert selection_kwargs[0]["fallback_on_preferred_account_unavailable"] is False
+    assert selection_kwargs[0]["preferred_account_is_continuity_owner"] is False
+    assert selection_kwargs[0]["preferred_account_overrides_single_account_routing"] is False
 
 
 @pytest.mark.asyncio
@@ -10878,6 +11221,8 @@ async def test_reconnect_http_bridge_session_keeps_soft_file_pin_owner_after_101
     exclude_account_ids = cast(set[str], selection_kwargs[0]["exclude_account_ids"])
     assert "acc-bridge" not in exclude_account_ids
     assert selection_kwargs[0]["fallback_on_preferred_account_unavailable"] is False
+    assert selection_kwargs[0]["preferred_account_is_continuity_owner"] is True
+    assert selection_kwargs[0]["preferred_account_overrides_single_account_routing"] is True
     assert session.account.id == "acc-bridge"
 
 
@@ -10938,6 +11283,8 @@ async def test_reconnect_http_bridge_session_skips_soft_account_after_1011_witho
     assert "acc-bridge" in exclude_account_ids
     assert selection_kwargs[0]["preferred_account_id"] is None
     assert selection_kwargs[0]["fallback_on_preferred_account_unavailable"] is True
+    assert selection_kwargs[0]["preferred_account_is_continuity_owner"] is False
+    assert selection_kwargs[0]["preferred_account_overrides_single_account_routing"] is False
 
 
 @pytest.mark.asyncio
@@ -11001,6 +11348,132 @@ async def test_reconnect_http_bridge_session_fails_closed_when_file_pin_owner_ca
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
     assert exc_info.value.payload["error"]["type"] == "server_error"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_retries_transient_file_pin_owner_saturation_and_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "sid-soft-file-1011-transient", None),
+        key_value="sid-soft-file-1011-transient",
+    )
+    session.last_upstream_close_code = 1011
+    selection_kwargs: list[dict[str, object]] = []
+    sleep_calls = 0
+
+    async def select_account(_deadline: float, **kwargs: object) -> proxy_service.AccountSelection:
+        selection_kwargs.append(kwargs)
+        if len(selection_kwargs) == 1:
+            return proxy_service.AccountSelection(
+                account=None,
+                error_message="Hard affinity owner account is unavailable",
+                error_code="hard_affinity_saturated",
+            )
+        return proxy_service.AccountSelection(account=session.account, error_message=None)
+
+    async def sleep_for_recovery(selection: proxy_service.AccountSelection, **_kwargs: object) -> bool:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        assert selection.error_code == "hard_affinity_saturated"
+        return True
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-soft-file-1011-transient",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        preferred_account_id=session.account.id,
+        file_required_preferred_account=True,
+    )
+    upstream = cast(Any, SimpleNamespace(response_header=lambda _name: None, close=AsyncMock()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=_bridge_selection_settings())),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(http_bridge_mixin_module, "_sleep_for_account_selection_recovery", sleep_for_recovery)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=session.account))
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=upstream))
+
+    await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    assert len(selection_kwargs) == 2
+    assert sleep_calls == 1
+    assert selection_kwargs[0]["preferred_account_is_continuity_owner"] is True
+    assert selection_kwargs[1]["preferred_account_id"] == session.account.id
+    assert session.closed is False
+
+
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_maps_nonexistent_file_pin_owner_without_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # given
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "sid-soft-file-1011-typed-miss", None),
+        key_value="sid-soft-file-1011-typed-miss",
+    )
+    session.last_upstream_close_code = 1011
+    selection_kwargs: list[dict[str, object]] = []
+    sleep_calls = 0
+
+    async def select_account(_deadline: float, **kwargs: object) -> proxy_service.AccountSelection:
+        selection_kwargs.append(kwargs)
+        return proxy_service.AccountSelection(
+            account=None,
+            error_message="Required continuity owner account no longer exists",
+            error_code=CONTINUITY_OWNER_UNAVAILABLE,
+            continuity_owner_no_longer_exists=True,
+        )
+
+    async def sleep_for_recovery(*_args: object, **_kwargs: object) -> bool:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        return False
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-soft-file-1011-typed-miss",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        preferred_account_id="acc-bridge",
+        file_required_preferred_account=True,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(http_bridge_mixin_module, "_sleep_for_account_selection_recovery", sleep_for_recovery)
+
+    # when
+    with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
+        await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    # then
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    assert sleep_calls == 0
+    assert selection_kwargs[0]["preferred_account_is_continuity_owner"] is True
+    assert selection_kwargs[0]["preferred_account_overrides_single_account_routing"] is True
 
 
 @pytest.mark.asyncio
@@ -11476,7 +11949,7 @@ async def test_select_account_with_budget_required_file_pin_does_not_fallback_on
 
 
 @pytest.mark.asyncio
-async def test_select_account_with_budget_required_file_pin_overrides_single_account_routing(
+async def test_select_account_with_budget_previous_response_owner_bypasses_single_account_routing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -11504,9 +11977,9 @@ async def test_select_account_with_budget_required_file_pin_overrides_single_acc
 
     selection = await service._select_account_with_budget(
         time.monotonic() + 60.0,
-        request_id="req-file-pin-single-account",
+        request_id="req-previous-response-single-account",
         kind="stream",
-        request_stage="first_turn",
+        request_stage="reattach",
         prefer_earlier_reset_window="secondary",
         preferred_account_id="acc-file-owner",
         lease_kind="stream",
@@ -11520,7 +11993,101 @@ async def test_select_account_with_budget_required_file_pin_overrides_single_acc
     assert first_call.kwargs["account_ids"] is None
     assert first_call.kwargs["required_account_id"] == "acc-file-owner"
     assert first_call.kwargs["required_account_is_ownership_constraint"] is True
+    assert first_call.kwargs["required_continuity_owner"] is False
     assert first_call.kwargs["routing_strategy"] == "capacity_weighted"
+
+
+@pytest.mark.asyncio
+async def test_select_account_with_budget_previous_response_owner_respects_assignment_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    select_account = AsyncMock()
+    service._load_balancer = cast(Any, SimpleNamespace(select_account=select_account))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    routing_strategy="single_account",
+                    single_account_id="acc-dashboard-selected",
+                    sticky_reallocation_budget_threshold_pct=95.0,
+                )
+            )
+        ),
+    )
+
+    selection = await service._select_account_with_budget(
+        time.monotonic() + 60.0,
+        request_id="req-previous-response-scope",
+        kind="stream",
+        request_stage="reattach",
+        api_key=_make_api_key(key_id="key-previous-response", assigned_account_ids=["acc-allowed"]),
+        prefer_earlier_reset_window="secondary",
+        preferred_account_id="acc-previous-response-owner",
+        lease_kind="stream",
+        fallback_on_preferred_account_unavailable=False,
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "preferred_account_unavailable"
+    select_account.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_select_account_with_budget_file_pin_continuity_overrides_single_account_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # given
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    select_account = AsyncMock(
+        return_value=proxy_service.AccountSelection(
+            account=cast(Any, SimpleNamespace(id="acc-file-owner")),
+            error_message=None,
+            error_code=None,
+        )
+    )
+    service._load_balancer = cast(Any, SimpleNamespace(select_account=select_account))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    routing_strategy="single_account",
+                    single_account_id="acc-dashboard-selected",
+                    sticky_reallocation_budget_threshold_pct=95.0,
+                )
+            )
+        ),
+    )
+
+    # when
+    selection = await service._select_account_with_budget(
+        time.monotonic() + 60.0,
+        request_id="req-file-pin-continuity-single-account",
+        kind="stream",
+        request_stage="reattach",
+        prefer_earlier_reset_window="secondary",
+        preferred_account_id="acc-file-owner",
+        preferred_account_is_continuity_owner=True,
+        preferred_account_overrides_single_account_routing=True,
+        lease_kind="stream",
+        fallback_on_preferred_account_unavailable=False,
+    )
+
+    # then
+    assert selection.account is not None
+    assert selection.account.id == "acc-file-owner"
+    select_account.assert_awaited_once()
+    first_call = select_account.await_args_list[0]
+    assert first_call.kwargs["account_ids"] is None
+    assert first_call.kwargs["required_account_id"] == "acc-file-owner"
+    assert first_call.kwargs["required_account_is_ownership_constraint"] is True
+    assert first_call.kwargs["required_continuity_owner"] is True
+    assert first_call.kwargs["routing_strategy"] == "capacity_weighted"
+    assert first_call.kwargs["account_ids"] != {"acc-dashboard-selected"}
 
 
 @pytest.mark.asyncio
@@ -25239,7 +25806,7 @@ async def test_get_or_create_http_bridge_session_soft_continuity_owner_blocks_st
         (None, True, 503, "no_accounts"),
         ("no_accounts", True, 503, "no_accounts"),
         ("preferred_account_unavailable", True, 503, "preferred_account_unavailable"),
-        ("hard_affinity_saturated", True, 503, "hard_affinity_saturated"),
+        ("hard_affinity_saturated", True, 502, "previous_response_owner_unavailable"),
         ("account_stream_cap", True, 429, "account_stream_cap"),
         ("account_response_create_cap", True, 429, "account_response_create_cap"),
         ("continuity_owner_policy_conflict", True, 503, "continuity_owner_policy_conflict"),
@@ -43623,3 +44190,222 @@ def test_suppression_message_names_the_timer_that_is_refusing_the_request() -> N
     assert "cooling down" not in half_open
     assert "480s" in half_open
     assert "42s" in cooldown
+
+
+def _make_relay_parity_request_state(
+    *,
+    response_id: str | None = "resp_relay_parity",
+    replay_downstream_response_id: str | None = None,
+) -> proxy_service._WebSocketRequestState:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-relay-parity",
+        response_id=response_id,
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.replay_downstream_response_id = replay_downstream_response_id
+    return request_state
+
+
+def _relay_parity_downstream_block(request_state: proxy_service._WebSocketRequestState) -> str:
+    assert request_state.event_queue is not None
+    event_block = request_state.event_queue.get_nowait()
+    assert isinstance(event_block, str)
+    return event_block
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_relays_unchanged_event_as_upstream_json_text() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_relay_parity_request_state()
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+    payload = {
+        "type": "response.output_text.delta",
+        "item_id": "msg_1",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": "\ud55c\uae00 \u2028 caf\u00e9",
+    }
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    event_block = _relay_parity_downstream_block(request_state)
+    assert event_block == f"event: response.output_text.delta\ndata: {text}\n\n"
+    # JSON-equivalent to the re-serialized block the reader used to emit; only the
+    # escaping differs (upstream UTF-8 is kept, not ``\\uXXXX``-escaped).
+    legacy_block = proxy_service.format_sse_event(payload)
+    assert proxy_service.parse_sse_data_json(event_block) == proxy_service.parse_sse_data_json(legacy_block)
+    assert event_block != legacy_block
+    assert request_state.downstream_visible is True
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_ascii_relay_is_byte_identical_to_serialization() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_relay_parity_request_state()
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+    payload = {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": "hello"}
+    text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    assert _relay_parity_downstream_block(request_state) == proxy_service.format_sse_event(payload)
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_reserializes_when_response_id_is_rewritten() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_relay_parity_request_state(
+        response_id="resp_upstream",
+        replay_downstream_response_id="resp_client_visible",
+    )
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+    payload = {
+        "type": "response.in_progress",
+        "response": {"id": "resp_upstream", "status": "in_progress", "metadata": {"note": "caf\u00e9"}},
+    }
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    event_block = _relay_parity_downstream_block(request_state)
+    rewritten = proxy_service.parse_sse_data_json(event_block)
+    assert rewritten is not None
+    assert cast(dict[str, Any], rewritten["response"])["id"] == "resp_client_visible"
+    assert event_block == proxy_service.format_sse_event(rewritten)
+    assert text not in event_block
+
+
+def _relay_parity_parallel_tool_call_done_text(call_id: str, patch_inputs: list[str]) -> str:
+    arguments = json.dumps(
+        {
+            "tool_uses": [
+                {"recipient_name": "functions.apply_patch", "parameters": {"input": patch_input}}
+                for patch_input in patch_inputs
+            ]
+        },
+        separators=(",", ":"),
+    )
+    return json.dumps(
+        {
+            "type": "response.output_item.done",
+            "response_id": "resp_relay_parity",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "id": f"fc_{call_id}",
+                "call_id": call_id,
+                "name": "multi_tool_use.parallel",
+                "arguments": arguments,
+                "status": "completed",
+            },
+        },
+        separators=(",", ":"),
+    )
+
+
+def _relay_parity_parallel_patch_inputs(event_block: str) -> list[str]:
+    payload = proxy_service.parse_sse_data_json(event_block)
+    assert payload is not None
+    item = cast(dict[str, Any], payload["item"])
+    arguments = json.loads(cast(str, item["arguments"]))
+    return [tool_use["parameters"]["input"] for tool_use in arguments["tool_uses"]]
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_relays_trimmed_parallel_tool_uses_not_upstream_text() -> None:
+    # ``mark_duplicate_tool_call_downstream_event`` trims partially duplicated
+    # parallel tool uses by mutating the payload in place (no new object), so the
+    # identity fast path must not relay the untrimmed upstream text.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_relay_parity_request_state()
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+
+    await service._process_http_bridge_upstream_text(
+        session, _relay_parity_parallel_tool_call_done_text("call_1", ["A", "B"])
+    )
+    second_text = _relay_parity_parallel_tool_call_done_text("call_2", ["A", "C"])
+    await service._process_http_bridge_upstream_text(session, second_text)
+
+    first_block = _relay_parity_downstream_block(request_state)
+    second_block = _relay_parity_downstream_block(request_state)
+    assert _relay_parity_parallel_patch_inputs(first_block) == ["A", "B"]
+    assert _relay_parity_parallel_patch_inputs(second_block) == ["C"]
+    assert second_text not in second_block
+    assert request_state.suppressed_duplicate_tool_call is False
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_fast_path_only_frames_text_that_serializes_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fast_path_event_types: list[str | None] = []
+    original_format_sse_event_from_text = http_bridge_upstream_events_module.format_sse_event_from_text
+
+    def _asserting_format_sse_event_from_text(payload: Mapping[str, Any], text: str) -> str:
+        # Precondition of the identity fast path: the relayed text must still be
+        # a serialization of the (possibly mutated) payload it was parsed from.
+        assert json.loads(text) == payload
+        fast_path_event_types.append(cast(str | None, payload.get("type")))
+        return original_format_sse_event_from_text(payload, text)
+
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "format_sse_event_from_text",
+        _asserting_format_sse_event_from_text,
+    )
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_relay_parity_request_state()
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+    upstream_texts = [
+        json.dumps(
+            {"type": "response.created", "response": {"id": "resp_relay_parity", "status": "in_progress"}},
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {
+                "type": "response.output_item.added",
+                "response_id": "resp_relay_parity",
+                "output_index": 0,
+                "item": {"type": "reasoning", "id": "rs_1", "summary": []},
+            },
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 0,
+                "delta": "한글   café",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 1, "delta": "hello"},
+            separators=(",", ":"),
+        ),
+        _relay_parity_parallel_tool_call_done_text("call_1", ["A", "B"]),
+        _relay_parity_parallel_tool_call_done_text("call_2", ["A", "C"]),
+    ]
+
+    for text in upstream_texts:
+        await service._process_http_bridge_upstream_text(session, text)
+
+    downstream_blocks = [_relay_parity_downstream_block(request_state) for _ in upstream_texts]
+    assert [
+        proxy_service.parse_sse_data_json(block) == json.loads(text)
+        for block, text in zip(downstream_blocks, upstream_texts, strict=True)
+    ] == [True, True, True, True, True, False]
+    assert _relay_parity_parallel_patch_inputs(downstream_blocks[-1]) == ["C"]
+    assert "response.output_text.delta" in fast_path_event_types
+    assert "response.reasoning_summary_text.delta" in fast_path_event_types
+    assert "response.output_item.done" not in fast_path_event_types

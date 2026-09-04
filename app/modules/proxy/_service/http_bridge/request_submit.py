@@ -12,8 +12,6 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
 
-import anyio
-
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import (  # noqa: F401
@@ -54,7 +52,8 @@ from app.core.openai.requests import (
     ResponsesRequest,
 )
 from app.core.resilience.overload import is_local_overload_error_code
-from app.core.types import JsonValue
+from app.core.types import JsonObject, JsonValue
+from app.core.utils.locks import fast_lock
 from app.core.utils.request_id import (
     ensure_request_id,
     ensure_request_scope_id,
@@ -470,12 +469,68 @@ async def _settle_claimed_http_bridge_liveness_failure(
         )
 
 
+_CLIENT_METADATA_TAIL_KEY = ',"client_metadata":'
+
+
+def _dumps_compact(value: JsonValue) -> str:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+
+def _splice_account_installation_id(text_data: str, codex_installation_id: str | None) -> str | None:
+    """Stamp ``client_metadata`` without decoding the rest of the frame.
+
+    Compact ``json.dumps`` (fixed separators, ``ensure_ascii``, insertion
+    order) is compositional: an object encodes as the concatenation of its
+    independently encoded members. For a frame produced by that encoder,
+    rewriting only the trailing top-level ``client_metadata`` value therefore
+    yields exactly the bytes a full decode/rewrite/encode would. This covers the
+    two dominant shapes -- ``client_metadata`` as the last key, or absent -- and
+    returns ``None`` for anything else so the caller falls back to the full
+    round trip.
+    """
+    if len(text_data) < 3 or text_data[0] != "{" or text_data[-1] != "}":
+        return None
+    index = text_data.rfind(_CLIENT_METADATA_TAIL_KEY)
+    if index < 0:
+        if '"client_metadata"' in text_data:
+            # Leading or nested key: not provably absent at the top level.
+            return None
+        inserted: dict[str, JsonValue] = {}
+        apply_codex_installation_metadata(inserted, codex_installation_id)
+        inserted_metadata = inserted.get("client_metadata")
+        if inserted_metadata is None:
+            return text_data
+        return f"{text_data[:-1]}{_CLIENT_METADATA_TAIL_KEY}{_dumps_compact(inserted_metadata)}}}"
+    encoded_metadata = text_data[index + len(_CLIENT_METADATA_TAIL_KEY) : -1]
+    if not encoded_metadata.startswith("{"):
+        return None
+    try:
+        raw_metadata = json.loads(encoded_metadata)
+    except json.JSONDecodeError:
+        # Nested match, or a value followed by further keys: not the trailing top-level key.
+        return None
+    if not isinstance(raw_metadata, dict):
+        return None
+    container: dict[str, JsonValue] = {"client_metadata": cast(dict[str, JsonValue], raw_metadata)}
+    apply_codex_installation_metadata(container, codex_installation_id)
+    metadata = container.get("client_metadata")
+    if metadata is None:
+        return f"{text_data[:index]}}}"
+    updated_metadata = _dumps_compact(metadata)
+    if updated_metadata == encoded_metadata:
+        return text_data
+    return f"{text_data[:index]}{_CLIENT_METADATA_TAIL_KEY}{updated_metadata}}}"
+
+
 def _text_with_account_installation_id(text_data: str, codex_installation_id: str | None) -> str:
+    spliced = _splice_account_installation_id(text_data, codex_installation_id)
+    if spliced is not None:
+        return spliced
     payload = json.loads(text_data)
     if not isinstance(payload, dict):
         return text_data
     apply_codex_installation_metadata(cast(dict[str, JsonValue], payload), codex_installation_id)
-    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    return _dumps_compact(payload)
 
 
 def _text_with_operation_id(text_data: str, operation_id: str | None) -> str:
@@ -631,6 +686,9 @@ class _HTTPBridgeRequestSubmitMixin:
         enforce_openai_sdk_contract: bool = True,
         preserve_responses_lite_client_metadata: bool = False,
     ) -> tuple[_WebSocketRequestState, str]:
+        # One dump feeds client-metadata derivation, the frame and the usage
+        # budget; ``to_payload`` is deterministic so sharing it is exact.
+        base_payload = payload.to_payload()
         request_state, text_data = self._prepare_response_bridge_request_state(
             payload,
             api_key=api_key,
@@ -639,7 +697,7 @@ class _HTTPBridgeRequestSubmitMixin:
             attach_event_queue=True,
             transport=_REQUEST_TRANSPORT_HTTP,
             client_metadata=_response_create_client_metadata(
-                payload.to_payload(),
+                base_payload,
                 headers=headers,
                 preserve_existing_responses_lite=preserve_responses_lite_client_metadata,
             ),
@@ -647,6 +705,7 @@ class _HTTPBridgeRequestSubmitMixin:
             session_id=_owner_lookup_session_id_from_headers(headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            upstream_payload_base=base_payload,
         )
         (
             request_state.useragent,
@@ -671,6 +730,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_id: str | None = None,
         request_log_id: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        upstream_payload_base: JsonObject | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
         deduped_replayed_input_count: int | None = None
         deduped_replayed_input_fingerprint: str | None = None
@@ -685,12 +745,19 @@ class _HTTPBridgeRequestSubmitMixin:
                 deduped_replayed_input_count = len(replayed_input_items)
                 deduped_replayed_input_fingerprint = _fingerprint_input_items(replayed_input_items)
                 payload = payload.model_copy(update={"input": deduped_input_items})
+                # The caller's dump describes the un-deduped input; it must not
+                # become the forwarded frame or the budget base.
+                upstream_payload_base = None
         protected_agent_control_output_occurrences = (
             _historical_agent_control_output_occurrences(cast(list[JsonValue], payload.input))
             if isinstance(payload.input, list)
             else {}
         )
-        upstream_payload = dict(payload.to_payload())
+        if upstream_payload_base is None:
+            upstream_payload_base = payload.to_payload()
+        # Shallow copy: every mutation below rebinds top-level keys only, so
+        # ``upstream_payload_base`` stays the pristine dump for the budget.
+        upstream_payload = dict(upstream_payload_base)
         upstream_payload.pop("stream", None)
         upstream_payload.pop("background", None)
         if include_type_field:
@@ -736,7 +803,7 @@ class _HTTPBridgeRequestSubmitMixin:
             transport=transport,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             api_key=api_key,
-            request_usage_budget=estimate_api_key_request_usage(payload),
+            request_usage_budget=estimate_api_key_request_usage(payload, upstream_payload=upstream_payload_base),
             previous_response_id=payload.previous_response_id,
             session_id=_normalize_session_id(session_id),
             hard_continuity_anchor=(
@@ -805,18 +872,30 @@ class _HTTPBridgeRequestSubmitMixin:
         text_data: str,
     ) -> str:
         codex_installation_id = getattr(session.account, "codex_installation_id", None)
-        updated_text = _text_with_account_installation_id(text_data, codex_installation_id)
-        if request_state.fresh_upstream_request_text is not None:
-            updated_fresh_text = _text_with_account_installation_id(
-                request_state.fresh_upstream_request_text,
-                codex_installation_id,
-            )
+        # The memo holds the exact objects the previous call returned for this
+        # installation id; a text rewrite yields a new object and an account
+        # swap changes the id, so both miss and take the full stamp below.
+        memo_valid = request_state.installation_stamp_installation_id == codex_installation_id
+        if memo_valid and (
+            text_data is request_state.installation_stamp_text
+            or text_data is request_state.installation_stamp_fresh_text
+        ):
+            updated_text = text_data
+        else:
+            updated_text = _text_with_account_installation_id(text_data, codex_installation_id)
+        fresh_text = request_state.fresh_upstream_request_text
+        if fresh_text is not None and not (memo_valid and fresh_text is request_state.installation_stamp_fresh_text):
+            updated_fresh_text = _text_with_account_installation_id(fresh_text, codex_installation_id)
             _enforce_http_bridge_response_create_text_size(request_state, updated_fresh_text)
             request_state.fresh_upstream_request_text = updated_fresh_text
         if updated_text == text_data:
-            return text_data
-        request_state.request_text = updated_text
-        _enforce_response_create_size_limit(request_state)
+            updated_text = text_data
+        else:
+            request_state.request_text = updated_text
+            _enforce_response_create_size_limit(request_state)
+        request_state.installation_stamp_installation_id = codex_installation_id
+        request_state.installation_stamp_text = updated_text
+        request_state.installation_stamp_fresh_text = request_state.fresh_upstream_request_text
         return updated_text
 
     async def _inline_http_bridge_image_urls(
@@ -2352,7 +2431,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     account=session.account,
                     account_id_value=session.account.id,
                     pending_requests=deque([request_state]),
-                    pending_lock=anyio.Lock(),
+                    pending_lock=fast_lock(),
                     error_code=error_code,
                     error_message=failure_error_message,
                     api_key=None,

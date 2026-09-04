@@ -507,7 +507,9 @@ async def test_cancelled_steering_send_releases_owned_leases_and_heartbeats(monk
         async def send_text(self, text):
             if json.loads(text).get("type") == "response.steer":
                 self.sent.append(json.loads(text))
-                asyncio.get_running_loop().call_soon(asyncio.current_task().cancel)
+                current_task = asyncio.current_task()
+                assert current_task is not None
+                asyncio.get_running_loop().call_soon(current_task.cancel)
                 await asyncio.Event().wait()
             await super().send_text(text)
 
@@ -562,6 +564,7 @@ async def test_cancelled_steering_send_releases_owned_leases_and_heartbeats(monk
     assert all(
         state.api_key_reservation is None and state.response_create_admission is None for state in observed_states
     )
+    assert controller._response_create is not None
     assert controller._response_create.semaphore._value == 2
     finalized = [entry[0] for entry in settled] + [
         call.args[0].reservation_id for call in released.await_args_list if call.args[0]

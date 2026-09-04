@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.clients.proxy import ProxyResponseError
+from app.core.types import JsonValue
 from app.modules.proxy._service.support import (
     _WebSocketRequestState,
     _WebSocketSteeringContinuation,
@@ -35,7 +36,7 @@ def _request_state(request_id: str) -> _WebSocketRequestState:
 
 
 def test_empty_input_text_is_rejected_as_nonempty_steering_input() -> None:
-    payload = {
+    payload: dict[str, JsonValue] = {
         "type": "response.steer",
         "previous_response_id": "resp_parent",
         "input": [

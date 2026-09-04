@@ -10,6 +10,7 @@ import pytest
 from fastapi import WebSocket
 
 import app.modules.proxy._service.websocket.mixin as ws_mixin
+from app.core.types import JsonValue
 from app.modules.proxy import service as proxy_service
 from tests.unit.test_proxy_utils import (
     _make_proxy_settings,
@@ -63,14 +64,14 @@ async def test_astra_websocket_final_anchor_resets_effort_before_reservation(mon
     monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=key))
     reserve = AsyncMock(return_value=None)
     monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve)
-    history = [{"role": "user", "content": [{"type": "input_text", "text": "Earlier"}]}]
-    new_input = {"role": "user", "content": [{"type": "input_text", "text": "Continue"}]}
+    history: list[JsonValue] = [{"role": "user", "content": [{"type": "input_text", "text": "Earlier"}]}]
+    new_input: dict[str, JsonValue] = {"role": "user", "content": [{"type": "input_text", "text": "Continue"}]}
     continuity = proxy_service._WebSocketContinuityState(
         last_completed_input_count=len(history),
         last_completed_response_id="resp_inherited_high",
         last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(history),
     )
-    payload = {"type": "response.create", "model": "gpt-6-astra", "input": [*history, new_input]}
+    payload: dict[str, JsonValue] = {"type": "response.create", "model": "gpt-6-astra", "input": [*history, new_input]}
     if client_anchor:
         payload["previous_response_id"] = "resp_inherited_high"
         payload["input"] = [new_input]

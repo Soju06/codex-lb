@@ -737,8 +737,9 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_delivery", ["sse", "status"])
+@pytest.mark.parametrize("failure_code", ["usage_limit_reached", "quota_exceeded"])
 async def test_stream_first_event_429_with_owner_state_transparently_fails_over(
-    async_client, monkeypatch, failure_delivery
+    async_client, monkeypatch, failure_delivery, failure_code
 ):
     """A rejected request must not pin its replay to the exhausted account."""
     await _import_account(async_client, "acc_sticky_429_a", "sticky429a@example.com")
@@ -757,13 +758,13 @@ async def test_stream_first_event_429_with_owner_state_transparently_fails_over(
             if failure_delivery == "status":
                 raise ProxyResponseError(
                     429,
-                    openai_error("usage_limit_reached", "usage limit reached"),
+                    openai_error(failure_code, "usage limit reached"),
                     failure_phase="status",
                 )
             yield _sse_event(
                 {
                     "type": "response.failed",
-                    "response": {"error": {"code": "usage_limit_reached", "message": "usage limit reached"}},
+                    "response": {"error": {"code": failure_code, "message": "usage limit reached"}},
                 }
             )
             return

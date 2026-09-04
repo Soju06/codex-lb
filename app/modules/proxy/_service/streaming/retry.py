@@ -2486,7 +2486,10 @@ class _StreamingRetryMixin:
                                         account_id=account.id,
                                         outcome="owner_previsible_failure",
                                     )
-                                    if not verified_owner_replay_moved and classified["failure_class"] == "rate_limit":
+                                    if not verified_owner_replay_moved and classified["failure_class"] in (
+                                        "rate_limit",
+                                        "quota",
+                                    ):
                                         _move_previsible_quota_rejection_from_soft_owner(
                                             account_id=account.id,
                                             outcome="owner_previsible_quota_rejection",
@@ -2633,16 +2636,12 @@ class _StreamingRetryMixin:
                         account_id=account.id,
                         outcome="owner_previsible_retryable_failure",
                     )
-                    if (
-                        not verified_owner_replay_moved
-                        and classify_upstream_failure(
-                            error_code=exc.code,
-                            error=exc.error,
-                            http_status=None,
-                            phase="first_event",
-                        )["failure_class"]
-                        == "rate_limit"
-                    ):
+                    if not verified_owner_replay_moved and classify_upstream_failure(
+                        error_code=exc.code,
+                        error=exc.error,
+                        http_status=None,
+                        phase="first_event",
+                    )["failure_class"] in ("rate_limit", "quota"):
                         _move_previsible_quota_rejection_from_soft_owner(
                             account_id=account.id,
                             outcome="owner_previsible_retryable_quota_rejection",
@@ -3133,7 +3132,10 @@ class _StreamingRetryMixin:
                                     account_id=account.id,
                                     outcome="owner_post_refresh_failure",
                                 )
-                                if not verified_owner_replay_moved and classified["failure_class"] == "rate_limit":
+                                if not verified_owner_replay_moved and classified["failure_class"] in (
+                                    "rate_limit",
+                                    "quota",
+                                ):
                                     _move_previsible_quota_rejection_from_soft_owner(
                                         account_id=account.id,
                                         outcome="owner_post_refresh_quota_rejection",

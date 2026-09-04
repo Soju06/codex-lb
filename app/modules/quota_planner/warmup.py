@@ -15,6 +15,7 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, QuotaPlannerDecision
 from app.modules.accounts.repository import AccountsRepository
@@ -246,6 +247,7 @@ class QuotaWarmupService:
                 )
 
         started = time.monotonic()
+        reservation_finalized = False
         try:
             usage = await self._send_warmup_probe(
                 account=account,
@@ -253,13 +255,18 @@ class QuotaWarmupService:
                 request_id=request_id,
             )
             if reservation_id is not None:
-                await self._api_keys.finalize_usage_reservation(
-                    reservation_id,
-                    model=resolved_model,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    cached_input_tokens=usage.cached_input_tokens,
+                settlement_cancellation = await _await_cleanup_deferring_cancellation(
+                    self._api_keys.finalize_usage_reservation(
+                        reservation_id,
+                        model=resolved_model,
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        cached_input_tokens=usage.cached_input_tokens,
+                    )
                 )
+                reservation_finalized = True
+                if settlement_cancellation is not None:
+                    raise settlement_cancellation
             await self._request_logs.add_log(
                 account_id=account_id,
                 api_key_id=api_key_id,
@@ -298,7 +305,7 @@ class QuotaWarmupService:
                 request_id=request_id,
             )
         except asyncio.CancelledError:
-            if reservation_id is not None:
+            if reservation_id is not None and not reservation_finalized:
                 await self._api_keys.fail_usage_reservation(
                     reservation_id,
                     model=resolved_model,

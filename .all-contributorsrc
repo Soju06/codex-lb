@@ -1372,6 +1372,15 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "hongzexin",
+      "name": "Jason HONG",
+      "avatar_url": "https://avatars.githubusercontent.com/u/136784169?v=4",
+      "profile": "https://github.com/hongzexin",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

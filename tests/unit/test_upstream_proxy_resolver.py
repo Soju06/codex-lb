@@ -146,6 +146,26 @@ def test_resolver_rejects_credentials_on_plaintext_proxy(scheme: str) -> None:
     assert exc_info.value.reason == "plaintext_proxy_credentials_forbidden"
 
 
+def test_resolver_rejects_colon_in_proxy_username() -> None:
+    # RFC 7617 Basic credentials cannot carry a colon in the user-id; aiohttp's
+    # encode_basic_auth raises, so fail closed at resolution instead.
+    encryptor = _encryptor()
+    endpoint = ProxyEndpoint(
+        id="colon",
+        name="colon",
+        scheme="https",
+        host="proxy.test",
+        port=8080,
+        username="user:name",
+        password_encrypted=encryptor.encrypt("secret"),
+    )
+
+    with pytest.raises(UpstreamProxyRouteError) as exc_info:
+        resolve_proxy_endpoint(endpoint, encryptor=encryptor)
+
+    assert exc_info.value.reason == "invalid_proxy_username"
+
+
 @pytest.mark.asyncio
 async def test_strict_default_pool_fails_closed_when_unconfigured(
     session_factory: async_sessionmaker[AsyncSession],

@@ -8,7 +8,7 @@ import {
   useNavigate,
   type NavigateFunction,
 } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { requestLogFiltersApplied, useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { server } from "@/test/mocks/server";
@@ -66,6 +66,64 @@ function createWrapper(
 }
 
 describe("useRequestLogs", () => {
+  it("keeps symbolic timeframes stable across refetch despite browser clock skew", async () => {
+    const listCalls: URLSearchParams[] = [];
+    const optionCalls: URLSearchParams[] = [];
+    server.use(
+      http.get("/api/request-logs", ({ request }) => {
+        listCalls.push(new URL(request.url).searchParams);
+        return HttpResponse.json({ requests: [], total: 0, hasMore: false });
+      }),
+      http.get("/api/request-logs/options", ({ request }) => {
+        optionCalls.push(new URL(request.url).searchParams);
+        return HttpResponse.json({
+          accountIds: [],
+          apiKeys: [],
+          modelOptions: [],
+          statuses: [],
+        });
+      }),
+    );
+    const browserClock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2036-08-31T12:00:00Z"));
+
+    try {
+      const queryClient = createTestQueryClient();
+      const wrapper = createWrapper(
+        queryClient,
+        "/dashboard?timeframe=24h&search=quota&accountId=acc_primary&apiKeyId=key_1&modelOption=gpt-5.1:::high&status=ok&limit=10&offset=20",
+      );
+      const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+      await waitFor(() => {
+        expect(result.current.logsQuery.isSuccess).toBe(true);
+        expect(result.current.optionsQuery.isSuccess).toBe(true);
+      });
+      await act(async () => {
+        await Promise.all([
+          result.current.logsQuery.refetch(),
+          result.current.optionsQuery.refetch(),
+        ]);
+      });
+
+      expect(listCalls).toHaveLength(2);
+      expect(optionCalls).toHaveLength(2);
+      for (const params of [...listCalls, ...optionCalls]) {
+        expect(params.get("timeframe")).toBe("24h");
+        expect(params.has("since")).toBe(false);
+      }
+      for (const params of listCalls) {
+        expect(params.get("search")).toBe("quota");
+        expect(params.getAll("accountId")).toEqual(["acc_primary"]);
+        expect(params.getAll("apiKeyId")).toEqual(["key_1"]);
+        expect(params.getAll("modelOption")).toEqual(["gpt-5.1:::high"]);
+        expect(params.getAll("status")).toEqual(["ok"]);
+        expect(params.get("limit")).toBe("10");
+        expect(params.get("offset")).toBe("20");
+      }
+    } finally {
+      browserClock.mockRestore();
+    }
+  });
   it("maps URL params into filter state and query key", async () => {
     const queryClient = createTestQueryClient();
     const wrapper = createWrapper(
@@ -230,6 +288,7 @@ describe("useRequestLogs", () => {
       accountIds: string[];
       apiKeyIds: string[];
       modelOptions: string[];
+      timeframe: string | null;
       since: string | null;
     }> = [];
     server.use(
@@ -240,6 +299,7 @@ describe("useRequestLogs", () => {
           accountIds: url.searchParams.getAll("accountId"),
           apiKeyIds: url.searchParams.getAll("apiKeyId"),
           modelOptions: url.searchParams.getAll("modelOption"),
+          timeframe: url.searchParams.get("timeframe"),
           since: url.searchParams.get("since"),
         });
         return HttpResponse.json({
@@ -271,7 +331,8 @@ describe("useRequestLogs", () => {
     );
     expect(matchingCall).toBeDefined();
     expect(matchingCall?.statuses).toEqual([]);
-    expect(matchingCall?.since).toMatch(/T/);
+    expect(matchingCall?.timeframe).toBe("24h");
+    expect(matchingCall?.since).toBeNull();
   });
 
   it("removes stale status from request parameters immediately after unselect", async () => {

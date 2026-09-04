@@ -13,7 +13,10 @@ from app.core.auth.dependencies import (
 )
 from app.core.utils.time import to_utc_naive, utcnow
 from app.dependencies import RequestLogsContext, get_request_logs_context
-from app.modules.dashboard.timeframes import resolve_conversation_timeframe
+from app.modules.dashboard.timeframes import (
+    resolve_conversation_timeframe,
+    resolve_request_log_timeframe,
+)
 from app.modules.request_logs.schemas import (
     ConversationDetailsResponse,
     ConversationsResponse,
@@ -54,6 +57,17 @@ def _parse_model_option(value: str) -> ServiceRequestLogModelOption | None:
     return ServiceRequestLogModelOption(model=model, reasoning_effort=effort or None)
 
 
+def _resolve_request_log_since(
+    timeframe: str | None,
+    since: datetime | None,
+) -> tuple[datetime | None, str | None]:
+    if timeframe is not None and since is not None:
+        raise HTTPException(status_code=422, detail="timeframe and since cannot be supplied together")
+    if timeframe is None:
+        return since, None
+    return resolve_request_log_timeframe(timeframe), timeframe
+
+
 @router.get("", response_model=RequestLogsResponse)
 async def list_request_logs(
     limit: int = Query(50, ge=1, le=1000),
@@ -66,6 +80,7 @@ async def list_request_logs(
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
+    timeframe: str | None = Query(default=None, pattern="^(1h|24h|7d)$"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
     principal: DashboardPrincipal = Depends(validate_dashboard_session),
@@ -78,12 +93,13 @@ async def list_request_logs(
     if model_option:
         parsed = [_parse_model_option(value) for value in model_option]
         parsed_options = [value for value in parsed if value is not None] or None
+    effective_since, cache_timeframe = _resolve_request_log_since(timeframe, since)
     page = await context.service.list_recent(
         limit=limit,
         offset=offset,
         search=search,
         conversation_id=conversation_id,
-        since=since,
+        since=effective_since,
         until=until,
         account_ids=account_id,
         api_key_ids=api_key_id,
@@ -91,6 +107,8 @@ async def list_request_logs(
         models=model,
         reasoning_efforts=reasoning_effort,
         status=status,
+        cache_mode="timeframe" if cache_timeframe is not None else "since",
+        timeframe=cache_timeframe,
         include_sensitive_metadata=principal.role == DashboardRole.ADMIN,
     )
     return RequestLogsResponse(
@@ -109,6 +127,7 @@ async def list_request_log_filter_options(
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
+    timeframe: str | None = Query(default=None, pattern="^(1h|24h|7d)$"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
     context: RequestLogsContext = Depends(get_request_logs_context),
@@ -118,8 +137,9 @@ async def list_request_log_filter_options(
     if model_option:
         parsed = [_parse_model_option(value) for value in model_option]
         parsed_options = [value for value in parsed if value is not None] or None
+    effective_since, _ = _resolve_request_log_since(timeframe, since)
     options = await context.service.list_filter_options(
-        since=since,
+        since=effective_since,
         until=until,
         account_ids=account_id,
         api_key_ids=api_key_id,

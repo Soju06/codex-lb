@@ -5,23 +5,37 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.message_coercion import coerce_messages
 from app.core.openai.requests import (
+    PassthroughJsonList,
+    PassthroughJsonValue,
     ResponsesCompactRequest,
     ResponsesReasoning,
     ResponsesRequest,
     ResponsesTextControls,
+    validate_passthrough_depth,
     validate_tool_types,
 )
 from app.core.types import JsonValue
+
+
+def _validate_optional_messages_array(value: list[JsonValue] | None) -> list[JsonValue] | None:
+    # ``messages`` skips pydantic's ``list`` validation; keep the array check
+    # at field level so the error still names ``param="messages"``.
+    if value is None:
+        return value
+    if not isinstance(value, list):
+        raise ValueError("messages must be an array")
+    validate_passthrough_depth(value)
+    return value
 
 
 class V1ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     model: str = Field(min_length=1)
-    messages: list[JsonValue] | None = None
-    input: JsonValue | None = None
+    messages: PassthroughJsonList | None = None
+    input: PassthroughJsonValue = None
     instructions: str | None = None
-    tools: list[JsonValue] = Field(default_factory=list)
+    tools: PassthroughJsonList = Field(default_factory=list)
     tool_choice: str | dict[str, JsonValue] | None = None
     parallel_tool_calls: bool | None = None
     reasoning: ResponsesReasoning | None = None
@@ -40,9 +54,17 @@ class V1ResponsesRequest(BaseModel):
     def _validate_input_type(cls, value: JsonValue | None) -> JsonValue | None:
         if value is None:
             return value
-        if isinstance(value, str) or isinstance(value, list):
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            validate_passthrough_depth(value)
             return value
         raise ValueError("input must be a string or array")
+
+    @field_validator("messages")
+    @classmethod
+    def _validate_messages_type(cls, value: list[JsonValue] | None) -> list[JsonValue] | None:
+        return _validate_optional_messages_array(value)
 
     @field_validator("store")
     @classmethod
@@ -52,7 +74,9 @@ class V1ResponsesRequest(BaseModel):
     @field_validator("tools")
     @classmethod
     def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
-        return validate_tool_types(value, allow_builtin_tools=True)
+        validated = validate_tool_types(value, allow_builtin_tools=True)
+        validate_passthrough_depth(validated)
+        return validated
 
     @model_validator(mode="after")
     def _validate_input(self) -> "V1ResponsesRequest":
@@ -65,19 +89,21 @@ class V1ResponsesRequest(BaseModel):
         return self
 
     def to_responses_request(self) -> ResponsesRequest:
-        data = self.model_dump(mode="json", exclude_none=True)
-        if "tools" not in self.model_fields_set:
-            # ``tools`` defaults to ``[]`` via ``default_factory``, so
-            # ``model_dump`` would hand ``ResponsesRequest`` an explicit
-            # ``"tools": []`` the client never sent, marking the field as set
-            # and forwarding a synthesized empty array upstream. Drop it here
-            # so field omission propagates through ``to_payload()``
-            # (issue #1184); an explicit client-sent ``[]`` stays intact.
-            data.pop("tools", None)
-        messages = data.pop("messages", None)
-        instructions = data.get("instructions")
+        # The passthrough fields are already plain JSON (validated for shape
+        # by the field validators above), so attach them directly instead of
+        # deep-copying them through ``model_dump``.
+        data = self.model_dump(mode="json", exclude_none=True, exclude={"input", "messages", "tools"})
+        if "tools" in self.model_fields_set:
+            # ``tools`` defaults to ``[]`` via ``default_factory``; handing
+            # ``ResponsesRequest`` an explicit ``"tools": []`` the client
+            # never sent would mark the field as set and forward a
+            # synthesized empty array upstream. Only attach it when the
+            # client sent it (issue #1184); an explicit ``[]`` stays intact.
+            data["tools"] = self.tools
+        messages = self.messages
+        instructions = self.instructions
         instruction_text = instructions if isinstance(instructions, str) else ""
-        input_value = data.get("input")
+        input_value = self.input
         input_items: list[JsonValue] = input_value if isinstance(input_value, list) else []
         input_text: str | None = input_value if isinstance(input_value, str) else None
 
@@ -101,8 +127,8 @@ class V1ResponsesCompactRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     model: str = Field(min_length=1)
-    messages: list[JsonValue] | None = None
-    input: JsonValue | None = None
+    messages: PassthroughJsonList | None = None
+    input: PassthroughJsonValue = None
     instructions: str | None = None
     reasoning: ResponsesReasoning | None = None
 
@@ -119,16 +145,24 @@ class V1ResponsesCompactRequest(BaseModel):
     def _validate_input_type(cls, value: JsonValue | None) -> JsonValue | None:
         if value is None:
             return value
-        if isinstance(value, str) or isinstance(value, list):
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            validate_passthrough_depth(value)
             return value
         raise ValueError("input must be a string or array")
 
+    @field_validator("messages")
+    @classmethod
+    def _validate_messages_type(cls, value: list[JsonValue] | None) -> list[JsonValue] | None:
+        return _validate_optional_messages_array(value)
+
     def to_compact_request(self) -> ResponsesCompactRequest:
-        data = self.model_dump(mode="json", exclude_none=True)
-        messages = data.pop("messages", None)
-        instructions = data.get("instructions")
+        data = self.model_dump(mode="json", exclude_none=True, exclude={"input", "messages"})
+        messages = self.messages
+        instructions = self.instructions
         instruction_text = instructions if isinstance(instructions, str) else ""
-        input_value = data.get("input")
+        input_value = self.input
         input_items: list[JsonValue] = input_value if isinstance(input_value, list) else []
         input_text: str | None = input_value if isinstance(input_value, str) else None
 

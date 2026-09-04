@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import update
@@ -313,6 +313,77 @@ async def test_request_logs_filters_by_account_model_and_time(async_client, db_s
     assert len(payload) == 1
     assert payload[0]["model"] == "gpt-5.1"
     assert payload[0]["tokens"] == 4
+
+
+@pytest.mark.parametrize(
+    ("timeframe", "window"),
+    [
+        ("1h", timedelta(hours=1)),
+        ("24h", timedelta(hours=24)),
+        ("7d", timedelta(days=7)),
+    ],
+)
+@pytest.mark.asyncio
+async def test_request_log_timeframe_uses_server_clock_for_rows_and_options(
+    async_client,
+    db_setup,
+    monkeypatch,
+    timeframe,
+    window,
+):
+    from app.modules.dashboard import timeframes as timeframes_module
+
+    fixed_now = datetime(2026, 8, 31, 12, 0, 0)
+    monkeypatch.setattr(timeframes_module, "utcnow", lambda: fixed_now)
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        await repo.add_log(
+            account_id=None,
+            request_id=f"req_{timeframe}_inside",
+            model=f"model-{timeframe}-inside",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            requested_at=fixed_now - window + timedelta(seconds=1),
+        )
+        await repo.add_log(
+            account_id=None,
+            request_id=f"req_{timeframe}_outside",
+            model=f"model-{timeframe}-outside",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            requested_at=fixed_now - window - timedelta(seconds=1),
+        )
+
+    rows = await async_client.get("/api/request-logs", params={"timeframe": timeframe})
+    options = await async_client.get("/api/request-logs/options", params={"timeframe": timeframe})
+
+    assert rows.status_code == 200
+    assert [item["requestId"] for item in rows.json()["requests"]] == [f"req_{timeframe}_inside"]
+    assert options.status_code == 200
+    assert options.json()["modelOptions"] == [{"model": f"model-{timeframe}-inside", "reasoningEffort": None}]
+
+
+@pytest.mark.parametrize("path", ["/api/request-logs", "/api/request-logs/options"])
+@pytest.mark.asyncio
+async def test_request_log_timeframe_rejects_unknown_and_ambiguous_bounds(
+    async_client,
+    db_setup,
+    path,
+):
+    unknown = await async_client.get(path, params={"timeframe": "30d"})
+    ambiguous = await async_client.get(
+        path,
+        params={"timeframe": "1h", "since": "2026-08-31T00:00:00Z"},
+    )
+
+    assert unknown.status_code == 422
+    assert ambiguous.status_code == 422
 
 
 @pytest.mark.asyncio

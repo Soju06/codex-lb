@@ -238,7 +238,7 @@ the env-file locations have to be known before env files are read.
 
 | Environment variable | Type | Default |
 | --- | --- | --- |
-| `CODEX_LB_LOG_FORMAT` | `str` | `'text'` |
+| `CODEX_LB_LOG_FORMAT` | `'text' \| 'json'` | `'text'` |
 | `CODEX_LB_METRICS_ENABLED` | `bool` | `False` |
 | `CODEX_LB_METRICS_PORT` | `int` | `9090` |
 | `CODEX_LB_OTEL_ENABLED` | `bool` | `False` |

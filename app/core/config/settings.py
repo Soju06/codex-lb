@@ -452,10 +452,10 @@ class Settings(BaseSettings):
     # --- Multi-replica & production settings ---
     # Prometheus metrics
     metrics_enabled: bool = False
-    metrics_port: int = 9090
+    metrics_port: int = Field(default=9090, ge=1, le=65535)
 
     # Logging
-    log_format: str = "text"  # "text" or "json"
+    log_format: Literal["text", "json"] = "text"
 
     # Leader election
     leader_election_enabled: bool = True

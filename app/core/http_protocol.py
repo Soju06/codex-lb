@@ -14,6 +14,13 @@ This module exposes :func:`load_http_protocol_class`, which returns the
 tolerant httptools subclass when httptools is importable (matching uvicorn's
 ``auto`` preference) and an h11 subclass with the same header hygiene
 otherwise.
+
+Both subclasses also release the keep-alive timer on every connection loss.
+Stock uvicorn cancels it only on a clean close (``exc is None``), so after an
+RST/``ECONNRESET`` the armed ``TimerHandle`` keeps the protocol graph alive for
+``--timeout-keep-alive`` seconds — a per-request leak behind reverse proxies
+that purge idle connections with RST. See
+``tests/integration/test_http_keepalive_timer.py``.
 """
 
 from __future__ import annotations
@@ -88,6 +95,15 @@ class UpgradeTolerantH11Protocol(H11Protocol):
     it runs right after ``self.headers`` (the same list object referenced by
     ``scope["headers"]``) is populated, so sanitizing in place here is enough.
     """
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        # Same defect as httptools_impl: stock h11_impl cancels the keep-alive
+        # timer only when exc is None, so an RST-closed idle connection stays
+        # pinned by the armed TimerHandle for timeout_keep_alive seconds.
+        # super() first: the base sends h11.ConnectionClosed before the exc
+        # check; the cancel touches only ``timeout_keep_alive_task``.
+        super().connection_lost(exc)
+        self._unset_keepalive_if_required()
 
     def _should_upgrade(self) -> bool:
         # Reimplements the stock decision on top of combined Connection fields

@@ -877,6 +877,7 @@ async def _select_account_with_budget_for_stream(proxy: Any, deadline: float, **
         "estimated_lease_tokens",
         "fallback_on_preferred_account_unavailable",
         "preferred_account_is_continuity_owner",
+        "preferred_account_overrides_single_account_routing",
         "spill_bare_session_on_account_cap",
         "require_unambiguous_account",
     )

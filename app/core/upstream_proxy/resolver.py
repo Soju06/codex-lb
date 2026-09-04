@@ -141,6 +141,9 @@ def _resolve_endpoint(endpoint: ProxyEndpoint, *, encryptor: TokenEncryptor | No
         endpoint.username is not None or endpoint.password_encrypted is not None
     ):
         raise UpstreamProxyRouteError("plaintext_proxy_credentials_forbidden")
+    if endpoint.username is not None and ":" in endpoint.username:
+        # RFC 7617 Basic credentials cannot encode a colon in the user-id.
+        raise UpstreamProxyRouteError("invalid_proxy_username")
     password: str | None = None
     if endpoint.password_encrypted is not None:
         try:

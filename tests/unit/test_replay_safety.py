@@ -10,6 +10,7 @@ from app.modules.proxy.continuity import (
 )
 from app.modules.proxy.replay_safety import (
     project_responses_input_for_account_neutral_fresh_replay,
+    responses_input_suffix_has_response_owned_prefix_settling_output_ids,
     responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
@@ -712,6 +713,213 @@ def test_full_resend_suffix_accepts_only_self_contained_tool_loops(
             pending_tool_calls=pending_tool_calls,
         )
         is expected
+    )
+
+
+def test_full_resend_suffix_accepts_outputs_for_pending_calls_in_stored_prefix() -> None:
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": "first question"},
+        {
+            "type": "function_call",
+            "call_id": "call_current",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+    ]
+    suffix: list[JsonValue] = [
+        {"type": "function_call_output", "call_id": "call_current", "output": "result"},
+    ]
+
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            [*stored_input, *suffix],
+            stored_count=len(stored_input),
+            pending_tool_calls={"call_current": "function_call"},
+        )
+        is True
+    )
+
+
+def test_full_resend_suffix_rejects_outputs_without_matching_pending_prefix_call() -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}]
+    suffix: list[JsonValue] = [
+        {"type": "function_call_output", "call_id": "call_current", "output": "orphan"},
+    ]
+
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            [*stored_input, *suffix],
+            stored_count=len(stored_input),
+            pending_tool_calls={"call_current": "function_call"},
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        pytest.param(
+            [
+                {"type": "function_call_output", "call_id": "call_current", "output": "wrong"},
+                {"type": "function_call_output", "call_id": "call_current", "output": "right"},
+            ],
+            id="duplicate-output-overwrite",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_current",
+                    "output": "result",
+                    "id": "response-owned-output-id",
+                },
+            ],
+            id="response-owned-output-field",
+        ),
+        pytest.param(
+            [{"type": "function_call_output", "output": "result"}],
+            id="missing-call-id",
+        ),
+        pytest.param(
+            [{"type": "function_call_output", "call_id": "call_current"}],
+            id="missing-output",
+        ),
+        pytest.param(
+            [{"type": "function_call_output", "call_id": "call_current", "output": []}],
+            id="malformed-output",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_current",
+                    "output": "result",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": ""},
+                }
+            ],
+            id="malformed-internal-metadata",
+        ),
+    ],
+)
+def test_full_resend_suffix_validates_prefix_settling_outputs(suffix: list[JsonValue]) -> None:
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": "first question"},
+        {
+            "type": "function_call",
+            "call_id": "call_current",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+    ]
+
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            [*stored_input, *suffix],
+            stored_count=len(stored_input),
+            pending_tool_calls={"call_current": "function_call"},
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("status", ["completed", "failed"])
+def test_full_resend_suffix_accepts_prefix_settling_output_status(status: str) -> None:
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": "apply this patch"},
+        {
+            "type": "apply_patch_call",
+            "call_id": "call_current",
+            "input": "*** Begin Patch\n*** End Patch\n",
+            "status": "completed",
+            "caller": {"type": "direct"},
+        },
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "apply_patch_call_output",
+            "call_id": "call_current",
+            "output": None,
+            "status": status,
+            "caller": {"type": "direct"},
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+        }
+    ]
+
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            [*stored_input, *suffix],
+            stored_count=len(stored_input),
+            pending_tool_calls={"call_current": "apply_patch_call"},
+        )
+        is True
+    )
+
+
+def test_full_resend_suffix_rejects_whitespace_prefix_settling_call_ids() -> None:
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": "first question"},
+        {
+            "type": "function_call",
+            "call_id": "   ",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+    ]
+    suffix: list[JsonValue] = [
+        {"type": "function_call_output", "call_id": "   ", "output": "result"},
+    ]
+
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            [*stored_input, *suffix],
+            stored_count=len(stored_input),
+            pending_tool_calls={"   ": "function_call"},
+        )
+        is False
+    )
+
+
+def test_full_resend_raw_suffix_preserves_prefix_settling_output_id_evidence() -> None:
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": "first question"},
+        {
+            "type": "function_call",
+            "id": "fc_old",
+            "call_id": "call_current",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "function_call_output",
+            "id": "response-owned-output-id",
+            "call_id": "call_current",
+            "output": "result",
+        },
+    ]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+    )
+
+    assert projection is not None
+    assert (
+        responses_input_suffix_has_response_owned_prefix_settling_output_ids(
+            [*stored_input, *suffix],
+            stored_count=len(stored_input),
+            pending_tool_calls={"call_current": "function_call"},
+        )
+        is True
+    )
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+            pending_tool_calls={"call_current": "function_call"},
+        )
+        is True
     )
 
 

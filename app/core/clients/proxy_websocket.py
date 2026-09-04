@@ -349,6 +349,7 @@ class WebsocketsUpstreamWebSocket:
                 kind="close",
                 close_code=_close_code_from_exception(exc),
                 close_reason=_close_reason_from_exception(exc),
+                close_frame_received=exc.rcvd is not None,
                 transport_ended=True,
             )
         except ConnectionClosedError as exc:
@@ -357,6 +358,7 @@ class WebsocketsUpstreamWebSocket:
                     kind="close",
                     close_code=_close_code_from_exception(exc),
                     close_reason=_close_reason_from_exception(exc),
+                    close_frame_received=True,
                     transport_ended=True,
                 )
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)
@@ -379,6 +381,7 @@ class WebsocketsUpstreamWebSocket:
                     else str(exc)
                 ),
                 error_code=relay_error_code,
+                close_frame_received=exc.rcvd is not None,
                 transport_ended=True,
             )
         except Exception as exc:
@@ -546,6 +549,7 @@ class CodexUpstreamWebSocket:
                 kind="close",
                 close_code=_aiohttp_ws_close_code(self._websocket, msg),
                 close_reason=_aiohttp_ws_close_reason(msg),
+                close_frame_received=msg.type == aiohttp.WSMsgType.CLOSE,
                 transport_ended=True,
             )
         if msg.type == aiohttp.WSMsgType.ERROR:

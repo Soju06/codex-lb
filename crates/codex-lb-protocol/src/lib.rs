@@ -11,6 +11,7 @@ pub const CAPABILITIES: &[&str] = &[
     "http",
     "http2_profile_v1",
     "websocket",
+    "websocket_close_frame_provenance_v1",
     "websocket_send_ack",
 ];
 

@@ -376,7 +376,8 @@ active response id, then MUST close the downstream WebSocket with code 1011.
 #### Scenario: frame-less HTTP bridge drop after output remains account-neutral
 
 - **GIVEN** an HTTP bridge request has emitted response events or buffered model output
-- **WHEN** its upstream WebSocket ends without an upstream-authored close frame
+- **WHEN** its adapter reports a close-kind ending with no received close frame or an error-kind transport ending
+- **AND** no upstream-authored close frame was received
 - **THEN** the request fails once with `stream_incomplete`
 - **AND** the upstream request is not transparently redispatched
 - **AND** the account receives no error-health write or eventless account signal

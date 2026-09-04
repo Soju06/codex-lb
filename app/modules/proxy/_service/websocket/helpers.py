@@ -292,6 +292,7 @@ from app.modules.proxy._service.support import (
     _WebSocketReceiveTimeout,
     _WebSocketRequestState,
     _WebSocketUpstreamControl,
+    update_pending_async_tools,
 )
 from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward as _HTTPBridgeOwnerForward,
@@ -438,6 +439,8 @@ def _is_websocket_stale_previous_response(
 def _prepare_websocket_request_state_for_visible_output_replay(
     request_state: "_WebSocketRequestState",
 ) -> str | None:
+    if request_state.steering_parent_response_id is not None:
+        return None
     downstream_response_id = None
     if request_state.response_id is not None and not request_state.awaiting_response_created:
         downstream_response_id = request_state.response_id
@@ -532,6 +535,8 @@ def _prepare_websocket_request_state_for_account_switch(
     request_state: "_WebSocketRequestState",
 ) -> str | None:
     """Return an unsent request body only when moving accounts is proven safe."""
+    if request_state.steering_parent_response_id is not None:
+        return None
     if request_state.previous_response_id is None:
         if not _websocket_request_text_is_account_neutral_fresh_replay(request_state.request_text):
             return None
@@ -634,6 +639,7 @@ def _record_websocket_continuity_completion(
         continuity_state.last_completed_input_prefix_fingerprint = None
         continuity_state.last_pending_function_call_ids = []
         continuity_state.last_pending_tool_call_types = {}
+        continuity_state.pending_async_tool_calls.clear()
         return
     # Record the completed response id and pending tool-call metadata
     # regardless of input shape (string inputs leave ``input_item_count`` at
@@ -642,6 +648,9 @@ def _record_websocket_continuity_completion(
     # meaningful for fingerprinted list inputs, so the count/fingerprint pair
     # is cleared rather than left stale when the completed turn cannot
     # provide one.
+    if request_state.previous_response_id != continuity_state.last_completed_response_id:
+        continuity_state.pending_async_tool_calls.clear()
+    update_pending_async_tools(continuity_state.pending_async_tool_calls, request_state)
     continuity_state.last_completed_response_id = response_id
     if request_state.input_item_count > 0 and request_state.input_full_fingerprint is not None:
         continuity_state.last_completed_input_count = request_state.input_item_count
@@ -968,6 +977,8 @@ def _prepare_websocket_request_state_for_auth_replay(
     *,
     current_account_id: str | None = None,
 ) -> str | None:
+    if request_state.steering_parent_response_id is not None:
+        return None
     if request_state.verified_stale_anchor_replay:
         return None
     if request_state.last_downstream_sequence_number is not None:
@@ -1633,6 +1644,11 @@ def _assign_websocket_response_id(
 ) -> _WebSocketRequestState | None:
     if response_id is None:
         return None
+    pending_requests = deque(
+        state
+        for state in pending_requests
+        if state.steering_parent_response_id is None or state.response_id is not None or state.request_text is not None
+    )
     existing = _find_websocket_request_state_by_response_id(pending_requests, response_id)
     if existing is not None:
         return existing
@@ -1666,6 +1682,11 @@ def _match_websocket_request_state_for_anonymous_event(
     allow_unanchored_previous_response_error: bool = False,
     prefer_draining_requests: bool = True,
 ) -> _WebSocketRequestState | None:
+    pending_requests = deque(
+        state
+        for state in pending_requests
+        if state.steering_parent_response_id is None or state.response_id is not None or state.request_text is not None
+    )
     if prefer_previous_response_not_found:
         return _match_websocket_request_state_for_previous_response_error(
             pending_requests,

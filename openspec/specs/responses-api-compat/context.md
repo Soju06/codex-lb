@@ -257,3 +257,34 @@ OpenSpec change first.
 - Post-deploy: correlate retry-circuit `opened`, `half_open`, and `reset` events with bridge `pending` and `response_events_seen` diagnostics. An idle `pending=0` retirement must not precede an immediate two-failure cooldown.
 - Post-deploy: monitor `previous_response_not_found` on `/backend-api/codex/responses`; recurring spikes show repeated continuity failures, which may come from malformed client identifiers, server-side invalidation, or connection lifecycle. Clients should perform the documented full-context retry without `previous_response_id`. Investigate socket-lifecycle remediation only when a separate close-reason, reconnect, or transport diagnostic correlates with the failures.
 - Websocket/Codex CLI tier verification runbook: `openspec/specs/responses-api-compat/ops.md`
+
+## Astra conversation continuity
+
+Async function/custom calls retain their IDs across intervening turns on an
+owned WebSocket or HTTP bridge session. A completed call item means its arguments
+are ready; it does not mean the client has delivered its output. For example,
+call_a can remain pending through a user correction and complete when its actual
+function_call_output arrives two responses later. Synchronous missing results
+still use the existing interrupted-output repair. Durable tool manifests that
+cannot represent async state are not treated as authoritative for that history.
+
+Steering is local to the upstream connection and owning account. Several accepted
+steers for one parent share one successor lifecycle. The original steered response
+and the successor each settle their own usage. A client can return required tool
+results immediately after completion without waiting for steer.pending. Ambiguous
+sends and disconnections retire steering state; queued corrections are not replayed.
+
+Configuration updates are validated after source selection and again at the final
+subscription anchor boundary. Explicit compaction_trigger stays on /responses
+when updates are present; automatic compaction/truncation and /responses/compact
+are incompatible with those updates. Externally configured sources using the
+same model ID keep their own model contract. WebSocket clients receive the normal
+HTTP-fallback signal for those sources before subscription-specific validation.
+
+Local scripted upstreams validate proxy routing, ordering and cleanup. They do not
+prove advanced-control rollout on a particular ChatGPT account. Verification is limited to deterministic local protocol tests.
+
+Protocol references:
+- https://developers.openai.com/api/docs/guides/async-tool-calling
+- https://developers.openai.com/api/docs/guides/steering
+- https://developers.openai.com/api/docs/guides/reasoning#change-reasoning-mid-conversation

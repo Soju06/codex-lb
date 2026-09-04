@@ -268,6 +268,7 @@ from app.modules.proxy.request_policy import (
     apply_prohibit_fast_mode,
     enforce_strict_function_tools_format,
     enforce_strict_text_format,
+    has_astra_configuration_updates,
     model_alias_requests_fast_mode,
     normalize_responses_request_payload,
     normalize_source_reasoning_aliases,
@@ -279,6 +280,8 @@ from app.modules.proxy.request_policy import (
     restore_source_reasoning_effort,
     sanitize_source_chat_payload,
     strip_terminal_compaction_trigger_input,
+    validate_astra_request,
+    validate_configuration_update_policy,
     validate_model_access,
     validate_top_level_compaction_trigger_input_shape,
 )
@@ -4360,6 +4363,7 @@ async def v1_chat_completions(
         if disabled_denial is not None:
             return disabled_denial
     if source is None:
+        validate_astra_request(responses_payload, api_key)
         apply_enforced_service_tier_model_fallback(
             responses_payload,
             service_tier_was_enforced=service_tier_was_enforced,
@@ -4965,6 +4969,7 @@ async def _source_responses_response(
         source,
         pre_normalization_effort=pre_normalization_effort,
     )
+    validate_configuration_update_policy(payload, api_key)
     reservation = await _enforce_request_limits(
         api_key,
         request_model=payload.model,
@@ -6037,9 +6042,10 @@ async def _stream_responses(
             service_tier_was_enforced=service_tier_was_enforced,
         )
     apply_prohibit_fast_mode(payload, prohibit_fast_mode=prohibit_fast_mode)
+    validate_astra_request(payload, api_key)
     validate_model_access(api_key, payload.model)
     compact_payload: ResponsesCompactRequest | None = None
-    if codex_session_affinity:
+    if codex_session_affinity and not has_astra_configuration_updates(payload):
         try:
             compact_trigger_input = strip_terminal_compaction_trigger_input(payload)
             if compact_trigger_input is not None:
@@ -6548,6 +6554,7 @@ async def _collect_responses(
         payload,
         service_tier_was_enforced=service_tier_was_enforced,
     )
+    validate_astra_request(payload, api_key)
     validate_model_access(api_key, payload.model)
     admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
     if admission_denial is not None:
@@ -6787,6 +6794,7 @@ async def _compact_responses(
         payload,
         service_tier_was_enforced=service_tier_was_enforced,
     )
+    validate_astra_request(payload, api_key)
     validate_model_access(api_key, payload.model)
     try:
         request_usage_budget = estimate_api_key_request_usage(payload)

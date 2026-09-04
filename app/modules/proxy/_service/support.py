@@ -993,6 +993,9 @@ class _WebSocketRequestState:
     # references pinned to the uploading subscription account. Previous
     # response ownership is recorded separately after continuity lookup.
     source_route_excluded: bool = False
+    # Preparation identified a source-owned Astra request and deferred its
+    # subscription controls. It must reach HTTP fallback even if sources change.
+    source_requires_http_transport: bool = False
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
     replay_count: int = 0
@@ -1189,6 +1192,12 @@ class _WebSocketRequestState:
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)
+    # A server-created steering successor has no replayable response.create.
+    steering_parent_response_id: str | None = None
+    steering_continuation_started: bool = False
+    steering_configuration: dict[str, JsonValue] | None = None
+    async_tool_call_types: dict[str, str] = field(default_factory=dict)
+    submitted_tool_output_types: dict[str, str] = field(default_factory=dict)
     added_tool_call_types: dict[str, str] = field(default_factory=dict)
     tool_call_manifest_invalid: bool = False
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
@@ -1324,6 +1333,7 @@ class _HTTPBridgeSession:
     last_completed_response_account_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
     last_pending_tool_calls: dict[str, str] = field(default_factory=dict)
+    pending_async_tool_calls: dict[str, str] = field(default_factory=dict)
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
@@ -1487,6 +1497,7 @@ class _WebSocketContinuityState:
     last_completed_input_prefix_fingerprint: str | None = None
     last_pending_function_call_ids: list[str] = field(default_factory=list)
     last_pending_tool_call_types: dict[str, str] = field(default_factory=dict)
+    pending_async_tool_calls: dict[str, str] = field(default_factory=dict)
     responses_lite_model: str | None = None
     responses_lite_response_id: str | None = None
 
@@ -1498,7 +1509,25 @@ class _WebSocketContinuityAnchor:
 
 
 @dataclass(slots=True)
+class _WebSocketSteerSubmission:
+    input: JsonValue
+    id: str | None = None
+
+
+@dataclass(slots=True)
+class _WebSocketSteeringContinuation:
+    parent: _WebSocketRequestState
+    request_state: _WebSocketRequestState
+    submissions: list[_WebSocketSteerSubmission] = field(default_factory=list)
+    required_input: list[JsonValue] | None = None
+    explicit_request_prepared: bool = False
+    queued_input_bytes: int = 0
+
+
+@dataclass(slots=True)
 class _WebSocketUpstreamControl:
+    steering_continuations: dict[str, _WebSocketSteeringContinuation] = field(default_factory=dict)
+    last_completed_request: _WebSocketRequestState | None = None
     reconnect_requested: bool = False
     retire_after_drain: bool = False
     suppress_downstream_event: bool = False
@@ -1928,3 +1957,54 @@ def websocket_connect_transport_failure_code(
 def upstream_websocket_transport_recently_failed() -> bool:
     marked_at = _upstream_ws_transport_failure_at
     return marked_at is not None and time.monotonic() - marked_at < UPSTREAM_WS_TRANSPORT_FAILURE_TTL_SECONDS
+
+
+_ASYNC_CALL_TYPES = frozenset({"function_call", "custom_tool_call"})
+_CALL_TYPE_BY_OUTPUT = {
+    "function_call_output": "function_call",
+    "custom_tool_call_output": "custom_tool_call",
+    "apply_patch_call_output": "apply_patch_call",
+}
+
+
+def submitted_tool_output_types(input_items: JsonValue) -> dict[str, str]:
+    """Keep protocol identity when consuming delayed application results."""
+    result: dict[str, str] = {}
+    if not isinstance(input_items, list):
+        return result
+    for item in input_items:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        call_type = _CALL_TYPE_BY_OUTPUT.get(item_type) if isinstance(item_type, str) else None
+        call_id = item.get("call_id")
+        if call_type is not None and isinstance(call_id, str) and call_id and "output" in item:
+            result[call_id] = call_type
+    return result
+
+
+def record_async_tool_call(request_state: _WebSocketRequestState, payload: dict[str, JsonValue] | None) -> None:
+    if payload is None:
+        return
+    items: list[JsonValue] = []
+    if payload.get("type") == "response.output_item.done":
+        items = [payload.get("item")]
+    elif payload.get("type") in {"response.completed", "response.incomplete"}:
+        response = payload.get("response")
+        output = response.get("output") if isinstance(response, dict) else None
+        if isinstance(output, list):
+            items = output
+    for item in items:
+        if not isinstance(item, dict) or item.get("async") is not True:
+            continue
+        item_type = item.get("type")
+        call_id = item.get("call_id")
+        if isinstance(item_type, str) and item_type in _ASYNC_CALL_TYPES and isinstance(call_id, str) and call_id:
+            request_state.async_tool_call_types[call_id] = item_type
+
+
+def update_pending_async_tools(pending: dict[str, str], request_state: _WebSocketRequestState) -> None:
+    for call_id, call_type in request_state.submitted_tool_output_types.items():
+        if pending.get(call_id) == call_type:
+            del pending[call_id]
+    pending.update(request_state.async_tool_call_types)

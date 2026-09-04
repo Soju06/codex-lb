@@ -2769,7 +2769,7 @@ overrides MUST NOT change the `model` key (owned by source selection) or the
 - **AND** the forwarded payload keeps `stream` as `true`
 
 ### Requirement: Interrupted tool calls receive synthetic outputs on anchored follow-ups
-The service MUST track tool-call items completed by a streamed response that may still require a tool output — `function_call`, `custom_tool_call`, and `apply_patch_call` — together with each call's item type. When a follow-up `response.create` anchors on that completed response via `previous_response_id` and its input omits an output item for a tracked call id, the service MUST prepend a synthetic interrupted output item whose type matches the originating call type (`function_call` -> `function_call_output`, `custom_tool_call` -> `custom_tool_call_output`, `apply_patch_call` -> `apply_patch_call_output`) before forwarding the request upstream. This applies to the direct WebSocket route and to the HTTP responses bridge session path.
+The service MUST track tool-call items completed by a streamed response that may still require a tool output — `function_call`, `custom_tool_call`, and `apply_patch_call` — together with each call's item type. Known asynchronous function/custom calls SHALL be excluded from synthetic interruption repair until actual outputs arrive; their omission on intervening turns is valid. For the remaining synchronous calls, when a follow-up `response.create` anchors on that completed response via `previous_response_id` and its input omits an output item for a tracked call id, the service MUST prepend a synthetic interrupted output item whose type matches the originating call type (`function_call` -> `function_call_output`, `custom_tool_call` -> `custom_tool_call_output`, `apply_patch_call` -> `apply_patch_call_output`) before forwarding the request upstream. This applies to the direct WebSocket route and to the HTTP responses bridge session path.
 
 #### Scenario: interrupted custom tool call on the WebSocket route
 - **GIVEN** a WebSocket `response.create` turn completes with a `custom_tool_call` item whose output was never sent (the turn was interrupted)
@@ -5731,3 +5731,69 @@ rule. A missing or invalid value MUST remain absent.
 - **WHEN** an upstream retry hint contains a line break or exceeds the bounded
   field length
 - **THEN** codex-lb does not copy that value downstream
+
+### Requirement: Async tool results remain pending across continuations
+The proxy SHALL preserve async true on function/custom tool definitions and corresponding emitted call items. It SHALL allow a subsequent response to omit an async call result while retaining that call identity for later output. It SHALL NOT synthesize an interrupted-tool result for a known asynchronous call. Matching actual outputs SHALL complete the corresponding pending async call without consuming unrelated pending calls.
+
+#### Scenario: Async work spans an intervening turn
+- **GIVEN** an Astra response emits async function call call_a
+- **WHEN** an anchored follow-up contains a new user message without call_a output
+- **THEN** no synthetic output for call_a is forwarded
+- **AND** a later actual call_a output can be forwarded unchanged
+
+#### Scenario: Async and synchronous calls coexist
+- **GIVEN** the previous response contains async call_a and interrupted synchronous call_b
+- **WHEN** an anchored follow-up omits both outputs
+- **THEN** only call_b receives the existing synthetic interrupted output
+
+### Requirement: Steering continuations retain owned WebSocket lifecycles
+The proxy SHALL accept valid response.steer events on an active subscription Responses WebSocket for an owned Astra response and SHALL forward them on that response's existing upstream connection/account. Steering events SHALL contain only type, previous_response_id and a nonempty supported user input. Accepted, pending, failed, and automatically created continuation responses SHALL remain correlated to the originating request and API key. Each continuation SHALL receive admission and usage accounting and SHALL settle once on its own terminal event. A steered incomplete response SHALL not be treated as an unhealthy upstream account. Automatic continuations SHALL not bind to unrelated queued response.create requests.
+
+#### Scenario: Steering creates an automatic successor
+- **GIVEN** an owned Astra response and accepted steering
+- **WHEN** the original response ends with incomplete reason steered and upstream automatically creates a successor
+- **THEN** the successor retains the original account and policy ownership and its usage is recorded exactly once
+
+#### Scenario: Steering waits for a tool result
+- **WHEN** upstream reports response.steer.pending with required tool input
+- **THEN** the proxy preserves that notification and allows the matching explicit anchored response.create to continue on the same connection without replaying the steer
+
+#### Scenario: Required tool input arrives before pending notification
+- **GIVEN** steering has been accepted and the original response has completed with a tool call
+- **WHEN** the client sends the matching anchored tool result before response.steer.pending arrives
+- **THEN** the explicit continuation is forwarded on the same connection and owns its terminal accounting
+
+#### Scenario: Multiple accepted steers share one automatic successor
+- **GIVEN** multiple steering inputs are accepted for the same response
+- **WHEN** upstream creates their automatic successor
+- **THEN** the proxy owns one continuation lifecycle and one reservation for that successor
+
+#### Scenario: Disconnect does not replay accepted steering
+- **GIVEN** steering is accepted on a connection
+- **WHEN** that connection closes before application completes
+- **THEN** all locally owned reservations/tasks are finalized and the proxy does not replay the queued steering on another account or connection
+
+#### Scenario: Failed or malformed steering does not corrupt other work
+- **WHEN** a steering request is invalid, unknown, or upstream reports response.steer.failed
+- **THEN** the failure is returned without assigning its lifecycle to an unrelated queued create or charging usage twice
+
+### Requirement: Astra configuration updates preserve compatible history
+For subscription-backed Astra, the proxy SHALL preserve supported configuration_update input items and normalize client-plane ultra to max. It SHALL reject unsupported reasoning values and invalid adjacent updates before upstream work. Histories with configuration updates SHALL reject automatic compaction, automatic truncation, and the standalone compact endpoint. Normal request-level reasoning SHALL remain unchanged by a valid input update. Explicit terminal compaction_trigger items combined with configuration updates SHALL remain on the Responses endpoint instead of being converted to a standalone compact request. Astra-specific model restrictions SHALL NOT be applied to externally configured model sources sharing the same model ID.
+
+#### Scenario: A valid update preserves the request cache prefix
+- **WHEN** a request has request-level low reasoning and a high configuration_update between conversation messages
+- **THEN** the forwarded request retains low at request level and high in that input item
+
+#### Scenario: Explicit compaction retains configuration history
+- **WHEN** a subscription Astra Responses request contains configuration updates and one terminal compaction_trigger
+- **THEN** the proxy forwards the updates and trigger on the Responses path without calling the standalone compact endpoint
+
+#### Scenario: A source with the same model name owns its model contract
+- **GIVEN** a request routes to an externally configured model source named gpt-6-astra
+- **WHEN** that source supports its own reasoning levels, logprobs or configuration update schema
+- **THEN** subscription-specific Astra validation does not override that contract
+- **AND** API-key reasoning policy remains enforced before source forwarding
+
+#### Scenario: Configuration updates cannot use standalone compaction
+- **WHEN** a compact request contains a configuration_update item
+- **THEN** the proxy returns a compatible invalid-request error before upstream work

@@ -172,6 +172,7 @@ from app.modules.proxy._service.support import (
     _request_log_client_fields,
     _websocket_request_can_replay_before_visible_output,
     _WebSocketRequestState,
+    submitted_tool_output_types,
 )
 from app.modules.proxy._service.support import (
     _websocket_route_log_kwargs as _websocket_route_log_kwargs,
@@ -231,6 +232,10 @@ from app.modules.proxy.helpers import (
     _parse_openai_error,
 )
 from app.modules.proxy.load_balancer import effective_account_concurrency_caps
+from app.modules.proxy.request_policy import (
+    prepare_astra_reasoning_policy_continuation,
+    validate_astra_request,
+)
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
 )
@@ -612,7 +617,13 @@ def _text_without_account_installation_id(text_data: str) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
-def _text_with_previous_response_id(text_data: str, response_id: str | None) -> str:
+def _text_with_previous_response_id(
+    text_data: str,
+    response_id: str | None,
+    *,
+    api_key: ApiKeyData | None = None,
+    request_state: _WebSocketRequestState | None = None,
+) -> str:
     if not response_id:
         return text_data
     try:
@@ -622,6 +633,36 @@ def _text_with_previous_response_id(text_data: str, response_id: str | None) -> 
     if not isinstance(payload, dict) or not response_id:
         return text_data
     payload["previous_response_id"] = response_id
+    if api_key is not None and payload.get("model") == "gpt-6-astra":
+        request = ResponsesRequest.model_validate(payload)
+        steering_configuration = request_state.steering_configuration if request_state is not None else None
+        if isinstance(steering_configuration, dict):
+            # The wire frame already maps Ultra to Max. Restore the validated
+            # client history only when it serializes to the identical input,
+            # including on repeated hard-turn preparation.
+            raw_request = ResponsesRequest.model_validate(steering_configuration)
+            if raw_request.to_payload().get("input") == payload.get("input"):
+                request.input = raw_request.input
+            raw_reasoning = steering_configuration.get("reasoning")
+            if isinstance(raw_reasoning, dict):
+                raw_effort = raw_reasoning.get("effort")
+                if isinstance(raw_effort, str):
+                    request._codex_lb_client_reasoning_effort = raw_effort.strip().lower()
+        prepare_astra_reasoning_policy_continuation(request, api_key)
+        validate_astra_request(request, api_key)
+        forwarded_payload = request.to_payload()
+        payload["input"] = forwarded_payload["input"]
+        if request_state is not None and isinstance(payload["input"], list):
+            request_state.input_item_count = len(payload["input"])
+            request_state.input_full_fingerprint = _fingerprint_input_items(payload["input"])
+            request_state.request_usage_budget = estimate_api_key_request_usage(
+                request,
+                upstream_payload=forwarded_payload,
+            )
+            request_state.steering_configuration = request.model_dump(mode="json", exclude_none=True)
+            reasoning = request_state.steering_configuration.get("reasoning")
+            if isinstance(reasoning, dict) and request._codex_lb_client_reasoning_effort is not None:
+                reasoning["effort"] = request._codex_lb_client_reasoning_effort
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
@@ -767,7 +808,12 @@ class _HTTPBridgeRequestSubmitMixin:
         request_log_id: str | None = None,
         enforce_openai_sdk_contract: bool = True,
         upstream_payload_base: JsonObject | None = None,
+        defer_subscription_validation: bool = False,
     ) -> tuple[_WebSocketRequestState, str]:
+        if not defer_subscription_validation:
+            if prepare_astra_reasoning_policy_continuation(payload, api_key):
+                upstream_payload_base = None
+            validate_astra_request(payload, api_key)
         deduped_replayed_input_count: int | None = None
         deduped_replayed_input_fingerprint: str | None = None
         deduped_replayed_tool_call_count = 0
@@ -810,7 +856,7 @@ class _HTTPBridgeRequestSubmitMixin:
         forwarded_service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
         input_item_count = 0
         input_full_fingerprint: str | None = None
-        payload_input = payload.input
+        payload_input = upstream_payload.get("input")
         if isinstance(payload_input, list):
             payload_input_list = cast(list[JsonValue], payload_input)
             input_item_count = len(payload_input_list)
@@ -824,6 +870,17 @@ class _HTTPBridgeRequestSubmitMixin:
         request_kind = (
             "normal" if connection_request_kind == "prewarm" and not generate_false_prewarm else header_request_kind
         )
+        steering_configuration = None
+        if payload.model == "gpt-6-astra":
+            steering_configuration = payload.model_dump(mode="json", exclude_none=True)
+            client_effort = (
+                api_key.enforced_reasoning_effort
+                if api_key is not None and api_key.enforced_reasoning_effort
+                else payload._codex_lb_client_reasoning_effort
+            )
+            reasoning = steering_configuration.get("reasoning")
+            if client_effort is not None and isinstance(reasoning, dict):
+                reasoning["effort"] = client_effort
         request_state = _WebSocketRequestState(
             request_id=resolved_request_id,
             request_log_id=request_log_id,
@@ -852,6 +909,8 @@ class _HTTPBridgeRequestSubmitMixin:
             # retirement when that operation path supplies the id.
             proxy_injected_anchor_had_full_resend_payload=_http_bridge_payload_looks_like_full_resend(payload),
             payload_conversation_bound=bool(payload.conversation),
+            submitted_tool_output_types=submitted_tool_output_types(payload.input),
+            steering_configuration=steering_configuration,
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
             request_kind=request_kind,
@@ -1450,7 +1509,12 @@ class _HTTPBridgeRequestSubmitMixin:
                         # successive response anchors.
                         seen_hard_turn_response_ids.add(terminal_hard_turn_response_id)
                         hard_turn_chain_advanced = True
-                        text_data = _text_with_previous_response_id(text_data, terminal_hard_turn_response_id)
+                        text_data = _text_with_previous_response_id(
+                            text_data,
+                            terminal_hard_turn_response_id,
+                            api_key=request_state.api_key,
+                            request_state=request_state,
+                        )
                         request_state.request_text = text_data
                         _bind_http_bridge_proxy_injected_anchor(
                             self,
@@ -1503,7 +1567,12 @@ class _HTTPBridgeRequestSubmitMixin:
                                     )
                             completed_response_id = getattr(completed_operation, "response_id", None)
                             if completed_response_id and completed_response_id != request_state.previous_response_id:
-                                text_data = _text_with_previous_response_id(text_data, completed_response_id)
+                                text_data = _text_with_previous_response_id(
+                                    text_data,
+                                    completed_response_id,
+                                    api_key=request_state.api_key,
+                                    request_state=request_state,
+                                )
                                 request_state.request_text = text_data
                                 _bind_http_bridge_proxy_injected_anchor(
                                     self,

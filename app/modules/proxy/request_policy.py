@@ -7,9 +7,10 @@ from typing import NamedTuple
 from pydantic import ValidationError
 
 from app.core.errors import OpenAIErrorEnvelope, openai_error
-from app.core.exceptions import ProxyModelNotAllowed, ProxyReasoningEffortNotAllowed
+from app.core.exceptions import ProxyInvalidRequestError, ProxyModelNotAllowed, ProxyReasoningEffortNotAllowed
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import ModelRegistry, canonical_service_tier_value, get_model_registry
+from app.core.openai.reasoning import resolve_wire_reasoning_effort
 from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesReasoning,
@@ -41,15 +42,6 @@ logger = logging.getLogger(__name__)
 # accept it as of 2026-04. See https://github.com/Soju06/codex-lb/issues/493
 _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS: frozenset[str] = frozenset({"minimal"})
 _DEFAULT_REASONING_EFFORT_FALLBACK = "low"
-
-# Client-plane reasoning efforts the reference Codex client never sends on the
-# wire. GPT-5.6 Sol/Terra advertise ``ultra`` in their catalog entries, but the
-# official client rewrites it to ``max`` before building the Responses request
-# (``reasoning_effort_for_request`` in codex-rs ``core/src/client.rs`` at
-# rust-v0.144.1); ``ultra``'s extra effect (proactive multi-agent mode) is
-# purely client-side. Mirror that aliasing for API-key enforcement and raw
-# API callers so the upstream backend only ever sees wire-safe values.
-_REASONING_EFFORT_WIRE_ALIASES: dict[str, str] = {"ultra": "max"}
 
 # Cursor exposes GPT-5 family model labels with UI suffixes such as "Extra
 # High Fast". The ChatGPT/Codex upstream accepts the canonical GPT-5-family
@@ -104,19 +96,6 @@ _MODEL_ALIAS_TOKENS: frozenset[str] = frozenset(
 # ``service_tier`` instead of sending a literal that fails upstream. See
 # https://github.com/Soju06/codex-lb/issues/546
 _UPSTREAM_OMIT_SERVICE_TIERS: frozenset[str] = frozenset({"auto", "default"})
-
-
-def resolve_wire_reasoning_effort(effort: str) -> str:
-    """Return the wire-safe value for a client-plane reasoning effort.
-
-    The reference Codex client rewrites client-plane efforts (``ultra`` ->
-    ``max``) before building the upstream Responses request; every codex-lb
-    code path that builds an upstream payload directly (proxy enforcement,
-    automation compact pings) applies the same aliasing so the upstream
-    backend never sees a client-plane literal. Unknown values pass through
-    unchanged.
-    """
-    return _REASONING_EFFORT_WIRE_ALIASES.get(effort.strip().lower(), effort)
 
 
 def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None:
@@ -374,6 +353,201 @@ def apply_api_key_enforcement(
             )
     apply_prohibit_fast_mode(payload, prohibit_fast_mode=prohibit_fast_mode)
     return ApiKeyEnforcementResult(service_tier_was_enforced, pre_normalization_effort)
+
+
+_ASTRA_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+_ASTRA_DEFAULT_REASONING_EFFORT = "medium"
+
+
+def _astra_wire_effort(value: JsonValue, *, param: str) -> str:
+    if not isinstance(value, str):
+        raise ProxyInvalidRequestError("Astra reasoning effort must be a string.", param=param)
+    normalized = value.strip().lower()
+    wire_effort = resolve_wire_reasoning_effort(normalized)
+    if wire_effort not in _ASTRA_REASONING_EFFORTS:
+        raise ProxyInvalidRequestError(
+            "Astra supports reasoning efforts low, medium, high, xhigh and max.", param=param
+        )
+    return wire_effort
+
+
+def _astra_subscription_client_effort(effort: str) -> str:
+    normalized = effort.strip().lower()
+    if normalized == "minimal":
+        return "low"
+    return normalized
+
+
+def _validate_astra_configuration_update_effort_access(
+    api_key: ApiKeyData,
+    effort: str,
+    *,
+    subscription: bool,
+) -> None:
+    allowed = api_key.allowed_reasoning_efforts
+    if allowed is None:
+        return
+    normalized = effort.strip().lower()
+    if normalized in allowed:
+        return
+    if subscription and normalized in {"minimal", "low"}:
+        equivalent_effort = "low" if normalized == "minimal" else "minimal"
+        if equivalent_effort in allowed:
+            return
+    validate_reasoning_effort_access(api_key, normalized)
+
+
+def prepare_astra_reasoning_policy_continuation(
+    payload: ResponsesRequest,
+    api_key: ApiKeyData | None,
+) -> bool:
+    """Reset inherited Astra effort before input governed by a restricted key.
+
+    ``configuration_update`` persists across response and conversation anchors,
+    while request-level ``reasoning`` does not reset that state. A leading
+    client update is already the earliest possible reset and remains subject to
+    normal policy validation. Otherwise, prepend one compatible update while
+    retaining client-plane Ultra until subscription serialization.
+
+    Call this after the final subscription anchor is present and before input
+    fingerprints, size checks, reservations, or owner-forward signatures are
+    derived. The leading-item check makes repeated preparation idempotent.
+    """
+    if api_key is None or payload.model.strip().lower() != "gpt-6-astra":
+        return False
+    if payload.previous_response_id is None and payload.conversation is None:
+        return False
+    if api_key.allowed_reasoning_efforts is None and api_key.enforced_reasoning_effort is None:
+        return False
+    if not is_json_list(payload.input):
+        return False
+
+    input_items = payload.input
+    if input_items and is_json_mapping(input_items[0]) and input_items[0].get("type") == "configuration_update":
+        return False
+
+    selected_effort = api_key.enforced_reasoning_effort
+    if selected_effort is None:
+        selected_effort = payload._codex_lb_client_reasoning_effort or _client_reasoning_effort(payload)
+    if selected_effort is None:
+        selected_effort = _ASTRA_DEFAULT_REASONING_EFFORT
+    selected_effort = selected_effort.strip().lower()
+    _validate_astra_configuration_update_effort_access(api_key, selected_effort, subscription=True)
+    wire_effort = _astra_subscription_client_effort(selected_effort)
+    _astra_wire_effort(wire_effort, param="input.0.reasoning.effort")
+    payload.input = [
+        {"type": "configuration_update", "reasoning": {"effort": wire_effort}},
+        *input_items,
+    ]
+    return True
+
+
+def has_astra_configuration_updates(payload: ResponsesRequest | ResponsesCompactRequest) -> bool:
+    return (
+        payload.model.strip().lower() == "gpt-6-astra"
+        and is_json_list(payload.input)
+        and any(is_json_mapping(item) and item.get("type") == "configuration_update" for item in payload.input)
+    )
+
+
+def validate_configuration_update_policy(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    api_key: ApiKeyData | None,
+    *,
+    subscription: bool = False,
+) -> None:
+    """Check key policy at the selected backend boundary, without assuming its schema."""
+    if api_key is None or not is_json_list(payload.input):
+        return
+    for index, item in enumerate(payload.input):
+        if not is_json_mapping(item) or item.get("type") != "configuration_update":
+            continue
+        reasoning = item.get("reasoning")
+        value = reasoning.get("effort") if is_json_mapping(reasoning) else None
+        if not isinstance(value, str):
+            if api_key.allowed_reasoning_efforts is not None or api_key.enforced_reasoning_effort is not None:
+                raise ProxyInvalidRequestError(
+                    "Configuration updates require a reasoning effort for this API key.",
+                    param=f"input.{index}.reasoning.effort",
+                )
+            continue
+        effort = value.strip().lower()
+        _validate_astra_configuration_update_effort_access(api_key, effort, subscription=subscription)
+        if api_key.enforced_reasoning_effort is not None:
+            enforced = api_key.enforced_reasoning_effort.strip().lower()
+            if subscription:
+                enforced = _astra_subscription_client_effort(enforced)
+                effort = _astra_subscription_client_effort(effort)
+            if effort != enforced:
+                raise ProxyReasoningEffortNotAllowed(
+                    "Configuration update conflicts with the API key's enforced reasoning effort.",
+                    param=f"input.{index}.reasoning.effort",
+                )
+
+
+def validate_astra_request(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    api_key: ApiKeyData | None,
+    *,
+    prepare_continuation: bool = True,
+) -> None:
+    """Validate Astra controls after model selection, preserving cache-prefix effort."""
+    if payload.model.strip().lower() != "gpt-6-astra":
+        return
+    if prepare_continuation and isinstance(payload, ResponsesRequest):
+        prepare_astra_reasoning_policy_continuation(payload, api_key)
+    validate_configuration_update_policy(payload, api_key, subscription=True)
+    if payload.reasoning is not None and payload.reasoning.effort is not None:
+        # Keep the established subscription minimal -> low compatibility path.
+        if payload.reasoning.effort.strip().lower() != "minimal":
+            _astra_wire_effort(payload.reasoning.effort, param="reasoning.effort")
+    extra = payload.model_extra or {}
+    for name in ("top_logprobs", "logprobs"):
+        if extra.get(name) is not None:
+            raise ProxyInvalidRequestError(f"Astra does not support {name}.", param=name)
+    if isinstance(payload, ResponsesRequest) and "message.output_text.logprobs" in payload.include:
+        raise ProxyInvalidRequestError("Astra does not support output logprobs.", param="include")
+    if not is_json_list(payload.input):
+        return
+    has_updates = False
+    previous_update = False
+    for index, item in enumerate(payload.input):
+        if not is_json_mapping(item) or item.get("type") != "configuration_update":
+            previous_update = False
+            continue
+        param = f"input.{index}"
+        if previous_update:
+            raise ProxyInvalidRequestError("Adjacent configuration updates are not supported.", param=param)
+        previous_update = True
+        if set(item) - {"type", "reasoning"}:
+            raise ProxyInvalidRequestError("Configuration updates may change only reasoning effort.", param=param)
+        reasoning = item.get("reasoning")
+        if not is_json_mapping(reasoning) or set(reasoning) != {"effort"}:
+            raise ProxyInvalidRequestError("Configuration updates require reasoning.effort only.", param=param)
+        value = reasoning["effort"]
+        _astra_wire_effort(value, param=f"{param}.reasoning.effort")
+        has_updates = True
+    if not has_updates:
+        return
+    if isinstance(payload, ResponsesCompactRequest):
+        raise ProxyInvalidRequestError("The compact endpoint does not support configuration updates.", param="input")
+    if payload.truncation == "auto":
+        raise ProxyInvalidRequestError(
+            "Configuration updates cannot be combined with automatic truncation.", param="truncation"
+        )
+    context_management = extra.get("context_management")
+    if is_json_list(context_management) and any(
+        is_json_mapping(entry) and entry.get("type") == "compaction" for entry in context_management
+    ):
+        raise ProxyInvalidRequestError(
+            "Configuration updates cannot be combined with automatic compaction.", param="context_management"
+        )
+    if payload.reasoning is not None and payload.reasoning.model_extra:
+        mode = payload.reasoning.model_extra.get("mode")
+        if mode not in (None, "standard"):
+            raise ProxyInvalidRequestError(
+                "Configuration updates require standard single-agent reasoning.", param="reasoning.mode"
+            )
 
 
 def apply_prohibit_fast_mode(
@@ -709,8 +883,8 @@ def normalize_unsupported_reasoning_effort(
     requested_effort = payload.reasoning.effort
     normalized_effort = requested_effort.strip().lower()
 
-    wire_alias = _REASONING_EFFORT_WIRE_ALIASES.get(normalized_effort)
-    if wire_alias is not None:
+    wire_alias = resolve_wire_reasoning_effort(normalized_effort)
+    if wire_alias != normalized_effort:
         payload.reasoning.effort = wire_alias
         logger.info(
             "reasoning_effort_wire_aliased request_id=%s model=%s requested_effort=%s aliased_effort=%s",

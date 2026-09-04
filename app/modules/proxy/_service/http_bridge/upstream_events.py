@@ -172,6 +172,8 @@ from app.modules.proxy._service.support import (
     _websocket_should_defer_reasoning_prelude,
     _WebSocketReceiveTimeout,
     _WebSocketRequestState,
+    record_async_tool_call,
+    update_pending_async_tools,
 )
 from app.modules.proxy._service.support import (
     _websocket_route_log_kwargs as _websocket_route_log_kwargs,
@@ -978,7 +980,7 @@ def _durable_pending_tool_call_manifest(
     payload: dict[str, JsonValue] | None,
 ) -> dict[str, str] | None:
     terminal_calls = _response_completed_tool_call_types(payload)
-    if request_state.tool_call_manifest_invalid or terminal_calls is None:
+    if request_state.tool_call_manifest_invalid or request_state.async_tool_call_types or terminal_calls is None:
         return None
     if request_state.added_tool_call_types != request_state.pending_tool_call_types:
         return None
@@ -1576,6 +1578,7 @@ async def _invalidate_denied_http_bridge_anchor(
                         session.last_completed_input_count = 0
                         session.last_completed_input_prefix_fingerprint = None
                         session.last_pending_tool_calls.clear()
+                        session.pending_async_tool_calls.clear()
                     if owner_matches_for_cleanup and (cleared or no_durable_owner) and unregister_succeeded:
                         session.denied_proxy_injected_anchor_ids.discard(denied_response_id)
                         session.denied_proxy_injected_anchor_cleanup_pending.discard(denied_response_id)
@@ -2639,6 +2642,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_type=event_type,
                     payload=payload,
                 )
+                record_async_tool_call(matched_request_state, payload)
                 completed_tool_call = _response_output_item_done_tool_call(payload)
                 if completed_tool_call is not None:
                     completed_call_id, completed_call_type = completed_tool_call
@@ -3701,7 +3705,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 input_full_fingerprint=(
                     matched_request_state.input_full_fingerprint if matched_request_state.input_item_count > 0 else None
                 ),
-                pending_tool_calls=_durable_pending_tool_call_manifest(matched_request_state, payload),
+                pending_tool_calls=(
+                    None
+                    if session.pending_async_tool_calls
+                    else _durable_pending_tool_call_manifest(matched_request_state, payload)
+                ),
             )
             completion_anchor_registration_confirmed = alias_registered
             if not alias_registered and anchor_advance_supersession is not None:
@@ -3910,6 +3918,9 @@ class _HTTPBridgeUpstreamEventsMixin:
             # input_item_count, e.g. string inputs) can still reuse this
             # anchor for continuity lookups.
             if response_id is not None:
+                if terminal_request_state.previous_response_id != session.last_completed_response_id:
+                    session.pending_async_tool_calls.clear()
+                update_pending_async_tools(session.pending_async_tool_calls, terminal_request_state)
                 session.last_completed_response_id = response_id
                 # This response was completed on the session's current account, so
                 # that account owns the anchor. Record it so the anchor is only

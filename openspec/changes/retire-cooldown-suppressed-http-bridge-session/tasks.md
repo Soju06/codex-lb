@@ -21,6 +21,8 @@
 - [x] Assert startup pre-submit suppression marks the session retiring, invokes
       the helper, preserves the 503 envelope, and never submits.
 - [x] Assert the replay bypass path does not retire the session.
+- [x] Assert late suppression of an idle, never-dispatched session closes it
+      through the real drain-retirement helper (`retire_after_drain` bounded close).
 
 ## Verification
 

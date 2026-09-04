@@ -31159,6 +31159,56 @@ async def test_http_bridge_submit_cooldown_suppression_retires_session_before_se
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_submit_cooldown_suppression_closes_idle_undispatched_session() -> None:
+    # Issue #1943: the suppressed request never dispatched response.create and
+    # nothing else owns the session, so the real (unmocked) drain-retirement
+    # helper must close the socket immediately instead of leaving it in the
+    # reuse pool for the next half-open probe.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-submit-cooldown-closes-idle")
+    now = time.monotonic()
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = (
+        http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+            consecutive_failures=2,
+            cooldown_until=now + 60.0,
+            last_detail="stream_idle_timeout",
+            last_touched_monotonic=now,
+        )
+    )
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
+    close_bounded = AsyncMock()
+    service._close_http_bridge_session_bounded = close_bounded
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-cooldown-closes-idle",
+        model="gpt-5.6-luna",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","input":"hello"}',
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            hard_session,
+            request_state=request_state,
+            text_data=request_state.request_text or "",
+            queue_limit=8,
+            request_scope_id="scope-submit-cooldown-closes-idle",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.payload["error"]["code"] == "upstream_request_timeout"
+    assert hard_session.upstream_close_attempted is True
+    assert hard_session.queued_request_count == 0
+    assert len(hard_session.pending_requests) == 0
+    close_bounded.assert_awaited_once_with(hard_session, reason="retire_after_drain")
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_ignores_soft_affinity_and_other_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

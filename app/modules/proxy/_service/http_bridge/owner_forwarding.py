@@ -198,6 +198,28 @@ def _owner_forward_failure_allows_local_recovery(exc: ProxyResponseError) -> boo
     }
 
 
+def _owner_forward_failure_was_pre_dispatch(exc: ProxyResponseError) -> bool:
+    """Return whether the owner failed before accepting the request upstream."""
+
+    return isinstance(exc, _OwnerForwardRequestError) and exc.outcome in {
+        _OwnerForwardOutcome.NOT_DISPATCHED,
+        _OwnerForwardOutcome.RECEIVER_REJECTED,
+    }
+
+
+def _owner_forward_outcome_for_proxy_error(
+    exc: ProxyResponseError,
+    *,
+    default: _OwnerForwardOutcome,
+) -> _OwnerForwardOutcome:
+    payload = exc.payload
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict) and error.get("code") == "bridge_drain_active":
+            return _OwnerForwardOutcome.RECEIVER_REJECTED
+    return default
+
+
 def _durable_recovery_supersedes_local_session(
     durable_lookup: DurableBridgeLookup | None,
     session: _HTTPBridgeSession,
@@ -549,7 +571,10 @@ class _HTTPBridgeOwnerForwardingMixin:
                     default_message="HTTP bridge owner request failed",
                 )
                 return
-            raise _OwnerForwardRequestError(exc, outcome=forward_outcome) from exc
+            raise _OwnerForwardRequestError(
+                exc,
+                outcome=_owner_forward_outcome_for_proxy_error(exc, default=forward_outcome),
+            ) from exc
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
                 bridge_owner_forward_total.labels(outcome="fail").inc()

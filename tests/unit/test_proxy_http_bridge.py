@@ -53,6 +53,7 @@ from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import support as proxy_support_module
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
 from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
+from app.modules.proxy._service.http_bridge import owner_forwarding as http_bridge_owner_forwarding_module
 from app.modules.proxy._service.http_bridge import quarantine as http_bridge_quarantine_module
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy._service.http_bridge import retry_circuit as http_bridge_retry_circuit_module
@@ -20343,6 +20344,224 @@ async def test_should_attempt_local_bootstrap_rebind_for_session_header_without_
             key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
             headers={"x-codex-session-id": "sid-123", "x-codex-turn-state": "http_turn_123"},
             previous_response_id=None,
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("owner_outcome", "error_code", "expected"),
+    [
+        ("receiver_rejected", "bridge_drain_active", True),
+        ("not_dispatched", "bridge_drain_active", True),
+        ("dispatch_ambiguous", "bridge_drain_active", False),
+        ("receiver_acknowledged", "bridge_drain_active", False),
+        ("receiver_rejected", "bridge_owner_unreachable", False),
+        ("receiver_rejected", "bridge_instance_mismatch", False),
+    ],
+)
+def test_turn_state_bootstrap_rebind_requires_explicit_draining_owner_rejection(
+    owner_outcome: str,
+    error_code: str,
+    expected: bool,
+) -> None:
+    source = ProxyResponseError(
+        503,
+        {"error": {"code": error_code, "message": "owner rejected", "type": "server_error"}},
+    )
+    outcome = http_bridge_owner_forwarding_module._OwnerForwardOutcome(owner_outcome)
+    exc = http_bridge_owner_forwarding_module._OwnerForwardRequestError(source, outcome=outcome)
+
+    assert (
+        proxy_service._http_bridge_should_attempt_local_bootstrap_rebind(
+            exc,
+            key=proxy_service._HTTPBridgeSessionKey("thread_header", "thread-123", None),
+            headers={"thread-id": "thread-123", "x-codex-turn-state": "http_turn_123"},
+            previous_response_id=None,
+            owner_pre_dispatch=http_bridge_owner_forwarding_module._owner_forward_failure_was_pre_dispatch(exc),
+        )
+        is expected
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_recovers_turn_state_locally_after_draining_owner_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    turn_state = "http_turn_drain_rebind"
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", turn_state, None)
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    started_at = time.monotonic()
+    prepared_states: list[proxy_service._WebSocketRequestState] = []
+
+    def fake_prepare(
+        prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip
+        assert prepared_payload.previous_response_id is None
+        state = proxy_service._WebSocketRequestState(
+            request_id=f"req-drain-rebind-{len(prepared_states)}",
+            model="gpt-5.4",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=started_at,
+            event_queue=asyncio.Queue(),
+            transport="http",
+        )
+        prepared_states.append(state)
+        return state, '{"type":"response.create"}'
+
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-b",
+        owner_endpoint="http://instance-b",
+        key=key,
+    )
+    recovery_session = _make_bridge_session(key=key, key_value=turn_state)
+    recovery_session.headers = {"x-codex-turn-state": turn_state}
+    captured_owner_context: dict[str, object] = {}
+    captured_local_request_state: dict[str, object] = {}
+
+    async def fake_owner_stream_responses(**kwargs: object):
+        captured_owner_context.update(kwargs)
+        raise ProxyResponseError(
+            503,
+            proxy_service.openai_error(
+                "bridge_drain_active",
+                "HTTP bridge owner is draining",
+                error_type="server_error",
+            ),
+        )
+        yield ""
+
+    async def fake_stream_http_bridge_session_events(
+        session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+        propagate_http_errors: bool,
+        downstream_turn_state: str | None,
+        request_deadline: float | None = None,
+    ):
+        del text_data, queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
+        captured_local_request_state["session"] = session
+        captured_local_request_state["request_state"] = request_state
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    get_or_create = AsyncMock(side_effect=[owner_forward, recovery_session])
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_owner_client",
+        cast(Any, SimpleNamespace(stream_responses=fake_owner_stream_responses)),
+    )
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-turn-state": turn_state},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=900.0,
+            max_sessions=8,
+            queue_limit=4,
+            downstream_turn_state=turn_state,
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert len(prepared_states) == 2
+    owner_context = cast(proxy_service.HTTPBridgeForwardContext, captured_owner_context["context"])
+    assert owner_context.original_affinity_kind == "turn_state_header"
+    assert owner_context.original_affinity_key == turn_state
+    assert owner_context.downstream_turn_state == turn_state
+    local_state = cast(proxy_service._WebSocketRequestState, captured_local_request_state["request_state"])
+    assert local_state.session_id == turn_state
+    assert local_state.previous_response_id is None
+    assert captured_local_request_state["session"] is recovery_session
+    assert get_or_create.await_count == 2
+    assert get_or_create.await_args_list[1].kwargs["allow_bootstrap_owner_rebind"] is True
+
+
+def test_owner_forward_proxy_error_classifies_explicit_drain_as_receiver_rejected() -> None:
+    drain_error = ProxyResponseError(
+        503,
+        {"error": {"code": "bridge_drain_active", "message": "owner draining", "type": "server_error"}},
+    )
+    ambiguous_error = ProxyResponseError(
+        503,
+        {"error": {"code": "bridge_owner_unreachable", "message": "owner failed", "type": "server_error"}},
+    )
+
+    assert (
+        http_bridge_owner_forwarding_module._owner_forward_outcome_for_proxy_error(
+            drain_error,
+            default=http_bridge_owner_forwarding_module._OwnerForwardOutcome.DISPATCH_AMBIGUOUS,
+        )
+        is http_bridge_owner_forwarding_module._OwnerForwardOutcome.RECEIVER_REJECTED
+    )
+    assert (
+        http_bridge_owner_forwarding_module._owner_forward_outcome_for_proxy_error(
+            ambiguous_error,
+            default=http_bridge_owner_forwarding_module._OwnerForwardOutcome.DISPATCH_AMBIGUOUS,
+        )
+        is http_bridge_owner_forwarding_module._OwnerForwardOutcome.DISPATCH_AMBIGUOUS
+    )
+
+
+def test_turn_state_draining_owner_rejection_does_not_rebind_previous_response() -> None:
+    source = ProxyResponseError(
+        503,
+        {"error": {"code": "bridge_drain_active", "message": "owner draining", "type": "server_error"}},
+    )
+    exc = http_bridge_owner_forwarding_module._OwnerForwardRequestError(
+        source,
+        outcome=http_bridge_owner_forwarding_module._OwnerForwardOutcome.RECEIVER_REJECTED,
+    )
+
+    assert (
+        proxy_service._http_bridge_should_attempt_local_bootstrap_rebind(
+            exc,
+            key=proxy_service._HTTPBridgeSessionKey("thread_header", "thread-123", None),
+            headers={"thread-id": "thread-123", "x-codex-turn-state": "http_turn_123"},
+            previous_response_id="resp-123",
+            owner_pre_dispatch=True,
         )
         is False
     )

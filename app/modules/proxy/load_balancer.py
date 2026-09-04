@@ -13,7 +13,6 @@ from uuid import uuid4
 
 from app.core import usage as usage_core
 from app.core.balancer import (
-    CAPACITY_PLAN_ALIASES,
     ERROR_BACKOFF_THRESHOLD,
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
@@ -35,6 +34,7 @@ from app.core.balancer import (
     handle_quota_exceeded,
     handle_rate_limit,
     plausible_rate_limit_reset_at,
+    resolve_capacity_plan_type,
 )
 from app.core.balancer import (
     select_account as select_account,
@@ -2649,9 +2649,7 @@ def _normalize_usage_inputs(
 
 def _capacity_for_routing_plan(plan_type: str | None, window: str) -> float | None:
     """Resolve rate-limit plan aliases before applying routing capacities."""
-    normalized_plan = (plan_type or "").strip().lower()
-    capacity_plan = CAPACITY_PLAN_ALIASES.get(normalized_plan, plan_type)
-    return usage_core.capacity_for_plan(capacity_plan, window)
+    return usage_core.capacity_for_plan(resolve_capacity_plan_type(plan_type), window)
 
 
 def _health_tier_primary_used(*, plan_type: str | None, primary_used: float | None) -> float | None:

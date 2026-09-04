@@ -1,5 +1,4 @@
 from app.core.balancer.logic import (
-    CAPACITY_PLAN_ALIASES,
     ERROR_BACKOFF_THRESHOLD,
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
@@ -32,11 +31,11 @@ from app.core.balancer.logic import (
     handle_rate_limit,
     plausible_rate_limit_reset_at,
     pool_usage_exhaustion,
+    resolve_capacity_plan_type,
     select_account,
 )
 
 __all__ = [
-    "CAPACITY_PLAN_ALIASES",
     "PERMANENT_FAILURE_CODES",
     "HEALTH_TIER_DRAINING",
     "HEALTH_TIER_HEALTHY",
@@ -69,5 +68,6 @@ __all__ = [
     "handle_rate_limit",
     "plausible_rate_limit_reset_at",
     "pool_usage_exhaustion",
+    "resolve_capacity_plan_type",
     "select_account",
 ]

@@ -88,6 +88,15 @@ CAPACITY_PLAN_ALIASES = {
     "unknown": "free",
 }
 
+
+def resolve_capacity_plan_type(plan_type: str | None) -> str | None:
+    """Normalize a stored plan and resolve aliases used by capacity routing."""
+    normalized = (plan_type or "").strip().lower()
+    if not normalized:
+        return None
+    return CAPACITY_PLAN_ALIASES.get(normalized, normalized)
+
+
 HEALTH_TIER_HEALTHY = 0
 HEALTH_TIER_DRAINING = 1
 HEALTH_TIER_PROBING = 2
@@ -441,8 +450,7 @@ def _prefer_earlier_reset_candidates(
 
 
 def _fallback_secondary_capacity_credits(plan_type: str | None) -> float:
-    normalized = (plan_type or "").strip().lower()
-    resolved_plan = CAPACITY_PLAN_ALIASES.get(normalized, normalized or UNKNOWN_PLAN_FALLBACK)
+    resolved_plan = resolve_capacity_plan_type(plan_type) or UNKNOWN_PLAN_FALLBACK
     return PLAN_CAPACITY_CREDITS_SECONDARY.get(
         resolved_plan,
         PLAN_CAPACITY_CREDITS_SECONDARY[UNKNOWN_PLAN_FALLBACK],

@@ -8892,6 +8892,16 @@ def _collected_output_items_match_terminal(
     collected_output = [item for _, item in sorted(output_items.items())]
     if len(terminal_output) != len(collected_output):
         return False
+    terminal_types = [
+        _output_item_identity(item).get("type") if isinstance(item, dict) else None for item in terminal_output
+    ]
+    collected_types = [_output_item_identity(item).get("type") for item in collected_output]
+    # A streamed tool-call lifecycle may be followed by a terminal assistant
+    # message at the same output index; those are distinct representations, not
+    # an echoed item with a conflicting identity.  Only compare identities when
+    # every pair is the same output-item type.
+    if any(terminal_type != collected_type for terminal_type, collected_type in zip(terminal_types, collected_types)):
+        return True
     for terminal_item, collected_item in zip(terminal_output, collected_output):
         terminal_identity = _output_item_identity(terminal_item) if isinstance(terminal_item, dict) else {}
         collected_identity = _output_item_identity(collected_item)

@@ -1877,18 +1877,21 @@ def test_run_upgrade_fails_for_unsupported_alembic_version_id(tmp_path: Path) ->
         run_upgrade(url, "head", bootstrap_legacy=False)
 
 
-def test_persisted_recovery_schema_repair_is_the_graph_head(tmp_path: Path) -> None:
+def test_persisted_recovery_schema_repair_precedes_ownership_registry_repair(tmp_path: Path) -> None:
     from alembic.script import ScriptDirectory
 
     config = _build_alembic_config(_db_url(tmp_path / "compatibility-head.db"))
     script_directory = ScriptDirectory.from_config(config)
     compatibility_revision = "20260828_020000_merge_http_bridge_recovery_heads"
     repair_revision = "20260901_000000_repair_persisted_schema_drift"
+    ownership_revision = "20260904_000000_repair_http_bridge_ownership_registry"
 
     assert script_directory.get_revision(compatibility_revision) is not None
     assert script_directory.get_revision(repair_revision) is not None
     assert script_directory.get_revision(repair_revision).down_revision == compatibility_revision
-    assert script_directory.get_heads() == [repair_revision]
+    assert script_directory.get_revision(ownership_revision) is not None
+    assert script_directory.get_revision(ownership_revision).down_revision == repair_revision
+    assert script_directory.get_heads() == [ownership_revision]
 
 
 def test_check_migration_policy_reports_head_and_format_violations(monkeypatch, tmp_path: Path) -> None:
@@ -2176,6 +2179,38 @@ def test_persisted_recovery_schema_repair_records_parent_index_ownership(monkeyp
         "index",
         migration._OPERATIONS_INDEX,
     )
+
+
+def test_ownership_registry_repair_bootstraps_missing_table(monkeypatch) -> None:
+    migration = importlib.import_module("app.db.alembic.versions.20260904_000000_repair_http_bridge_ownership_registry")
+    bind = object()
+    ensure_ownership_table = Mock()
+
+    monkeypatch.setattr(migration, "op", SimpleNamespace(get_bind=lambda: bind))
+    monkeypatch.setattr(migration, "ensure_ownership_table", ensure_ownership_table)
+
+    migration.upgrade()
+
+    ensure_ownership_table.assert_called_once_with(bind)
+
+
+def test_ownership_registry_repair_restores_missing_table(tmp_path: Path) -> None:
+    url = _db_url(tmp_path / "missing-ownership-registry.db")
+    repair_revision = "20260901_000000_repair_persisted_schema_drift"
+
+    run_upgrade(url, repair_revision, bootstrap_legacy=False)
+
+    with create_engine(to_sync_database_url(url), future=True).begin() as connection:
+        connection.execute(text("DROP TABLE http_bridge_migration_object_ownership"))
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        assert inspect(engine).has_table("http_bridge_migration_object_ownership")
+    finally:
+        engine.dispose()
+    assert check_schema_drift(url) == ()
 
 
 def test_replica_guardrails_migration_round_trips_with_version_backfill(tmp_path: Path) -> None:

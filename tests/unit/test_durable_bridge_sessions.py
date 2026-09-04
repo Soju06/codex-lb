@@ -3627,3 +3627,143 @@ async def test_durable_bridge_cas_loser_does_not_steal_a_foreign_winners_live_le
     assert loser.owner_instance_id == "instance-b"
     assert loser.owner_epoch == winner_epoch[0]
     assert loser.state == HttpBridgeSessionState.ACTIVE
+
+
+async def _detach_rows_like_account_invalidation(
+    async_session_factory: Callable[[], AsyncSession], account_id: str
+) -> None:
+    """Run the real account-invalidation detach so the test tracks its shape."""
+
+    from app.modules.accounts.repository import AccountsRepository
+
+    async with async_session_factory() as session:
+        await AccountsRepository(session)._close_http_bridge_sessions_for_account(account_id)
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_lookup_ignores_rows_detached_by_account_invalidation(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="thread_header",
+        session_key_value="thread-detached",
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=120.0,
+        account_id="acc-invalidated",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=claimed.session_id,
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        turn_state="http_turn_detached",
+        lease_ttl_seconds=120.0,
+    )
+
+    # Account deactivation / reauth / deletion detach every row of the account:
+    # CLOSED, no owner account, no lease, no continuity anchors, no aliases.
+    await _detach_rows_like_account_invalidation(async_session_factory, "acc-invalidated")
+
+    async with async_session_factory() as session:
+        row = await session.scalar(
+            select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.id == claimed.session_id)
+        )
+        assert row is not None
+        assert row.state == HttpBridgeSessionState.CLOSED
+        assert row.account_id is None
+
+    # The detached row must not surface as durable owner evidence: a hard
+    # thread continuation would otherwise fail closed forever with
+    # previous_response_owner_unavailable even after the account recovers.
+    assert (
+        await coordinator.lookup_request_targets(
+            session_key_kind="thread_header",
+            session_key_value="thread-detached",
+            api_key_id="key-1",
+            turn_state="http_turn_detached",
+            session_header=None,
+            previous_response_id=None,
+        )
+        is None
+    )
+
+    # A fresh selection re-owns the same canonical key.
+    reclaimed = await coordinator.claim_live_session(
+        session_key_kind="thread_header",
+        session_key_value="thread-detached",
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=120.0,
+        account_id="acc-replacement",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    assert reclaimed.session_id == claimed.session_id
+    assert reclaimed.account_id == "acc-replacement"
+    after = await coordinator.lookup_request_targets(
+        session_key_kind="thread_header",
+        session_key_value="thread-detached",
+        api_key_id="key-1",
+        turn_state=None,
+        session_header=None,
+        previous_response_id=None,
+    )
+    assert after is not None
+    assert after.account_id == "acc-replacement"
+    assert after.state == HttpBridgeSessionState.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_lookup_keeps_closed_rows_that_still_name_their_account(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="thread_header",
+        session_key_value="thread-released",
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=120.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id="resp_released",
+        allow_takeover=True,
+    )
+    released = await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=False,
+    )
+    assert released is not None
+    assert released.state == HttpBridgeSessionState.CLOSED
+
+    # An ordinary release keeps the owner account and its anchors: the closed
+    # row remains owner evidence for the continuation.
+    lookup = await coordinator.lookup_request_targets(
+        session_key_kind="thread_header",
+        session_key_value="thread-released",
+        api_key_id="key-1",
+        turn_state=None,
+        session_header=None,
+        previous_response_id=None,
+    )
+    assert lookup is not None
+    assert lookup.account_id == "acc-1"
+    assert lookup.state == HttpBridgeSessionState.CLOSED
+    assert lookup.latest_response_id == "resp_released"

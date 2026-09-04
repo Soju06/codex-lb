@@ -858,7 +858,8 @@ class ResponsesCompactRequest(BaseModel):
 
 def _normalize_configuration_update_efforts(payload: MutableJsonObject) -> None:
     """Keep client effort selections intact until the subscription egress boundary."""
-    if payload.get("model") != "gpt-6-astra":
+    model = payload.get("model")
+    if not isinstance(model, str) or model.strip().lower() != "gpt-6-astra":
         return
     items = payload.get("input")
     if not is_json_list(items):

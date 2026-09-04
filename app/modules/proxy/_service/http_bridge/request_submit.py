@@ -47,6 +47,7 @@ from app.core.clients.proxy_websocket import (
     is_account_neutral_websocket_error_code,
 )
 from app.core.errors import OpenAIErrorEnvelope, openai_error
+from app.core.exceptions import ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
     ResponsesRequest,
@@ -1621,6 +1622,11 @@ class _HTTPBridgeRequestSubmitMixin:
                     parent_response_id=operation_parent_response_id,
                     request_text=text_data,
                 )
+            except (ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed):
+                # Late operation anchors revalidate the restored Astra input.
+                # Client-policy failures must retain their 400/403 envelope and
+                # must not retire a healthy session as a persistence failure.
+                raise
             except Exception as exc:
                 session.closed = True
                 session.upstream_control.reconnect_requested = True

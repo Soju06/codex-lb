@@ -292,3 +292,9 @@ Protocol references:
 - https://developers.openai.com/api/docs/guides/async-tool-calling
 - https://developers.openai.com/api/docs/guides/steering
 - https://developers.openai.com/api/docs/guides/reasoning#change-reasoning-mid-conversation
+
+### Queued steering admission and completed-state retention
+
+Steering submissions share one automatically created successor and one usage reservation. Each additional submission must be admitted against the remaining quota before it is sent upstream, with its increment added to that reservation. An unapplied rejection releases its increment; the successor still settles once. This preserves the existing API-key quota boundary while allowing multiple corrections to one response.
+
+Only completed Astra responses remain eligible as stored steering parents. A successful response from another model clears that reference so ordinary idle WebSocket connections do not retain completed request bodies for an unsupported feature.

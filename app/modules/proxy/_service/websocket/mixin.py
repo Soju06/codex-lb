@@ -1746,7 +1746,7 @@ class _WebSocketMixin:
                                 error = (
                                     exc
                                     if isinstance(exc, ProxyResponseError)
-                                    else steering_error("invalid_input", str(exc))
+                                    else steering_error("invalid_input", "Invalid steering request.")
                                 )
                                 async with client_send_lock:
                                     await websocket.send_text(json.dumps(steering_failure_payload(payload, error)))
@@ -6006,7 +6006,7 @@ class _WebSocketMixin:
             event_type == "response.incomplete" and _websocket_event_incomplete_reason(event_type, payload) == "steered"
         )
         if successful_boundary and not completed_empty_prewarm:
-            upstream_control.last_completed_request = request_state
+            upstream_control.last_completed_request = request_state if request_state.model == "gpt-6-astra" else None
             if event_type == "response.completed" and response_id is not None:
                 queued_steering = upstream_control.steering_continuations.get(response_id)
                 if queued_steering is not None:

@@ -1440,5 +1440,5 @@ The proxy SHALL apply allowed and enforced reasoning controls to configuration_u
 
 #### Scenario: Owner forwarding preserves client reasoning identity
 - **WHEN** a restricted-key continuation selects ultra and is prepared and forwarded through an owner instance more than once
-- **THEN** preparation retains one leading update and the original client-plane policy identity
-- **AND** subscription wire serialization uses max
+- **THEN** preparation retains exactly one leading configuration update selecting ultra and request-level ultra, without treating either value as max during API-key policy checks
+- **AND** only final subscription wire serialization maps both ultra values to max

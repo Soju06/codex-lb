@@ -52,6 +52,48 @@ async def test_astra_source_controls_reach_websocket_http_fallback(monkeypatch, 
     select.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        replace(_api_key(), allowed_reasoning_efforts=["low"]),
+        replace(_api_key(), enforced_reasoning_effort="low"),
+    ],
+    ids=["allow-only-low", "enforced-low"],
+)
+async def test_astra_websocket_rejects_high_configuration_update_before_upstream(monkeypatch, key):
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(ws_mixin, "responses_model_is_source_owned", AsyncMock(return_value=False))
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=key))
+    reserve = AsyncMock(side_effect=AssertionError("Rejected request reached API-key reservation"))
+    select = AsyncMock(side_effect=AssertionError("Rejected request reached upstream account selection"))
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve)
+    monkeypatch.setattr(service, "_select_websocket_connect_account", select)
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
+    frame = json.loads(_create_frame("gpt-6-astra"))
+    frame["input"].insert(0, {"type": "configuration_update", "reasoning": {"effort": "high"}})
+    socket = _Downstream([json.dumps(frame)])
+
+    await asyncio.wait_for(
+        service.proxy_responses_websocket(
+            cast(WebSocket, socket), {}, codex_session_affinity=False, openai_cache_affinity=False, api_key=key
+        ),
+        timeout=5,
+    )
+
+    events = [json.loads(text) for text in socket.sent_text]
+    rejection = next(event for event in events if event.get("error", {}).get("code") == "reasoning_effort_not_allowed")
+    assert rejection["type"] == "error"
+    assert rejection["status"] == 403
+    assert rejection["error"]["type"] == "permission_error"
+    reserve.assert_not_awaited()
+    select.assert_not_awaited()
+
+
 @pytest.mark.parametrize("client_anchor", [False, True])
 async def test_astra_websocket_final_anchor_resets_effort_before_reservation(monkeypatch, client_anchor):
     settings = _make_proxy_settings()

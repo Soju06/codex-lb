@@ -307,12 +307,13 @@ async def submit_websocket_steering(
         continuation = control.steering_continuations.get(parent_id)
         if continuation is not initial_continuation:
             raise steering_error("response_not_found", "Steering ownership changed while validating the request.")
+    request_usage_budget = estimate_api_key_request_usage(request)
     if continuation is None:
         reservation = await proxy._reserve_websocket_api_key_usage(
             refreshed_key,
             request_model=request.model,
             request_service_tier=request.service_tier,
-            request_usage_budget=estimate_api_key_request_usage(request),
+            request_usage_budget=request_usage_budget,
         )
         child: _WebSocketRequestState | None = None
         registered = False
@@ -366,7 +367,17 @@ async def submit_websocket_steering(
                 registered = True
             proxy._start_request_state_api_key_reservation_heartbeat(child, api_key=refreshed_key, surface="websocket")
         except BaseException:
-            if not registered:
+            if registered and child is not None:
+                cleanup_state = False
+                async with pending_lock:
+                    if control.steering_continuations.get(parent_id) is continuation:
+                        control.steering_continuations.pop(parent_id, None)
+                    if child in pending_requests:
+                        pending_requests.remove(child)
+                        cleanup_state = True
+                if cleanup_state:
+                    await release_steering_request(proxy, child)
+            else:
                 if child is not None:
                     await release_steering_request(proxy, child)
                 else:
@@ -378,9 +389,48 @@ async def submit_websocket_steering(
         parent.request_text = None
         parent.fresh_upstream_request_text = None
         parent.fresh_upstream_request_is_retry_safe = False
-    submission = _WebSocketSteerSubmission(input=payload.get("input"), wire_bytes=wire_bytes)
-    continuation.submissions.append(submission)
-    continuation.queued_input_bytes += wire_bytes
+    else:
+        reservation = continuation.request_state.api_key_reservation
+        extended = await proxy._extend_websocket_api_key_usage(
+            reservation,
+            request_service_tier=request.service_tier,
+            request_usage_budget=request_usage_budget,
+        )
+        if not extended:
+            raise steering_error("response_not_found", "The steering continuation is no longer active.")
+    submission = _WebSocketSteerSubmission(
+        input=payload.get("input"),
+        wire_bytes=wire_bytes,
+        request_usage_budget=request_usage_budget,
+        request_service_tier=request.service_tier,
+    )
+    try:
+        async with pending_lock:
+            if (
+                control.steering_continuations.get(parent_id) is not continuation
+                or continuation.request_state not in pending_requests
+            ):
+                raise steering_error("response_not_found", "The steering continuation is no longer active.")
+            continuation.submissions.append(submission)
+            continuation.queued_input_bytes += wire_bytes
+    except BaseException:
+        if initial_continuation is not None:
+            await proxy._reduce_websocket_api_key_usage(
+                reservation,
+                request_service_tier=request.service_tier,
+                request_usage_budget=request_usage_budget,
+            )
+        else:
+            cleanup_state = False
+            async with pending_lock:
+                if control.steering_continuations.get(parent_id) is continuation:
+                    control.steering_continuations.pop(parent_id, None)
+                if continuation.request_state in pending_requests:
+                    pending_requests.remove(continuation.request_state)
+                    cleanup_state = True
+            if cleanup_state:
+                await release_steering_request(proxy, continuation.request_state)
+        raise
     try:
         await upstream.send_text(wire_text)
     except BaseException:
@@ -408,6 +458,8 @@ async def process_websocket_steering_event(
     if not isinstance(parent_id, str):
         return
     release_state: _WebSocketRequestState | None = None
+    reduce_submission: _WebSocketSteerSubmission | None = None
+    reduce_reservation = None
     async with pending_lock:
         continuation = control.steering_continuations.get(parent_id)
         if continuation is None:
@@ -445,5 +497,14 @@ async def process_websocket_steering_event(
                     release_state = continuation.request_state
                     if release_state in pending_requests:
                         pending_requests.remove(release_state)
+            elif not continuation.explicit_request_prepared:
+                reduce_submission = submission
+                reduce_reservation = continuation.request_state.api_key_reservation
     if release_state is not None:
         await release_steering_request(proxy, release_state)
+    elif reduce_submission is not None:
+        await proxy._reduce_websocket_api_key_usage(
+            reduce_reservation,
+            request_service_tier=reduce_submission.request_service_tier,
+            request_usage_budget=reduce_submission.request_usage_budget,
+        )

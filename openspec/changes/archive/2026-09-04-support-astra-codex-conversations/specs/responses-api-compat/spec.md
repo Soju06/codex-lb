@@ -15,12 +15,18 @@ The proxy SHALL preserve async true on function/custom tool definitions and corr
 - **THEN** only call_b receives the existing synthetic interrupted output
 
 ### Requirement: Steering continuations retain owned WebSocket lifecycles
-The proxy SHALL accept valid response.steer events on an active subscription Responses WebSocket for an owned Astra response and SHALL forward them on that response's existing upstream connection/account. Steering events SHALL contain only type, previous_response_id and a nonempty supported user input. Accepted, pending, failed, and automatically created continuation responses SHALL remain correlated to the originating request and API key. Each continuation SHALL receive admission and usage accounting and SHALL settle once on its own terminal event. A steered incomplete response SHALL not be treated as an unhealthy upstream account. Automatic continuations SHALL not bind to unrelated queued response.create requests.
+The proxy SHALL accept valid response.steer events on an active subscription Responses WebSocket for an owned Astra response and SHALL forward them on that response's existing upstream connection/account. Steering events SHALL contain only type, previous_response_id and a nonempty supported user input. Accepted, pending, failed, and automatically created continuation responses SHALL remain correlated to the originating request and API key. Each continuation SHALL receive admission and usage accounting and SHALL settle once on its own terminal event. Each additional queued steer SHALL extend the same successor reservation before upstream dispatch; rejection SHALL release only that submission's unapplied reservation increment without charging or settling the successor twice. A steered incomplete response SHALL not be treated as an unhealthy upstream account. Automatic continuations SHALL not bind to unrelated queued response.create requests. Completed request-state retention for post-completion steering SHALL be limited to Astra responses; a subsequent successful non-Astra response SHALL clear the retained steering parent.
 
 #### Scenario: Steering creates an automatic successor
 - **GIVEN** an owned Astra response and accepted steering
 - **WHEN** the original response ends with incomplete reason steered and upstream automatically creates a successor
 - **THEN** the successor retains the original account and policy ownership and its usage is recorded exactly once
+
+#### Scenario: Ordinary responses do not retain steering request bodies
+- **GIVEN** a WebSocket previously completed an Astra response
+- **WHEN** a non-Astra response reaches a successful completion boundary
+- **THEN** the connection clears the retained steering parent without retaining the completed non-Astra request body
+- **AND** successful Astra responses remain available for owned post-completion steering
 
 #### Scenario: Steering waits for a tool result
 - **WHEN** upstream reports response.steer.pending with required tool input
@@ -35,6 +41,18 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 - **GIVEN** multiple steering inputs are accepted for the same response
 - **WHEN** upstream creates their automatic successor
 - **THEN** the proxy owns one continuation lifecycle and one reservation for that successor
+
+#### Scenario: Additional steering input exceeds the remaining quota
+- **GIVEN** an automatic successor already has a reservation for an earlier steer
+- **WHEN** a later steer would exceed an applicable API-key quota after extending that reservation
+- **THEN** the later steer is rejected before upstream dispatch
+- **AND** the earlier submission and reservation remain valid
+
+#### Scenario: A rejected steer releases its reservation increment
+- **GIVEN** several admitted steering submissions share one successor reservation
+- **WHEN** upstream rejects one submission before applying it
+- **THEN** its unapplied reservation increment is released while the remaining submissions retain their reserved usage
+- **AND** final successor usage is settled once against the remaining reservation
 
 #### Scenario: Disconnect does not replay accepted steering
 - **GIVEN** steering is accepted on a connection
@@ -77,6 +95,12 @@ For subscription-backed Astra, the proxy SHALL preserve supported configuration_
 - **WHEN** that source supports its own reasoning levels, logprobs or configuration update schema
 - **THEN** subscription-specific Astra validation does not override that contract
 - **AND** API-key reasoning policy remains enforced before source forwarding
+
+#### Scenario: Source WebSocket fallback precedes subscription validation
+- **GIVEN** a WebSocket response.create routes to an externally configured model source named gpt-6-astra
+- **WHEN** the request carries source-specific controls that subscription Astra would reject
+- **THEN** the proxy emits model_source_requires_http_transport before applying subscription-specific validation
+- **AND** no subscription account is selected or contacted
 
 #### Scenario: Configuration updates cannot use standalone compaction
 - **WHEN** a compact request contains a configuration_update item

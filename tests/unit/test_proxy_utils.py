@@ -36956,7 +36956,7 @@ async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_
 ):
     request_logs = _RequestLogsRecorder()
     reservation_record = SimpleNamespace(status="reserved", items=[])
-    get_usage_reservation_mock = AsyncMock(
+    get_usage_reservation_for_update_mock = AsyncMock(
         side_effect=(
             [RuntimeError("transient reservation read failure"), reservation_record] if release_read_fails else None
         ),
@@ -36968,7 +36968,7 @@ async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_
     api_keys_repo = cast(
         ApiKeysRepository,
         SimpleNamespace(
-            get_usage_reservation=get_usage_reservation_mock,
+            get_usage_reservation_for_update=get_usage_reservation_for_update_mock,
             transition_usage_reservation_status=transition_usage_reservation_status_mock,
             settle_usage_reservation=settle_usage_reservation_mock,
             commit=commit_mock,
@@ -37059,7 +37059,7 @@ async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_
     assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
     owner_lookup.assert_awaited_once()
     select_account.assert_not_called()
-    get_usage_reservation_mock.assert_awaited_once_with(reservation.reservation_id)
+    get_usage_reservation_for_update_mock.assert_awaited_once_with(reservation.reservation_id)
     if release_read_fails:
         transition_usage_reservation_status_mock.assert_not_awaited()
         settle_usage_reservation_mock.assert_not_awaited()

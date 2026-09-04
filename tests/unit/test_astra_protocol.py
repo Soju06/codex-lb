@@ -138,6 +138,8 @@ async def run_socket(
         return item
 
     monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve)
+    monkeypatch.setattr(service, "_extend_websocket_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_reduce_websocket_api_key_usage", AsyncMock(return_value=True))
     settled = []
 
     async def settle(key, reservation, settlement, request_id, **kwargs):
@@ -249,10 +251,85 @@ async def test_multiple_queued_steers_share_one_successor_reservation(monkeypatc
         ]
     )
     socket.finish_when = lambda event: event.get("type") == "response.completed" and event["response"]["id"] == "r2"
-    _, reservations, settled, _, _ = await run_socket(monkeypatch, socket, upstream)
+    service, reservations, settled, _, _ = await run_socket(monkeypatch, socket, upstream)
     assert len(reservations) == 2
     assert len(settled) == 2
     assert [item["input"] for item in upstream.sent[1:]] == ["First correction", "Second correction"]
+    service._extend_websocket_api_key_usage.assert_awaited_once()
+    assert service._extend_websocket_api_key_usage.await_args.args[0].reservation_id == "res_1"
+
+
+@pytest.mark.asyncio
+async def test_second_queued_steer_quota_rejection_happens_before_upstream_send(monkeypatch):
+    from app.core.exceptions import ProxyRateLimitError
+
+    first = {"type": "response.steer", "previous_response_id": "r1", "input": "First correction"}
+    second = {**first, "input": "Second correction"}
+    socket = ScriptedSocket(
+        [
+            (create(), lambda _: True),
+            (first, saw("response.created", "r1")),
+            (second, saw("response.steer.accepted")),
+        ]
+    )
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [{"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}}],
+        ]
+    )
+
+    def configure(service, account):
+        del account
+        monkeypatch.setattr(
+            service,
+            "_extend_websocket_api_key_usage",
+            AsyncMock(side_effect=ProxyRateLimitError("queued steer exceeds quota")),
+        )
+
+    service, reservations, _, _, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
+    assert len(reservations) == 2
+    assert [item["input"] for item in upstream.sent[1:]] == ["First correction"]
+    service._extend_websocket_api_key_usage.assert_awaited_once()
+    assert socket.sent[-1]["type"] == "response.steer.failed"
+    assert socket.sent[-1]["error"]["code"] == "invalid_input"
+
+
+@pytest.mark.asyncio
+async def test_failed_queued_steer_returns_only_its_shared_reservation_budget(monkeypatch):
+    first = {"type": "response.steer", "previous_response_id": "r1", "input": "First correction"}
+    second = {**first, "input": "Second correction"}
+    socket = ScriptedSocket(
+        [
+            (create(), lambda _: True),
+            (first, saw("response.created", "r1")),
+            (second, saw("response.steer.accepted")),
+        ]
+    )
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [{"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}}],
+            [
+                {"type": "response.steer.accepted", "steer": {"id": "s2", "previous_response_id": "r1"}},
+                {
+                    "type": "response.steer.failed",
+                    "steer": {"id": "s1", "previous_response_id": "r1", "input": "First correction"},
+                    "error": {"code": "invalid_input", "message": "Rejected"},
+                },
+                response("response.completed", "r1"),
+                response("response.created", "r2", parent="r1"),
+                response("response.completed", "r2", parent="r1"),
+            ],
+        ]
+    )
+    socket.finish_when = lambda event: event.get("type") == "response.completed" and event["response"]["id"] == "r2"
+    service, reservations, settled, released, _ = await run_socket(monkeypatch, socket, upstream)
+    assert len(reservations) == 2
+    assert len(settled) == 2
+    released.assert_not_awaited()
+    service._reduce_websocket_api_key_usage.assert_awaited_once()
+    assert service._reduce_websocket_api_key_usage.await_args.args[0].reservation_id == "res_1"
 
 
 @pytest.mark.asyncio
@@ -570,6 +647,37 @@ async def test_cancelled_steering_send_releases_owned_leases_and_heartbeats(monk
         call.args[0].reservation_id for call in released.await_args_list if call.args[0]
     ]
     assert sorted(finalized) == ["res_0", "res_1"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_steering_after_child_registration_releases_successor_reservation(monkeypatch):
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    socket = ScriptedSocket([(create(), lambda _: True), (steer, saw("response.created", "r1"))])
+    upstream = ScriptedUpstream([[response("response.created", "r1")]])
+
+    def configure(service, account):
+        del account
+
+        def cancel_after_registration(*args, **kwargs):
+            del kwargs
+            request_state = args[0]
+            if request_state.steering_parent_response_id is not None:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", cancel_after_registration)
+
+    _, reservations, settled, released, _ = await run_socket(
+        monkeypatch,
+        socket,
+        upstream,
+        configure=configure,
+        cancelled=True,
+    )
+    finalized = [entry[0] for entry in settled] + [
+        call.args[0].reservation_id for call in released.await_args_list if call.args[0]
+    ]
+    assert len(reservations) == 2
+    assert finalized.count("res_1") == 1
 
 
 @pytest.mark.asyncio

@@ -1512,6 +1512,8 @@ class _WebSocketContinuityAnchor:
 class _WebSocketSteerSubmission:
     input: JsonValue
     wire_bytes: int
+    request_usage_budget: ApiKeyRequestUsageBudget
+    request_service_tier: str | None
     id: str | None = None
 
 

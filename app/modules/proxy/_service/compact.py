@@ -947,6 +947,7 @@ class _CompactMixin:
         deferred_stream_health: list[tuple[Account, Any, str, int | None]] = []
         deferred_http_500_health: list[tuple[Account, ProxyResponseError, int]] = []
         deferred_proxy_health: list[tuple[Account, ProxyResponseError]] = []
+        deferred_permanent_health: list[tuple[Account, str]] = []
         settlement_attempted = False
 
         async def flush_deferred_health() -> None:
@@ -956,6 +957,8 @@ class _CompactMixin:
             deferred_http_500_health.clear()
             proxy_pending = list(deferred_proxy_health)
             deferred_proxy_health.clear()
+            permanent_pending = list(deferred_permanent_health)
+            deferred_permanent_health.clear()
             for failed_account, failed_error, failed_code, failed_status in stream_pending:
                 try:
                     await proxy._handle_stream_error(
@@ -988,6 +991,16 @@ class _CompactMixin:
                 except Exception:
                     logger.warning(
                         "Failed to flush deferred compact proxy health account_id=%s request_id=%s",
+                        failed_account.id,
+                        request_id,
+                        exc_info=True,
+                    )
+            for failed_account, failed_code in permanent_pending:
+                try:
+                    await proxy._load_balancer.mark_permanent_failure(failed_account, failed_code)
+                except Exception:
+                    logger.warning(
+                        "Failed to flush deferred compact permanent health account_id=%s request_id=%s",
                         failed_account.id,
                         request_id,
                         exc_info=True,
@@ -1077,6 +1090,15 @@ class _CompactMixin:
                 deferred_proxy_health.append((failed_account, failed_exc))
                 return
             await proxy._handle_proxy_error(failed_account, failed_exc)
+
+        async def record_or_defer_permanent_health(
+            failed_account: Account,
+            failed_code: str,
+        ) -> None:
+            if api_key is not None and api_key_reservation is not None:
+                deferred_permanent_health.append((failed_account, failed_code))
+                return
+            await proxy._load_balancer.mark_permanent_failure(failed_account, failed_code)
 
         async def record_or_defer_stream_health(
             failed_account: Account,
@@ -1752,6 +1774,22 @@ class _CompactMixin:
                             except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as refresh_exc:
                                 if isinstance(refresh_exc, RefreshError):
                                     if refresh_exc.is_permanent:
+                                        if preferred_account_id is None:
+                                            # This compact request is not bound to an
+                                            # account-owned response, turn state, or
+                                            # file. Retire the revoked account and
+                                            # continue the same pre-visible request on
+                                            # another healthy account. For API-key
+                                            # requests the health write is deferred
+                                            # until after usage settlement.
+                                            await record_or_defer_permanent_health(
+                                                account,
+                                                refresh_exc.code,
+                                            )
+                                            last_exc = exc
+                                            excluded_account_ids.add(account.id)
+                                            transient_exhausted = True
+                                            break
                                         await settle_compact_usage(
                                             api_key=api_key,
                                             api_key_reservation=api_key_reservation,

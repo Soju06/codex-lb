@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sqlite3
 import sys
@@ -141,6 +142,10 @@ def _load_shutdown_drain_timeout_seconds() -> int:
 
 
 def _run_server(app: str, **kwargs: Any) -> None:
+    # Route warnings.warn() output (for example aiohttp ResourceWarning reprs
+    # that embed connection keys) through the redacting log handlers instead
+    # of raw stderr.
+    logging.captureWarnings(True)
     uvicorn = _load_uvicorn()
     drain_timeout_seconds = _load_shutdown_drain_timeout_seconds()
     config = uvicorn.Config(

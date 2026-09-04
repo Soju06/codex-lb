@@ -29,7 +29,8 @@ from app.core.resilience.network_recovery import (
 )
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
-_RESERVED = frozenset({"akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy"})
+_RESERVED = frozenset({"akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy", "proxy_headers"})
+_TLS_TARGET_SCHEMES = frozenset({"https", "wss"})
 _CODEX_SKIP_AUTO_IDENTITY_HEADERS = frozenset({aiohttp.hdrs.ACCEPT, aiohttp.hdrs.ACCEPT_ENCODING})
 
 
@@ -243,6 +244,7 @@ class CodexClient:
         aiohttp_kwargs = dict(kwargs)
         _normalize_aiohttp_request_kwargs(aiohttp_kwargs)
         endpoints = (route.endpoint, *route.fallbacks)
+        _reject_credentialed_plaintext_target(url, endpoints)
         allow_fallback = _is_idempotent_method(method)
         for index, endpoint in enumerate(endpoints):
             candidate = route.with_endpoint(endpoint, tuple(endpoints[index + 1 :]))
@@ -283,7 +285,7 @@ class CodexClient:
                         response = await self._session.request(
                             method,
                             url,
-                            proxy=endpoint.proxy_url,
+                            **endpoint.aiohttp_proxy_kwargs(),
                             **aiohttp_kwargs,
                         )
                     except Exception as exc:
@@ -336,7 +338,8 @@ class CodexClient:
         if route is None:
             raise ValueError("Codex upstream calls require a resolved upstream proxy route")
         _reject_reserved(kwargs)
-        result = self._session.ws_connect(url, proxy=route.proxy_url, **kwargs)
+        _reject_credentialed_plaintext_target(url, (route.endpoint,))
+        result = self._session.ws_connect(url, **route.endpoint.aiohttp_proxy_kwargs(), **kwargs)
         if asyncio.iscoroutine(result):
             return await result
         return result
@@ -354,6 +357,7 @@ class CodexClient:
             raise ValueError("Codex upstream calls require a resolved upstream proxy route")
         _reject_reserved(kwargs)
         endpoints = (route.endpoint, *route.fallbacks)
+        _reject_credentialed_plaintext_target(url, endpoints)
         for index, endpoint in enumerate(endpoints):
             candidate = route.with_endpoint(endpoint, tuple(endpoints[index + 1 :]))
             context: Any | None = None
@@ -386,7 +390,7 @@ class CodexClient:
                 else:
                     context = self._session.ws_connect(
                         url,
-                        proxy=endpoint.proxy_url,
+                        **endpoint.aiohttp_proxy_kwargs(),
                         **kwargs,
                     )
                     if asyncio.iscoroutine(context):
@@ -840,6 +844,23 @@ async def _read_response_body(response: Any) -> bytes | None:
 def _response_status(response: Any) -> int:
     value = getattr(response, "status", getattr(response, "status_code", 0))
     return int(value or 0)
+
+
+def _reject_credentialed_plaintext_target(url: str, endpoints: tuple[ResolvedProxyEndpoint, ...]) -> None:
+    # Proxy credentials ride in a Proxy-Authorization header (never URL
+    # userinfo, which aiohttp reprs into ConnectionKey/ClientHttpProxyError).
+    # aiohttp only forwards proxy_headers on the CONNECT tunnel, so a
+    # credentialed endpoint requires a TLS target. Checked once for the whole
+    # ordered pool, ahead of every transport branch and before any dispatch,
+    # so a credential-free fallback cannot quietly absorb a misconfigured
+    # primary. Raised as a connect-phase transport error so callers map it to
+    # the usual upstream-unavailable response instead of an unhandled failure.
+    if any(endpoint.username for endpoint in endpoints) and URL(url).scheme not in _TLS_TARGET_SCHEMES:
+        raise CodexTransportError(
+            "credentialed aiohttp proxy routes require an https/wss upstream target",
+            failure_phase="connect",
+            retryable_same_contract=False,
+        )
 
 
 def _reject_reserved(kwargs: Mapping[str, Any]) -> None:

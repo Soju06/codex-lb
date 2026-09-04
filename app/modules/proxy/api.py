@@ -8872,16 +8872,38 @@ def _collected_output_items_match_terminal(
     """
     if not output_items:
         return True
-    terminal_output = response.get("output")
-    if not isinstance(terminal_output, list) or not terminal_output:
+
+    # The output indexes are part of the public lifecycle contract.  Sorting
+    # a sparse mapping would silently collapse a missing item (for example an
+    # only-seen ``output_index=1``) into position zero during backfill.
+    output_indexes = sorted(output_items)
+    if output_indexes != list(range(len(output_indexes))):
+        return False
+
+    if "output" not in response:
+        return True
+    terminal_output = response["output"]
+    # Backfill is valid only for an omitted output or an explicitly empty
+    # array.  A present non-list value is a malformed terminal envelope.
+    if not isinstance(terminal_output, list):
+        return False
+    if not terminal_output:
         return True
     collected_output = [item for _, item in sorted(output_items.items())]
     if len(terminal_output) != len(collected_output):
         return False
-    return all(
-        _items_match_for_echo(terminal_item, collected_item)
-        for terminal_item, collected_item in zip(terminal_output, collected_output)
-    )
+    for terminal_item, collected_item in zip(terminal_output, collected_output):
+        terminal_identity = _output_item_identity(terminal_item) if is_json_mapping(terminal_item) else {}
+        collected_identity = _output_item_identity(collected_item)
+        # ``_items_match_for_echo`` intentionally strips response-owned IDs;
+        # lifecycle validation must compare those stable identities first.
+        if not _output_item_identities_match(collected_identity, terminal_identity):
+            return False
+        if not _output_item_identities_match(terminal_identity, collected_identity):
+            return False
+        if not _items_match_for_echo(terminal_item, collected_item):
+            return False
+    return True
 
 
 async def _normalize_public_responses_stream(
@@ -9045,12 +9067,27 @@ async def _normalize_public_responses_stream(
         ):
             response_obj = payload.get("response")
             if is_json_mapping(response_obj):
-                if output_lifecycle_invalid or added_output_indexes - done_output_indexes:
+                if (
+                    contract_violation_kind is not None
+                    or output_lifecycle_invalid
+                    or added_output_indexes - done_output_indexes
+                ):
+                    error_kind = contract_violation_kind or "invalid_output_item"
+                    contract_violation_kind = error_kind
+                    output_lifecycle_invalid = True
+                    for formatted_payload in _public_response_failed_event_blocks(
+                        error_kind,
+                        include_created=not created_emitted,
+                        sequence_number=next_sequence_number,
+                    ):
+                        yield formatted_payload
+                    return
+                if output_items and not _collected_output_items_match_terminal(response_obj, output_items):
                     contract_violation_kind = contract_violation_kind or "invalid_output_item"
                     output_lifecycle_invalid = True
                     for formatted_payload in _public_response_failed_event_blocks(
                         "invalid_output_item",
-                        include_created=not created_emitted,
+                        include_created=False,
                         sequence_number=next_sequence_number,
                     ):
                         yield formatted_payload
@@ -9768,6 +9805,9 @@ def _normalize_public_response_mapping(
         return None, "invalid_output_item"
     merged = _merge_collected_output_items(response, output_items or {})
     output = merged.get("output")
+    if "output" in merged and not isinstance(output, list):
+        _record_public_contract_violation("invalid_output_item")
+        return None, "invalid_output_item"
     if not isinstance(output, list):
         return merged, None
     normalized_output: list[JsonValue] = []

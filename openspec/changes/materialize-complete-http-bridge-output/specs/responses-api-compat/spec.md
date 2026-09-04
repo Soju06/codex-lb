@@ -11,6 +11,13 @@ The proxy MUST reject reconstruction when the terminal completion is missing,
 an output item is malformed or unfinished, or the configured transcript bound
 would be exceeded.
 
+The proxy MUST reject reconstruction when more than one terminal completion is
+present, when output-item indexes are sparse or reused, or when a present
+terminal `output` value is not a list. When both streamed output items and a
+non-empty terminal output are present, each item MUST have matching stable
+identity fields (`id`, `call_id`, and `type` when provided) before payload
+comparison; an omitted terminal `status` MAY be tolerated.
+
 When complete-transcript recovery is enabled, the proxy MUST make a best-effort
 attempt to persist a bounded, self-contained replay-input snapshot for each
 completed operation. The snapshot MUST omit stale response anchors and
@@ -37,6 +44,24 @@ and terminal output needed to seed later bounded snapshots.
 
 - **WHEN** output-item events exist but no `response.completed` event is durable
 - **THEN** the operation MUST NOT be marked as a complete replay transcript
+
+#### Scenario: Conflicting terminal lifecycle remains ineligible
+
+- **WHEN** the durable spool contains two terminal completion events, sparse
+  output indexes, or a terminal `output` value with a non-list shape
+- **THEN** the operation MUST NOT be marked as a complete replay transcript
+
+#### Scenario: Terminal echo preserves stable item identity
+
+- **WHEN** streamed output items and a non-empty terminal output contain the
+  same payload but different stable item identities
+- **THEN** the operation MUST be rejected instead of replaying either version
+
+#### Scenario: Omitted terminal status remains compatible
+
+- **WHEN** a streamed output item has `status: "completed"` and the matching
+  terminal echo omits `status`
+- **THEN** the operation MAY be materialized using the streamed item
 
 #### Scenario: Parent purge uses a retained replay snapshot
 

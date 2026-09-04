@@ -1328,6 +1328,34 @@ def test_materialize_output_items_rejects_conflicting_terminal_output() -> None:
     assert materialize_output_items_from_events(events) is None
 
 
+def test_materialize_output_items_tolerates_omitted_terminal_status() -> None:
+    events = [
+        (
+            "event: response.output_item.done\ndata: "
+            '{"type":"response.output_item.done","output_index":0,"item":'
+            '{"id":"msg_1","type":"message","role":"assistant","status":"completed",'
+            '"content":[{"type":"output_text","text":"answer"}]}}\n\n'
+        ),
+        (
+            "event: response.completed\ndata: "
+            '{"type":"response.completed","response":{"output":['
+            '{"id":"msg_1","type":"message","role":"assistant",'
+            '"content":[{"type":"output_text","text":"answer"}]}'
+            "]}}\n\n"
+        ),
+    ]
+
+    assert materialize_output_items_from_events(events) == [
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "answer"}],
+        }
+    ]
+
+
 def test_materialize_output_items_requires_terminal_completion() -> None:
     events = [
         (

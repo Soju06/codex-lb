@@ -113,18 +113,21 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
         # same response.  The durable spool is only replayable when both
         # representations agree; otherwise choosing the indexed events would
         # silently discard a conflicting terminal payload.
-        if (
-            completed_output is not None
-            and completed_output
-            and (
-                len(completed_output) != len(materialized_output)
-                or any(
-                    _canonical_item(terminal_item) != _canonical_item(indexed_item)
-                    for terminal_item, indexed_item in zip(completed_output, materialized_output)
-                )
-            )
-        ):
+        if completed_output is not None and completed_output and (len(completed_output) != len(materialized_output)):
             return None
+        if completed_output is not None and completed_output:
+            for terminal_item, indexed_item in zip(completed_output, materialized_output):
+                terminal_identity = _output_item_identity(terminal_item) if isinstance(terminal_item, dict) else {}
+                indexed_identity = _output_item_identity(indexed_item)
+                # Replay validation must retain lifecycle identity checks even
+                # though the payload comparison tolerates an omitted status
+                # field in terminal echoes.
+                if not _output_item_identities_match(indexed_identity, terminal_identity):
+                    return None
+                if not _output_item_identities_match(terminal_identity, indexed_identity):
+                    return None
+                if not _items_match_for_echo(terminal_item, indexed_item):
+                    return None
         return materialized_output
     return completed_output
 

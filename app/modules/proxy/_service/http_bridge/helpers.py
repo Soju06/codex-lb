@@ -172,7 +172,6 @@ from app.modules.proxy._service.warmup import (
     _WarmupUsageSnapshot as _WarmupUsageSnapshot,
 )
 from app.modules.proxy.account_cache import is_account_routing_unavailable
-from app.modules.proxy.account_eligibility import reauth_access_token_is_expired
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _codex_backend_identity,
@@ -2127,11 +2126,7 @@ def _http_bridge_session_account_active(session: "_HTTPBridgeSession") -> bool:
     # `account_routing` cache-invalidation namespace refreshing the routing
     # availability snapshot behind is_account_routing_unavailable().
     return (
-        session.account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
-        and not reauth_access_token_is_expired(
-            session.account.status,
-            session.access_token_expires_at,
-        )
+        session.account.status == AccountStatus.ACTIVE
         and not is_account_routing_unavailable(session.account.id)
     )
 

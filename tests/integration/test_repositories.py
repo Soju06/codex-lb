@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -20,6 +20,7 @@ from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
     AccountLimitWarmup,
+    AccountProxyBinding,
     AccountStatus,
     AdditionalUsageHistory,
     ApiKey,
@@ -28,6 +29,9 @@ from app.db.models import (
     HttpBridgeSessionAlias,
     HttpBridgeSessionRecord,
     HttpBridgeSessionState,
+    ProxyEndpoint,
+    ProxyPool,
+    ProxyPoolMember,
     RequestLog,
     StickySession,
     StickySessionKind,
@@ -62,6 +66,92 @@ def _make_account(account_id: str, email: str) -> Account:
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+
+
+def _make_proxy_pool(
+    pool_id: str,
+    *,
+    created_at: datetime,
+) -> tuple[ProxyPool, ProxyEndpoint, ProxyPoolMember]:
+    pool = ProxyPool(id=pool_id, name=pool_id, created_at=created_at)
+    endpoint = ProxyEndpoint(
+        id=f"{pool_id}_endpoint",
+        name=f"{pool_id} endpoint",
+        scheme="http",
+        host="proxy.test",
+        port=8080,
+    )
+    member = ProxyPoolMember(id=f"{pool_id}_member", pool=pool, endpoint=endpoint)
+    return pool, endpoint, member
+
+
+@pytest.mark.asyncio
+async def test_upsert_account_slot_auto_assigns_new_row_and_invalidates_route_cache(db_setup):
+    del db_setup
+    route_cache = get_upstream_route_cache()
+    generation_before = route_cache.generation
+
+    async with SessionLocal() as session:
+        session.add_all(_make_proxy_pool("auto_pool", created_at=utcnow()))
+        await session.commit()
+        repo = AccountsRepository(session)
+
+        saved = await repo.upsert_account_slot(_make_account("auto_account", "auto-account@example.com"))
+        binding = await session.scalar(select(AccountProxyBinding).where(AccountProxyBinding.account_id == saved.id))
+
+    assert binding is not None
+    assert binding.pool_id == "auto_pool"
+    assert binding.is_active is True
+    assert route_cache.generation == generation_before + 1
+
+
+@pytest.mark.asyncio
+async def test_upsert_account_slot_reimport_preserves_inactive_binding(db_setup):
+    del db_setup
+    created_at = utcnow()
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                *_make_proxy_pool("first_pool", created_at=created_at),
+                *_make_proxy_pool("second_pool", created_at=created_at + timedelta(seconds=1)),
+            ]
+        )
+        await session.commit()
+        repo = AccountsRepository(session)
+        saved = await repo.upsert_account_slot(_make_account("reimport_account", "reimport@example.com"))
+        saved_binding = await session.scalar(
+            select(AccountProxyBinding).where(AccountProxyBinding.account_id == saved.id)
+        )
+        assert saved_binding is not None
+        saved_binding.pool_id = "second_pool"
+        saved_binding.is_active = False
+        await session.commit()
+
+        reimported = await repo.upsert_account_slot(_make_account("reimport_account", "reimport@example.com"))
+        binding = await session.scalar(
+            select(AccountProxyBinding).where(AccountProxyBinding.account_id == reimported.id)
+        )
+
+    assert binding is not None
+    assert binding.pool_id == "second_pool"
+    assert binding.is_active is False
+
+
+@pytest.mark.asyncio
+async def test_upsert_account_slot_without_usable_pool_leaves_new_row_unbound(db_setup):
+    del db_setup
+    async with SessionLocal() as session:
+        pool, endpoint, member = _make_proxy_pool("inactive_endpoint_pool", created_at=utcnow())
+        endpoint.is_active = False
+        session.add_all([pool, endpoint, member])
+        await session.commit()
+
+        saved = await AccountsRepository(session).upsert_account_slot(
+            _make_account("unbound_account", "unbound@example.com")
+        )
+        binding = await session.scalar(select(AccountProxyBinding).where(AccountProxyBinding.account_id == saved.id))
+
+    assert binding is None
 
 
 @pytest.mark.asyncio

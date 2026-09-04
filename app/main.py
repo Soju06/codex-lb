@@ -88,6 +88,7 @@ from app.modules.dashboard_auth import api as dashboard_auth_api
 from app.modules.firewall import api as firewall_api
 from app.modules.fleet import api as fleet_api
 from app.modules.health import api as health_api
+from app.modules.key_dashboard import api as key_dashboard_api
 from app.modules.model_sources import api as model_sources_api
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
@@ -974,6 +975,7 @@ def create_app() -> FastAPI:
     app.include_router(telemetry_api.router)
     app.include_router(firewall_api.router)
     app.include_router(fleet_api.router)
+    app.include_router(key_dashboard_api.router)
     app.include_router(sticky_sessions_api.router)
     app.include_router(automations_api.router)
     app.include_router(api_keys_api.router)

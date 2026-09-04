@@ -9,9 +9,10 @@ from sqlalchemy import select, update
 
 from app.core.auth import fallback_account_id, generate_unique_account_id
 from app.core.crypto import TokenEncryptor
+from app.core.upstream_proxy import resolve_upstream_route
 from app.core.usage.refresh_scheduler import reconcile_recoverable_account_statuses
 from app.core.utils.time import naive_utc_to_epoch, utcnow
-from app.db.models import Account, AccountStatus, RequestLog
+from app.db.models import Account, AccountProxyBinding, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.accounts.deletion import run_account_deletion_pass
 from app.modules.accounts.repository import AccountsRepository
@@ -186,6 +187,54 @@ async def test_import_pauses_until_proxy_binding_when_proxy_routing_enabled(
     )
     assert reset_settings.status_code == 200
     clear_account_routing_unavailable(account_id)
+
+
+@pytest.mark.asyncio
+async def test_import_auto_assigns_new_account_to_proxy_pool(async_client):
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "auto import proxy", "scheme": "http", "host": "proxy.test", "port": 8080},
+    )
+    assert endpoint.status_code == 200
+    pool = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "auto import pool", "endpointIds": [endpoint.json()["id"]]},
+    )
+    assert pool.status_code == 200
+    pool_id = pool.json()["id"]
+
+    email = "auto-proxy-import@example.com"
+    raw_account_id = "acc_auto_proxy_import"
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_make_auth_json(raw_account_id, email)),
+                "application/json",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == AccountStatus.ACTIVE.value
+    account_id = generate_unique_account_id(raw_account_id, email)
+    async with SessionLocal() as session:
+        binding = (
+            await session.execute(select(AccountProxyBinding).where(AccountProxyBinding.account_id == account_id))
+        ).scalar_one()
+        route = await resolve_upstream_route(
+            session,
+            account_id=account_id,
+            operation="usage_refresh",
+            scope="account",
+            encryptor=TokenEncryptor(),
+        )
+
+    assert binding.pool_id == pool_id
+    assert binding.is_active is True
+    assert route is not None
+    assert route.pool_id == pool_id
 
 
 @pytest.mark.asyncio

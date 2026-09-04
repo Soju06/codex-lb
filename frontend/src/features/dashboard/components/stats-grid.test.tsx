@@ -73,4 +73,24 @@ describe("StatsGrid", () => {
 
     expect(screen.getByText("Empty")).toBeInTheDocument();
   });
+
+  it("uses a stat-specific semantic accent when provided", () => {
+    render(
+      <StatsGrid
+        stats={[
+          {
+            label: "Colored",
+            value: "1",
+            icon: Activity,
+            trend: EMPTY_TREND,
+            trendColor: "#0ea5e9",
+            accentClassName: "bg-sky-500/10 text-sky-700",
+          },
+        ]}
+      />,
+    );
+
+    const card = screen.getByText("Colored").closest(".rounded-xl");
+    expect(card?.querySelector(".bg-sky-500\\/10")).toBeInTheDocument();
+  });
 });

@@ -563,10 +563,8 @@ async def test_record_error_backoff_enters_floor_without_adding_full_threshold()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED])
-async def test_successful_force_probes_promote_routable_account_to_healthy(status: AccountStatus) -> None:
+async def test_successful_force_probes_promote_active_account_to_healthy() -> None:
     account = _make_account("acc-force-probe-success")
-    account.status = status
     balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([account]), _StubUsageRepository({}, {})))
     balancer._runtime[account.id] = RuntimeState(
         health_tier=HEALTH_TIER_PROBING,
@@ -585,6 +583,26 @@ async def test_successful_force_probes_promote_routable_account_to_healthy(statu
     assert runtime.probe_success_streak == 0
     assert runtime.error_count == 0
     assert runtime.last_error_at is None
+
+
+@pytest.mark.asyncio
+async def test_successful_force_probe_does_not_promote_reauth_account() -> None:
+    account = _make_account("acc-force-probe-reauth")
+    account.status = AccountStatus.REAUTH_REQUIRED
+    balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([account]), _StubUsageRepository({}, {})))
+    balancer._runtime[account.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        error_count=2,
+        last_error_at=time.time() - 120.0,
+    )
+
+    await balancer.record_probe_result(account_id=account.id, http_status=200)
+
+    runtime = balancer._runtime[account.id]
+    assert runtime.health_tier == HEALTH_TIER_PROBING
+    assert runtime.probe_success_streak == 0
+    assert runtime.error_count == 2
+    assert runtime.last_error_at is not None
 
 
 @pytest.mark.asyncio

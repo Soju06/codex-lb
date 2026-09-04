@@ -697,7 +697,7 @@ async def run_sticky_selection_path(
                         and lease_kind is not None
                         and len(selection_states) < len(states)
                         and any(
-                            state.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+                            state.status == AccountStatus.ACTIVE
                             for state in states
                             if state not in selection_states
                         )

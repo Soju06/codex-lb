@@ -222,7 +222,7 @@ def test_select_account_preserves_accounts_until_no_others_are_available():
     result = select_account(states, routing_strategy="usage_weighted")
 
     assert result.account is not None
-    assert result.account.account_id == "normal"
+    assert result.account.account_id == "review"
 
 
 def test_select_account_falls_back_to_preserve_policy_when_needed():
@@ -2122,8 +2122,8 @@ def test_requested_limit_relative_availability_uses_requested_reset_window():
     assert result.account.account_id == "ordinary-late-requested-soon"
 
 
-def test_bypass_quota_exceeded_keeps_reauth_request_routable():
-    """Reauth remains selectable while paused and deactivated stay blocked."""
+def test_bypass_quota_exceeded_does_not_bypass_reauth_quarantine():
+    """A quota bypass must not admit a credential quarantined for re-authentication."""
     now = 1_700_000_000.0
     paused = AccountState("p", AccountStatus.PAUSED, used_percent=5.0)
     reauth = AccountState("r", AccountStatus.REAUTH_REQUIRED, used_percent=5.0)
@@ -2132,7 +2132,7 @@ def test_bypass_quota_exceeded_keeps_reauth_request_routable():
 
     result = select_account([paused, reauth, deactivated, quota], now=now, bypass_quota_exceeded=True)
     assert result.account is not None
-    assert result.account.account_id == "r"
+    assert result.account.account_id == "q"
 
 
 def _make_test_account(

@@ -449,13 +449,9 @@ def _fallback_secondary_capacity_credits(plan_type: str | None) -> float:
     )
 
 
-def _known_expired_reauth(state: AccountState, current: float) -> bool:
-    """Return whether a warning-state account has crossed known token expiry."""
-    return (
-        state.status == AccountStatus.REAUTH_REQUIRED
-        and state.access_token_expires_at is not None
-        and state.access_token_expires_at <= current
-    )
+def _reauth_required(state: AccountState) -> bool:
+    """Return whether the temporary revocation safeguard blocks the account."""
+    return state.status == AccountStatus.REAUTH_REQUIRED
 
 
 def select_account(
@@ -561,7 +557,7 @@ def select_account(
             continue
         if state.status == AccountStatus.PAUSED:
             continue
-        if _known_expired_reauth(state, current):
+        if _reauth_required(state):
             continue
         if state.status == AccountStatus.RATE_LIMITED:
             if state.reset_at and current >= state.reset_at:
@@ -617,7 +613,7 @@ def select_account(
                     AccountStatus.RATE_LIMITED,
                     AccountStatus.QUOTA_EXCEEDED,
                 )
-                or _known_expired_reauth(state, current)
+                or _reauth_required(state)
             )
             and state.account_id not in in_error_backoff_ids
             for state in all_states
@@ -644,24 +640,24 @@ def select_account(
                 )
                 if usage_exhaustion is not None:
                     return usage_exhaustion
-            expired_reauth = [state for state in all_states if _known_expired_reauth(state, current)]
+            reauth_required = [state for state in all_states if _reauth_required(state)]
             deactivated = [s for s in all_states if s.status == AccountStatus.DEACTIVATED]
             paused = [s for s in all_states if s.status == AccountStatus.PAUSED]
             rate_limited = [s for s in all_states if s.status == AccountStatus.RATE_LIMITED]
             quota_exceeded = [s for s in all_states if s.status == AccountStatus.QUOTA_EXCEEDED]
 
             if not rate_limited and not quota_exceeded:
-                if paused and expired_reauth and deactivated:
+                if paused and reauth_required and deactivated:
                     return SelectionResult(None, "All accounts are paused, deactivated, or require re-authentication")
-                if paused and expired_reauth:
+                if paused and reauth_required:
                     return SelectionResult(None, "All accounts are paused or require re-authentication")
                 if paused and deactivated:
                     return SelectionResult(None, "All accounts are paused or deactivated")
-                if expired_reauth and deactivated:
+                if reauth_required and deactivated:
                     return SelectionResult(None, "All accounts are deactivated or require re-authentication")
                 if paused:
                     return SelectionResult(None, "All accounts are paused")
-                if expired_reauth:
+                if reauth_required:
                     return SelectionResult(None, "All accounts require re-authentication")
                 if deactivated:
                     return SelectionResult(None, "All accounts are deactivated")

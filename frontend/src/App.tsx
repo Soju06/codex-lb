@@ -29,6 +29,9 @@ const AutomationsPage = lazy(() =>
   import("@/features/automations/components/automations-page").then((m) => ({ default: m.AutomationsPage })),
 );
 const ApisPage = lazy(() => import("@/features/apis/components/apis-page").then((m) => ({ default: m.ApisPage })));
+const KeyDashboardPage = lazy(() =>
+  import("@/features/key-dashboard/components/key-dashboard-page").then((m) => ({ default: m.KeyDashboardPage })),
+);
 const SettingsPage = lazy(() =>
   import("@/features/settings/components/settings-page").then((m) => ({ default: m.SettingsPage })),
 );
@@ -69,24 +72,36 @@ function AppLayout() {
   );
 }
 
+function AdministratorApp() {
+  return (
+    <AuthGate>
+      <Routes>
+        <Route element={<AppLayout />}>
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/reports" element={<ReportsPage />} />
+          <Route path="/accounts" element={<AccountsPage />} />
+          <Route path="/automations" element={<AutomationsPage />} />
+          <Route path="/apis" element={<ApisPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/firewall" element={<Navigate to="/settings?advanced=1#firewall" replace />} />
+        </Route>
+      </Routes>
+    </AuthGate>
+  );
+}
+
 export default function App() {
   return (
     <TooltipProvider>
       <Toaster richColors />
-      <AuthGate>
-        <Routes>
-          <Route element={<AppLayout />}>
-            <Route path="/" element={<Navigate to="/dashboard" replace />} />
-            <Route path="/dashboard" element={<DashboardPage />} />
-            <Route path="/reports" element={<ReportsPage />} />
-            <Route path="/accounts" element={<AccountsPage />} />
-            <Route path="/automations" element={<AutomationsPage />} />
-            <Route path="/apis" element={<ApisPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/firewall" element={<Navigate to="/settings?advanced=1#firewall" replace />} />
-          </Route>
-        </Routes>
-      </AuthGate>
+      <Routes>
+        <Route
+          path="/key-dashboard"
+          element={<Suspense fallback={null}><KeyDashboardPage /></Suspense>}
+        />
+        <Route path="*" element={<AdministratorApp />} />
+      </Routes>
     </TooltipProvider>
   );
 }

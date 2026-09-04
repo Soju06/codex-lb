@@ -7,8 +7,8 @@ from app.core.auth import token_expiry_epoch_ms
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
 
-ROUTABLE_STATUSES = (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
-"""Statuses whose sessions keep serving requests (reauth stays routable until expiry)."""
+ROUTABLE_STATUSES = (AccountStatus.ACTIVE,)
+"""Statuses whose sessions may serve requests during the revocation safeguard."""
 
 
 def stored_access_token_expires_at(
@@ -50,13 +50,6 @@ def all_accounts_require_reauthentication(
     accounts: Collection[Account],
     encryptor: TokenEncryptor,
 ) -> bool:
-    """Return whether every candidate is reauthentication-blocked by known expiry."""
-    now = time.time()
-    return bool(accounts) and all(
-        reauth_access_token_is_expired(
-            account.status,
-            account_access_token_expires_at(account, encryptor),
-            now=now,
-        )
-        for account in accounts
-    )
+    """Return whether every candidate is quarantined pending reauthentication."""
+    del encryptor
+    return bool(accounts) and all(account.status == AccountStatus.REAUTH_REQUIRED for account in accounts)

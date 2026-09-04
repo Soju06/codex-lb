@@ -102,6 +102,7 @@ export type RecentRequestsTableProps = {
   hasMore: boolean;
   filtersApplied?: boolean;
   visibleColumns?: readonly RequestLogColumnId[];
+  allowSensitiveDetails?: boolean;
   columnWidths?: RequestLogColumnWidths;
   onColumnWidthChange?: (column: RequestLogColumnId, width: number) => void;
   onLimitChange: (limit: number) => void;
@@ -195,7 +196,7 @@ function RequestLogTableHead({
         "relative text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80",
         className,
       )}
-      style={onWidthChange ? { width: resolvedWidth } : undefined}
+      style={width !== undefined || onWidthChange ? { width: resolvedWidth } : undefined}
     >
       {label}
       {onWidthChange ? (
@@ -312,6 +313,7 @@ export function RecentRequestsTable({
   hasMore,
   filtersApplied = false,
   visibleColumns: configuredVisibleColumns,
+  allowSensitiveDetails = true,
   columnWidths,
   onColumnWidthChange,
   onLimitChange,
@@ -322,6 +324,7 @@ export function RecentRequestsTable({
   const [selectedRequest, setSelectedRequest] = useState<RequestLog | null>(null);
   const blurred = usePrivacyStore((s) => s.blurred);
   const isAdmin = useAuthStore((state) => state.role === "admin");
+  const showSensitiveDetails = allowSensitiveDetails && isAdmin;
   const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const selectedRequestCostSummary = formatRequestCostSummary(selectedRequest, t);
   const visibleColumns = configuredVisibleColumns ?? ALL_REQUEST_LOG_COLUMNS;
@@ -615,11 +618,11 @@ export function RecentRequestsTable({
                 <RequestDetailField label={t("dashboard.requests.columns.time")} value={selectedRequest ? formatDateTimeInline(selectedRequest.requestedAt, dateDisplayFormat) : "—"} />
                 <RequestDetailField label={t("dashboard.requestDetails.errorCode")} value={selectedRequest?.errorCode ?? "—"} mono />
               </div>
-              {selectedRequest?.upstreamProxyRouteMode ||
+              {showSensitiveDetails && (selectedRequest?.upstreamProxyRouteMode ||
               selectedRequest?.upstreamProxyPoolId ||
               selectedRequest?.upstreamProxyEndpointId ||
               selectedRequest?.upstreamProxyFallbackUsed != null ||
-              selectedRequest?.upstreamProxyFailClosedReason ? (
+              selectedRequest?.upstreamProxyFailClosedReason) ? (
                 <div className="grid gap-3 sm:grid-cols-3">
                   {selectedRequest.upstreamProxyRouteMode ? (
                     <RequestDetailField label={t("dashboard.requestDetails.routeMode")} value={selectedRequest.upstreamProxyRouteMode} mono />
@@ -649,7 +652,7 @@ export function RecentRequestsTable({
                   ) : null}
                 </div>
               ) : null}
-              {isAdmin ? (
+              {showSensitiveDetails ? (
                 <RequestDetailField
                   label={t("dashboard.requestDetails.userAgent")}
                   value={selectedRequest?.useragent ?? "—"}
@@ -658,7 +661,7 @@ export function RecentRequestsTable({
                   compactCopy
                 />
               ) : null}
-              {isAdmin ? (
+              {showSensitiveDetails ? (
                 <div className="grid gap-3 sm:grid-cols-2">
                   <RequestDetailField
                     label={t("dashboard.requestDetails.clientIp")}
@@ -705,7 +708,7 @@ export function RecentRequestsTable({
               ) : null}
             </div>
 
-            {isAdmin ? (
+            {showSensitiveDetails ? (
               <RequestArchivePanel
                 requestId={selectedRequest?.archiveRequestId ?? selectedRequest?.requestId}
                 requestedAt={selectedRequest?.requestedAt}

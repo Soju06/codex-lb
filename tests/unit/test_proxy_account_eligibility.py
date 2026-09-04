@@ -63,14 +63,14 @@ def test_build_states_carries_reauth_access_token_expiry() -> None:
     assert states[0].access_token_expires_at == 1_700_000_123.0
 
 
-def test_selection_skips_expired_reauth_account() -> None:
+def test_selection_skips_unexpired_reauth_account() -> None:
     now = 1_700_000_000.0
     states = [
         AccountState(
-            "expired",
+            "unexpired",
             AccountStatus.REAUTH_REQUIRED,
             used_percent=1.0,
-            access_token_expires_at=now,
+            access_token_expires_at=now + 3600,
         ),
         AccountState("active", AccountStatus.ACTIVE, used_percent=50.0),
     ]
@@ -81,18 +81,18 @@ def test_selection_skips_expired_reauth_account() -> None:
     assert result.account.account_id == "active"
 
 
-def test_all_expired_reauth_accounts_report_reauthentication() -> None:
+def test_all_reauth_accounts_report_reauthentication_before_expiry() -> None:
     now = 1_700_000_000.0
     states = [
         AccountState(
-            "expired-a",
+            "unexpired-a",
             AccountStatus.REAUTH_REQUIRED,
-            access_token_expires_at=now - 1,
+            access_token_expires_at=now + 3600,
         ),
         AccountState(
-            "expired-b",
+            "unexpired-b",
             AccountStatus.REAUTH_REQUIRED,
-            access_token_expires_at=now,
+            access_token_expires_at=now + 7200,
         ),
     ]
 
@@ -102,13 +102,13 @@ def test_all_expired_reauth_accounts_report_reauthentication() -> None:
     assert result.error_message == "All accounts require re-authentication"
 
 
-def test_http_bridge_rejects_expired_reauth_session() -> None:
+def test_http_bridge_rejects_unexpired_reauth_session() -> None:
     session = SimpleNamespace(
         account=SimpleNamespace(
-            id="expired-bridge-owner",
+            id="unexpired-bridge-owner",
             status=AccountStatus.REAUTH_REQUIRED,
         ),
-        access_token_expires_at=0.0,
+        access_token_expires_at=4_000_000_000.0,
     )
 
     assert not _http_bridge_session_account_active(cast(Any, session))

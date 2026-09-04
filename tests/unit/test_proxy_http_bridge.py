@@ -7918,8 +7918,18 @@ async def test_get_or_create_http_bridge_session_recovers_unanchored_closed_admi
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "use_routing_overlay"),
+    [
+        (AccountStatus.ACTIVE, True),
+        (AccountStatus.REAUTH_REQUIRED, False),
+    ],
+    ids=["routing-overlay", "reauth-required"],
+)
 async def test_get_or_create_http_bridge_session_replaces_routing_unavailable_account(
     monkeypatch: pytest.MonkeyPatch,
+    status: AccountStatus,
+    use_routing_overlay: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     key = proxy_service._HTTPBridgeSessionKey("request", "bridge-routing-unavailable", None)
@@ -7928,7 +7938,7 @@ async def test_get_or_create_http_bridge_session_replaces_routing_unavailable_ac
         headers={},
         affinity=proxy_service._AffinityPolicy(key="bridge-routing-unavailable"),
         request_model="gpt-5.4-mini",
-        account=cast(Any, SimpleNamespace(id="acc-unavailable", status=AccountStatus.ACTIVE, plan_type="plus")),
+        account=cast(Any, SimpleNamespace(id="acc-unavailable", status=status, plan_type="plus")),
         upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque(),
@@ -7961,7 +7971,8 @@ async def test_get_or_create_http_bridge_session_replaces_routing_unavailable_ac
     monkeypatch.setattr(service, "_close_http_bridge_session", close_session)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
 
-    mark_account_routing_unavailable("acc-unavailable")
+    if use_routing_overlay:
+        mark_account_routing_unavailable("acc-unavailable")
     try:
         reused = await service._get_or_create_http_bridge_session(
             key,
@@ -7973,7 +7984,8 @@ async def test_get_or_create_http_bridge_session_replaces_routing_unavailable_ac
             max_sessions=8,
         )
     finally:
-        clear_account_routing_unavailable("acc-unavailable")
+        if use_routing_overlay:
+            clear_account_routing_unavailable("acc-unavailable")
 
     assert reused is replacement_session
     assert service._http_bridge_sessions[key] is replacement_session

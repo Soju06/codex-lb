@@ -89,6 +89,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_incompatible_model_fork_key,
     _http_bridge_inflight_creation_can_register,
     _http_bridge_inflight_creation_count,
+    _http_bridge_key_is_synthesized_turn_state,
     _http_bridge_key_strength,
     _http_bridge_locally_owned_fork_key,
     _http_bridge_models_compatible,
@@ -128,7 +129,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _register_http_bridge_turn_state_aliases_locked,
     _require_http_bridge_bound_account_not_excluded,
     _reserve_http_bridge_unanchored_handoff,
-    _settle_failed_http_bridge_creation,
+    _settle_and_close_failed_http_bridge_creation,
     _turn_keys,
     _wait_for_http_bridge_aborted_owner,
 )
@@ -1401,12 +1402,12 @@ class _HTTPBridgeMixin(
                         pending_count=_http_bridge_session_generation_count(self),
                         inflight_count=len(self._http_bridge_inflight_sessions),
                     )
+                    if _http_bridge_key_is_synthesized_turn_state(key):
+                        raise timeout_error from exc
                     if await _wait_for_http_bridge_aborted_owner(
                         inflight_future,
                         timeout=wait_timeout_seconds,
                     ):
-                        if key.affinity_kind == "turn_state_header":
-                            raise timeout_error from exc
                         continue
                     raise timeout_error from exc
                 except Exception:
@@ -1564,18 +1565,14 @@ class _HTTPBridgeMixin(
                         code="capacity_exhausted_active_sessions",
                     )
             except BaseException as exc:
-                superseded = await _settle_failed_http_bridge_creation(
+                await _settle_and_close_failed_http_bridge_creation(
                     self,
                     key,
                     inflight_future=inflight_future,
                     created_session=created_session,
+                    session_registered=session_registered,
                     exc=exc,
                 )
-                if created_session is not None and not session_registered:
-                    await self._close_http_bridge_session(
-                        created_session,
-                        release_durable_session=not superseded,
-                    )
                 raise
             assert created_session is not None
             _log_http_bridge_event(

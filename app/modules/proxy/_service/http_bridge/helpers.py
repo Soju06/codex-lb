@@ -179,6 +179,7 @@ from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _codex_backend_identity,
     _extract_model_class,
+    _is_synthesized_turn_state,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
 )
@@ -841,6 +842,10 @@ def _mark_http_bridge_inflight_creation_owner(future: Any, *, started_at: float)
     setattr(future, _HTTP_BRIDGE_INFLIGHT_OWNER_TASK_ATTR, owner_task)
 
 
+def _http_bridge_key_is_synthesized_turn_state(key: "_HTTPBridgeSessionKey") -> bool:
+    return key.affinity_kind == "turn_state_header" and _is_synthesized_turn_state(key.affinity_key)
+
+
 def _abort_http_bridge_inflight_creation_locked(
     service: Any,
     key: "_HTTPBridgeSessionKey",
@@ -866,12 +871,7 @@ def _abort_http_bridge_inflight_creation_locked(
             future.set_exception(exc)
             future.exception()
 
-    if (
-        caller_is_owner
-        or owner_finished
-        or not isinstance(owner_task, asyncio.Task)
-        or key.affinity_kind == "turn_state_header"
-    ):
+    if caller_is_owner or owner_finished or not isinstance(owner_task, asyncio.Task):
         service._http_bridge_inflight_sessions.pop(key, None)
     elif owner_running and not abort_was_signalled:
         owner_task.cancel()
@@ -908,6 +908,9 @@ async def _wait_for_http_bridge_aborted_owner(
     except TimeoutError:
         return False
     except asyncio.CancelledError:
+        current_task = asyncio.current_task()
+        if isinstance(current_task, asyncio.Task) and current_task.cancelling():
+            raise
         if owner_task.done():
             return True
         raise
@@ -1621,6 +1624,7 @@ async def _settle_failed_http_bridge_creation(
     inflight_future: Any,
     created_session: "_HTTPBridgeSession | None",
     exc: BaseException,
+    retain_current_marker: bool = False,
 ) -> bool:
     """Retire a failed creation and report whether another session replaced it.
 
@@ -1633,13 +1637,14 @@ async def _settle_failed_http_bridge_creation(
         current_future = service._http_bridge_inflight_sessions.get(key)
         replacement_in_flight = current_future is not None and current_future is not inflight_future
         if current_future is inflight_future:
-            service._http_bridge_inflight_sessions.pop(key, None)
             if inflight_future is not None and not inflight_future.done():
                 if isinstance(exc, asyncio.CancelledError):
                     inflight_future.cancel()
                 else:
                     inflight_future.set_exception(exc)
                     inflight_future.exception()
+            if not retain_current_marker:
+                service._http_bridge_inflight_sessions.pop(key, None)
         registered_session = service._http_bridge_sessions.get(key)
         # A replacement that has claimed but not yet published its session is
         # just as much the winner as a registered one: releasing here would
@@ -1682,6 +1687,43 @@ async def _settle_failed_http_bridge_creation(
             ):
                 registered_session.durable_owner_epoch = claimed_epoch
         return superseded
+
+
+async def _release_failed_http_bridge_creation_marker(
+    service: Any,
+    key: "_HTTPBridgeSessionKey",
+    *,
+    inflight_future: Any,
+) -> None:
+    async with service._http_bridge_lock:
+        if service._http_bridge_inflight_sessions.get(key) is inflight_future:
+            service._http_bridge_inflight_sessions.pop(key, None)
+
+
+async def _settle_and_close_failed_http_bridge_creation(
+    service: Any,
+    key: "_HTTPBridgeSessionKey",
+    *,
+    inflight_future: Any,
+    created_session: "_HTTPBridgeSession | None",
+    session_registered: bool,
+    exc: BaseException,
+) -> None:
+    retain_marker = created_session is not None and not session_registered
+    superseded = await _settle_failed_http_bridge_creation(
+        service,
+        key,
+        inflight_future=inflight_future,
+        created_session=created_session,
+        exc=exc,
+        retain_current_marker=retain_marker,
+    )
+    try:
+        if retain_marker:
+            await service._close_http_bridge_session(created_session, release_durable_session=not superseded)
+    finally:
+        if retain_marker:
+            await _release_failed_http_bridge_creation_marker(service, key, inflight_future=inflight_future)
 
 
 async def _close_http_bridge_session_resources(

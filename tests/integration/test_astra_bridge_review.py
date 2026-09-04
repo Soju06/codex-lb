@@ -23,8 +23,10 @@ pytestmark = pytest.mark.integration
 
 async def _bridge(async_client, app_instance, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
-    proxy_module.get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode = (
-        "server_indefinite_recovery"
+    monkeypatch.setattr(
+        proxy_module.get_settings(),
+        "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
+        "server_indefinite_recovery",
     )
     account_id = await _import_account(async_client, "astra-review", "astra-review@example.com")
     account = await _get_account(account_id)

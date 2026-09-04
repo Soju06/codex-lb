@@ -184,13 +184,26 @@ class _ApiKeyUsageMixin:
             return True
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
         with anyio.CancelScope(shield=True):
-            async with proxy._repo_factory() as repos:
-                service = _service_api_keys_service()(repos.api_keys)
-                return await service.reduce_usage_reservation(
+            try:
+                async with proxy._repo_factory() as repos:
+                    service = _service_api_keys_service()(repos.api_keys)
+                    return await service.reduce_usage_reservation(
+                        reservation.reservation_id,
+                        request_service_tier=request_service_tier,
+                        request_usage_budget=request_usage_budget,
+                    )
+            except Exception:
+                # Reduction only returns unused admission budget. Its service
+                # transaction has rolled back, so preserving the conservative
+                # reservation until terminal settlement is safe and must not
+                # abort unrelated responses on this WebSocket connection.
+                logger.warning(
+                    "Failed to reduce websocket API key reservation reservation_id=%s request_id=%s",
                     reservation.reservation_id,
-                    request_service_tier=request_service_tier,
-                    request_usage_budget=request_usage_budget,
+                    get_request_id(),
+                    exc_info=True,
                 )
+                return False
         raise RuntimeError("unreachable")
 
     async def _release_websocket_reservation(

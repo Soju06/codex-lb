@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 import pytest
 
@@ -62,6 +63,88 @@ async def test_rejected_reservation_extension_rolls_back_limit_and_ledger_update
             LimitType.INPUT_TOKENS: 100,
             LimitType.TOTAL_TOKENS: 150,
         }
+
+
+@pytest.mark.asyncio
+async def test_reservation_reduction_rollover_preserves_new_window_until_terminal_settlement(_reset_db_state) -> None:
+    del _reset_db_state
+    async with SessionLocal() as session:
+        repository = ApiKeysRepository(session)
+        service = ApiKeysService(repository)
+        created = await service.create_key(
+            ApiKeyCreateData(
+                name="reservation-reduction-rollover",
+                allowed_models=None,
+                expires_at=None,
+                limits=[
+                    LimitRuleInput(limit_type="input_tokens", limit_window="weekly", max_value=1_000),
+                    LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=1_000),
+                ],
+            )
+        )
+        reservation = await service.enforce_limits_for_request(
+            created.id,
+            request_model="gpt-5.1",
+            request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=100, output_tokens=50),
+        )
+        assert reservation is not None
+
+        limits = await repository.get_limits_by_key(created.id)
+        total_limit = next(limit for limit in limits if limit.limit_type == LimitType.TOTAL_TOKENS)
+        original_total_reset_at = total_limit.reset_at
+        assert original_total_reset_at is not None
+        rollover_reset_at = original_total_reset_at + timedelta(days=7)
+        total_limit.current_value = 0
+        total_limit.reset_at = rollover_reset_at
+        await repository.commit()
+
+    async with SessionLocal() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        with pytest.raises(RuntimeError, match="failed to reduce API key usage reservation"):
+            await service.reduce_usage_reservation(
+                reservation.reservation_id,
+                request_service_tier=None,
+                request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=50),
+            )
+
+    async with SessionLocal() as session:
+        repository = ApiKeysRepository(session)
+        stored = await repository.get_usage_reservation(reservation.reservation_id)
+        limits = await repository.get_limits_by_key(created.id)
+        assert stored is not None
+        assert stored.status == "reserved"
+        assert {item.limit_type: item.reserved_delta for item in stored.items} == {
+            LimitType.INPUT_TOKENS: 100,
+            LimitType.TOTAL_TOKENS: 150,
+        }
+        assert {limit.limit_type: limit.current_value for limit in limits} == {
+            LimitType.INPUT_TOKENS: 100,
+            LimitType.TOTAL_TOKENS: 0,
+        }
+
+        await ApiKeysService(repository).finalize_usage_reservation(
+            reservation.reservation_id,
+            model="gpt-5.1",
+            input_tokens=80,
+            output_tokens=20,
+        )
+
+    async with SessionLocal() as session:
+        repository = ApiKeysRepository(session)
+        stored = await repository.get_usage_reservation(reservation.reservation_id)
+        limits = await repository.get_limits_by_key(created.id)
+        assert stored is not None
+        assert stored.status == "finalized"
+        assert {item.limit_type: item.actual_delta for item in stored.items} == {
+            LimitType.INPUT_TOKENS: 80,
+            LimitType.TOTAL_TOKENS: 100,
+        }
+        assert {limit.limit_type: limit.current_value for limit in limits} == {
+            LimitType.INPUT_TOKENS: 80,
+            LimitType.TOTAL_TOKENS: 0,
+        }
+        total_limit = next(limit for limit in limits if limit.limit_type == LimitType.TOTAL_TOKENS)
+        assert total_limit.reset_at == rollover_reset_at
 
 
 @pytest.mark.asyncio

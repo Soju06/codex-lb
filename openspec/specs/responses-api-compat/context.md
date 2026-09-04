@@ -298,3 +298,5 @@ Protocol references:
 Steering submissions share one automatically created successor and one usage reservation. Each additional submission must be admitted against the remaining quota before it is sent upstream, with its increment added to that reservation. An unapplied rejection releases its increment; the successor still settles once. This preserves the existing API-key quota boundary while allowing multiple corrections to one response.
 
 Only completed Astra responses remain eligible as stored steering parents. A successful response from another model clears that reference so ordinary idle WebSocket connections do not retain completed request bodies for an unsupported feature.
+
+A rejected-steer refund is best effort when a quota window has already changed: its old reservation remains available for normal terminal reconciliation, and the connection stays usable. Quota extensions remain admission checks and fail closed. Whether a request creates a new reservation or extends an existing one depends on continuation ownership, independently of whether the parent request body has already been migrated into retained steering configuration.

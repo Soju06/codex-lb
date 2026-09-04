@@ -15,7 +15,7 @@ The proxy SHALL preserve async true on function/custom tool definitions and corr
 - **THEN** only call_b receives the existing synthetic interrupted output
 
 ### Requirement: Steering continuations retain owned WebSocket lifecycles
-The proxy SHALL accept valid response.steer events on an active subscription Responses WebSocket for an owned Astra response and SHALL forward them on that response's existing upstream connection/account. Steering events SHALL contain only type, previous_response_id and a nonempty supported user input. Accepted, pending, failed, and automatically created continuation responses SHALL remain correlated to the originating request and API key. Each continuation SHALL receive admission and usage accounting and SHALL settle once on its own terminal event. Each additional queued steer SHALL extend the same successor reservation before upstream dispatch; rejection SHALL release only that submission's unapplied reservation increment without charging or settling the successor twice. A steered incomplete response SHALL not be treated as an unhealthy upstream account. Automatic continuations SHALL not bind to unrelated queued response.create requests. Completed request-state retention for post-completion steering SHALL be limited to Astra responses; a subsequent successful non-Astra response SHALL clear the retained steering parent.
+The proxy SHALL accept valid response.steer events on an active subscription Responses WebSocket for an owned Astra response and SHALL forward them on that response's existing upstream connection/account. Steering events SHALL contain only type, previous_response_id and a nonempty supported user input. Accepted, pending, failed, and automatically created continuation responses SHALL remain correlated to the originating request and API key. Each continuation SHALL receive admission and usage accounting and SHALL settle once on its own terminal event. Each additional queued steer SHALL extend the same successor reservation before upstream dispatch; rejection SHALL release only that submission's unapplied reservation increment without charging or settling the successor twice. If this refund fails, the proxy SHALL retain the existing reservation for normal terminal reconciliation without terminating unrelated in-flight responses; failed admission extensions SHALL still reject the steer. A steered incomplete response SHALL not be treated as an unhealthy upstream account. Automatic continuations SHALL not bind to unrelated queued response.create requests. Completed request-state retention for post-completion steering SHALL be limited to Astra responses; a subsequent successful non-Astra response SHALL clear the retained steering parent.
 
 #### Scenario: Steering creates an automatic successor
 - **GIVEN** an owned Astra response and accepted steering
@@ -53,6 +53,17 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 - **WHEN** upstream rejects one submission before applying it
 - **THEN** its unapplied reservation increment is released while the remaining submissions retain their reserved usage
 - **AND** final successor usage is settled once against the remaining reservation
+
+#### Scenario: A failed refund preserves the connection and settlement
+- **GIVEN** several steering submissions share a reservation and the quota window changes before one is rejected
+- **WHEN** refunding that rejected submission fails
+- **THEN** the proxy keeps the reservation ledger intact for terminal reconciliation
+- **AND** other in-flight responses and the remaining steering continuation can complete on the connection
+
+#### Scenario: A new successor after rejected steering reserves input once
+- **GIVEN** an earlier steering continuation was rejected and its parent retains migrated steering configuration
+- **WHEN** a new steering submission creates a new successor reservation
+- **THEN** that submission is reserved once without immediately extending the new reservation for the same input
 
 #### Scenario: Disconnect does not replay accepted steering
 - **GIVEN** steering is accepted on a connection

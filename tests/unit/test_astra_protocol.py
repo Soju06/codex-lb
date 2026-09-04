@@ -260,6 +260,45 @@ async def test_multiple_queued_steers_share_one_successor_reservation(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_first_steer_on_migrated_parent_does_not_extend_its_new_reservation(monkeypatch):
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    socket = ScriptedSocket([(create(), lambda _: True), (steer, saw("response.created", "r1"))])
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [
+                {"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}},
+                response("response.incomplete", "r1"),
+                response("response.created", "r2", parent="r1"),
+                response("response.completed", "r2", parent="r1"),
+            ],
+        ]
+    )
+
+    def configure(service, account):
+        del account
+        original = service._prepare_response_bridge_request_state
+        prepared = 0
+
+        def prepare(*args, **kwargs):
+            nonlocal prepared
+            state, text = original(*args, **kwargs)
+            prepared += 1
+            if prepared == 1:
+                assert state.request_text is not None
+                state.steering_configuration = json.loads(state.request_text)
+                state.request_text = None
+            return state, text
+
+        monkeypatch.setattr(service, "_prepare_response_bridge_request_state", prepare)
+
+    service, reservations, settled, _, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
+    assert len(reservations) == 2
+    assert len(settled) == 2
+    service._extend_websocket_api_key_usage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_second_queued_steer_quota_rejection_happens_before_upstream_send(monkeypatch):
     from app.core.exceptions import ProxyRateLimitError
 
@@ -330,6 +369,56 @@ async def test_failed_queued_steer_returns_only_its_shared_reservation_budget(mo
     released.assert_not_awaited()
     service._reduce_websocket_api_key_usage.assert_awaited_once()
     assert service._reduce_websocket_api_key_usage.await_args.args[0].reservation_id == "res_1"
+
+
+@pytest.mark.asyncio
+async def test_failed_steer_reduction_error_does_not_abort_other_responses(monkeypatch, caplog):
+    first = {"type": "response.steer", "previous_response_id": "r1", "input": "First correction"}
+    second = {**first, "input": "Second correction"}
+    socket = ScriptedSocket(
+        [
+            (create(), lambda _: True),
+            (first, saw("response.created", "r1")),
+            (second, saw("response.steer.accepted")),
+        ]
+    )
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [{"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}}],
+            [
+                {"type": "response.steer.accepted", "steer": {"id": "s2", "previous_response_id": "r1"}},
+                {
+                    "type": "response.steer.failed",
+                    "steer": {"id": "s1", "previous_response_id": "r1", "input": "First correction"},
+                    "error": {"code": "invalid_input", "message": "Rejected"},
+                },
+                response("response.completed", "r1"),
+                response("response.created", "r2", parent="r1"),
+                response("response.completed", "r2", parent="r1"),
+            ],
+        ]
+    )
+    socket.finish_when = lambda event: event.get("type") == "response.completed" and event["response"]["id"] == "r2"
+
+    class FailingReductionService:
+        def __init__(self, repository):
+            del repository
+
+        async def reduce_usage_reservation(self, *args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("limit window rolled over")
+
+    def configure(service, account):
+        del account
+        monkeypatch.delattr(service, "_reduce_websocket_api_key_usage")
+        monkeypatch.setattr(proxy_service, "ApiKeysService", FailingReductionService)
+
+    _, reservations, settled, _, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
+    assert len(reservations) == 2
+    assert len(settled) == 2
+    assert saw("response.completed", "r2")(socket.sent)
+    assert "Failed to reduce websocket API key reservation" in caplog.text
 
 
 @pytest.mark.asyncio

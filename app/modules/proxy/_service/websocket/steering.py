@@ -389,7 +389,7 @@ async def submit_websocket_steering(
         parent.request_text = None
         parent.fresh_upstream_request_text = None
         parent.fresh_upstream_request_is_retry_safe = False
-    else:
+    if initial_continuation is not None:
         reservation = continuation.request_state.api_key_reservation
         extended = await proxy._extend_websocket_api_key_usage(
             reservation,

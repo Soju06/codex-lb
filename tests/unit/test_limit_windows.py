@@ -38,7 +38,7 @@ def test_limit_window_delta_returns_expected_duration(
     "window, expected",
     [
         (LimitWindow.FIVE_HOURS, NOW + timedelta(hours=5)),
-        (LimitWindow.DAILY, NOW + timedelta(days=1)),
+        (LimitWindow.DAILY, datetime(2026, 5, 29, 0, 0, 0)),
         (LimitWindow.WEEKLY, NOW + timedelta(days=7)),
         (LimitWindow.SEVEN_DAYS, NOW + timedelta(days=7)),
         (LimitWindow.MONTHLY, NOW + timedelta(days=30)),
@@ -66,7 +66,7 @@ def test_advance_limit_reset_returns_input_when_reset_equals_now_strictly() -> N
 
     result = advance_limit_reset(reset_at, NOW, LimitWindow.DAILY)
 
-    assert result == NOW + timedelta(days=1)
+    assert result == datetime(2026, 5, 29, 0, 0, 0)
 
 
 def test_advance_limit_reset_advances_by_a_single_delta_when_one_window_passed() -> None:
@@ -74,18 +74,18 @@ def test_advance_limit_reset_advances_by_a_single_delta_when_one_window_passed()
 
     result = advance_limit_reset(reset_at, NOW, LimitWindow.DAILY)
 
-    assert result == reset_at + timedelta(days=1)
+    assert result == datetime(2026, 5, 29, 0, 0, 0)
 
 
 def test_advance_limit_reset_advances_multiple_deltas_when_many_windows_passed() -> None:
-    # Three full daily windows missed should bump reset_at by exactly three
-    # deltas, not just one. Pins the loop semantic so future refactors that
-    # use a different `>=` boundary still walk the right number of windows.
+    # A stale legacy reset can carry an arbitrary time of day. Advancing it
+    # must converge to the canonical daily boundary instead of preserving
+    # that legacy clock forever.
     reset_at = NOW - timedelta(days=3, hours=2)
 
     result = advance_limit_reset(reset_at, NOW, LimitWindow.DAILY)
 
-    assert result == reset_at + timedelta(days=4)
+    assert result == datetime(2026, 5, 29, 0, 0, 0)
     assert result > NOW
 
 

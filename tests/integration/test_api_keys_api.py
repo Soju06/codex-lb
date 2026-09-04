@@ -3999,9 +3999,56 @@ async def test_reset_expired_limits_background_fallback_advances_windows(async_c
         daily_limit = next(limit for limit in limits if limit.limit_window == LimitWindow.DAILY)
         weekly_limit = next(limit for limit in limits if limit.limit_window == LimitWindow.WEEKLY)
         assert daily_limit.current_value == 0
-        assert daily_limit.reset_at == now + timedelta(days=1)
+        assert daily_limit.reset_at == (now + timedelta(days=1)).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
         assert weekly_limit.current_value == 0
         assert weekly_limit.reset_at == now + timedelta(days=7)
+
+
+@pytest.mark.asyncio
+async def test_align_daily_limit_resets_preserves_usage_and_other_windows(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "daily-midnight-alignment",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 1000},
+                {"limitType": "cost_usd", "limitWindow": "weekly", "maxValue": 1000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+
+    target_reset_at = utcnow().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    daily_reset_at = target_reset_at + timedelta(hours=8)
+    weekly_reset_at = target_reset_at + timedelta(days=6, hours=12)
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        daily_limit = next(limit for limit in limits if limit.limit_window == LimitWindow.DAILY)
+        weekly_limit = next(limit for limit in limits if limit.limit_window == LimitWindow.WEEKLY)
+        daily_limit.current_value = 321
+        daily_limit.reset_at = daily_reset_at
+        weekly_limit.current_value = 654
+        weekly_limit.reset_at = weekly_reset_at
+        await session.commit()
+
+        aligned_count = await repo.align_daily_limit_resets(reset_at=target_reset_at)
+
+    assert aligned_count == 1
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        daily_limit = next(limit for limit in limits if limit.limit_window == LimitWindow.DAILY)
+        weekly_limit = next(limit for limit in limits if limit.limit_window == LimitWindow.WEEKLY)
+        assert daily_limit.current_value == 321
+        assert daily_limit.reset_at == target_reset_at
+        assert weekly_limit.current_value == 654
+        assert weekly_limit.reset_at == weekly_reset_at
 
 
 @pytest.mark.asyncio
@@ -4048,7 +4095,12 @@ async def test_reset_expired_limits_background_fallback_processes_batches(async_
         limits = await repo.get_limits_by_key(key_id)
         by_window = {limit.limit_window: limit for limit in limits}
         assert by_window[LimitWindow.DAILY].current_value == 0
-        assert by_window[LimitWindow.DAILY].reset_at == now + timedelta(days=1)
+        assert by_window[LimitWindow.DAILY].reset_at == (now + timedelta(days=1)).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
         assert by_window[LimitWindow.WEEKLY].current_value == 0
         assert by_window[LimitWindow.WEEKLY].reset_at == now + timedelta(days=7)
         assert by_window[LimitWindow.MONTHLY].current_value == 0

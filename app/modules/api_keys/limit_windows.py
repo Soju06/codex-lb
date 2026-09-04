@@ -11,7 +11,7 @@ def next_limit_reset(now: datetime, window: LimitWindow) -> datetime:
     if window == LimitWindow.SEVEN_DAYS:
         return now + timedelta(days=7)
     if window == LimitWindow.DAILY:
-        return now + timedelta(days=1)
+        return (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     if window == LimitWindow.WEEKLY:
         return now + timedelta(days=7)
     if window == LimitWindow.MONTHLY:
@@ -20,6 +20,8 @@ def next_limit_reset(now: datetime, window: LimitWindow) -> datetime:
 
 
 def advance_limit_reset(reset_at: datetime, now: datetime, window: LimitWindow) -> datetime:
+    if window == LimitWindow.DAILY and reset_at <= now:
+        return next_limit_reset(now, window)
     delta = limit_window_delta(window)
     next_reset = reset_at
     while next_reset <= now:

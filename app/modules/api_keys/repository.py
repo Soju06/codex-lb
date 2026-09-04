@@ -606,6 +606,18 @@ class ApiKeysRepository:
                     reset_count += 1
             await self._session.commit()
 
+    async def align_daily_limit_resets(self, *, reset_at: datetime) -> int:
+        result = await self._session.execute(
+            update(ApiKeyLimit)
+            .where(ApiKeyLimit.limit_window == LimitWindow.DAILY)
+            .where(ApiKeyLimit.reset_at != reset_at)
+            .values(reset_at=reset_at)
+            .returning(ApiKeyLimit.id)
+        )
+        aligned_ids = result.scalars().all()
+        await self._session.commit()
+        return len(aligned_ids)
+
     async def try_reserve_usage(
         self,
         limit_id: int,

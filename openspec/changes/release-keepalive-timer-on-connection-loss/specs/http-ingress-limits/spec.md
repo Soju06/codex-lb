@@ -44,7 +44,8 @@ be configurable via the `--timeout-keep-alive` CLI flag and the
 `UVICORN_TIMEOUT_KEEP_ALIVE` environment variable, with the CLI flag taking
 precedence, and an invalid (non-integer) value MUST fail startup with a clear
 error. The documented contract for the value is that it exceeds the connection
-pool idle timeout of the clients the deployment serves (Codex CLI: 90 seconds).
+pool idle timeout of the clients the deployment serves (reqwest default: 90
+seconds).
 
 #### Scenario: Default keep-alive window
 

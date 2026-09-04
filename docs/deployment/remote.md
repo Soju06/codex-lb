@@ -25,7 +25,7 @@ CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS=172.18.0.0/16
 Only sources inside the trusted CIDRs may set forwarded headers; everything else is treated as the direct peer address.
 
 - **Optionally delegate dashboard auth** to the proxy with `trusted_header` mode — see [Authentication](../authentication.md).
-- **Leave the idle keep-alive window alone unless a client needs more.** codex-lb closes idle client connections after 300 s (`--timeout-keep-alive` / `UVICORN_TIMEOUT_KEEP_ALIVE`, process environment only). The value must stay above the connection-pool idle timeout of your proxy and clients (Codex CLI: 90 s) so a pooled connection is never reused at the moment the server closes it; raising it into hours only holds idle sockets longer.
+- **Leave the idle keep-alive window alone unless a client needs more.** codex-lb closes idle client connections after 300 s (`--timeout-keep-alive` / `UVICORN_TIMEOUT_KEEP_ALIVE`, process environment only). The value must stay above the connection-pool idle timeout of your proxy and clients (reqwest default: 90 s; Codex CLI itself opens a fresh connection per `/responses` request) so a pooled connection is never reused at the moment the server closes it; raising it into hours only holds idle sockets longer. If a reverse proxy fronts codex-lb, keep the proxy's *upstream* idle/pool timeout below `--timeout-keep-alive`, or raise `UVICORN_TIMEOUT_KEEP_ALIVE` above it. The race window is one RTT wide at the server's timeout and does not depend on request body size, so large compaction POSTs need no extra allowance.
 
 ---
 

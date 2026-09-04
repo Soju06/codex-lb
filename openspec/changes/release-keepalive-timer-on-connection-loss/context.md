@@ -55,15 +55,16 @@ same `connection_lost` body at the time of writing.
 
 ## Why the default returns to 300 s
 
-`#698` introduced `--timeout-keep-alive` at 300 s because uvicorn's 5 s default
-let Codex CLI write a compaction POST into a socket the server was closing.
-`#729` raised it to 7200 s; its diff contains no measurement or rationale for
-that number. The race is prevented by `server idle window > client pool idle
+`#698` introduced `--timeout-keep-alive` at 300 s, stating that uvicorn's 5 s
+default could let Codex CLI write a compaction POST into a socket the server
+was closing. `#729` raised it to 7200 s with the text "Codex CLI reuses local
+connections for large compact POSTs"; neither PR recorded a measurement or a
+rationale for its number (see "Provenance and audit" below). The race is prevented by `server idle window > client pool idle
 timeout (+ margin)` and is independent of request size:
 
 | Client | Pool idle timeout |
 |--------|-------------------|
-| Codex CLI (reqwest/hyper default) | 90 s |
+| reqwest/hyper default (Codex CLI's HTTP stack) | 90 s |
 | This repo's Rust egress client | 120 s |
 | Go `net/http` default | 90 s |
 | aiohttp / httpx / undici defaults | 15 s / 5 s / 4 s |
@@ -74,6 +75,31 @@ protocol) 24x longer. Production has run 300 s since the incident without
 stale-socket reports. Operators with a direct-connect client whose pool idle
 exceeds 300 s raise `UVICORN_TIMEOUT_KEEP_ALIVE` explicitly; the knob is an
 internal tunable and stays out of `.env.example` (simplicity gate P2).
+
+## Provenance and audit (2026-09-04)
+
+The #698/#729 premise — "Codex CLI reuses local connections for large compact
+POSTs" — is contradicted by codex-rs at `rust-v0.131.0` and `rust-v0.133.0`
+(the tags bracketing those PRs) and at HEAD: `core/src/client.rs`
+(`build_api_transport` -> `create_client_for_route`) builds a fresh
+`reqwest::Client` via `login/src/auth/default_client.rs` for every `/responses`
+and `/responses/compact` call, so Codex CLI holds no idle pooled connection to
+codex-lb and FINs the socket as soon as the SSE body completes (probed twice
+against a plain-HTTP server). reqwest 0.12.28's default `pool_idle_timeout` is
+90 s and codex-rs never overrides pool settings (`http-client/src/client_builder.rs`
+sets only TLS, headers, redirects, connect timeout, cookies). Codex also retries
+transport errors itself: `request_max_retries` (default 4) replays the in-memory
+body at the request layer (`codex-client/src/retry.rs`,
+`codex-api/src/endpoint/session.rs`) and `stream_max_retries` (default 5) covers
+the stream layer, so a keep-alive race costs one retry rather than a
+user-visible failure. The safety invariant is therefore `server idle window >
+every client's pool idle timeout + margin` (practically S >= 2C): uvicorn's
+stock 5 s violates it, 300 s gives 3.3x over reqwest's 90 s, and 7200 s adds
+nothing because the client side has closed every idle connection by 180 s.
+uvicorn's timer never bounds an in-flight request and does not apply to
+WebSocket connections. The retention leak fixed by this change is the
+`connection_lost` `exc is None` gate described above; it is independent of the
+default value, which only bounded how long each leaked graph survived.
 
 ## Verification evidence
 

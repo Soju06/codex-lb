@@ -63,11 +63,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--timeout-keep-alive",
         default=os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "300"),
         help=(
-            "Seconds an idle keep-alive HTTP connection stays open. Must exceed the "
-            "client's connection-pool idle timeout (Codex CLI/reqwest: 90s) so a pooled "
-            "connection is never reused at the moment the server closes it — that race "
-            "leaves the client writing a non-retryable POST into a stale socket. Every "
-            "idle connection is held for the full window, so keep it well under an hour."
+            "Seconds an idle keep-alive HTTP connection stays open between requests "
+            "(env: UVICORN_TIMEOUT_KEEP_ALIVE). Keep it above any client's connection-pool "
+            "idle timeout (reqwest default 90s; Codex CLI opens a fresh connection per "
+            "/responses request, so this mainly matters for other SDKs and reverse proxies) "
+            "and well under an hour, because every idle connection is held for the full "
+            "window. uvicorn's stock 5s default is too short for pooled clients."
         ),
     )
     parser.add_argument(

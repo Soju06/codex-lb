@@ -195,6 +195,7 @@ class UpstreamWebSocketMessage:
     data: bytes | None = None
     close_code: int | None = None
     close_reason: str | None = None
+    close_frame_received: bool = False
     error: str | None = None
     error_code: str | None = None
     responses_interpreted: bool = False
@@ -459,14 +460,12 @@ class NativeUpstreamWebSocket:
             data=message.data,
             close_code=message.close_code,
             close_reason=message.close_reason,
-<<<<<<< HEAD
             responses_interpreted=message.responses_interpreted,
             event_type=message.event_type,
             payload=message.payload,
             routing=message.routing,
-=======
+            close_frame_received=message.close_frame_received,
             transport_ended=message.kind == "close",
->>>>>>> 09a22a2f5 (fix(proxy): mark native websocket terminal events)
         )
 
     async def close(self, code: int = 1000, reason: str = "") -> None:

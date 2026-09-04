@@ -1944,7 +1944,7 @@ class LoadBalancer:
             error_count=runtime.error_count,
             deactivation_reason=account.deactivation_reason,
             plan_type=account.plan_type,
-            capacity_credits=_capacity_for_routing_plan(account.plan_type, "secondary"),
+            capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
             routing_policy=routing_policy,
             ignore_standard_quota=False,
         )
@@ -2278,7 +2278,7 @@ def _state_from_account(
         effective_secondary_entry,
         secondary_entry,
     )
-    quota_primary_used = _health_tier_primary_used(plan_type=account.plan_type, primary_used=primary_used)
+    quota_primary_used = _recovery_primary_used(plan_type=account.plan_type, primary_used=primary_used)
     quota_available = usage_windows_allow_recovery(
         quota_primary_used, secondary_used, credits_has, credits_unlimited, credits_balance
     )
@@ -2359,7 +2359,10 @@ def _state_from_account(
             if quota_available and _usage_entry_recorded_after_block(early_freshness_entry, effective_blocked_at):
                 rate_limited_cooldown_deadline = None
 
-    if _capacity_for_routing_plan(account.plan_type, "primary") == 0.0 and (
+    primary_capacity = usage_core.capacity_for_plan(account.plan_type, "primary")
+    if account.status == AccountStatus.RATE_LIMITED:
+        primary_capacity = _capacity_for_recovery_plan(account.plan_type, "primary")
+    if primary_capacity == 0.0 and (
         account.status != AccountStatus.RATE_LIMITED
         or (
             rate_limited_cooldown_deadline is None
@@ -2373,7 +2376,7 @@ def _state_from_account(
             )
         )
     ):
-        primary_used = _health_tier_primary_used(
+        primary_used = _recovery_primary_used(
             plan_type=account.plan_type,
             primary_used=primary_used,
         )
@@ -2548,7 +2551,7 @@ def _state_from_account(
     long_window_key = "secondary"
     if effective_secondary_entry is not None and effective_secondary_entry.window == "monthly":
         long_window_key = "monthly"
-    capacity_credits = _capacity_for_routing_plan(account.plan_type, long_window_key) or 0.0
+    capacity_credits = usage_core.capacity_for_plan(account.plan_type, long_window_key) or 0.0
     if capacity_credits > 0.0 and runtime.leased_tokens > 0:
         lease_token_weight = getattr(settings, "proxy_account_lease_token_weight", 1.0)
         leased_token_pressure_pct = runtime.leased_tokens * lease_token_weight / capacity_credits * 100.0
@@ -2600,7 +2603,12 @@ def _normalize_usage_inputs(
     if (
         effective_secondary_entry is not None
         and effective_secondary_entry.window == "monthly"
-        and _capacity_for_routing_plan(account.plan_type, "monthly") is None
+        and (
+            _capacity_for_recovery_plan(account.plan_type, "monthly")
+            if account.status == AccountStatus.RATE_LIMITED
+            else usage_core.capacity_for_plan(account.plan_type, "monthly")
+        )
+        is None
     ):
         effective_secondary_entry = None
     primary_row = usage_history_to_window_row(primary_entry) if primary_entry is not None else None
@@ -2647,9 +2655,16 @@ def _normalize_usage_inputs(
     )
 
 
-def _capacity_for_routing_plan(plan_type: str | None, window: str) -> float | None:
-    """Resolve rate-limit plan aliases before applying routing capacities."""
+def _capacity_for_recovery_plan(plan_type: str | None, window: str) -> float | None:
+    """Resolve rate-limit plan aliases for blocked-account recovery only."""
     return usage_core.capacity_for_plan(resolve_capacity_plan_type(plan_type), window)
+
+
+def _recovery_primary_used(*, plan_type: str | None, primary_used: float | None) -> float | None:
+    """Drop primary usage when recovery plan capacity marks it inapplicable."""
+    if _capacity_for_recovery_plan(plan_type, "primary") == 0.0:
+        return None
+    return primary_used
 
 
 def _health_tier_primary_used(*, plan_type: str | None, primary_used: float | None) -> float | None:
@@ -2658,7 +2673,7 @@ def _health_tier_primary_used(*, plan_type: str | None, primary_used: float | No
     # health state machine must follow plan capacity, not the row's slot, or
     # both ordinary routing and Force Probe can drain an account on a quota it
     # does not have.
-    if _capacity_for_routing_plan(plan_type, "primary") == 0.0:
+    if usage_core.capacity_for_plan(plan_type, "primary") == 0.0:
         return None
     return primary_used
 
@@ -2798,7 +2813,10 @@ def _select_long_window_entry(
     monthly_entry: UsageHistory | None,
     secondary_entry: UsageHistory | AdditionalUsageHistory | None,
 ) -> UsageHistory | AdditionalUsageHistory | None:
-    if monthly_entry is not None and _capacity_for_routing_plan(account.plan_type, "monthly") is not None:
+    monthly_capacity = usage_core.capacity_for_plan(account.plan_type, "monthly")
+    if account.status == AccountStatus.RATE_LIMITED:
+        monthly_capacity = _capacity_for_recovery_plan(account.plan_type, "monthly")
+    if monthly_entry is not None and monthly_capacity is not None:
         return monthly_entry
     return secondary_entry
 
@@ -2812,7 +2830,7 @@ def _rate_limited_freshness_entry(
     if (
         long_window_entry is not None
         and long_window_entry.window == "monthly"
-        and _capacity_for_routing_plan(account.plan_type, "monthly") is not None
+        and _capacity_for_recovery_plan(account.plan_type, "monthly") is not None
     ):
         return long_window_entry
     if primary_entry is None:

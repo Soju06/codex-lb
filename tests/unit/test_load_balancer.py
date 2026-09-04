@@ -2610,6 +2610,37 @@ def test_state_from_account_treats_monthly_usage_as_advisory_long_window_pressur
     assert state.capacity_credits == usage_core.capacity_for_plan("free", "monthly")
 
 
+@pytest.mark.parametrize("plan_type", ["guest", "go", "free_workspace", "quorum", "unknown"])
+def test_state_from_account_active_free_alias_keeps_existing_advisory_routing(monkeypatch, plan_type):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE, plan_type=plan_type),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=80.0,
+            reset_at=int(now + 3600),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=300,
+        ),
+        secondary_entry=_make_test_usage(
+            window="monthly",
+            used_percent=40.0,
+            reset_at=int(now + 30 * 24 * 3600),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=43200,
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent == 80.0
+    assert state.secondary_used_percent is None
+    assert state.capacity_credits == 0.0
+
+
 def test_state_from_account_ignores_stale_monthly_usage_after_upgrade(monkeypatch):
     now = 1_700_000_000.0
     weekly_reset = int(now + 7 * 24 * 3600)

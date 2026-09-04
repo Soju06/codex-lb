@@ -37,7 +37,8 @@ application protocol were working.
 
 ## Impact
 
-The change is limited to HTTP bridge account-health accounting and regression
-coverage. It introduces no setting, schema, migration, API, retry, or routing
-change. It supersedes only the observed-output penalty clause in
-`keep-abrupt-eventless-drop-account-neutral`.
+The change covers HTTP bridge account-health accounting, the internal
+`UpstreamWebSocketMessage.transport_ended` contract, and WebSockets,
+aiohttp/Codex, and native-egress adapter mappings. It introduces no external
+API, setting, schema, migration, retry, or routing change. It supersedes only
+the observed-output penalty clause in `keep-abrupt-eventless-drop-account-neutral`.

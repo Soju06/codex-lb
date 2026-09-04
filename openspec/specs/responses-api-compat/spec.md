@@ -1139,12 +1139,15 @@ remain account-neutral and use their classified error and bounded retry or
 retry-circuit handling. A frame-less terminal HTTP bridge ending MUST remain
 account-neutral regardless of response-event count or buffered model-output
 progress. Unless an existing bounded pre-created recovery succeeds, it MUST
-still fail the interrupted request as `stream_incomplete`. It MUST NOT make a
-post-output request eligible for transparent redispatch, and an operation with
-response events or buffered model output MUST remain acknowledged rather than
-recoverable. Only a frame-less drop with zero response events and no buffered
-model output MAY contribute to the existing windowed eventless account drain
-signal; a post-output drop MUST NOT contribute to that signal.
+still fail the interrupted request as `stream_incomplete`. For an error-kind
+message, the proxy MUST require positive adapter provenance that the transport
+ended; protocol errors without that provenance MUST retain their existing
+account-health treatment. It MUST NOT make a post-output request eligible for
+transparent redispatch, and an operation with response events or buffered model
+output MUST remain acknowledged rather than recoverable. Only a frame-less drop
+with zero response events and no buffered model output MAY contribute to the
+existing windowed eventless account drain signal; a post-output drop MUST NOT
+contribute to that signal.
 
 For other closes, the proxy MUST surface `stream_incomplete` to affected pending
 requests except when a direct Responses WebSocket request has already

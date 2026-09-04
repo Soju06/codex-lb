@@ -303,6 +303,7 @@ class _FakeUpstreamMessage:
         error: str | None = None,
         error_code: str | None = None,
         transport_ended: bool = False,
+        close_frame_received: bool = False,
     ) -> None:
         self.kind = kind
         self.text = text
@@ -310,6 +311,7 @@ class _FakeUpstreamMessage:
         self.error = error
         self.error_code = error_code
         self.transport_ended = transport_ended
+        self.close_frame_received = close_frame_received
         self.data = None
 
 

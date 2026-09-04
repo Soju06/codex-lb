@@ -146,7 +146,7 @@ async def test_failed_detached_settlement_retries_failed_release_until_persisted
         )
         assert reservation is not None
 
-    original_get_reservation = ApiKeysRepository.get_usage_reservation
+    original_get_reservation = ApiKeysRepository.get_usage_reservation_for_update
     reservation_read_attempts = 0
     retry_started = asyncio.Event()
     allow_retry = asyncio.Event()
@@ -169,7 +169,7 @@ async def test_failed_detached_settlement_retries_failed_release_until_persisted
                 await allow_retry.wait()
         return await original_get_reservation(self, reservation_id)
 
-    monkeypatch.setattr(ApiKeysRepository, "get_usage_reservation", fail_first_two_reservation_reads)
+    monkeypatch.setattr(ApiKeysRepository, "get_usage_reservation_for_update", fail_first_two_reservation_reads)
 
     settlement = proxy_service_module._StreamSettlement(
         status="success",

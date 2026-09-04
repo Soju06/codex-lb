@@ -37,3 +37,20 @@ serialized output and not inside a string literal that the length shortcuts
 (`instructions` >= 8192 chars, or a single chunk that alone covers the
 remaining budget) prove the cap without encoding. Surrogates skipped that way
 yield the 8192 cap like any other large payload.
+
+## Astra inherited reasoning and steering ownership
+
+A configuration_update persists across response/conversation anchors, and a
+request-level reasoning field does not clear it. Restricted-key continuations
+therefore establish an allowed configuration before new input. A leading client
+update is retained if it passes policy; otherwise preparation adds a reset based
+on enforced effort, explicit client effort, or the verified medium default. If
+that choice is disallowed, the continuation is rejected. For example, a key that
+allows only low needs an explicit low selection when no leading update is sent.
+Raw Ultra identity survives policy and owner forwarding; it becomes Max only at
+subscription serialization. The existing Minimal-to-Low compatibility remains.
+
+Steering inherits an owned response's effective configuration. A changed key or
+account policy that cannot be applied through steering requires a normal explicit
+response.create. Each automatic successor has independent usage ownership, and
+its reservation, account admission and heartbeat are cleaned up on failure.

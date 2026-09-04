@@ -31,6 +31,28 @@ supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```
 
+### Astra conversation controls
+
+Astra conversation support includes delayed async function/custom tool results
+and mid-turn steering over the same Responses WebSocket. The client remains
+responsible for running tools and delivering their eventual outputs. Accepted
+steering is connection-local: do not assume it survives a disconnect or replay
+it blindly on a new connection.
+
+`configuration_update` items can change reasoning between responses without
+rewriting request-level effort. They must satisfy API-key reasoning policies
+and cannot be combined with automatic compaction, automatic truncation, or the
+standalone `/responses/compact` endpoint. Explicit `compaction_trigger` input
+remains supported on `/responses`. For a reasoning-restricted API key, anchored
+continuations explicitly reset inherited reasoning to an allowed selection;
+choose an allowed effort in your client when the default medium is not permitted.
+
+These behaviors are specified in
+[responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat)
+and [api-keys](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/api-keys).
+Local protocol tests do not establish feature rollout for a particular ChatGPT
+account; verify upstream acceptance before deployment.
+
 ### Opting into the 872k context window
 
 GPT-5.6 ships a 272,000-token default input budget with an 872,000-token

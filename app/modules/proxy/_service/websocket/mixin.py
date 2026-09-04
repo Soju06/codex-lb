@@ -353,6 +353,7 @@ from app.modules.proxy._service.support import (
     _WebSocketUpstreamControl,
     clear_upstream_websocket_transport_failure,
     mark_upstream_websocket_transport_failure,
+    record_async_tool_call,
     websocket_connect_transport_failure_code,
 )
 from app.modules.proxy._service.support import (
@@ -393,7 +394,6 @@ from app.modules.proxy._service.warmup import (
 )
 from app.modules.proxy._service.websocket.helpers import (
     _app_error_to_websocket_event,
-    _assign_websocket_response_id,
     _bind_websocket_request_dispatch_owner,
     _find_websocket_request_state_by_response_id,
     _forget_websocket_stale_previous_response,
@@ -449,6 +449,16 @@ from app.modules.proxy._service.websocket.helpers import (
     _wrapped_websocket_error_event,
 )
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
+from app.modules.proxy._service.websocket.steering import (
+    assign_websocket_created_request_state,
+    completed_steering_required_input,
+    process_websocket_steering_event,
+    release_steering_request,
+    required_steering_input_is_present,
+    steering_error,
+    steering_failure_payload,
+    submit_websocket_steering,
+)
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _is_synthesized_turn_state,
@@ -498,6 +508,7 @@ from app.modules.proxy.request_policy import (
     openai_invalid_payload_error,
     openai_validation_error,
     responses_source_route_excluded,
+    validate_astra_request,
     validate_model_access,
     validate_top_level_compaction_trigger_input_shape,
 )
@@ -1705,6 +1716,41 @@ class _WebSocketMixin:
                                     )
                                 )
                             continue
+                        if payload.get("type") == "response.steer":
+                            try:
+                                if shutdown_state.is_draining():
+                                    raise steering_error("service_unavailable", "Server is draining.")
+                                if upstream is None or upstream_control is None or account is None:
+                                    raise steering_error(
+                                        "response_not_found", "Steering requires an active connection."
+                                    )
+                                await submit_websocket_steering(
+                                    proxy,
+                                    payload,
+                                    headers=headers,
+                                    account=account,
+                                    upstream=upstream,
+                                    control=upstream_control,
+                                    pending_requests=pending_requests,
+                                    pending_lock=pending_lock,
+                                    api_key=api_key,
+                                    prohibit_fast_mode=prohibit_fast_mode,
+                                )
+                            except (
+                                ProxyResponseError,
+                                AppError,
+                                ClientPayloadError,
+                                ValidationError,
+                                ValueError,
+                            ) as exc:
+                                error = (
+                                    exc
+                                    if isinstance(exc, ProxyResponseError)
+                                    else steering_error("invalid_input", "Invalid steering request.")
+                                )
+                                async with client_send_lock:
+                                    await websocket.send_text(json.dumps(steering_failure_payload(payload, error)))
+                            continue
                         if _is_websocket_response_create(payload):
                             if shutdown_state.is_draining():
                                 async with client_send_lock:
@@ -1721,6 +1767,35 @@ class _WebSocketMixin:
                                     )
                                 continue
                             try:
+                                steering_continuation = None
+                                parent_id = payload.get("previous_response_id")
+                                if upstream_control is not None and isinstance(parent_id, str):
+                                    steering_continuation = upstream_control.steering_continuations.get(parent_id)
+                                if steering_continuation is not None:
+                                    if steering_continuation.explicit_request_prepared:
+                                        raise steering_error(
+                                            "invalid_input", "A steering continuation is already in progress."
+                                        )
+                                    if (
+                                        steering_continuation.required_input is None
+                                        or not required_steering_input_is_present(
+                                            steering_continuation.required_input, payload.get("input")
+                                        )
+                                    ):
+                                        raise steering_error(
+                                            "invalid_input", "Return every required steering input before continuing."
+                                        )
+                                    original_settings = steering_continuation.parent.steering_configuration or {}
+                                    if payload.get("stream_id") != original_settings.get("stream_id"):
+                                        raise steering_error(
+                                            "invalid_input",
+                                            "Steering continuation requires the original WebSocket lane.",
+                                        )
+                                    stale_state = steering_continuation.request_state
+                                    async with pending_lock:
+                                        if stale_state in pending_requests:
+                                            pending_requests.remove(stale_state)
+                                    await release_steering_request(proxy, stale_state)
                                 prepared_request = await proxy._prepare_websocket_response_create_request(
                                     payload,
                                     headers=headers,
@@ -1778,6 +1853,14 @@ class _WebSocketMixin:
                                         capability_header_values=capability_header_values,
                                     )
                                 request_state = prepared_request.request_state
+                                if steering_continuation is not None:
+                                    steering_continuation.request_state = request_state
+                                    steering_continuation.explicit_request_prepared = True
+                                    request_state.steering_parent_response_id = request_state.previous_response_id
+                                    request_state.fresh_upstream_request_text = None
+                                    request_state.fresh_upstream_request_is_retry_safe = False
+                                    request_state.preferred_account_id = account.id if account is not None else None
+                                    request_state.replay_required_account_id = request_state.preferred_account_id
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
                                 if request_state.previous_response_id is not None:
@@ -1807,28 +1890,19 @@ class _WebSocketMixin:
                                     # (503, which the client transparently falls back from).
                                     and upstream_reader is not None
                                     and not upstream_reader.done()
-                                    # Requests the HTTP route excludes from
-                                    # source routing (a terminal compaction
-                                    # trigger, ``input_file`` references)
-                                    # must stay on subscription accounts even
-                                    # when their model is also source-owned;
-                                    # the owner-routing below dispatches them
-                                    # to the pinned account instead of this
-                                    # guard failing the turn.
-                                    and not request_state.source_route_excluded
-                                    # A model source may emit the same canonical
-                                    # response-id shape as the subscription
-                                    # backend. Only recorded account ownership,
-                                    # resolved above, may bypass this guard.
-                                    and request_state.previous_response_owner_account_id is None
-                                    and await responses_model_is_source_owned(
-                                        request_state.model,
-                                        request_state.api_key or api_key,
-                                        # The raw client model, before enforcement
-                                        # normalized aliases: an alias-only source
-                                        # (``gpt-5-high``) is invisible in the
-                                        # normalized ``request_state.model``.
-                                        raw_model=request_state.raw_source_model,
+                                    # A deferred source request cannot be dispatched to a
+                                    # subscription even if configuration changes meanwhile.
+                                    and (
+                                        request_state.source_requires_http_transport
+                                        or (
+                                            not request_state.source_route_excluded
+                                            and request_state.previous_response_owner_account_id is None
+                                            and await responses_model_is_source_owned(
+                                                request_state.model,
+                                                request_state.api_key or api_key,
+                                                raw_model=request_state.raw_source_model,
+                                            )
+                                        )
                                     )
                                 ):
                                     # Socket reuse bypasses connect-time selection, so a later
@@ -3106,6 +3180,31 @@ class _WebSocketMixin:
             # parse failure keeps the source guards active instead of
             # changing that behavior here.
             source_route_excluded = False
+        # Check full client history before trimming, then apply inherited-effort
+        # policy after the final subscription anchor and tool repair are known.
+        # A source may deliberately reuse Astra's slug with its own controls;
+        # let the established connect/reuse guards request HTTP fallback first.
+        subscription_astra = True
+        if (
+            responses_payload.model == "gpt-6-astra"
+            and not source_route_excluded
+            and await responses_model_is_source_owned(
+                responses_payload.model, refreshed_api_key, raw_model=raw_source_model
+            )
+        ):
+            subscription_astra = (
+                await proxy._resolve_websocket_previous_response_owner(
+                    previous_response_id=responses_payload.previous_response_id,
+                    api_key=refreshed_api_key,
+                    session_id=_owner_lookup_session_id_from_headers(
+                        headers, synthesized_turn_state=synthesized_turn_state
+                    ),
+                    surface="websocket_source_route",
+                )
+                is not None
+            )
+        if subscription_astra:
+            validate_astra_request(responses_payload, refreshed_api_key, prepare_continuation=False)
         normalized_payload = responses_payload.to_payload()
         stripped_client_metadata = strip_capability_metadata(normalized_payload.get("client_metadata"))
         if stripped_client_metadata is not normalized_payload.get("client_metadata"):
@@ -3212,7 +3311,11 @@ class _WebSocketMixin:
             input_items = cast(list[JsonValue], responses_payload.input)
             missing_call_ids = _facade()._missing_function_call_outputs_for_previous_response(
                 input_items,
-                pending_call_ids=continuity_state.last_pending_function_call_ids,
+                pending_call_ids=[
+                    call_id
+                    for call_id in continuity_state.last_pending_function_call_ids
+                    if call_id not in continuity_state.pending_async_tool_calls
+                ],
             )
             if missing_call_ids:
                 responses_payload = responses_payload.model_copy(
@@ -3229,6 +3332,10 @@ class _WebSocketMixin:
                     responses_payload.previous_response_id,
                     len(missing_call_ids),
                 )
+        if subscription_astra or session_anchor is not None:
+            if not subscription_astra and original_full_resend_payload is not None:
+                validate_astra_request(original_full_resend_payload, refreshed_api_key, prepare_continuation=False)
+            validate_astra_request(responses_payload, refreshed_api_key)
         session_id = _owner_lookup_session_id_from_headers(
             headers,
             synthesized_turn_state=synthesized_turn_state,
@@ -3257,6 +3364,7 @@ class _WebSocketMixin:
                 responses_payload,
                 api_key=refreshed_api_key,
                 api_key_reservation=reservation,
+                defer_subscription_validation=not subscription_astra and session_anchor is None,
                 include_type_field=True,
                 attach_event_queue=False,
                 transport=_REQUEST_TRANSPORT_WEBSOCKET,
@@ -3273,6 +3381,7 @@ class _WebSocketMixin:
         request_state.client_ip = client_ip
         request_state.raw_source_model = raw_source_model
         request_state.source_route_excluded = source_route_excluded
+        request_state.source_requires_http_transport = not subscription_astra and session_anchor is None
         request_state.responses_lite_model = next_responses_lite_model
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
         request_state.require_security_work_authorized = capability_route.require_security_work_authorized
@@ -3528,7 +3637,7 @@ class _WebSocketMixin:
         # owner skip the guard. Response-id syntax is provider-opaque, so a
         # configured source with no recorded subscription owner still falls
         # back to the HTTP source path.
-        if (
+        if request_state.source_requires_http_transport or (
             not request_state.source_route_excluded
             and request_state.previous_response_owner_account_id is None
             and await responses_model_is_source_owned(
@@ -5282,7 +5391,9 @@ class _WebSocketMixin:
         finally:
             async with pending_lock:
                 has_pending_requests = bool(pending_requests)
-            if not upstream_control.reconnect_requested and has_pending_requests:
+            if (
+                not upstream_control.reconnect_requested and has_pending_requests
+            ) or upstream_control.steering_continuations:
                 try:
                     await websocket.close()
                 except Exception:
@@ -5310,7 +5421,21 @@ class _WebSocketMixin:
         payload = parsed_frame.payload
         event_type = parsed_frame.event_type
         event = parsed_frame.event
+        if payload is not None and event_type in {
+            "response.steer.accepted",
+            "response.steer.pending",
+            "response.steer.failed",
+        }:
+            await process_websocket_steering_event(
+                proxy, payload, control=upstream_control, pending_requests=pending_requests, pending_lock=pending_lock
+            )
+            return text
         response_id = _websocket_response_id(event, payload)
+        if response_id is not None and response_id in upstream_control.suppressed_steering_response_ids:
+            upstream_control.suppress_downstream_event = True
+            if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                upstream_control.suppressed_steering_response_ids.discard(response_id)
+            return text
         error_message = _websocket_event_error_message(event_type, payload)
         is_typeless_error_event = (
             isinstance(payload, dict)
@@ -5365,7 +5490,15 @@ class _WebSocketMixin:
             has_other_pending_requests = False
             grouped_previous_response_request_states: list[_WebSocketRequestState] = []
             if event_type == "response.created":
-                request_state = _assign_websocket_response_id(pending_requests, response_id)
+                request_state = assign_websocket_created_request_state(
+                    payload,
+                    response_id=response_id,
+                    control=upstream_control,
+                    pending_requests=pending_requests,
+                )
+                if response_id is not None and response_id in upstream_control.suppressed_steering_response_ids:
+                    upstream_control.suppress_downstream_event = True
+                    return text
                 created_request_state = request_state
                 release_create_gate = request_state is not None
             elif response_id is not None:
@@ -5419,6 +5552,7 @@ class _WebSocketMixin:
                 if actual_service_tier is not None:
                     request_state.actual_service_tier = actual_service_tier
                     request_state.service_tier = actual_service_tier
+                record_async_tool_call(request_state, payload)
                 completed_tool_call = _facade()._response_output_item_done_tool_call(payload)
                 if completed_tool_call is not None:
                     completed_call_id, completed_call_type = completed_tool_call
@@ -5868,7 +6002,18 @@ class _WebSocketMixin:
             and completed_usage is not None
             and completed_usage.output_tokens == 0
         )
-        if event_type == "response.completed" and continuity_state is not None and not completed_empty_prewarm:
+        successful_boundary = event_type == "response.completed" or (
+            event_type == "response.incomplete" and _websocket_event_incomplete_reason(event_type, payload) == "steered"
+        )
+        if successful_boundary and not completed_empty_prewarm:
+            upstream_control.last_completed_request = request_state if request_state.model == "gpt-6-astra" else None
+            if event_type == "response.completed" and response_id is not None:
+                queued_steering = upstream_control.steering_continuations.get(response_id)
+                if queued_steering is not None:
+                    # Clients can return tool results immediately on completion,
+                    # before the subsequent steer.pending notification arrives.
+                    queued_steering.required_input = completed_steering_required_input(payload)
+        if successful_boundary and continuity_state is not None and not completed_empty_prewarm:
             _record_websocket_continuity_completion(
                 continuity_state,
                 request_state=request_state,
@@ -6190,6 +6335,10 @@ class _WebSocketMixin:
             if incomplete_reason is not None:
                 error_code = incomplete_reason
                 error_message = incomplete_reason
+            if incomplete_reason == "steered":
+                status = "success"
+                error_code = None
+                error_message = None
             if event_type == "response.failed":
                 error_payload = _upstream_error_from_openai(error)
             usage = event.response.usage if event and event.response else None

@@ -254,6 +254,7 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import required_capability_metadata_values
 from app.modules.proxy.complete_transcript import (
+    _items_match_for_echo,
     _output_item_identities_match,
     _output_item_identity,
     _output_item_identity_is_valid,
@@ -8856,6 +8857,33 @@ def _merge_collected_output_items(
     return merged
 
 
+def _collected_output_items_match_terminal(
+    response: Mapping[str, JsonValue],
+    output_items: dict[int, dict[str, JsonValue]],
+) -> bool:
+    """Require terminal output to agree with streamed done items.
+
+    The upstream can carry the same output twice: once in
+    ``response.output_item.done`` events and again in ``response.completed``.
+    A non-empty terminal payload that disagrees with the collected items is a
+    malformed lifecycle and must fail closed instead of selecting one
+    representation nondeterministically.  Omitted status fields remain
+    compatible with the normal echo-matching rules.
+    """
+    if not output_items:
+        return True
+    terminal_output = response.get("output")
+    if not isinstance(terminal_output, list) or not terminal_output:
+        return True
+    collected_output = [item for _, item in sorted(output_items.items())]
+    if len(terminal_output) != len(collected_output):
+        return False
+    return all(
+        _items_match_for_echo(terminal_item, collected_item)
+        for terminal_item, collected_item in zip(terminal_output, collected_output)
+    )
+
+
 async def _normalize_public_responses_stream(
     stream: AsyncIterator[str],
     *,
@@ -9036,6 +9064,7 @@ async def _normalize_public_responses_stream(
         normalized_payload, violation_kind = _normalize_public_stream_payload(
             payload,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            output_items=output_items if enforce_openai_sdk_contract else None,
         )
         if violation_kind is not None:
             contract_violation_kind = contract_violation_kind or violation_kind
@@ -9460,6 +9489,7 @@ def _normalize_public_stream_payload(
     payload: dict[str, JsonValue],
     *,
     enforce_openai_sdk_contract: bool = True,
+    output_items: dict[int, dict[str, JsonValue]] | None = None,
 ) -> tuple[dict[str, JsonValue] | None, str | None]:
     event_type = classify_event_type(payload)
     if event_type == "response.reasoning_summary_text.done" and isinstance(payload.get("text"), str):
@@ -9522,7 +9552,7 @@ def _normalize_public_stream_payload(
                 ),
                 "invalid_json",
             )
-        normalized_response, violation_kind = _normalize_public_response_mapping(response)
+        normalized_response, violation_kind = _normalize_public_response_mapping(response, output_items)
         if normalized_response is None:
             error_kind = violation_kind or "invalid_output_item"
             return (
@@ -9733,6 +9763,9 @@ def _normalize_public_response_mapping(
     response: Mapping[str, JsonValue],
     output_items: dict[int, dict[str, JsonValue]] | None = None,
 ) -> tuple[dict[str, JsonValue] | None, str | None]:
+    if output_items and not _collected_output_items_match_terminal(response, output_items):
+        _record_public_contract_violation("invalid_output_item")
+        return None, "invalid_output_item"
     merged = _merge_collected_output_items(response, output_items or {})
     output = merged.get("output")
     if not isinstance(output, list):

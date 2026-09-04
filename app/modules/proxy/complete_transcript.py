@@ -88,6 +88,12 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
             continue
         if event_type != "response.completed":
             continue
+        if saw_completed:
+            # A durable response stream has exactly one terminal completion.
+            # Accepting a later completion would silently replace the first
+            # snapshot and let recovery replay a different transcript than
+            # the one the client observed.
+            return None
         saw_completed = True
         response = payload.get("response")
         output = response.get("output") if isinstance(response, dict) else None

@@ -1339,6 +1339,15 @@ def test_materialize_output_items_requires_terminal_completion() -> None:
     assert materialize_output_items_from_events(events) is None
 
 
+def test_materialize_output_items_rejects_duplicate_terminal_completion() -> None:
+    events = [
+        ('event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n'),
+        ('event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n'),
+    ]
+
+    assert materialize_output_items_from_events(events) is None
+
+
 @pytest.mark.parametrize("malformed_event", ["data: {not-json}\n\n", "data: []\n\n"])
 def test_materialize_output_items_rejects_malformed_data_blocks(malformed_event: str) -> None:
     events = [

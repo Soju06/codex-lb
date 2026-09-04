@@ -669,6 +669,23 @@ async def test_collect_responses_payload_preserves_non_empty_terminal_output() -
 
 
 @pytest.mark.asyncio
+async def test_collect_responses_payload_rejects_conflicting_terminal_output() -> None:
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks(
+            'data: {"type":"response.output_item.done","output_index":0,'
+            '"item":{"id":"item_a","type":"message","role":"assistant",'
+            '"content":[{"type":"output_text","text":"from-events"}]}}\n\n',
+            'data: {"type":"response.completed","response":{"id":"resp_1",'
+            '"output":[{"id":"item_b","type":"message","role":"assistant",'
+            '"content":[{"type":"output_text","text":"from-terminal"}]}]}}\n\n',
+        )
+    )
+
+    body = result.model_dump(mode="json", exclude_none=True)
+    assert body["error"]["code"] == "invalid_output_item"
+
+
+@pytest.mark.asyncio
 async def test_collect_responses_payload_captures_turn_state_metadata_before_failed_response() -> None:
     captured_headers: dict[str, str] = {}
 
@@ -1430,7 +1447,7 @@ async def test_normalize_public_responses_stream_preserves_non_empty_terminal_ou
                     'data: {"type":"response.completed","sequence_number":2,'
                     '"response":{"id":"resp_1","status":"completed",'
                     '"output":[{"id":"item_b","type":"message","role":"assistant",'
-                    '"content":[{"type":"output_text","text":"b"}]}]}}\n\n'
+                    '"content":[{"type":"output_text","text":"a"}]}]}}\n\n'
                 ),
             )
         )
@@ -1447,14 +1464,13 @@ async def test_normalize_public_responses_stream_preserves_non_empty_terminal_ou
             "id": "item_b",
             "type": "message",
             "role": "assistant",
-            "content": [{"type": "output_text", "text": "b"}],
+            "content": [{"type": "output_text", "text": "a"}],
         }
     ]
 
 
 @pytest.mark.asyncio
-async def test_normalize_public_responses_stream_preserves_conflicting_terminal_output() -> None:
-    """Non-empty terminal output is forwarded unchanged."""
+async def test_normalize_public_responses_stream_rejects_conflicting_terminal_output() -> None:
     blocks = [
         block
         async for block in proxy_api_module._normalize_public_responses_stream(
@@ -1479,20 +1495,14 @@ async def test_normalize_public_responses_stream_preserves_conflicting_terminal_
     ]
 
     payloads = [proxy_api_module._parse_sse_payload(b) for b in blocks]
-    completed = payloads[-1]
-    assert completed is not None
-    assert completed.get("type") == "response.completed"
-    response = completed["response"]
+    failed = payloads[-1]
+    assert failed is not None
+    assert failed.get("type") == "response.failed"
+    response = failed["response"]
     assert isinstance(response, dict)
-    assert response["output"] == [
-        {
-            "id": "msg_terminal",
-            "type": "message",
-            "role": "assistant",
-            "status": "completed",
-            "content": [{"type": "output_text", "text": "from-terminal"}],
-        }
-    ]
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "invalid_output_item"
 
 
 @pytest.mark.asyncio

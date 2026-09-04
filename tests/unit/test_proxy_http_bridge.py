@@ -479,6 +479,8 @@ async def test_submit_abandoned_operation_returns_full_history_recovery_without_
     rollback_call = rollback_recovery_attempt.await_args
     assert rollback_call is not None
     assert rollback_call.kwargs["session_id"] == session.durable_session_id
+    assert rollback_call.kwargs["instance_id"] == "instance-abandoned-operation"
+    assert rollback_call.kwargs["owner_epoch"] == session.durable_owner_epoch
     assert rollback_call.kwargs["request_fingerprint"] == "recovery-attempt-abandoned-operation"
 
 

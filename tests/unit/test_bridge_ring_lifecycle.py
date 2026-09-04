@@ -3079,6 +3079,78 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_state", ("completed", "incomplete"))
+async def test_sweep_never_abandons_terminal_rows_awaiting_spool_finalization(
+    async_session_factory: Callable[[], AsyncSession],
+    terminal_state: str,
+) -> None:
+    """The two-phase terminal write is fenced by state, not by the batcher set.
+
+    ``flush_operation`` drops the operation from the in-memory protection set
+    before awaiting ``finalize_operation_event_spool``. That gap is safe
+    because the terminal state has already landed by then and the sweep only
+    selects ``unknown``/``acknowledged`` rows; even a fully unprotected,
+    ownerless, long-inactive terminal row must survive the sweep so the
+    pending ``event_spool_complete`` marker still has a row to land on.
+    """
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-terminal-finalize",
+            session_key_value=f"sid-terminal-finalize-{terminal_state}",
+        )
+        fingerprint = durable_bridge_hash(f"terminal-finalize-{terminal_state}")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-finalize",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        # Phase one of the terminal write has landed; phase two (the
+        # ``event_spool_complete`` marker) is still in flight. Age the row
+        # well past any cutoff and release the owner so nothing except the
+        # state predicate stands between it and the sweep.
+        await session.execute(
+            update(HttpBridgeOperationRecord)
+            .where(HttpBridgeOperationRecord.operation_id == operation_id)
+            .values(
+                state=terminal_state,
+                event_spool_complete=False,
+                updated_at=utcnow() - timedelta(hours=3),
+            )
+        )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == claim.id)
+            .values(owner_instance_id=None, lease_expires_at=utcnow() - timedelta(minutes=5))
+        )
+        await session.commit()
+
+        sweep = await repository.abandon_stale_operations(
+            cutoff=utcnow() - timedelta(minutes=30),
+            lease_expired_before=utcnow() - timedelta(seconds=30),
+            protected_operation_ids=(),
+        )
+        assert sweep.abandonments == ()
+
+        row = await session.scalar(
+            select(HttpBridgeOperationRecord).where(HttpBridgeOperationRecord.operation_id == operation_id)
+        )
+        assert row is not None
+        assert row.state == terminal_state
+        assert row.event_spool_complete is False
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_abandoned_chunk_operation_fences_late_owner_chunk_writers(
     async_session_factory: Callable[[], AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

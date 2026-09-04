@@ -314,6 +314,20 @@ async def test_native_direct_adapter_classifies_helper_pong_timeout() -> None:
 
     assert message.kind == "error"
     assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    assert message.transport_ended is True
+
+
+@pytest.mark.asyncio
+async def test_native_direct_adapter_marks_peer_close_as_transport_ended() -> None:
+    class NativeConnection(_FakeNativeWebSocket):
+        async def receive(self) -> NativeWebSocketMessage:
+            return NativeWebSocketMessage(kind="close", close_code=1006)
+
+    message = await NativeUpstreamWebSocket(cast(Any, NativeConnection())).receive()
+
+    assert message.kind == "close"
+    assert message.close_code == 1006
+    assert message.transport_ended is True
 
 
 @pytest.mark.asyncio

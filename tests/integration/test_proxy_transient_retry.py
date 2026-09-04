@@ -705,7 +705,7 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
 @pytest.mark.asyncio
 async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_client, monkeypatch):
     """Connect-phase 429/usage_limit_reached on A should fail over to B before any downstream event."""
-    await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")
+    account_a_id = await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")
     await _import_account(async_client, "acc_stream_429_b", "stream429b@example.com")
 
     seen_account_ids: list[str | None] = []
@@ -733,6 +733,11 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
     assert len(completed) == 1
     assert len(failed) == 0
     assert seen_account_ids[:2] == ["acc_stream_429_a", "acc_stream_429_b"]
+
+    async with SessionLocal() as session:
+        exhausted_account = await session.get(Account, account_a_id)
+        assert exhausted_account is not None
+        assert exhausted_account.status == AccountStatus.QUOTA_EXCEEDED
 
 
 @pytest.mark.asyncio

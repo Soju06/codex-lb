@@ -39,7 +39,7 @@ def apply_usage_quota(
                     reset_at = None
             else:
                 used_percent = 100.0
-                if infer_status_from_usage:
+                if status == AccountStatus.QUOTA_EXCEEDED or infer_status_from_usage:
                     if secondary_reset is not None:
                         reset_at = secondary_reset
                     status = AccountStatus.QUOTA_EXCEEDED

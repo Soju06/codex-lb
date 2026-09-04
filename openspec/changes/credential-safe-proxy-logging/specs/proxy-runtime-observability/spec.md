@@ -3,7 +3,8 @@
 ### Requirement: Rendered log records redact URL userinfo and keyed secrets
 
 Every log record rendered by the application's text, access, and JSON
-formatters MUST have `scheme://user:password@` URL userinfo replaced with
+formatters MUST have URL userinfo, in both the `scheme://user:password@` and
+the username-only `scheme://user@` forms, replaced with
 `scheme://[REDACTED]@` and `Basic <token>` authorization tokens (in the
 `Basic`, `basic` and `BASIC` scheme spellings)
 (a reversible encoding of `user:password`, as carried in aiohttp proxy-error
@@ -13,8 +14,10 @@ text. Structured extra keys MUST be redacted like values. Records at WARNING
 level or higher MUST additionally have keyed secrets (`password=`, `token=`,
 `api_key=`, bearer, basic and authorization values in any letter case, JSON
 secret fields embedded in strings, and structured extra fields whose key names
-a secret, whatever the value type) redacted. Redaction MUST never raise: on
-failure the record is emitted unchanged, and structured extras that are cyclic,
+a secret, whatever the value type) redacted. Redaction MUST never raise and
+MUST fail closed: if a redaction pass fails, the affected text is replaced with
+a `[REDACTED: log redaction failed]` placeholder and the record is still
+emitted with its timestamp, level and logger; structured extras that are cyclic,
 pathologically deep, or unprintable MUST still be emitted with redaction
 applied to every finite, printable part. Application startup MUST route
 `warnings.warn` output through the same log handlers. Log records that contain
@@ -32,6 +35,12 @@ no secret patterns MUST render byte-identically to the unredacted rendering.
 - **GIVEN** a proxy password containing an RFC 3986 sub-delim such as `'`, which yarl leaves unencoded in the URL userinfo, or a raw environment proxy string that is not percent-encoded at all
 - **WHEN** the URL is rendered in any log record at any level
 - **THEN** the record contains `scheme://[REDACTED]@host:port` and neither the raw nor the percent-encoded password
+
+#### Scenario: Username-only URL userinfo is redacted
+
+- **GIVEN** a URL whose userinfo carries only a username (a token used as the username, `scheme://user@host:port`) with no `:password` part
+- **WHEN** the URL is rendered in any log record at any level, text or JSON
+- **THEN** the record contains `scheme://[REDACTED]@host:port` and the username does not appear
 
 #### Scenario: Proxy error repr with a Basic token is masked
 
@@ -53,10 +62,11 @@ no secret patterns MUST render byte-identically to the unredacted rendering.
 - **WHEN** a record such as the one-time bootstrap token banner contains no URL userinfo or keyed secret pattern
 - **THEN** the rendered output is byte-identical to the unredacted rendering
 
-#### Scenario: Redaction failure never breaks logging
+#### Scenario: Redaction failure never breaks logging and fails closed
 
-- **WHEN** the redaction pattern raises while rendering a record
-- **THEN** the record is emitted with its original text
+- **WHEN** a redaction pass raises while rendering a record
+- **THEN** the record is still emitted, in text and JSON, with its timestamp, level and logger
+- **AND** the affected text is rendered as `[REDACTED: log redaction failed]` rather than the original text
 
 #### Scenario: Cyclic or unprintable structured extras never drop the record
 

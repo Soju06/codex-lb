@@ -29,6 +29,10 @@ _SENSITIVE_LOG_VALUE_PATTERNS = (
 # regex itself is case-insensitive once a precheck hits.
 _BASIC_TOKEN_PATTERN = re.compile(r"(?i)(basic\s+)[A-Za-z0-9+/=]+")
 _BASIC_TOKEN_PRECHECKS = ("Basic ", "basic ", "BASIC ")
+# Fail-closed rendering when a redaction pass itself raises: the record is
+# still emitted (timestamp/level/logger intact) but never with the original,
+# possibly credential-bearing text.
+_REDACTION_FAILED_PLACEHOLDER = "[REDACTED: log redaction failed]"
 _JSON_SENSITIVE_LOG_VALUE_PATTERN = re.compile(
     r'(?i)("(?:password|passwd|pwd|token|secret|api[_-]?key|authorization)"\s*:\s*")'
     r'(?:\\.|[^"\\])*(")'
@@ -101,8 +105,8 @@ def redact_rendered_log_text(text: str, *, keyed_secrets: bool = True) -> str:
     pass to the substring-precheck patterns (URL userinfo and ``Basic <token>``
     in its ``Basic``/``basic``/``BASIC`` spellings); formatters use it for INFO and lower records because the
     keyed patterns cost tens of microseconds on long hot-path lines. Never
-    raises: any failure returns the input unchanged so logging itself cannot
-    break.
+    raises: if a pass fails the text is replaced with a fail-closed placeholder
+    so logging itself cannot break and the original text is never emitted.
     """
     try:
         redacted = text
@@ -118,7 +122,7 @@ def redact_rendered_log_text(text: str, *, keyed_secrets: bool = True) -> str:
                 return _redact_secret_patterns(redacted)
         return redacted
     except Exception:
-        return text
+        return _REDACTION_FAILED_PLACEHOLDER
 
 
 def _redact_record_text(record: logging.LogRecord, text: str) -> str:
@@ -161,7 +165,12 @@ class _RedactingFormatterMixin(logging.Formatter):
     """Redact the fully rendered record (message, exception text, stack info)."""
 
     def format(self, record: logging.LogRecord) -> str:
-        return _redact_record_text(record, super().format(record))
+        rendered = _redact_record_text(record, super().format(record))
+        if rendered is _REDACTION_FAILED_PLACEHOLDER:
+            # Fail closed but keep a secret-free prefix (time, level, logger)
+            # so the line still says when and where it came from.
+            return f"{self.formatTime(record, self.datefmt)} {record.levelname} {record.name} {rendered}"
+        return rendered
 
 
 class UtcDefaultFormatter(_RedactingFormatterMixin, DefaultFormatter):

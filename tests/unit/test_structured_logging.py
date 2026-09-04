@@ -399,16 +399,42 @@ def test_rendered_exception_traceback_redacts_userinfo(monkeypatch, log_format):
     assert "RuntimeError: http://[REDACTED]@h/" in output
 
 
-def test_redact_rendered_log_text_never_throws(monkeypatch, text_formatter):
+def test_redact_rendered_log_text_never_throws_and_fails_closed(monkeypatch, text_formatter, json_formatter):
     class _Exploding:
         def sub(self, *args, **kwargs):
             raise RuntimeError("regex engine failure")
 
     monkeypatch.setattr(runtime_logging, "_USERINFO_PATTERN", _Exploding())
     line = _connection_key_line(runtime_basic_auth_url("u", "pw", _PROXY_AUTHORITY))
+    placeholder = runtime_logging._REDACTION_FAILED_PLACEHOLDER
 
-    assert runtime_logging.redact_rendered_log_text(line) == line
-    assert _render(text_formatter, _record(line)).endswith(line + "\n")
+    assert runtime_logging.redact_rendered_log_text(line) == placeholder
+
+    text_output = _render(text_formatter, _record(line))
+    assert text_output.endswith(placeholder + "\n")
+    assert "pw" not in text_output
+    assert " ERROR asyncio " in text_output
+
+    json_output = json.loads(_render(json_formatter, _record(line)))
+    assert json_output["message"] == placeholder
+    assert json_output["level"] == "ERROR"
+    assert json_output["logger"] == "asyncio"
+    assert "pw" not in json.dumps(json_output)
+
+
+@pytest.mark.parametrize("level", [logging.INFO, logging.ERROR])
+def test_username_only_url_userinfo_is_redacted(text_formatter, json_formatter, level):
+    # Token-as-username URLs (``https://ghp_xxx@host``) carry the secret without a
+    # ``:password`` part; the userinfo pattern must not require the colon.
+    line = "proxy=URL('http://tok3n-as-user@proxy.test:8080') status=failed"
+    record = _record(line, level=level)
+
+    text_output = _render(text_formatter, record)
+    json_output = json.loads(_render(json_formatter, record))
+
+    assert "tok3n-as-user" not in text_output
+    assert "proxy=URL('http://[REDACTED]@proxy.test:8080') status=failed" in text_output
+    assert json_output["message"] == "proxy=URL('http://[REDACTED]@proxy.test:8080') status=failed"
 
 
 def test_credential_free_info_line_skips_regex_passes(monkeypatch, text_formatter):

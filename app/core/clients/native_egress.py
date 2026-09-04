@@ -209,6 +209,7 @@ class NativeWebSocketMessage:
     event_type: str | None = None
     payload: dict[str, JsonValue] | None = None
     routing: NativeWebSocketRoutingMetadata | None = None
+    close_frame_received: bool = False
 
 
 class NativeEgressClient(Protocol):
@@ -635,16 +636,20 @@ class NativeEgressWebSocket:
                 if event_type == "websocket_close":
                     code = item.get("code")
                     reason = item.get("reason")
+                    close_frame_received = item.get("close_frame_received", code is not None)
                     if code is not None and not isinstance(code, int):
                         raise NativeEgressProtocolError("native websocket close code is invalid")
                     if reason is not None and not isinstance(reason, str):
                         raise NativeEgressProtocolError("native websocket close reason is invalid")
+                    if not isinstance(close_frame_received, bool):
+                        raise NativeEgressProtocolError("native websocket close frame provenance is invalid")
                     self._remote_closed = True
                     self._queue_message(
                         NativeWebSocketMessage(
                             kind="close",
                             close_code=code,
                             close_reason=reason,
+                            close_frame_received=close_frame_received,
                         )
                     )
                     terminal_failure = NativeEgressTransportError(

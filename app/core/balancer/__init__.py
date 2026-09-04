@@ -1,4 +1,5 @@
 from app.core.balancer.logic import (
+    CAPACITY_PLAN_ALIASES,
     ERROR_BACKOFF_THRESHOLD,
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
@@ -35,6 +36,7 @@ from app.core.balancer.logic import (
 )
 
 __all__ = [
+    "CAPACITY_PLAN_ALIASES",
     "PERMANENT_FAILURE_CODES",
     "HEALTH_TIER_DRAINING",
     "HEALTH_TIER_HEALTHY",

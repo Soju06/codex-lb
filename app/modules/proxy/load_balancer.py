@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from app.core import usage as usage_core
 from app.core.balancer import (
+    CAPACITY_PLAN_ALIASES,
     ERROR_BACKOFF_THRESHOLD,
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
@@ -1943,7 +1944,7 @@ class LoadBalancer:
             error_count=runtime.error_count,
             deactivation_reason=account.deactivation_reason,
             plan_type=account.plan_type,
-            capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
+            capacity_credits=_capacity_for_routing_plan(account.plan_type, "secondary"),
             routing_policy=routing_policy,
             ignore_standard_quota=False,
         )
@@ -2358,7 +2359,7 @@ def _state_from_account(
             if quota_available and _usage_entry_recorded_after_block(early_freshness_entry, effective_blocked_at):
                 rate_limited_cooldown_deadline = None
 
-    if usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0 and (
+    if _capacity_for_routing_plan(account.plan_type, "primary") == 0.0 and (
         account.status != AccountStatus.RATE_LIMITED
         or (
             rate_limited_cooldown_deadline is None
@@ -2547,7 +2548,7 @@ def _state_from_account(
     long_window_key = "secondary"
     if effective_secondary_entry is not None and effective_secondary_entry.window == "monthly":
         long_window_key = "monthly"
-    capacity_credits = usage_core.capacity_for_plan(account.plan_type, long_window_key) or 0.0
+    capacity_credits = _capacity_for_routing_plan(account.plan_type, long_window_key) or 0.0
     if capacity_credits > 0.0 and runtime.leased_tokens > 0:
         lease_token_weight = getattr(settings, "proxy_account_lease_token_weight", 1.0)
         leased_token_pressure_pct = runtime.leased_tokens * lease_token_weight / capacity_credits * 100.0
@@ -2599,7 +2600,7 @@ def _normalize_usage_inputs(
     if (
         effective_secondary_entry is not None
         and effective_secondary_entry.window == "monthly"
-        and usage_core.capacity_for_plan(account.plan_type, "monthly") is None
+        and _capacity_for_routing_plan(account.plan_type, "monthly") is None
     ):
         effective_secondary_entry = None
     primary_row = usage_history_to_window_row(primary_entry) if primary_entry is not None else None
@@ -2646,13 +2647,20 @@ def _normalize_usage_inputs(
     )
 
 
+def _capacity_for_routing_plan(plan_type: str | None, window: str) -> float | None:
+    """Resolve rate-limit plan aliases before applying routing capacities."""
+    normalized_plan = (plan_type or "").strip().lower()
+    capacity_plan = CAPACITY_PLAN_ALIASES.get(normalized_plan, plan_type)
+    return usage_core.capacity_for_plan(capacity_plan, window)
+
+
 def _health_tier_primary_used(*, plan_type: str | None, primary_used: float | None) -> float | None:
     """Drop primary usage when the plan has no primary-window capacity."""
     # Storage may retain a legacy/synthetic primary row for free accounts. The
     # health state machine must follow plan capacity, not the row's slot, or
     # both ordinary routing and Force Probe can drain an account on a quota it
     # does not have.
-    if usage_core.capacity_for_plan(plan_type, "primary") == 0.0:
+    if _capacity_for_routing_plan(plan_type, "primary") == 0.0:
         return None
     return primary_used
 
@@ -2792,7 +2800,7 @@ def _select_long_window_entry(
     monthly_entry: UsageHistory | None,
     secondary_entry: UsageHistory | AdditionalUsageHistory | None,
 ) -> UsageHistory | AdditionalUsageHistory | None:
-    if monthly_entry is not None and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None:
+    if monthly_entry is not None and _capacity_for_routing_plan(account.plan_type, "monthly") is not None:
         return monthly_entry
     return secondary_entry
 
@@ -2806,7 +2814,7 @@ def _rate_limited_freshness_entry(
     if (
         long_window_entry is not None
         and long_window_entry.window == "monthly"
-        and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None
+        and _capacity_for_routing_plan(account.plan_type, "monthly") is not None
     ):
         return long_window_entry
     if primary_entry is None:

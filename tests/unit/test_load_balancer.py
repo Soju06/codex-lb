@@ -2907,7 +2907,10 @@ def test_state_from_account_zero_capacity_recovery_respects_recent_blocked_at_fl
 
 
 @pytest.mark.parametrize("primary_used", [None, 100.0], ids=["missing-primary", "synthetic-exhausted-primary"])
-def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_block_usage(monkeypatch, primary_used):
+@pytest.mark.parametrize("plan_type", ["free", "guest", "go", "free_workspace", "quorum", "unknown"])
+def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_block_usage(
+    monkeypatch, primary_used, plan_type
+):
     # Once the local cooldown elapsed, fresh applicable quota may recover the
     # marking replica early. A synthetic primary row must not block a plan
     # with zero primary-window capacity.
@@ -2921,7 +2924,7 @@ def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_blo
         status=AccountStatus.RATE_LIMITED,
         reset_at=int(now + 20),
         blocked_at=int(blocked_at),
-        plan_type="free",
+        plan_type=plan_type,
     )
     monthly_entry = _make_test_usage(
         window="monthly",

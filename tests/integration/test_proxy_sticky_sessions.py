@@ -790,6 +790,8 @@ async def test_codex_goal_restart_cannot_retire_owner_outside_api_key_scope(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error_code", ["rate_limit_exceeded", "usage_limit_reached"])
 async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monkeypatch, error_code):
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
     await _set_routing_settings(async_client, sticky_threads_enabled=True)
     encryptor = TokenEncryptor()
     now = utcnow()
@@ -893,12 +895,33 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
             reset_at=now_epoch + 5 * 24 * 3600,
             window_minutes=10080,
         )
+        sticky_repo = StickySessionsRepository(session)
+        await sticky_repo.upsert(
+            "thread_rl",
+            acc_a.id,
+            kind=StickySessionKind.PROMPT_CACHE,
+        )
+        assert (
+            await sticky_repo.get_account_id(
+                "thread_rl",
+                kind=StickySessionKind.PROMPT_CACHE,
+            )
+            == acc_a.id
+        )
     seen.clear()
     get_account_selection_cache().invalidate()
     response = await async_client.post("/backend-api/codex/responses", json=payload)
     assert response.status_code == 200
     assert "response.completed" in response.text
     assert seen == [acc_b.id]
+    async with SessionLocal() as session:
+        assert (
+            await StickySessionsRepository(session).get_account_id(
+                "thread_rl",
+                kind=StickySessionKind.PROMPT_CACHE,
+            )
+            == acc_b.id
+        )
 
 
 @pytest.mark.asyncio

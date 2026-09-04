@@ -407,6 +407,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _pop_terminal_websocket_request_state,
     _prepare_websocket_request_state_for_account_switch,
     _prepare_websocket_request_state_for_auth_replay,
+    _record_upstream_websocket_failure_metadata,
     _record_websocket_continuity_completion,
     _record_websocket_responses_lite_acceptance,
     _record_websocket_stale_anchor_failure,
@@ -1257,6 +1258,7 @@ async def _process_upstream_websocket_transport_end(
             _facade().logger.debug("Failed to close upstream websocket for replay", exc_info=True)
         return True
 
+    _record_upstream_websocket_failure_metadata(message, reader_owned)
     sequenced_downstream_replay_refused = "sequenced_downstream_frame" in replay_refusal_reasons
     await proxy._fail_pending_websocket_requests(
         account=account,

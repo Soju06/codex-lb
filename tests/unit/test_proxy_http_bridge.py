@@ -28632,6 +28632,59 @@ async def test_http_bridge_abrupt_eventless_drop_stays_account_neutral_and_recor
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_native_receive_failure_copies_request_log_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-native-bridge-failure",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+    )
+    session = _make_bridge_session(
+        key_value="bridge-native-failure",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(
+                return_value=UpstreamWebSocketMessage(
+                    kind="error",
+                    error="Upstream websocket receive failed",
+                    failure_phase="transport",
+                    failure_detail="native_websocket_phase=transport",
+                )
+            ),
+            close=AsyncMock(),
+        ),
+    )
+    observed_metadata: list[tuple[str | None, str | None]] = []
+
+    async def fail_reader(
+        target_session: proxy_service._HTTPBridgeSession,
+        **_kwargs: object,
+    ) -> bool:
+        assert target_session is session
+        observed_metadata.append((request_state.failure_phase_override, request_state.failure_detail_override))
+        target_session.closed = True
+        return True
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_fail_http_bridge_reader_and_maybe_retire", fail_reader)
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    assert observed_metadata == [("transport", "native_websocket_phase=transport")]
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_abrupt_drop_after_response_events_still_penalizes_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

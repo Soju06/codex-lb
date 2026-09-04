@@ -5,7 +5,7 @@ import json
 import sys
 import time
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -1917,6 +1917,25 @@ def _upstream_websocket_disconnect_message(message: UpstreamWebSocketMessage) ->
     if message.close_code is not None:
         return f"Upstream websocket closed before response.completed (close_code={message.close_code})"
     return "Upstream websocket closed before response.completed"
+
+
+def _record_upstream_websocket_failure_metadata(
+    message: UpstreamWebSocketMessage,
+    request_states: Iterable[_WebSocketRequestState],
+) -> None:
+    """Copy bounded transport provenance to terminal request-log state."""
+
+    if message.kind != "error":
+        return
+    failure_phase = getattr(message, "failure_phase", None)
+    failure_detail = getattr(message, "failure_detail", None)
+    if failure_phase is None and failure_detail is None:
+        return
+    for request_state in request_states:
+        if failure_phase is not None and request_state.failure_phase_override is None:
+            request_state.failure_phase_override = failure_phase
+        if failure_detail is not None and request_state.failure_detail_override is None:
+            request_state.failure_detail_override = failure_detail
 
 
 def _websocket_receive_timeout_for_pending_requests(

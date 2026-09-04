@@ -812,6 +812,46 @@ for line in sys.stdin:
 
 
 @pytest.mark.asyncio
+async def test_native_websocket_message_queue_overflow_preserves_bounded_diagnostic(tmp_path: Path) -> None:
+    helper = tmp_path / "native-helper"
+    _write_helper(
+        helper,
+        """#!/usr/bin/env python3
+import json
+import sys
+command = json.loads(sys.stdin.readline())
+request_id = command["request_id"]
+print(json.dumps({"type": "websocket_open", "request_id": request_id, "status": 101, "headers": []}), flush=True)
+for index in range(65):
+    print(json.dumps({
+        "type": "websocket_text", "request_id": request_id, "text": str(index),
+    }), flush=True)
+for line in sys.stdin:
+    command = json.loads(line)
+    if command["type"] == "cancel":
+        print(json.dumps({"type": "cancelled", "request_id": request_id}), flush=True)
+""",
+    )
+    client = SubprocessNativeEgressClient(helper)
+    websocket = await client.websocket(
+        NativeWebSocketRequest(
+            url="wss://example.test/codex/responses",
+            headers={},
+            connect_timeout_seconds=2,
+            max_message_bytes=1024,
+        )
+    )
+
+    await asyncio.sleep(0.05)
+    with pytest.raises(NativeEgressTransportError) as exc_info:
+        await asyncio.wait_for(websocket.receive(), timeout=2.0)
+
+    assert exc_info.value.failure_phase == "consumer_backpressure"
+    assert exc_info.value.failure_detail == "message_queue_depth=64;message_queue_limit=64"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_native_websocket_helper_death_fails_pending_send_without_replay(tmp_path: Path) -> None:
     helper = tmp_path / "native-helper"
     _write_helper(

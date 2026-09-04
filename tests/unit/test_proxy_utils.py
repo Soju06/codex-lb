@@ -45,6 +45,7 @@ from app.core.clients.proxy_websocket import (
     UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
     CodexUpstreamWebSocket,
     UpstreamWebSocket,
+    UpstreamWebSocketMessage,
     UpstreamWebSocketTransportError,
     WebsocketsUpstreamWebSocket,
 )
@@ -34528,6 +34529,126 @@ async def test_relay_upstream_websocket_ordinary_receive_failure_is_stream_incom
     assert handle_stream_error_args is not None
     assert handle_stream_error_args.args[0] is account
     assert handle_stream_error_args.args[2] == "stream_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_relay_native_receive_failure_persists_metadata_without_changing_public_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_native_transport",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hi"}',
+        response_create_sent_at=0.0,
+        awaiting_response_created=True,
+        downstream_visible=True,
+    )
+    upstream = _QueuedTestUpstreamWebSocket(
+        [
+            SimpleNamespace(
+                kind="error",
+                text=None,
+                data=None,
+                close_code=None,
+                error="Upstream websocket receive failed",
+                error_code=None,
+                failure_phase="consumer_backpressure",
+                failure_detail="message_queue_depth=64;message_queue_limit=64",
+            )
+        ]
+    )
+    downstream = _ScriptedDownstreamWebSocket()
+
+    await service._relay_upstream_websocket_messages(
+        cast(WebSocket, downstream),
+        cast(UpstreamWebSocket, upstream),
+        account=_make_account("acc_ws_native_transport"),
+        account_id_value="acc_ws_native_transport",
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+        proxy_request_budget_seconds=5.0,
+        stream_idle_timeout_seconds=5.0,
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+
+    assert len(request_logs.calls) == 1
+    failure_log = request_logs.calls[0]
+    assert failure_log["error_code"] == "stream_incomplete"
+    assert failure_log["error_message"] == (
+        "Upstream websocket closed before response.completed: Upstream websocket receive failed"
+    )
+    assert failure_log["failure_phase"] == "consumer_backpressure"
+    assert failure_log["failure_detail"] == "message_queue_depth=64;message_queue_limit=64"
+    terminal = json.loads(downstream.sent_text[-1])
+    assert terminal["response"]["error"]["code"] == "stream_incomplete"
+    assert terminal["response"]["error"]["message"] == failure_log["error_message"]
+
+
+@pytest.mark.asyncio
+async def test_native_receive_failure_does_not_stamp_safe_precreated_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_native_safe_replay",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    monkeypatch.setattr(
+        websocket_mixin,
+        "_claim_sent_websocket_requests_for_reader",
+        AsyncMock(return_value=deque([request_state])),
+    )
+    monkeypatch.setattr(
+        websocket_mixin,
+        "_pop_replayable_precreated_websocket_request_state",
+        AsyncMock(return_value=request_state),
+    )
+    upstream = SimpleNamespace(close=AsyncMock())
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    should_stop = await websocket_mixin._process_upstream_websocket_transport_end(
+        SimpleNamespace(),
+        cast(WebSocket, SimpleNamespace()),
+        cast(UpstreamWebSocket, upstream),
+        message=UpstreamWebSocketMessage(
+            kind="error",
+            error="Upstream websocket receive failed",
+            failure_phase="transport",
+            failure_detail="native_websocket_phase=transport",
+        ),
+        account=_make_account("acc_ws_native_safe_replay"),
+        account_id_value="acc_ws_native_safe_replay",
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    assert should_stop is True
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.failure_phase_override is None
+    assert request_state.failure_detail_override is None
+    upstream.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

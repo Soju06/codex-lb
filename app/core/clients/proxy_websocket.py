@@ -191,14 +191,25 @@ class UpstreamWebSocketMessage:
     close_reason: str | None = None
     error: str | None = None
     error_code: str | None = None
+    failure_phase: str | None = None
+    failure_detail: str | None = None
 
 
 class UpstreamWebSocketTransportError(RuntimeError):
     """Credential-safe post-connect transport failure with stable classification."""
 
-    def __init__(self, message: str, *, error_code: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str,
+        failure_phase: str | None = None,
+        failure_detail: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.error_code = error_code
+        self.failure_phase = failure_phase
+        self.failure_detail = failure_detail
 
 
 def _websocket_transport_error_code(exc: BaseException, *, uses_proxy: bool) -> str:
@@ -432,10 +443,18 @@ class NativeUpstreamWebSocket:
             message = await self._websocket.receive()
         except NativeEgressError as exc:
             error = _native_websocket_transport_error(exc, operation="receive")
+            logger.warning(
+                "native_websocket_receive_failed request_id=%s failure_phase=%s failure_detail=%s",
+                get_request_id(),
+                error.failure_phase,
+                error.failure_detail,
+            )
             return UpstreamWebSocketMessage(
                 kind="error",
                 error=str(error),
                 error_code=_relay_receive_error_code(error.error_code),
+                failure_phase=error.failure_phase,
+                failure_detail=error.failure_detail,
             )
         return UpstreamWebSocketMessage(
             kind=message.kind,
@@ -458,15 +477,24 @@ def _native_websocket_transport_error(
     operation: str,
 ) -> UpstreamWebSocketTransportError:
     phase = exc.failure_phase if isinstance(exc, NativeEgressTransportError) else "protocol"
+    detail = (
+        exc.failure_detail
+        if isinstance(exc, NativeEgressTransportError) and exc.failure_detail
+        else f"native_websocket_phase={phase}"
+    )
     if phase == "liveness_timeout":
         return UpstreamWebSocketTransportError(
             f"Upstream websocket {operation} failed",
             error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+            failure_phase=phase,
+            failure_detail=detail,
         )
     account_neutral = phase in {"helper_exit", "helper_read", "helper_write", "shutdown"}
     return UpstreamWebSocketTransportError(
         f"Upstream websocket {operation} failed",
         error_code=PROCESS_NETWORK_UNAVAILABLE_CODE if account_neutral else "upstream_unavailable",
+        failure_phase=phase,
+        failure_detail=detail,
     )
 
 

@@ -55,6 +55,7 @@ class NativeEgressTransportError(NativeEgressError):
         message: str,
         *,
         failure_phase: str = "request",
+        failure_detail: str | None = None,
         retryable_same_contract: bool = False,
         is_tls_verification_failure: bool = False,
         status_code: int | None = None,
@@ -63,6 +64,7 @@ class NativeEgressTransportError(NativeEgressError):
     ) -> None:
         super().__init__(message)
         self.failure_phase = failure_phase
+        self.failure_detail = failure_detail
         self.retryable_same_contract = retryable_same_contract
         self.is_tls_verification_failure = is_tls_verification_failure
         self.status_code = status_code
@@ -438,12 +440,16 @@ class NativeEgressWebSocket:
         try:
             self._messages.put_nowait(message)
         except asyncio.QueueFull as exc:
+            queue_depth = self._messages.qsize()
             while not self._messages.empty():
                 with contextlib.suppress(asyncio.QueueEmpty):
                     self._messages.get_nowait()
             raise NativeEgressTransportError(
                 "native websocket consumer exceeded the bounded message queue",
                 failure_phase="consumer_backpressure",
+                failure_detail=(
+                    f"message_queue_depth={queue_depth};message_queue_limit={_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT}"
+                ),
             ) from exc
 
     def _queue_terminal(self, failure: BaseException) -> None:

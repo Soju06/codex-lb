@@ -35,6 +35,7 @@ from app.core.clients.proxy_websocket import (
     connect_responses_websocket,
 )
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
+from app.modules.proxy._service.websocket.helpers import _record_upstream_websocket_failure_metadata
 from tests.unit._proxy_test_helpers import runtime_basic_auth_url
 
 
@@ -310,6 +311,62 @@ async def test_native_direct_adapter_classifies_helper_pong_timeout() -> None:
 
     assert message.kind == "error"
     assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    assert message.failure_phase == "liveness_timeout"
+    assert message.failure_detail == "native_websocket_phase=liveness_timeout"
+
+
+@pytest.mark.asyncio
+async def test_native_direct_adapter_preserves_receive_failure_provenance(caplog: pytest.LogCaptureFixture) -> None:
+    class NativeConnection(_FakeNativeWebSocket):
+        async def receive(self) -> NativeWebSocketMessage:
+            raise NativeEgressTransportError(
+                "native websocket transport failed with secret-token",
+                failure_phase="transport",
+                failure_detail="native_websocket_phase=transport",
+            )
+
+    websocket = NativeUpstreamWebSocket(cast(Any, NativeConnection()))
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.error == "Upstream websocket receive failed"
+    assert message.error_code is None
+    assert message.failure_phase == "transport"
+    assert message.failure_detail == "native_websocket_phase=transport"
+    warnings = [record for record in caplog.records if "native_websocket_receive_failed" in record.getMessage()]
+    assert len(warnings) == 1
+    assert "failure_phase=transport" in warnings[0].getMessage()
+    assert "secret-token" not in warnings[0].getMessage()
+
+
+def test_websocket_failure_metadata_preserves_specific_request_overrides() -> None:
+    existing = SimpleNamespace(
+        failure_phase_override="continuity",
+        failure_detail_override="specific",
+    )
+    empty = SimpleNamespace(
+        failure_phase_override=None,
+        failure_detail_override=None,
+    )
+
+    _record_upstream_websocket_failure_metadata(
+        proxy_websocket_module.UpstreamWebSocketMessage(kind="error"),
+        cast(Any, [existing, empty]),
+    )
+    assert existing.failure_phase_override == "continuity"
+    assert existing.failure_detail_override == "specific"
+
+    message = proxy_websocket_module.UpstreamWebSocketMessage(
+        kind="error",
+        failure_phase="consumer_backpressure",
+        failure_detail="message_queue_depth=64;message_queue_limit=64",
+    )
+    _record_upstream_websocket_failure_metadata(message, cast(Any, [existing, empty]))
+    assert existing.failure_phase_override == "continuity"
+    assert existing.failure_detail_override == "specific"
+    assert empty.failure_phase_override == "consumer_backpressure"
+    assert empty.failure_detail_override == "message_queue_depth=64;message_queue_limit=64"
 
 
 @pytest.mark.asyncio

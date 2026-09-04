@@ -270,7 +270,7 @@ def responses_input_items_are_self_contained_fresh_replay(input_items: list[Json
         if not _input_item_has_only_known_fields(item, item_type):
             return False
         call_id_value = item.get("call_id")
-        call_id = call_id_value if isinstance(call_id_value, str) and call_id_value else None
+        call_id = cast(str, call_id_value) if _is_nonblank_string(call_id_value) else None
         if item_type in _TOOL_CALL_TYPES:
             if (
                 call_id is None
@@ -412,7 +412,15 @@ def responses_input_suffix_matches_pending_tool_calls(
         allow_historical_developer_interleave=True,
         canonical_lite_developer_index=canonical_lite_developer_index,
     )
-    if prefix_state is None or prefix_state[0] or prefix_state[1] & pending_tool_calls.keys():
+    if prefix_state is None:
+        return False
+    prefix_pending_calls, prefix_seen_call_ids = prefix_state
+    expected = dict(pending_tool_calls)
+    prefix_pending = {call_id: call_type for call_type, call_id in prefix_pending_calls}
+    if prefix_pending:
+        if prefix_pending != expected:
+            return False
+    elif prefix_seen_call_ids & pending_tool_calls.keys():
         return False
     suffix = input_items[stored_count:]
     if (
@@ -429,19 +437,78 @@ def responses_input_suffix_matches_pending_tool_calls(
         for item in suffix
     ):
         return False
-    if not responses_input_items_are_self_contained_fresh_replay(suffix):
+    if not prefix_pending and not responses_input_items_are_self_contained_fresh_replay(suffix):
         return False
     suffix_calls: dict[str, str] = {}
     suffix_outputs: dict[str, str] = {}
     for item in cast(list[dict[str, JsonValue]], suffix):
         item_type = cast(str, item["type"])
-        call_id = cast(str, item["call_id"])
+        call_id = item.get("call_id")
+        if not _is_nonblank_string(call_id):
+            return False
+        call_id_str = cast(str, call_id)
         if item_type in _TOOL_CALL_TYPES:
-            suffix_calls[call_id] = item_type
+            if call_id_str in suffix_calls:
+                return False
+            suffix_calls[call_id_str] = item_type
         else:
-            suffix_outputs[call_id] = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE[item_type]
-    expected = dict(pending_tool_calls)
+            if call_id_str in suffix_outputs:
+                return False
+            if "id" in item or set(item) - _ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS[item_type]:
+                return False
+            if (
+                not _internal_chat_message_metadata_is_account_neutral(item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD))
+                or not _caller_is_self_contained(item)
+                or not _tool_output_is_self_contained(item_type, item)
+            ):
+                return False
+            suffix_outputs[call_id_str] = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE[item_type]
+    if prefix_pending:
+        return not suffix_calls and suffix_outputs == expected
     return suffix_calls == expected and suffix_outputs == expected
+
+
+def responses_input_suffix_has_response_owned_prefix_settling_output_ids(
+    input_items: list[JsonValue],
+    *,
+    stored_count: int,
+    pending_tool_calls: Mapping[str, str],
+    canonical_lite_developer_index: int | None = None,
+) -> bool:
+    """Return whether raw prefix-settling outputs carry response-owned IDs."""
+
+    if stored_count <= 0 or len(input_items) <= stored_count or not pending_tool_calls:
+        return False
+    prefix_state = _direct_tool_call_prefix_state(
+        input_items[:stored_count],
+        allow_historical_developer_interleave=True,
+        canonical_lite_developer_index=canonical_lite_developer_index,
+    )
+    if prefix_state is None:
+        return False
+    prefix_pending_calls, _prefix_seen_call_ids = prefix_state
+    prefix_pending = {call_id: call_type for call_type, call_id in prefix_pending_calls}
+    expected = dict(pending_tool_calls)
+    if prefix_pending != expected:
+        return False
+    suffix = input_items[stored_count:]
+    if (
+        len(suffix) == 3
+        and isinstance(suffix[1], dict)
+        and _fresh_developer_message_is_transparent(suffix[1])
+        and _fresh_developer_interleave_is_bounded(suffix, index=1)
+    ):
+        suffix = [suffix[0], suffix[2]]
+    for item in suffix:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        call_type = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE.get(item_type if isinstance(item_type, str) else "")
+        call_id = item.get("call_id")
+        if call_type is not None and _is_nonblank_string(call_id) and expected.get(cast(str, call_id)) == call_type:
+            if "id" in item:
+                return True
+    return False
 
 
 def _direct_tool_call_prefix_state(
@@ -490,10 +557,11 @@ def _direct_tool_call_prefix_state(
             if item.get("status") not in (None, "completed"):
                 return None
             call_id = item.get("call_id")
-            if not isinstance(call_id, str) or not call_id or call_id in seen_call_ids:
+            if not _is_nonblank_string(call_id) or call_id in seen_call_ids:
                 return None
-            seen_call_ids.add(call_id)
-            pending_calls.append((item_type, call_id))
+            call_id_str = cast(str, call_id)
+            seen_call_ids.add(call_id_str)
+            pending_calls.append((item_type, call_id_str))
             if len(pending_calls) > 1:
                 # A window that already spent its interleaved developer message must not
                 # become parallel afterwards, otherwise a batch is admitted by ordering the
@@ -507,7 +575,7 @@ def _direct_tool_call_prefix_state(
             if item.get("status") not in (None, "completed", "failed"):
                 return None
             call_id = item.get("call_id")
-            if not isinstance(call_id, str) or not pending_calls:
+            if not _is_nonblank_string(call_id) or not pending_calls:
                 return None
             if pending_calls[0] != (call_type, call_id):
                 return None
@@ -526,8 +594,8 @@ def _direct_tool_call_prefix_state(
         # surface their IDs for collision checks: a pending call that reuses
         # one of them cannot be proven fresh.
         fallthrough_call_id = item.get("call_id")
-        if isinstance(fallthrough_call_id, str) and fallthrough_call_id:
-            seen_call_ids.add(fallthrough_call_id)
+        if _is_nonblank_string(fallthrough_call_id):
+            seen_call_ids.add(cast(str, fallthrough_call_id))
     return pending_calls, seen_call_ids
 
 

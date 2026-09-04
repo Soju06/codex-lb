@@ -13612,6 +13612,20 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
         pytest.param(
             [
                 {
+                    "type": "function_call_output",
+                    "call_id": "call-prefix",
+                    "output": "result",
+                    "status": "completed",
+                },
+            ],
+            {"call-prefix": "function_call"},
+            True,
+            False,
+            id="prefix-settled-tool-output",
+        ),
+        pytest.param(
+            [
+                {
                     "type": "custom_tool_call",
                     "call_id": "call-1",
                     "name": "shell",
@@ -13679,14 +13693,29 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
     forwardable_owner: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    stored_input_items: list[proxy_service.JsonValue] = [
-        {
-            "type": "additional_tools",
-            "role": "developer",
-            "tools": [{"type": "custom", "name": "shell"}],
-        },
-        {"role": "user", "content": "hello"},
-    ]
+    if pending_tool_calls == {"call-prefix": "function_call"}:
+        stored_input_items: list[proxy_service.JsonValue] = [
+            {"role": "user", "content": "look that up"},
+            {
+                "type": "function_call",
+                "call_id": "call-prefix",
+                "name": "lookup",
+                "arguments": "{}",
+                "status": "completed",
+            },
+        ]
+    else:
+        stored_input_items = cast(
+            list[proxy_service.JsonValue],
+            [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {"role": "user", "content": "hello"},
+            ],
+        )
     input_items = [*stored_input_items, *suffix_items]
     payload = proxy_service.ResponsesRequest.model_validate(
         {
@@ -13866,13 +13895,24 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
         normalized_input_items if preserves_full_resend else normalized_input_items[-len(suffix_items) :]
     )
     assert prepared_frames[-1]["input"] == expected_input_items
-    assert [frame["client_metadata"][CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY] for frame in prepared_frames] == [
-        "true",
-    ] * len(prepared_frames)
+    if isinstance(stored_input_items[0], dict) and stored_input_items[0].get("type") == "additional_tools":
+        assert [frame["client_metadata"][CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY] for frame in prepared_frames] == [
+            "true",
+        ] * len(prepared_frames)
+    else:
+        assert all(
+            CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY not in cast(dict[str, Any], frame.get("client_metadata", {}))
+            for frame in prepared_frames
+        )
+    expected_reasoning_context = (
+        "all_turns"
+        if isinstance(stored_input_items[0], dict) and stored_input_items[0].get("type") == "additional_tools"
+        else "last_turn"
+    )
     assert all(
         frame["reasoning"]
         == {
-            "context": "all_turns",
+            "context": expected_reasoning_context,
             "effort": "high",
             "summary": "auto",
             "vendor_hint": 7,
@@ -14061,6 +14101,53 @@ def test_verified_durable_full_resend_accepts_response_bound_pending_tool_calls(
         )
         is None
     )
+
+
+def test_verified_durable_full_resend_rejects_response_owned_prefix_settling_output_id() -> None:
+    stored_input_items: list[proxy_service.JsonValue] = [
+        {"role": "user", "content": "look that up"},
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+    ]
+    full_input: list[proxy_service.JsonValue] = [
+        *stored_input_items,
+        {
+            "type": "function_call_output",
+            "id": "fc_output_response_owned",
+            "call_id": "call-1",
+            "output": "result",
+        },
+    ]
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": full_input,
+        }
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="sess-tool-proof",
+        canonical_kind="session_header",
+        canonical_key="sid-tool-proof",
+        api_key_scope="__anonymous__",
+        account_id="acc-proof",
+        owner_instance_id=None,
+        owner_epoch=3,
+        lease_expires_at=None,
+        state=HttpBridgeSessionState.CLOSED,
+        latest_turn_state="http_turn_tool_proof",
+        latest_response_id="resp-tool-proof",
+        latest_input_item_count=len(stored_input_items),
+        latest_input_full_fingerprint=proxy_service._fingerprint_input_items(stored_input_items),
+        model="gpt-5.4",
+        latest_pending_tool_calls={"call-1": "function_call"},
+    )
+
+    assert http_bridge_streaming_module._verify_durable_full_resend(payload, durable_lookup) is None
 
 
 @pytest.mark.asyncio

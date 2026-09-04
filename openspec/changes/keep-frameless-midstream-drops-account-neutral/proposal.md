@@ -21,8 +21,9 @@ application protocol were working.
   settlement, operation acknowledgement, and no-replay behavior after output.
 - Feed only genuinely eventless, output-free drops into the existing windowed
   account drain signal; post-output drops do not contribute to that signal.
-- Preserve existing penalties for upstream-authored close frames, protocol
-  violations, authentication, quota, policy, and application-layer errors.
+- Preserve existing penalties for non-clean upstream-authored close frames,
+  protocol violations, authentication, quota, policy, and application-layer
+  errors, while retaining the established clean pre-response `1000` exemption.
 
 ## Capabilities
 

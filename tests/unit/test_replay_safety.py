@@ -2091,6 +2091,59 @@ def test_full_resend_tool_loop_manifest_rejects_call_id_reused_from_stored_prefi
     )
 
 
+def test_host_automation_heartbeat_is_account_neutral_fresh_input() -> None:
+    heartbeat: JsonValue = {
+        "type": "function_call_output",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn_current",
+            "create_time": 1_788_526_697.25,
+        },
+    }
+
+    assert responses_payload_is_account_neutral_fresh_replay({"input": [heartbeat]})
+    assert responses_input_suffix_retains_prior_output(
+        [
+            {"role": "user", "content": "monitor this"},
+            {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "Still waiting."}],
+            },
+            heartbeat,
+        ],
+        stored_count=1,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("name", "other_tool"),
+        ("namespace", "other_host"),
+        ("output", "ordinary tool output"),
+        ("call_id", "call_owner_bound"),
+    ],
+)
+def test_noncanonical_host_automation_output_is_not_account_neutral(field: str, value: str) -> None:
+    heartbeat: dict[str, JsonValue] = {
+        "type": "function_call_output",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn_current",
+            "create_time": 1_788_526_697.25,
+        },
+    }
+    heartbeat[field] = value
+
+    assert not responses_payload_is_account_neutral_fresh_replay({"input": [heartbeat]})
+
+
 def test_full_resend_tool_loop_manifest_rejects_call_id_reused_from_unsupported_prefix_item() -> None:
     stored_input: list[JsonValue] = [
         {"role": "user", "content": "first question"},

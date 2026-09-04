@@ -15,4 +15,5 @@
 
 - [x] 3.1 Add route-level success and fail-closed regression coverage.
 - [x] 3.2 Run focused streaming, ownership, replay-safety, and lint validation.
-- [ ] 3.3 Run strict OpenSpec validation.
+- [x] 3.3 Add route-level scheduled-heartbeat failover and fail-closed shape coverage.
+- [x] 3.4 Run strict OpenSpec validation.

@@ -882,6 +882,97 @@ async def test_stream_previsible_429_does_not_replay_unanchored_delta_owner_stat
 
 
 @pytest.mark.asyncio
+async def test_stream_previsible_429_replays_scheduled_heartbeat_on_another_account(async_client, monkeypatch):
+    """Codex host heartbeats are fresh input, not an orphaned upstream tool result."""
+    await _import_account(async_client, "acc_heartbeat_429_a", "heartbeat429a@example.com")
+    await _import_account(async_client, "acc_heartbeat_429_b", "heartbeat429b@example.com")
+
+    seen_account_ids: list[str | None] = []
+    seen_inputs: list[object] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        seen_inputs.append(payload.input)
+        if account_id == "acc_heartbeat_429_a":
+            raise ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "usage limit reached"),
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_heartbeat_429_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    def heartbeat_item(item_id: str, turn_id: str) -> dict:
+        return {
+            "type": "function_call_output",
+            "id": item_id,
+            "name": "automation_update",
+            "namespace": "codex_app",
+            "output": (
+                "<heartbeat><automation_id>follow-pr</automation_id>"
+                "<current_time_iso>2026-09-04T13:58:17Z</current_time_iso></heartbeat>"
+            ),
+            "internal_chat_message_metadata_passthrough": {
+                "turn_id": turn_id,
+                "create_time": 1_788_526_697,
+            },
+        }
+
+    payload = {
+        "model": "gpt-5.6-sol",
+        "reasoning": {"effort": "xhigh"},
+        "prompt_cache_key": "scheduled-heartbeat-failover",
+        "instructions": "monitor the pull request",
+        "input": [
+            {"type": "message", "id": "msg_user", "role": "user", "content": "monitor this"},
+            {
+                "type": "message",
+                "id": "msg_first_answer",
+                "role": "assistant",
+                "status": "completed",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "No actionable change."}],
+            },
+            heartbeat_item("host_heartbeat_old", "turn_old"),
+            {
+                "type": "message",
+                "id": "msg_latest_answer",
+                "role": "assistant",
+                "status": "completed",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "Still waiting."}],
+            },
+            {
+                "type": "reasoning",
+                "id": "rs_owner",
+                "encrypted_content": "owner-bound",
+                "summary": [],
+            },
+            heartbeat_item("host_heartbeat_current", "turn_current"),
+        ],
+        "stream": True,
+    }
+
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    assert len([event for event in events if event.get("type") == "response.completed"]) == 1
+    assert not [event for event in events if event.get("type") == "response.failed"]
+    assert seen_account_ids[:2] == ["acc_heartbeat_429_a", "acc_heartbeat_429_b"]
+    replay_input = seen_inputs[1]
+    assert isinstance(replay_input, list)
+    assert all(isinstance(item, dict) and "id" not in item for item in replay_input)
+    assert all(item.get("type") != "reasoning" for item in replay_input if isinstance(item, dict))
+    replay_heartbeats = [
+        item for item in replay_input if isinstance(item, dict) and item.get("namespace") == "codex_app"
+    ]
+    assert len(replay_heartbeats) == 2
+
+
+@pytest.mark.asyncio
 async def test_stream_http_502_unknown_code_fails_over_to_second_account(async_client, monkeypatch):
     await _import_account(async_client, "acc_h502_a", "h502_a@example.com")
     await _import_account(async_client, "acc_h502_b", "h502_b@example.com")

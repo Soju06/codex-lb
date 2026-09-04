@@ -13,6 +13,8 @@ another pool account is healthy.
   self-contained full resend.
 - Project response-owned bookkeeping out of the replay input, require retained assistant
   output followed by fresh user input, and re-run the existing account-neutral replay gates.
+- Recognize the exact Codex host-generated scheduled-task heartbeat as account-neutral fresh
+  input while keeping ordinary or malformed orphan tool outputs fail-closed.
 - Clear only the soft dispatch owner and reallocate prompt-cache affinity before selecting a
   different account.
 - Keep previous-response, conversation, turn-state, file, single-account, incomplete-history,

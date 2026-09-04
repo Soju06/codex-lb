@@ -340,7 +340,12 @@ class DurableBridgeRepository:
                 HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count
             )
         operation = await self._session.scalar(operation_statement.with_for_update())
-        if owner_exists is None or operation is None:
+        # ``abandoned`` is a terminal duplicate-suppression fence that the
+        # maintenance sweep applies without clearing session ownership, so the
+        # original owner still passes the instance/epoch fence above. Refuse
+        # the lock like the rows_v1 writers do; otherwise a late terminal chunk
+        # rewrites ``state`` and a late batch grows the abandoned spool.
+        if owner_exists is None or operation is None or operation.state == "abandoned":
             await self._session.rollback()
             return None
         if operation.spool_format == HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2:

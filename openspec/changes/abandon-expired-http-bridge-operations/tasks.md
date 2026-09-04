@@ -23,6 +23,8 @@
 - [x] 2.8 Apply the same grace to recently released ownerless sessions, retain
       PostgreSQL row locking on oversized sweeps, and return a distinct
       parameterless full-history contract for abandoned hard turn-state work.
+- [x] 2.9 Fence the shared `chunks_v2` lock helper so a lease-expired owner's
+      late chunk batch or terminal chunk cannot resurrect an `abandoned` row.
 
 ## 3. Verification
 
@@ -41,3 +43,5 @@
 - [x] 3.7 Cover the lease-expiry grace and the structured abandonment reason.
 - [x] 3.8 Cover ownerless-release grace, oversized-path row locking, and
       abandoned hard turn-state recovery.
+- [x] 3.9 Cover late `chunks_v2` batch and terminal chunk writes from the
+      original lease-expired owner against an abandoned operation.

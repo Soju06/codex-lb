@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import anyio
 import pytest
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.sql.dml import Update
 from sqlalchemy.sql.selectable import Select
@@ -3074,6 +3074,136 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
         assert persisted is not None
         assert persisted.state == "abandoned"
         assert persisted.response_id is None
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_abandoned_chunk_operation_fences_late_owner_chunk_writers(
+    async_session_factory: Callable[[], AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lease-expired owner's late chunks_v2 writes must not resurrect ``abandoned``.
+
+    The sweep leaves session ownership in place, so the original owner still
+    matches the instance/epoch fence in ``_lock_operation_for_chunk_append``.
+    Without an abandoned-state fence there, a late terminal chunk rewrites
+    ``state`` to ``completed`` and a late batch grows the abandoned spool.
+    """
+    session = async_session_factory()
+    try:
+
+        async def encode_off_loop(function, *args):
+            return function(*args)
+
+        monkeypatch.setattr(durable_repo_module.asyncio, "to_thread", AsyncMock(side_effect=encode_off_loop))
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-chunk-abandonment",
+            session_key_value="sid-chunk-abandonment",
+        )
+        fingerprint = durable_bridge_hash("chunk-abandonment")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-chunk-abandonment",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id=None,
+            request_text='{"input":"turn"}',
+        )
+        assert await repository.append_operation_event_chunk(
+            events=[
+                DurableBridgeOperationEventInput(
+                    operation_id=operation_id,
+                    session_id=claim.id,
+                    instance_id="inst-chunk-abandonment",
+                    owner_epoch=claim.owner_epoch,
+                    event_text="created",
+                )
+            ],
+            max_bytes=1024,
+        )
+        stale_at = utcnow() - timedelta(hours=3)
+        await session.execute(
+            update(HttpBridgeOperationRecord)
+            .where(HttpBridgeOperationRecord.operation_id == operation_id)
+            .values(state="acknowledged", updated_at=stale_at)
+        )
+        # The owner keeps its row but its lease lapsed past the grace window.
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == claim.id)
+            .values(lease_expires_at=utcnow() - timedelta(minutes=10))
+        )
+        await session.commit()
+
+        sweep = await repository.abandon_stale_operations(
+            cutoff=utcnow() - timedelta(minutes=30),
+            lease_expired_before=utcnow() - timedelta(minutes=2),
+        )
+        assert [(a.source_state, a.owner_lease_outcome) for a in sweep.abandonments] == [("acknowledged", "expired")]
+
+        assert (
+            await repository.append_operation_event_chunk(
+                events=[
+                    DurableBridgeOperationEventInput(
+                        operation_id=operation_id,
+                        session_id=claim.id,
+                        instance_id="inst-chunk-abandonment",
+                        owner_epoch=claim.owner_epoch,
+                        event_text="late-delta",
+                    )
+                ],
+                max_bytes=1024,
+            )
+            is False
+        )
+        assert (
+            await repository.append_terminal_operation_chunk(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id="inst-chunk-abandonment",
+                owner_epoch=claim.owner_epoch,
+                event_text='data: {"type":"response.completed"}\n\n',
+                max_bytes=1024,
+                state="completed",
+                response_id="resp-should-not-write",
+            )
+            is False
+        )
+        # An oversized late terminal must not settle the row either.
+        assert (
+            await repository.append_terminal_operation_chunk(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id="inst-chunk-abandonment",
+                owner_epoch=claim.owner_epoch,
+                event_text="x" * 2048,
+                max_bytes=1024,
+                state="failed",
+            )
+            is False
+        )
+
+        session.expire_all()
+        row = await session.get(HttpBridgeOperationRecord, operation_id)
+        assert row is not None
+        assert row.state == "abandoned"
+        assert row.response_id is None
+        assert row.event_spool_complete is False
+        assert row.event_bytes == len(b"created")
+        chunk_count = await session.scalar(
+            select(func.count())
+            .select_from(HttpBridgeOperationEventChunk)
+            .where(HttpBridgeOperationEventChunk.operation_id == operation_id)
+        )
+        assert chunk_count == 1
+        assert await repository.get_replayable_transcript(response_id="resp-should-not-write") is None
     finally:
         await session.close()
 

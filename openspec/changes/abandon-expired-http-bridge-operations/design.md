@@ -64,7 +64,10 @@ an unbounded scan.
 it is not relabeled `failed`: the proxy cannot prove that upstream failed.
 Completed/incomplete/failed behavior remains unchanged. Existing
 `record_operation`, reset, and append paths treat `abandoned` as immutable;
-late operation writes are fenced out.
+late operation writes are fenced out. This covers both spool formats: the
+`rows_v1` writers check the state under their owner fence, and the shared
+`chunks_v2` lock helper refuses an `abandoned` row before any chunk append or
+terminal settlement can touch `state`, `response_id`, or the spool.
 
 ### 2. Derive the cutoff from the existing request budget
 
@@ -140,7 +143,9 @@ request text, response IDs, API keys, and account emails are not included.
 - A concurrent recovery claim changes `unknown` to `submitted`; the
   `unknown`/`acknowledged` predicate rejects abandonment.
 - A late upstream event after abandonment cannot update the row because all
-  operation state writers reject terminal `abandoned` rows.
+  operation state writers reject terminal `abandoned` rows. The sweep leaves
+  session ownership in place, so this fence must not rely on the owner
+  instance/epoch check alone: a lease-expired owner still matches it.
 - A request that is already pending locally is protected by the service
   snapshot, including detached generations that are still draining.
 

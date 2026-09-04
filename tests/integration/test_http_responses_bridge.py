@@ -315,6 +315,26 @@ def _install_bridge_settings_with_limits(
     )
 
 
+class _FakeUpstreamMessage:
+    def __init__(
+        self,
+        kind: str,
+        *,
+        text: str | None = None,
+        close_code: int | None = None,
+        error: str | None = None,
+        error_code: str | None = None,
+        transport_ended: bool = False,
+        close_frame_received: bool = False,
+    ) -> None:
+        self.kind = kind
+        self.text = text
+        self.close_code = close_code
+        self.error = error
+        self.error_code = error_code
+        self.transport_ended = transport_ended
+        self.close_frame_received = close_frame_received
+        self.data = None
 
 class _FakeBridgeUpstreamWebSocket:
     def __init__(self, response_id_prefix: str = "resp_bridge") -> None:

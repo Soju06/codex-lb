@@ -14,6 +14,9 @@ or the adapter-synthesized RFC 6455 code `1006`). A frame-less terminal HTTP
 bridge ending MUST remain account-neutral regardless of response-event count or
 buffered model-output progress. Unless an existing bounded pre-created recovery
 succeeds, it MUST still fail the interrupted request as `stream_incomplete`.
+For an error-kind message, the proxy MUST require positive adapter provenance
+that the transport ended; protocol errors without that provenance MUST retain
+their existing account-health treatment.
 It MUST NOT make a post-output request eligible for transparent redispatch, and
 an operation with response events or buffered model output MUST remain
 acknowledged rather than recoverable. Only a frame-less drop with zero response events and no

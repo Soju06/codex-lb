@@ -19,6 +19,7 @@ from websockets.http11 import Response
 import app.core.clients.proxy_websocket as proxy_websocket_module
 from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
 from app.core.clients.native_egress import (
+    NativeEgressProtocolError,
     NativeEgressTransportError,
     NativeEgressUnavailable,
     NativeWebSocketMessage,
@@ -328,6 +329,19 @@ async def test_native_direct_adapter_marks_peer_close_as_transport_ended() -> No
     assert message.kind == "close"
     assert message.close_code == 1006
     assert message.transport_ended is True
+
+
+@pytest.mark.asyncio
+async def test_native_direct_adapter_keeps_protocol_error_distinct_from_transport_end() -> None:
+    class NativeConnection(_FakeNativeWebSocket):
+        async def receive(self) -> NativeWebSocketMessage:
+            raise NativeEgressProtocolError("native websocket event is invalid")
+
+    message = await NativeUpstreamWebSocket(cast(Any, NativeConnection())).receive()
+
+    assert message.kind == "error"
+    assert message.error_code is None
+    assert message.transport_ended is False
 
 
 @pytest.mark.asyncio

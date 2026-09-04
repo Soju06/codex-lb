@@ -441,7 +441,7 @@ class NativeUpstreamWebSocket:
                 kind="error",
                 error=str(error),
                 error_code=_relay_receive_error_code(error.error_code),
-                transport_ended=True,
+                transport_ended=isinstance(exc, NativeEgressTransportError),
             )
         return UpstreamWebSocketMessage(
             kind=message.kind,

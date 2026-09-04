@@ -551,6 +551,7 @@ for line in sys.stdin:
         print(json.dumps({
             "type": "websocket_close", "request_id": request_id,
             "code": command["code"], "reason": command["reason"],
+            "close_frame_received": False,
         }), flush=True)
     elif kind == "cancel":
         print(json.dumps({"type": "cancelled", "request_id": request_id}), flush=True)
@@ -587,7 +588,7 @@ async def test_native_websocket_routes_frames_and_send_acknowledgements(tmp_path
         kind="close",
         close_code=1000,
         close_reason="done",
-        close_frame_received=True,
+        close_frame_received=False,
     )
     with pytest.raises(NativeEgressTransportError, match="closed"):
         await asyncio.wait_for(websocket.receive(), timeout=0.1)

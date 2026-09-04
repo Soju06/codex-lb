@@ -3644,8 +3644,9 @@ def test_state_from_account_rejected_reset_requires_all_quota_windows_available(
     [
         ("free", 100.0, 10.0, None),
         (None, 10.0, 100.0, 25.0),
+        ("guest", 100.0, 100.0, 25.0),
     ],
-    ids=["free-synthetic-primary", "credits-available-secondary"],
+    ids=["free-synthetic-primary", "credits-available-secondary", "free-alias-credits"],
 )
 def test_state_from_account_rejected_reset_uses_normalized_quota_availability(
     monkeypatch, plan_type, primary_used, secondary_used, credits_balance
@@ -3670,11 +3671,11 @@ def test_state_from_account_rejected_reset_uses_normalized_quota_availability(
         credits_balance=credits_balance,
     )
     secondary = _make_test_usage(
-        window="monthly" if plan_type == "free" else "secondary",
+        window="monthly" if plan_type in {"free", "guest"} else "secondary",
         used_percent=secondary_used,
         reset_at=int(now + 7 * 24 * 3600),
         recorded_at=_epoch_to_naive_utc(now - 10),
-        window_minutes=43200 if plan_type == "free" else 10080,
+        window_minutes=43200 if plan_type in {"free", "guest"} else 10080,
     )
 
     state = _state_from_account(
@@ -4035,6 +4036,84 @@ def test_background_recovery_state_keeps_rate_limited_when_long_window_exhausted
     )
 
     assert state.status == AccountStatus.RATE_LIMITED
+
+
+def test_background_recovery_state_requires_all_quota_windows_after_reset_elapses(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+        plan_type="plus",
+    )
+    fresh_primary = _make_test_usage(
+        window="primary",
+        used_percent=10.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+    exhausted_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=100.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=fresh_primary,
+        secondary_entry=exhausted_secondary,
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == pytest.approx(past_reset)
+    assert state.blocked_at == pytest.approx(blocked)
+
+
+def test_background_recovery_state_allows_alias_credit_recovery_after_reset_elapses(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+        plan_type="guest",
+    )
+    synthetic_primary = _make_test_usage(
+        window="primary",
+        used_percent=100.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=43200,
+        credits_balance=25.0,
+    )
+    exhausted_monthly = _make_test_usage(
+        window="monthly",
+        used_percent=100.0,
+        reset_at=int(now + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=43200,
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=synthetic_primary,
+        secondary_entry=exhausted_monthly,
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
+    assert state.blocked_at is None
 
 
 def test_background_recovery_state_keeps_rate_limited_when_primary_reset_metadata_missing(monkeypatch):

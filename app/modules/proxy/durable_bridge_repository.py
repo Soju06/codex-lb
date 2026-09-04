@@ -1084,7 +1084,12 @@ class DurableBridgeRepository:
                 live_owned_draining = (
                     existing.state == HttpBridgeSessionState.DRAINING and not lease_expired and not owner_absent
                 )
-                takeover_permitted = allow_takeover and not contended
+                live_owned_active = (
+                    existing.state == HttpBridgeSessionState.ACTIVE and not lease_expired and not owner_absent
+                )
+                takeover_permitted = (force_owner_epoch_advance or allow_takeover) and not contended
+                if live_owned_active and not force_owner_epoch_advance:
+                    takeover_permitted = False
                 if live_owned_draining or (
                     not takeover_permitted and not lease_expired and not owner_absent and not state_closed
                 ):

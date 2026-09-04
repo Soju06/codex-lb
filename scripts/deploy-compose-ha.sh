@@ -11,6 +11,7 @@ PHASE_FILE="$STATE_DIR/draining-slot"
 LOCK_FILE="$STATE_DIR/deploy.lock"
 HA_PROJECT="codex-lb-ha"
 HA_NETWORK="${CODEX_LB_HA_NETWORK:-codex-lb_default}"
+HA_EDGE_NETWORK="codex-lb-ha-edge"
 DEFAULT_DRAIN_SECONDS=300
 READY_ATTEMPTS="${_CODEX_LB_HA_READY_ATTEMPTS:-60}"
 PUBLIC_READY_ATTEMPTS="${_CODEX_LB_HA_PUBLIC_READY_ATTEMPTS:-30}"
@@ -32,9 +33,10 @@ Usage:
   scripts/deploy-compose-ha.sh rollback [drain-seconds]
   scripts/deploy-compose-ha.sh status
 
-bootstrap performs the one-time migration from stock Compose to HAProxy.
-deploy builds the inactive slot, cuts traffic over after readiness, and drains
-the previous slot. rollback is available while the previous slot is draining.
+bootstrap performs the one-time migration from stock Compose to two active
+HAProxy backends. deploy adds a temporary surge backend, replaces blue and
+green one at a time, then retires the surge backend. rollback cancels only the
+base-slot drain currently reported by status.
 EOF
 }
 
@@ -95,7 +97,7 @@ validate_prerequisites() {
 
     case "$database_url" in
         postgresql://*|postgresql+*://*) ;;
-        *) die "CODEX_LB_DATABASE_URL must select shared PostgreSQL before blue/green overlap" ;;
+        *) die "CODEX_LB_DATABASE_URL must select shared PostgreSQL before multi-backend overlap" ;;
     esac
 
     case "${leader_enabled,,}" in
@@ -141,24 +143,19 @@ slot_service() {
     printf 'server-%s' "$1"
 }
 
-other_slot() {
-    case "$1" in
-        blue) printf 'green' ;;
-        green) printf 'blue' ;;
-        *) die "invalid slot '$1'" ;;
-    esac
-}
-
-read_active_slot() {
+read_topology_state() {
     [[ -f "$ACTIVE_FILE" ]] || die "HA topology is not bootstrapped; run '$0 bootstrap'"
-    local slot
-    slot="$(<"$ACTIVE_FILE")"
-    [[ "$slot" == blue || "$slot" == green ]] || die "invalid active slot state in $ACTIVE_FILE"
-    printf '%s' "$slot"
+    local state
+    state="$(<"$ACTIVE_FILE")"
+    case "$state" in
+        blue|green|blue,green) ;;
+        *) die "invalid serving topology state in $ACTIVE_FILE" ;;
+    esac
+    printf '%s' "$state"
 }
 
-write_active_slot() {
-    printf '%s\n' "$1" >"$ACTIVE_FILE"
+write_active_active_state() {
+    printf 'blue,green\n' >"$ACTIVE_FILE"
 }
 
 container_id() {
@@ -209,21 +206,6 @@ runtime_command() {
         sh -c 'nc -w 3 127.0.0.1 9999'
 }
 
-set_runtime_slots() {
-    local ready_slot="$1"
-    local other_state="$2"
-    local other
-    other="$(other_slot "$ready_slot")"
-    case "$other_state" in
-        drain|maint) ;;
-        *) die "invalid HAProxy state '$other_state'" ;;
-    esac
-    # Make the candidate eligible before removing the predecessor so there is
-    # never a no-ready-backend interval. Weight zero drains existing sessions.
-    runtime_command "set server codex_lb_slots/$ready_slot weight 1" >/dev/null || return 1
-    runtime_command "set server codex_lb_slots/$other weight 0" >/dev/null || return 1
-}
-
 server_status() {
     local slot="$1"
     runtime_command 'show stat' | awk -F, -v slot="$slot" '
@@ -231,11 +213,96 @@ server_status() {
     '
 }
 
+server_exists() {
+    [[ -n "$(server_status "$1")" ]]
+}
+
 server_weight() {
     local slot="$1"
     runtime_command 'show stat' | awk -F, -v slot="$slot" '
         $1 == "codex_lb_slots" && $2 == slot { gsub(/\r/, "", $19); print $19; exit }
     '
+}
+
+server_state_field() {
+    local slot="$1"
+    local field="$2"
+    runtime_command 'show servers state' | awk -v slot="$slot" -v field="$field" '
+        $2 == "codex_lb_slots" && $4 == slot { gsub(/\r/, "", $field); print $field; exit }
+    '
+}
+
+set_slot_weight() {
+    local slot="$1"
+    local weight="$2"
+    local attempt observed
+    runtime_command "set server codex_lb_slots/$slot weight $weight" >/dev/null || return 1
+    for ((attempt = 1; attempt <= 10; attempt++)); do
+        observed="$(server_weight "$slot")"
+        if [[ "$weight" == 0 && "$observed" == 0 ]]; then
+            return 0
+        fi
+        if [[ "$weight" != 0 && "$observed" =~ ^[1-9][0-9]*$ ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+eligible_slot_count() {
+    runtime_command 'show stat' | awk -F, '
+        $1 == "codex_lb_slots" && ($2 == "blue" || $2 == "green" || $2 == "surge") {
+            gsub(/\r/, "", $18)
+            gsub(/\r/, "", $19)
+            if ($18 ~ /^UP/ && ($19 + 0) > 0) count++
+        }
+        END { print count + 0 }
+    '
+}
+
+ensure_minimum_eligible() {
+    local expected="$1"
+    local actual
+    actual="$(eligible_slot_count)"
+    ((actual >= expected)) || {
+        log "Expected at least $expected eligible HAProxy backends, found $actual"
+        return 1
+    }
+}
+
+ensure_runtime_surge_server() {
+    local id address fqdn output
+    id="$(container_id surge)"
+    [[ -n "$id" ]] || return 1
+    address="$("${DOCKER[@]}" inspect --format \
+        "{{with index .NetworkSettings.Networks \"$HA_EDGE_NETWORK\"}}{{.IPAddress}}{{end}}" "$id")"
+    [[ "$address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || {
+        log "Could not resolve the surge container address on $HA_EDGE_NETWORK"
+        return 1
+    }
+
+    if server_exists surge; then
+        fqdn="$(server_state_field surge 18)"
+        if [[ "$fqdn" == - || -z "$fqdn" ]]; then
+            # A server added to a legacy HAProxy process has no DNS name. Its
+            # container IP must be refreshed every time surge is recreated.
+            runtime_command "set server codex_lb_slots/surge addr $address port 2455" >/dev/null || return 1
+            [[ "$(server_state_field surge 5)" == "$address" ]] || return 1
+        fi
+    else
+        # HAProxy may still be the pre-surge process during the first rollout
+        # after upgrading this repository. Register the checked-in static
+        # member without restarting the public frontend.
+        output="$(runtime_command \
+            "add server codex_lb_slots/surge $address:2455 check port 2455 inter 2s fall 2 rise 2 weight 0")" || return 1
+        if [[ "$output" != *"New server registered"* ]] && ! server_exists surge; then
+            log "HAProxy rejected runtime surge registration: ${output:-no response}"
+            return 1
+        fi
+    fi
+    runtime_command 'enable health codex_lb_slots/surge' >/dev/null || return 1
+    runtime_command 'enable server codex_lb_slots/surge' >/dev/null || return 1
 }
 
 active_sessions() {
@@ -279,40 +346,212 @@ validate_drain_seconds() {
     [[ "$seconds" =~ ^[0-9]+$ ]] && ((seconds > 0)) || die "drain-seconds must be a positive integer"
 }
 
-finish_drain() {
-    local draining_slot="$1"
-    local expected_active="$2"
-    local drain_seconds="$3"
+write_phase() {
+    local action="$1"
+    local slot="$2"
+    local remaining="${3:-}"
+    printf '%s:%s:%s\n' "$action" "$slot" "$remaining" >"$PHASE_FILE"
+}
+
+slot_is_eligible() {
+    local slot="$1"
+    local status weight
+    status="$(server_status "$slot")"
+    weight="$(server_weight "$slot")"
+    [[ "$status" == UP* && "$weight" =~ ^[1-9][0-9]*$ ]]
+}
+
+base_slots_are_eligible() {
+    slot_is_eligible blue && slot_is_eligible green
+}
+
+wait_for_sessions() {
+    local slot="$1"
+    local drain_seconds="$2"
+    local expected_phase="$3"
     local deadline=$((SECONDS + drain_seconds))
     local remaining=0
 
     while ((SECONDS < deadline)); do
-        if [[ "$(read_active_slot)" != "$expected_active" ]]; then
-            log "Drain ownership changed after rollback; leaving $draining_slot running"
-            return 0
+        if [[ ! -f "$PHASE_FILE" || "$(<"$PHASE_FILE")" != "$expected_phase" ]]; then
+            log "Drain ownership changed; leaving $slot running"
+            return 2
         fi
-        remaining="$(active_sessions "$draining_slot")"
-        ((remaining == 0)) && break
+        remaining="$(active_sessions "$slot")"
+        ((remaining == 0)) && return 0
         sleep 2
     done
 
-    flock -n 9 || die "another HA deployment command is finalizing the rollout"
-    if [[ "$(read_active_slot)" != "$expected_active" ]]; then
-        release_lock
-        log "Active slot changed; leaving $draining_slot running"
+    remaining="$(active_sessions "$slot")"
+    if ((remaining > 0)); then
+        log "Drain bound reached with $remaining HAProxy session(s) on $slot"
+    fi
+}
+
+start_base_slot() {
+    local slot="$1"
+    log "Starting replacement $slot slot from the image built for this rollout"
+    compose up --detach --no-build --no-deps --force-recreate "$(slot_service "$slot")" || return 1
+    wait_slot_ready "$slot" || return 1
+    set_slot_weight "$slot" 1 || return 1
+    wait_public_ready || return 1
+    ensure_minimum_eligible 2 || return 1
+    snapshot_runtime_state || return 1
+}
+
+roll_base_slot() {
+    local slot="$1"
+    local remaining_slot="$2"
+    local drain_seconds="$3"
+
+    if ! slot_is_eligible "$slot"; then
+        start_base_slot "$slot" || {
+            log "Replacement $slot did not reach strict readiness; existing eligible backends remain in service"
+            return 1
+        }
         return 0
     fi
 
-    remaining="$(active_sessions "$draining_slot")"
-    if ((remaining > 0)); then
-        log "Drain bound reached with $remaining HAProxy session(s) on $draining_slot"
+    ensure_minimum_eligible 3 || {
+        log "Refusing to drain $slot without two other eligible backends"
+        return 1
+    }
+
+    local drain_phase="draining:$slot:$remaining_slot"
+    write_phase draining "$slot" "$remaining_slot"
+    log "Removing new connections from $slot before replacement"
+    if ! set_slot_weight "$slot" 0; then
+        rm -f "$PHASE_FILE"
+        log "HAProxy rejected the drain for $slot"
+        return 1
     fi
-    runtime_command "set server codex_lb_slots/$draining_slot weight 0" >/dev/null
-    snapshot_runtime_state
-    compose stop "$(slot_service "$draining_slot")"
-    rm -f "$PHASE_FILE"
+    if ! ensure_minimum_eligible 2 || ! wait_public_ready; then
+        set_slot_weight "$slot" 1 >/dev/null 2>&1 || true
+        snapshot_runtime_state || true
+        rm -f "$PHASE_FILE"
+        log "Drain verification failed; restored $slot"
+        return 1
+    fi
+    if ! snapshot_runtime_state; then
+        set_slot_weight "$slot" 1 >/dev/null 2>&1 || true
+        rm -f "$PHASE_FILE"
+        log "Could not persist the drain state; restored $slot"
+        return 1
+    fi
     release_lock
-    log "Stopped drained $draining_slot slot; $expected_active remains active"
+    log "Draining $slot for at most $drain_seconds seconds"
+
+    local drain_result=0
+    wait_for_sessions "$slot" "$drain_seconds" "$drain_phase" || drain_result=$?
+    if ((drain_result == 2)); then
+        return 2
+    fi
+    flock 9 || die "could not reacquire the HA deployment lock"
+    if [[ ! -f "$PHASE_FILE" || "$(<"$PHASE_FILE")" != "$drain_phase" ]]; then
+        release_lock
+        log "Drain ownership changed; leaving $slot running"
+        return 2
+    fi
+
+    write_phase replacing "$slot" "$remaining_slot"
+    compose stop "$(slot_service "$slot")" || return 1
+    if ! start_base_slot "$slot"; then
+        log "Replacement $slot failed; surge and the other base slot remain eligible"
+        return 1
+    fi
+    rm -f "$PHASE_FILE"
+    log "Replacement $slot is active"
+}
+
+cleanup_uncommitted_surge() {
+    if server_exists surge; then
+        set_slot_weight surge 0 >/dev/null 2>&1 || true
+        snapshot_runtime_state >/dev/null 2>&1 || true
+    fi
+    compose stop server-surge >/dev/null 2>&1 || true
+}
+
+activate_surge() {
+    log "Building and starting the temporary surge backend"
+    if ! compose up --detach --build --no-deps server-surge; then
+        cleanup_uncommitted_surge
+        return 1
+    fi
+    if ! wait_slot_container_ready surge || ! ensure_runtime_surge_server || ! wait_slot_ready surge; then
+        cleanup_uncommitted_surge
+        return 1
+    fi
+    if ! set_slot_weight surge 1 || ! wait_public_ready || ! ensure_minimum_eligible 2; then
+        cleanup_uncommitted_surge
+        return 1
+    fi
+    if ! snapshot_runtime_state; then
+        cleanup_uncommitted_surge
+        return 1
+    fi
+    log "Surge backend is eligible; the rollout can preserve two-backend capacity"
+}
+
+retire_surge() {
+    local drain_seconds="$1"
+    base_slots_are_eligible || {
+        log "Refusing to retire surge before blue and green are both eligible"
+        return 1
+    }
+
+    if ! server_exists surge; then
+        rm -f "$PHASE_FILE"
+        write_active_active_state
+        release_lock
+        return 0
+    fi
+
+    local retire_phase="retiring:surge:"
+    write_phase retiring surge
+    if ! set_slot_weight surge 0; then
+        rm -f "$PHASE_FILE"
+        return 1
+    fi
+    if ! ensure_minimum_eligible 2 || ! wait_public_ready; then
+        set_slot_weight surge 1 >/dev/null 2>&1 || true
+        rm -f "$PHASE_FILE"
+        log "Surge retirement verification failed; restored surge traffic"
+        return 1
+    fi
+    if ! snapshot_runtime_state; then
+        set_slot_weight surge 1 >/dev/null 2>&1 || true
+        rm -f "$PHASE_FILE"
+        log "Could not persist surge drain state; restored surge traffic"
+        return 1
+    fi
+    release_lock
+    log "Draining the temporary surge backend for at most $drain_seconds seconds"
+
+    local drain_result=0
+    wait_for_sessions surge "$drain_seconds" "$retire_phase" || drain_result=$?
+    ((drain_result == 0)) || return "$drain_result"
+    flock 9 || die "could not reacquire the HA deployment lock"
+    if [[ ! -f "$PHASE_FILE" || "$(<"$PHASE_FILE")" != "$retire_phase" ]]; then
+        release_lock
+        return 2
+    fi
+    compose stop server-surge
+    if ! snapshot_runtime_state; then
+        release_lock
+        log "Surge stopped, but final HAProxy state could not be persisted"
+        return 1
+    fi
+    rm -f "$PHASE_FILE"
+    write_active_active_state
+    release_lock
+    log "Rollout complete: blue and green are active; surge is stopped"
+}
+
+restore_stock_after_bootstrap_failure() {
+    local stock_id="$1"
+    compose stop haproxy server-blue server-green >/dev/null 2>&1 || true
+    rm -f "$ACTIVE_FILE" "$PHASE_FILE"
+    [[ -z "$stock_id" ]] || stock_compose up --detach --no-deps server
 }
 
 bootstrap() {
@@ -325,12 +564,15 @@ bootstrap() {
     ensure_network
     ensure_data_volume
 
-    log "Building and starting initial blue slot"
-    compose up --detach --build --no-deps server-blue
-    wait_slot_container_ready blue || {
-        compose stop server-blue >/dev/null 2>&1 || true
-        die "initial blue slot did not reach strict readiness"
-    }
+    log "Building and starting the initial blue and green backends"
+    if ! compose up --detach --build --no-deps server-blue server-green; then
+        compose stop server-blue server-green >/dev/null 2>&1 || true
+        die "initial active-active backends failed to build or start"
+    fi
+    if ! wait_slot_container_ready blue || ! wait_slot_container_ready green; then
+        compose stop server-blue server-green >/dev/null 2>&1 || true
+        die "initial active-active backends did not reach strict readiness"
+    fi
 
     local stock_id
     stock_id="$(stock_compose ps --quiet server 2>/dev/null || true)"
@@ -339,21 +581,57 @@ bootstrap() {
         stock_compose stop --timeout "$drain_seconds" server
     fi
 
-    write_active_slot blue
     if ! compose up --detach --no-deps haproxy; then
-        rm -f "$ACTIVE_FILE"
-        [[ -z "$stock_id" ]] || stock_compose up --detach --no-deps server
+        restore_stock_after_bootstrap_failure "$stock_id"
         die "HAProxy failed to start; restored the stock server when present"
     fi
-    if ! wait_public_ready; then
-        compose stop haproxy >/dev/null 2>&1 || true
-        rm -f "$ACTIVE_FILE"
-        [[ -z "$stock_id" ]] || stock_compose up --detach --no-deps server
-        die "public readiness failed during bootstrap; restored the stock server when present"
+    if ! wait_slot_ready blue || ! wait_slot_ready green || \
+        ! set_slot_weight blue 1 || ! set_slot_weight green 1 || \
+        ! wait_public_ready || ! ensure_minimum_eligible 2; then
+        restore_stock_after_bootstrap_failure "$stock_id"
+        die "active-active public readiness failed during bootstrap; restored the stock server when present"
     fi
+    server_exists surge && set_slot_weight surge 0 >/dev/null 2>&1 || true
+    compose stop server-surge >/dev/null 2>&1 || true
+    write_active_active_state
     snapshot_runtime_state
     release_lock
-    log "HAProxy topology is ready with blue active"
+    log "HAProxy topology is ready with blue and green active"
+}
+
+resume_interrupted_rollout() {
+    local phase="$1"
+    local drain_seconds="$2"
+    local action slot remaining
+
+    if [[ "$phase" == blue || "$phase" == green ]]; then
+        die "legacy drain for $phase is still open; run rollback before another deploy"
+    fi
+    IFS=: read -r action slot remaining <<<"$phase"
+    case "$action:$slot" in
+        draining:blue|draining:green)
+            die "$slot is still draining; run rollback before another deploy"
+            ;;
+        replacing:blue|replacing:green)
+            slot_is_eligible surge || die "cannot resume $slot replacement without an eligible surge backend"
+            log "Resuming interrupted replacement of $slot"
+            start_base_slot "$slot" || die "could not resume replacement of $slot"
+            rm -f "$PHASE_FILE"
+            if [[ -n "$remaining" ]]; then
+                local result=0
+                roll_base_slot "$remaining" "" "$drain_seconds" || result=$?
+                ((result == 0)) || return "$result"
+            fi
+            retire_surge "$drain_seconds"
+            return $?
+            ;;
+        retiring:surge)
+            log "Resuming interrupted surge retirement"
+            retire_surge "$drain_seconds"
+            return $?
+            ;;
+        *) die "invalid rollout phase in $PHASE_FILE" ;;
+    esac
 }
 
 deploy() {
@@ -362,47 +640,56 @@ deploy() {
     ensure_state_dir
     acquire_lock
     validate_prerequisites
-    [[ ! -f "$PHASE_FILE" ]] || die "a predecessor is still draining; inspect status or rollback first"
+    local topology
+    topology="$(read_topology_state)"
 
-    local active candidate status active_weight candidate_weight
-    active="$(read_active_slot)"
-    candidate="$(other_slot "$active")"
-    status="$(server_status "$active")"
-    [[ "$status" == UP* ]] || die "recorded active slot $active is not ready in HAProxy (status: ${status:-unknown})"
-    active_weight="$(server_weight "$active")"
-    candidate_weight="$(server_weight "$candidate")"
-    [[ "$active_weight" =~ ^[1-9][0-9]*$ && "$candidate_weight" == 0 ]] || \
-        die "HAProxy weights disagree with active-slot state; refusing an ambiguous cutover"
-
-    log "Building and starting inactive $candidate slot"
-    if ! compose up --detach --build --no-deps "$(slot_service "$candidate")"; then
-        compose stop "$(slot_service "$candidate")" >/dev/null 2>&1 || true
-        die "candidate $candidate failed to build or start; $active remains active"
-    fi
-    if ! wait_slot_ready "$candidate"; then
-        compose stop "$(slot_service "$candidate")" >/dev/null 2>&1 || true
-        die "candidate $candidate did not reach strict readiness; $active remains active"
+    if [[ -f "$PHASE_FILE" ]]; then
+        resume_interrupted_rollout "$(<"$PHASE_FILE")" "$drain_seconds"
+        return $?
     fi
 
-    log "Switching new connections from $active to $candidate"
-    if ! set_runtime_slots "$candidate" drain; then
-        runtime_command "set server codex_lb_slots/$candidate weight 0" >/dev/null 2>&1 || true
-        compose stop "$(slot_service "$candidate")" >/dev/null 2>&1 || true
-        die "HAProxy rejected the cutover; $active remains active"
-    fi
-    if ! wait_public_ready; then
-        set_runtime_slots "$active" maint || die "public verification failed and automatic HAProxy rollback also failed"
-        snapshot_runtime_state
-        compose stop "$(slot_service "$candidate")" >/dev/null 2>&1 || true
-        die "public verification failed; traffic returned to $active"
+    if [[ "$topology" == blue ]]; then
+        slot_is_eligible blue || die "legacy active slot blue is not eligible"
+    elif [[ "$topology" == green ]]; then
+        slot_is_eligible green || die "legacy active slot green is not eligible"
+    else
+        (slot_is_eligible blue || slot_is_eligible green) || \
+            die "neither steady-state backend is eligible"
     fi
 
-    write_active_slot "$candidate"
-    printf '%s\n' "$active" >"$PHASE_FILE"
-    snapshot_runtime_state
-    release_lock
-    log "$candidate is active; draining $active for at most $drain_seconds seconds"
-    finish_drain "$active" "$candidate" "$drain_seconds"
+    activate_surge || die "surge backend failed readiness; existing backends remain in service"
+
+    local first=blue second=green
+    if ! slot_is_eligible blue; then
+        first=blue
+        second=green
+    elif ! slot_is_eligible green; then
+        first=green
+        second=blue
+    elif [[ "$topology" == green ]]; then
+        first=blue
+        second=green
+    fi
+
+    local result=0
+    roll_base_slot "$first" "$second" "$drain_seconds" || result=$?
+    if ((result == 2)); then
+        log "Rollout cancelled by rollback while $first was draining"
+        return 0
+    elif ((result != 0)); then
+        die "failed while replacing $first; inspect status before retrying deploy"
+    fi
+
+    result=0
+    roll_base_slot "$second" "" "$drain_seconds" || result=$?
+    if ((result == 2)); then
+        log "Rollout cancelled by rollback while $second was draining"
+        return 0
+    elif ((result != 0)); then
+        die "failed while replacing $second; inspect status before retrying deploy"
+    fi
+
+    retire_surge "$drain_seconds" || die "blue and green are active, but surge retirement is incomplete"
 }
 
 rollback() {
@@ -411,45 +698,57 @@ rollback() {
     ensure_state_dir
     acquire_lock
     validate_prerequisites
-    [[ -f "$PHASE_FILE" ]] || die "rollback is only available while a predecessor is draining"
+    [[ -f "$PHASE_FILE" ]] || die "rollback is only available while a base slot is draining"
 
-    local current predecessor
-    current="$(read_active_slot)"
-    predecessor="$(<"$PHASE_FILE")"
-    [[ "$predecessor" == blue || "$predecessor" == green ]] || die "invalid draining-slot state"
-    [[ "$(container_health "$predecessor" 2>/dev/null || true)" == healthy ]] || \
-        die "predecessor $predecessor is no longer healthy; refusing rollback"
-
-    log "Returning new connections from $current to $predecessor"
-    set_runtime_slots "$predecessor" drain
-    if ! wait_public_ready; then
-        set_runtime_slots "$current" drain || true
-        die "rollback public verification failed; restored $current as active"
+    local phase action predecessor ignored
+    phase="$(<"$PHASE_FILE")"
+    if [[ "$phase" == blue || "$phase" == green ]]; then
+        predecessor="$phase"
+    else
+        IFS=: read -r action predecessor ignored <<<"$phase"
+        [[ "$action" == draining && ("$predecessor" == blue || "$predecessor" == green) ]] || \
+            die "rollback is unavailable during rollout phase '$phase'"
     fi
-    write_active_slot "$predecessor"
-    printf '%s\n' "$current" >"$PHASE_FILE"
+    [[ "$(container_health "$predecessor" 2>/dev/null || true)" == healthy ]] || \
+        die "draining backend $predecessor is no longer healthy; refusing rollback"
+
+    log "Cancelling the drain and returning $predecessor to active service"
+    set_slot_weight "$predecessor" 1 || die "HAProxy rejected rollback for $predecessor"
+    if ! wait_public_ready || ! ensure_minimum_eligible 2; then
+        set_slot_weight "$predecessor" 0 >/dev/null 2>&1 || true
+        die "rollback public verification failed; restored the drain"
+    fi
+    rm -f "$PHASE_FILE"
+    write_active_active_state
     snapshot_runtime_state
-    release_lock
-    log "$predecessor is active again; draining $current"
-    finish_drain "$current" "$predecessor" "$drain_seconds"
+
+    if server_exists surge && slot_is_eligible surge; then
+        retire_surge "$drain_seconds" || die "base-slot rollback succeeded, but surge retirement is incomplete"
+    else
+        compose stop server-surge >/dev/null 2>&1 || true
+        release_lock
+        log "Rollback complete: blue and green remain active"
+    fi
 }
 
 status() {
     ensure_state_dir
-    local active="uninitialized"
-    [[ ! -f "$ACTIVE_FILE" ]] || active="$(read_active_slot)"
-    printf 'Active slot: %s\n' "$active"
+    local topology="uninitialized"
+    [[ ! -f "$ACTIVE_FILE" ]] || topology="$(read_topology_state)"
+    printf 'Serving topology: %s\n' "$topology"
     if [[ -f "$PHASE_FILE" ]]; then
-        printf 'Draining slot: %s\n' "$(<"$PHASE_FILE")"
+        printf 'Rollout phase: %s\n' "$(<"$PHASE_FILE")"
     else
-        printf 'Draining slot: none\n'
+        printf 'Rollout phase: none\n'
     fi
     compose ps
     if compose ps --quiet haproxy | grep -q .; then
         runtime_command 'show stat' | awk -F, '
-            $1 == "codex_lb_slots" && ($2 == "blue" || $2 == "green") {
+            $1 == "codex_lb_slots" && ($2 == "blue" || $2 == "green" || $2 == "surge") {
                 printf "%s: status=%s weight=%s sessions=%s\n", $2, $18, $19, $5
+                if ($18 ~ /^UP/ && ($19 + 0) > 0) eligible++
             }
+            END { printf "Eligible backends: %d\n", eligible + 0 }
         '
     fi
 }

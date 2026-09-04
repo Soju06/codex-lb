@@ -153,32 +153,58 @@ scheme `https`; raw-peer authorization still evaluates `10.0.0.8`.
 ## Opt-in single-host HAProxy rollout
 
 `deploy/compose/docker-compose.ha.yml` is deliberately separate from the stock Compose path. The
-stock files keep their zero-config single-replica contract, while the HA topology pays the
-operational cost of two named application slots only for operators who already provide shared
-PostgreSQL and multi-replica-safe key material. HAProxy owns public port `2455`; its runtime control
-listener and both application ports remain private.
+stock files keep their zero-config single-replica contract. The HA topology instead runs the named
+`blue` and `green` application backends at equal positive weight for operators who already provide
+shared PostgreSQL and multi-replica-safe key material. HAProxy owns public port `2455`; its runtime
+control listener and all application ports remain private. A third `surge` backend is stopped and
+has weight zero outside deployment.
 
 The host-side `scripts/deploy-compose-ha.sh` avoids a persistent Docker-socket controller. It
-serializes commands, performs direct and public readiness checks, changes HAProxy server state in
+serializes mutations, performs direct and public readiness checks, changes HAProxy server state in
 ready-before-drain order, and snapshots that state for proxy restart. A one-time bootstrap must
 rebind the public port from stock Compose to HAProxy and therefore has a short interruption. Later
-healthy blue/green cutovers continuously admit new connections. Long-lived connections still have
-a finite drain bound, and the host plus HAProxy remain a single failure domain.
+healthy deployments first build and activate surge, replace blue and green one at a time from that
+same image, then drain and stop surge. This keeps two application processes eligible throughout
+the replacement steps and continuously admits new connections.
 
-The inactive slot has static HAProxy weight zero. Candidate activation therefore uses an absolute
-positive runtime weight (`weight 1`) before assigning the predecessor weight zero. A percentage
-such as `100%` would remain zero because HAProxy evaluates it against the candidate's static
-zero-weight baseline, temporarily leaving the backend with no eligible server.
+For example, a normal rollout serves from `blue + green`, then `blue + green + surge`; while blue
+is replaced, `green + surge` continue receiving new traffic. After blue is ready, green is replaced
+while `blue + surge` serve. Surge retires only after both base backends are ready again. A degraded
+topology cannot promise two-backend capacity until surge and another backend are eligible.
+
+The runtime command uses an absolute positive weight (`weight 1`) when activating surge or a
+replacement. A percentage such as `100%` could remain zero when HAProxy evaluates it against a
+static or restored zero-weight baseline. A backend receives absolute weight zero before it stops,
+allowing its HTTP, SSE, and WebSocket sessions to drain up to the configured bound. Long-lived
+connections can still be terminated at that bound, and the host plus HAProxy remain a single
+failure domain.
+
+Existing initialized hosts may still record one legacy active slot and run a two-server HAProxy
+process. Their first new rollout starts surge, resolves its private container address, and uses the
+HAProxy 3.2 Runtime API to register and health-check it without restarting the public listener.
+Until that legacy process restarts with the static declaration, later rollouts refresh the
+runtime-added server's IP whenever the surge container is recreated.
+Legacy `blue` or `green` marker values remain readable; a completed rollout records `blue,green`.
+Shared PostgreSQL bridge membership lets legacy replicas discover the temporary instance while
+new service definitions include all three stable instance names.
+
+The rollout phase file distinguishes a backend that is draining, being replaced, or surge being
+retired. An explicit rollback is safe only while a base backend is visibly draining and still
+healthy: it makes that backend eligible, aborts later replacements, and retires surge. It does not
+restore an earlier backend that was already replaced. If replacement startup fails after the old
+container stops, the other base backend and surge remain active and the next deploy resumes the
+published replacement phase from the candidate image already built for that rollout.
 
 OAuth callback port `1455` is excluded because the callback listener exists temporarily inside one
 application process. Account onboarding is therefore completed before bootstrap or handled in a
-maintenance window by publishing `1455` directly to the active slot.
+maintenance window by publishing `1455` directly to one base backend.
 
 The repository-owned `$codex-lb-ha-deploy` skill makes the tested script the default path for later
 Codex-operated deployments on an initialized Compose host. Agent instructions intentionally contain
-no duplicate HAProxy mutation logic: they inspect status, invoke the script, wait through drain, and
-verify the resulting slot and public readiness. A deploy request does not implicitly authorize
-source-control changes, rollback, or the one-time bootstrap interruption.
+no duplicate HAProxy mutation logic: they inspect status, invoke the script, wait through all drain
+phases, and verify blue plus green are eligible, surge is retired, and public readiness succeeds. A
+deploy request does not implicitly authorize source-control changes, rollback, or the one-time
+bootstrap interruption.
 
 ## NEXT-RELEASE QUEUE (do not lose)
 

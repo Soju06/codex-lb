@@ -20,49 +20,48 @@ def _compose() -> dict[str, Any]:
     return yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
 
 
-def test_ha_compose_keeps_application_slots_private() -> None:
+def test_ha_compose_keeps_application_backends_private() -> None:
     services = _compose()["services"]
 
     assert services["haproxy"]["ports"] == ["2455:2455"]
-    assert services["server-blue"]["expose"] == ["2455"]
-    assert services["server-green"]["expose"] == ["2455"]
-    assert "ports" not in services["server-blue"]
-    assert "ports" not in services["server-green"]
+    for service_name in ("server-blue", "server-green", "server-surge"):
+        assert services[service_name]["expose"] == ["2455"]
+        assert "ports" not in services[service_name]
     assert services["haproxy"]["image"].startswith("haproxy:3.2-alpine@sha256:")
     assert len(services["haproxy"]["image"].rsplit("@sha256:", 1)[1]) == 64
 
 
-def test_ha_slots_have_stable_unique_identity_and_shared_state() -> None:
+def test_ha_backends_have_stable_unique_identity_and_shared_state() -> None:
     services = _compose()["services"]
-    blue = services["server-blue"]
-    green = services["server-green"]
-
-    assert blue["environment"] == {
-        "FORWARDED_ALLOW_IPS": "172.31.245.254",
-        "CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS": "true",
-        "CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS": "172.31.245.254/32",
-        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID": "server-blue",
-        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING": "server-blue,server-green",
-        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL": "http://server-blue:2455",
+    backends = {
+        name: services[f"server-{name}"] for name in ("blue", "green", "surge")
     }
-    assert green["environment"] == {
-        "FORWARDED_ALLOW_IPS": "172.31.245.254",
-        "CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS": "true",
-        "CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS": "172.31.245.254/32",
-        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID": "server-green",
-        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING": "server-blue,server-green",
-        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL": "http://server-green:2455",
-    }
-    assert blue["volumes"] == green["volumes"] == ["codex-lb-data:/var/lib/codex-lb"]
-    assert blue["command"][:3] == ["python", "-m", "app.cli"]
-    assert green["command"][:3] == ["python", "-m", "app.cli"]
-    assert blue["healthcheck"] == green["healthcheck"]
-    assert blue["stop_grace_period"] == green["stop_grace_period"] == "75s"
-    assert services["haproxy"]["networks"]["ha-edge"]["ipv4_address"] == "172.31.245.254"
-    assert blue["networks"] == green["networks"] == {"ha-edge": {}, "data": {}}
+    expected_ring = "server-blue,server-green,server-surge"
+
+    for name, service in backends.items():
+        assert service["environment"] == {
+            "FORWARDED_ALLOW_IPS": "172.31.245.254",
+            "CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS": "true",
+            "CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS": "172.31.245.254/32",
+            "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID": f"server-{name}",
+            "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING": expected_ring,
+            "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL": (
+                f"http://server-{name}:2455"
+            ),
+        }
+        assert service["volumes"] == ["codex-lb-data:/var/lib/codex-lb"]
+        assert service["command"][:3] == ["python", "-m", "app.cli"]
+        assert service["stop_grace_period"] == "75s"
+        assert service["networks"] == {"ha-edge": {}, "data": {}}
+
+    assert backends["blue"]["healthcheck"] == backends["green"]["healthcheck"]
+    assert backends["green"]["healthcheck"] == backends["surge"]["healthcheck"]
+    assert services["haproxy"]["networks"]["ha-edge"]["ipv4_address"] == (
+        "172.31.245.254"
+    )
 
 
-def test_haproxy_config_supports_readiness_streams_and_private_runtime_control() -> None:
+def test_haproxy_config_supports_active_active_plus_surge() -> None:
     config = HAPROXY_PATH.read_text(encoding="utf-8")
 
     assert "stats socket ipv4@127.0.0.1:9999 level admin" in config
@@ -74,7 +73,9 @@ def test_haproxy_config_supports_readiness_streams_and_private_runtime_control()
     assert "option forwardfor" in config
     assert "http-request del-header X-Forwarded-For" in config
     assert "server blue server-blue:2455 check" in config
-    assert "server green server-green:2455 weight 0 check" in config
+    assert "server green server-green:2455 check" in config
+    assert "server green server-green:2455 weight 0" not in config
+    assert "server surge server-surge:2455 weight 0 check" in config
 
 
 def _write_fake_docker(path: Path) -> None:
@@ -82,15 +83,20 @@ def _write_fake_docker(path: Path) -> None:
         """#!/usr/bin/env bash
 set -eu
 printf '%s\\n' "$*" >>"$FAKE_DOCKER_LOG"
+mkdir -p "$FAKE_DOCKER_STATE"
 
 if [[ -n "${FAKE_FAIL_MATCH:-}" && " $* " == *"$FAKE_FAIL_MATCH"* ]]; then
     exit 1
 fi
-if [[ "${1:-}" == network ]]; then
+if [[ "${1:-}" == network || "${1:-}" == volume ]]; then
     exit 0
 fi
 if [[ "${1:-}" == inspect ]]; then
-    printf 'healthy\\n'
+    if [[ " $* " == *".NetworkSettings.Networks"* ]]; then
+        printf '%s\\n' "${FAKE_SURGE_IP:-172.31.245.13}"
+    else
+        printf 'healthy\\n'
+    fi
     exit 0
 fi
 if [[ " $* " != *" compose "* ]]; then
@@ -107,6 +113,14 @@ if [[ " $* " == *" ps --quiet server-green "* ]]; then
     printf 'green-container\\n'
     exit 0
 fi
+if [[ " $* " == *" ps --quiet server-surge "* ]]; then
+    printf 'surge-container\\n'
+    exit 0
+fi
+if [[ " $* " == *" ps --quiet haproxy "* ]]; then
+    printf 'haproxy-container\\n'
+    exit 0
+fi
 if [[ " $* " == *"docker-compose.prod.yml"* && " $* " == *" ps --quiet server "* ]]; then
     exit 0
 fi
@@ -119,13 +133,58 @@ if [[ " $* " == *" exec --no-TTY haproxy sh -c "* ]]; then
     if [[ -n "${FAKE_FAIL_MATCH:-}" && "$payload" == *"$FAKE_FAIL_MATCH"* ]]; then
         exit 1
     fi
+
+    for slot in blue green surge; do
+        weight_file="$FAKE_DOCKER_STATE/$slot.weight"
+        if [[ ! -f "$weight_file" ]]; then
+            if [[ "$slot" == surge ]]; then
+                printf '0\\n' >"$weight_file"
+            else
+                printf '100\\n' >"$weight_file"
+            fi
+        fi
+    done
+
     if [[ "$payload" == *"show stat"* ]]; then
         printf '# pxname,svname,qcur,qmax,scur,smax,slim,stot,bin,bout,dreq,dresp,ereq,econ,'
-        printf 'eresp,wretr,wredis,status\\n'
-        printf 'codex_lb_slots,blue,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,UP,100\\n'
-        printf 'codex_lb_slots,green,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,DRAIN,0\\n'
+        printf 'eresp,wretr,wredis,status,weight\\n'
+        for slot in blue green; do
+            weight="$(<"$FAKE_DOCKER_STATE/$slot.weight")"
+            status=UP
+            [[ "$weight" != 0 ]] || status=DRAIN
+            printf 'codex_lb_slots,%s,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,%s,%s\\n' \
+                "$slot" "$status" "$weight"
+        done
+        if [[ "${FAKE_LEGACY_HAPROXY:-0}" != 1 || -f "$FAKE_DOCKER_STATE/surge.registered" ]]; then
+            weight="$(<"$FAKE_DOCKER_STATE/surge.weight")"
+            status=UP
+            [[ "$weight" != 0 ]] || status=DRAIN
+            printf 'codex_lb_slots,surge,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,%s,%s\\n' \
+                "$status" "$weight"
+        fi
     elif [[ "$payload" == *"show servers state"* ]]; then
-        printf '1\\n# be_id be_name srv_id srv_name srv_addr srv_op_state srv_admin_state\\n'
+        printf '1\\n'
+        printf '# be_id be_name srv_id srv_name srv_addr srv_op_state srv_admin_state srv_uweight '
+        printf 'srv_iweight srv_time_since_last_change srv_check_status srv_check_result srv_check_health '
+        printf 'srv_check_state srv_agent_state bk_f_forced_id srv_f_forced_id srv_fqdn srv_port\\n'
+        if [[ -f "$FAKE_DOCKER_STATE/surge.registered" ]]; then
+            address="$(<"$FAKE_DOCKER_STATE/surge.addr")"
+            printf '3 codex_lb_slots 3 surge %s 2 0 1 0 0 15 3 3 6 0 0 0 - 2455\\n' "$address"
+        elif [[ "${FAKE_LEGACY_HAPROXY:-0}" != 1 ]]; then
+            printf '3 codex_lb_slots 3 surge 172.31.245.13 0 0 0 0 0 0 0 0 0 0 0 0 server-surge 2455\\n'
+        fi
+    elif [[ "$payload" =~ add[[:space:]]server[[:space:]]codex_lb_slots/surge ]]; then
+        touch "$FAKE_DOCKER_STATE/surge.registered"
+        printf '%s\\n' "${FAKE_SURGE_IP:-172.31.245.13}" >"$FAKE_DOCKER_STATE/surge.addr"
+        printf 'New server registered.\\n'
+    else
+        set_weight_re='set[[:space:]]server[[:space:]]codex_lb_slots/([a-z]+)[[:space:]]weight[[:space:]]([0-9]+)'
+        set_addr_re='set[[:space:]]server[[:space:]]codex_lb_slots/surge[[:space:]]addr[[:space:]]([^[:space:]]+)'
+        if [[ "$payload" =~ $set_weight_re ]]; then
+            printf '%s\\n' "${BASH_REMATCH[2]}" >"$FAKE_DOCKER_STATE/${BASH_REMATCH[1]}.weight"
+        elif [[ "$payload" =~ $set_addr_re ]]; then
+            printf '%s\\n' "${BASH_REMATCH[1]}" >"$FAKE_DOCKER_STATE/surge.addr"
+        fi
     fi
     exit 0
 fi
@@ -156,6 +215,8 @@ def _run_workflow(
     command: str,
     *,
     fail_match: str | None = None,
+    legacy_haproxy: bool = False,
+    surge_ip: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     log_path = root / "docker.log"
     env = {
@@ -164,11 +225,19 @@ def _run_workflow(
         "_CODEX_LB_HA_READY_ATTEMPTS": "1",
         "_CODEX_LB_HA_PUBLIC_READY_ATTEMPTS": "1",
         "FAKE_DOCKER_LOG": str(log_path),
+        "FAKE_DOCKER_STATE": str(root / ".fake-docker-state"),
     }
     if fail_match is not None:
         env["FAKE_FAIL_MATCH"] = fail_match
+    if legacy_haproxy:
+        env["FAKE_LEGACY_HAPROXY"] = "1"
+    if surge_ip is not None:
+        env["FAKE_SURGE_IP"] = surge_ip
+    args = [str(root / "scripts/deploy-compose-ha.sh"), command]
+    if command != "status":
+        args.append("1")
     return subprocess.run(
-        [str(root / "scripts/deploy-compose-ha.sh"), command, "1"],
+        args,
         cwd=root,
         env=env,
         check=False,
@@ -182,7 +251,8 @@ def _run_workflow(
     [
         ("CODEX_LB_DATABASE_URL=sqlite+aiosqlite:///store.db\n", "shared PostgreSQL"),
         (
-            "CODEX_LB_DATABASE_URL=postgresql+asyncpg://db/codex_lb\nCODEX_LB_LEADER_ELECTION_ENABLED=false\n",
+            "CODEX_LB_DATABASE_URL=postgresql+asyncpg://db/codex_lb\n"
+            "CODEX_LB_LEADER_ELECTION_ENABLED=false\n",
             "must remain enabled",
         ),
     ],
@@ -203,7 +273,9 @@ def test_deployment_rejects_unsafe_overlap_before_container_mutation(
     assert not (root / ".codex-lb-ha/active-slot").exists()
 
 
-def test_fake_docker_workflow_bootstraps_then_switches_blue_to_green(tmp_path: Path) -> None:
+def test_fake_docker_workflow_bootstraps_active_active_then_uses_surge(
+    tmp_path: Path,
+) -> None:
     root, fake_docker = _workflow_repo(
         tmp_path,
         "CODEX_LB_DATABASE_URL=postgresql+asyncpg://db/codex_lb\n"
@@ -216,33 +288,123 @@ def test_fake_docker_workflow_bootstraps_then_switches_blue_to_green(tmp_path: P
     assert bootstrap.returncode == 0, bootstrap.stderr
     assert deploy.returncode == 0, deploy.stderr
     state_dir = root / ".codex-lb-ha"
-    assert (state_dir / "active-slot").read_text(encoding="utf-8").strip() == "green"
+    assert (state_dir / "active-slot").read_text(encoding="utf-8").strip() == (
+        "blue,green"
+    )
     assert not (state_dir / "draining-slot").exists()
     assert (state_dir / "server-state").exists()
 
     log = (root / "docker.log").read_text(encoding="utf-8")
-    candidate_start = log.index("up --detach --build --no-deps server-green")
-    candidate_ready = log.index("wget -q -T 3 -O /dev/null http://server-green:2455/health/ready")
-    cutover = log.index("set server codex_lb_slots/green weight 1")
-    predecessor_stop = log.rindex("stop server-blue")
-    assert candidate_start < candidate_ready < cutover < predecessor_stop
-    assert "set server codex_lb_slots/blue weight 0" in log
-    assert "weight 100%" not in log
+    surge_start = log.index("up --detach --build --no-deps server-surge")
+    surge_active = log.index("set server codex_lb_slots/surge weight 1")
+    blue_drain = log.index("set server codex_lb_slots/blue weight 0", surge_active)
+    blue_stop = log.index("stop server-blue", blue_drain)
+    blue_restart = log.index(
+        "up --detach --no-build --no-deps --force-recreate server-blue", blue_stop
+    )
+    green_drain = log.index("set server codex_lb_slots/green weight 0", blue_restart)
+    surge_retire = log.rindex("set server codex_lb_slots/surge weight 0")
+    surge_stop = log.rindex("stop server-surge")
+    assert (
+        surge_start
+        < surge_active
+        < blue_drain
+        < blue_stop
+        < blue_restart
+        < green_drain
+        < surge_retire
+        < surge_stop
+    )
+
+
+def test_first_rollout_registers_surge_in_a_legacy_haproxy_process(
+    tmp_path: Path,
+) -> None:
+    root, fake_docker = _workflow_repo(
+        tmp_path,
+        "CODEX_LB_DATABASE_URL=postgresql+asyncpg://db/codex_lb\n",
+    )
+    bootstrap = _run_workflow(root, fake_docker, "bootstrap", legacy_haproxy=True)
+    assert bootstrap.returncode == 0, bootstrap.stderr
+
+    state_dir = root / ".codex-lb-ha"
+    (state_dir / "active-slot").write_text("blue\n", encoding="utf-8")
+    (root / ".fake-docker-state/green.weight").write_text("0\n", encoding="utf-8")
+    log_path = root / "docker.log"
+    log_path.write_text("", encoding="utf-8")
+    deploy = _run_workflow(root, fake_docker, "deploy", legacy_haproxy=True)
+
+    assert deploy.returncode == 0, deploy.stderr
+    assert (state_dir / "active-slot").read_text(encoding="utf-8").strip() == (
+        "blue,green"
+    )
+    log = log_path.read_text(encoding="utf-8")
+    assert "add server codex_lb_slots/surge 172.31.245.13:2455" in log
+    assert "enable health codex_lb_slots/surge" in log
+    assert "enable server codex_lb_slots/surge" in log
+    green_ready = log.index("set server codex_lb_slots/green weight 1")
+    blue_drain = log.index("set server codex_lb_slots/blue weight 0")
+    assert green_ready < blue_drain
+
+    log_path.write_text("", encoding="utf-8")
+    second_deploy = _run_workflow(
+        root,
+        fake_docker,
+        "deploy",
+        legacy_haproxy=True,
+        surge_ip="172.31.245.14",
+    )
+    assert second_deploy.returncode == 0, second_deploy.stderr
+    second_log = log_path.read_text(encoding="utf-8")
+    assert "set server codex_lb_slots/surge addr 172.31.245.14 port 2455" in second_log
+
+
+def test_failed_legacy_runtime_registration_does_not_drain_the_active_backend(
+    tmp_path: Path,
+) -> None:
+    root, fake_docker = _workflow_repo(
+        tmp_path,
+        "CODEX_LB_DATABASE_URL=postgresql+asyncpg://db/codex_lb\n",
+    )
+    bootstrap = _run_workflow(root, fake_docker, "bootstrap", legacy_haproxy=True)
+    assert bootstrap.returncode == 0, bootstrap.stderr
+
+    state_dir = root / ".codex-lb-ha"
+    (state_dir / "active-slot").write_text("blue\n", encoding="utf-8")
+    fake_state = root / ".fake-docker-state"
+    (fake_state / "green.weight").write_text("0\n", encoding="utf-8")
+    log_path = root / "docker.log"
+    log_path.write_text("", encoding="utf-8")
+
+    deploy = _run_workflow(
+        root,
+        fake_docker,
+        "deploy",
+        fail_match="add server codex_lb_slots/surge",
+        legacy_haproxy=True,
+    )
+
+    assert deploy.returncode != 0
+    assert "surge backend failed readiness" in deploy.stderr
+    assert (fake_state / "blue.weight").read_text(encoding="utf-8").strip() != "0"
+    assert (fake_state / "green.weight").read_text(encoding="utf-8").strip() == "0"
+    log = log_path.read_text(encoding="utf-8")
+    assert "stop server-blue" not in log
+    assert "stop server-green" not in log
 
 
 @pytest.mark.parametrize(
-    "failed_stage,expected_error",
+    "failed_stage",
     [
-        ("up --detach --build --no-deps server-green", "failed to build or start"),
-        ("http://server-green:2455/health/ready", "did not reach strict readiness"),
-        ("set server codex_lb_slots/green weight 1", "rejected the cutover"),
-        ("http://127.0.0.1:2455/health/ready", "public verification failed"),
+        "up --detach --build --no-deps server-surge",
+        "http://server-surge:2455/health/ready",
+        "set server codex_lb_slots/surge weight 1",
+        "http://127.0.0.1:2455/health/ready",
     ],
 )
-def test_failed_deployment_stage_keeps_blue_active(
+def test_failed_surge_stage_keeps_both_base_backends_untouched(
     tmp_path: Path,
     failed_stage: str,
-    expected_error: str,
 ) -> None:
     root, fake_docker = _workflow_repo(
         tmp_path,
@@ -256,13 +418,49 @@ def test_failed_deployment_stage_keeps_blue_active(
     deploy = _run_workflow(root, fake_docker, "deploy", fail_match=failed_stage)
 
     assert deploy.returncode != 0
-    assert expected_error in deploy.stderr
-    assert (root / ".codex-lb-ha/active-slot").read_text(encoding="utf-8").strip() == "blue"
+    assert "surge backend failed readiness" in deploy.stderr
+    assert (root / ".codex-lb-ha/active-slot").read_text(encoding="utf-8").strip() == (
+        "blue,green"
+    )
     log = log_path.read_text(encoding="utf-8")
     assert "stop server-blue" not in log
+    assert "stop server-green" not in log
 
 
-def test_fake_docker_workflow_rolls_back_during_drain(tmp_path: Path) -> None:
+def test_interrupted_base_replacement_is_resumable(tmp_path: Path) -> None:
+    root, fake_docker = _workflow_repo(
+        tmp_path,
+        "CODEX_LB_DATABASE_URL=postgresql+asyncpg://db/codex_lb\n",
+    )
+    bootstrap = _run_workflow(root, fake_docker, "bootstrap")
+    assert bootstrap.returncode == 0, bootstrap.stderr
+
+    failed = _run_workflow(
+        root,
+        fake_docker,
+        "deploy",
+        fail_match="up --detach --no-build --no-deps --force-recreate server-blue",
+    )
+    assert failed.returncode != 0
+    phase_file = root / ".codex-lb-ha/draining-slot"
+    assert phase_file.read_text(encoding="utf-8").strip() == "replacing:blue:green"
+    fake_state = root / ".fake-docker-state"
+    assert (fake_state / "blue.weight").read_text(encoding="utf-8").strip() == "0"
+    assert (fake_state / "green.weight").read_text(encoding="utf-8").strip() != "0"
+    assert (fake_state / "surge.weight").read_text(encoding="utf-8").strip() != "0"
+
+    resumed = _run_workflow(root, fake_docker, "deploy")
+
+    assert resumed.returncode == 0, resumed.stderr
+    assert not phase_file.exists()
+    assert (root / ".codex-lb-ha/active-slot").read_text(encoding="utf-8").strip() == (
+        "blue,green"
+    )
+
+
+def test_fake_docker_workflow_rolls_back_the_current_base_drain(
+    tmp_path: Path,
+) -> None:
     root, fake_docker = _workflow_repo(
         tmp_path,
         "CODEX_LB_DATABASE_URL=postgresql+asyncpg://db/codex_lb\n",
@@ -271,21 +469,74 @@ def test_fake_docker_workflow_rolls_back_during_drain(tmp_path: Path) -> None:
     assert bootstrap.returncode == 0, bootstrap.stderr
 
     state_dir = root / ".codex-lb-ha"
-    (state_dir / "active-slot").write_text("green\n", encoding="utf-8")
-    (state_dir / "draining-slot").write_text("blue\n", encoding="utf-8")
+    (state_dir / "draining-slot").write_text(
+        "draining:blue:green\n", encoding="utf-8"
+    )
+    fake_state = root / ".fake-docker-state"
+    (fake_state / "blue.weight").write_text("0\n", encoding="utf-8")
+    (fake_state / "surge.weight").write_text("100\n", encoding="utf-8")
     log_path = root / "docker.log"
     log_path.write_text("", encoding="utf-8")
 
     rollback = _run_workflow(root, fake_docker, "rollback")
 
     assert rollback.returncode == 0, rollback.stderr
-    assert (state_dir / "active-slot").read_text(encoding="utf-8").strip() == "blue"
+    assert (state_dir / "active-slot").read_text(encoding="utf-8").strip() == (
+        "blue,green"
+    )
     assert not (state_dir / "draining-slot").exists()
     log = log_path.read_text(encoding="utf-8")
     ready = log.index("set server codex_lb_slots/blue weight 1")
-    drain = log.index("set server codex_lb_slots/green weight 0")
-    stop = log.index("stop server-green")
-    assert ready < drain < stop
+    surge_drain = log.index("set server codex_lb_slots/surge weight 0")
+    surge_stop = log.index("stop server-surge")
+    assert ready < surge_drain < surge_stop
+    assert "stop server-green" not in log
+
+
+def test_status_reports_all_backends_and_eligible_count(tmp_path: Path) -> None:
+    root, fake_docker = _workflow_repo(
+        tmp_path,
+        "CODEX_LB_DATABASE_URL=postgresql+asyncpg://db/codex_lb\n",
+    )
+    bootstrap = _run_workflow(root, fake_docker, "bootstrap")
+    assert bootstrap.returncode == 0, bootstrap.stderr
+
+    status = _run_workflow(root, fake_docker, "status")
+
+    assert status.returncode == 0, status.stderr
+    assert "Serving topology: blue,green" in status.stdout
+    assert "blue: status=UP" in status.stdout
+    assert "green: status=UP" in status.stdout
+    assert "surge: status=DRAIN" in status.stdout
+    assert "Eligible backends: 2" in status.stdout
+
+
+def test_second_deploy_is_rejected_during_a_published_drain(tmp_path: Path) -> None:
+    root, fake_docker = _workflow_repo(
+        tmp_path,
+        "CODEX_LB_DATABASE_URL=postgresql+asyncpg://db/codex_lb\n",
+    )
+    bootstrap = _run_workflow(root, fake_docker, "bootstrap")
+    assert bootstrap.returncode == 0, bootstrap.stderr
+
+    state_dir = root / ".codex-lb-ha"
+    (state_dir / "draining-slot").write_text(
+        "draining:blue:green\n", encoding="utf-8"
+    )
+    fake_state = root / ".fake-docker-state"
+    (fake_state / "blue.weight").write_text("0\n", encoding="utf-8")
+    (fake_state / "surge.weight").write_text("100\n", encoding="utf-8")
+    log_path = root / "docker.log"
+    log_path.write_text("", encoding="utf-8")
+
+    deploy = _run_workflow(root, fake_docker, "deploy")
+
+    assert deploy.returncode != 0
+    assert "blue is still draining" in deploy.stderr
+    log = log_path.read_text(encoding="utf-8")
+    assert "runtime:set server" not in log
+    assert " up " not in log
+    assert " stop " not in log
 
 
 def test_concurrent_deployment_is_rejected_before_mutation(tmp_path: Path) -> None:
@@ -318,3 +569,4 @@ def test_deployment_script_help_is_available_without_docker() -> None:
     assert result.returncode == 0
     assert "bootstrap" in result.stdout
     assert "rollback" in result.stdout
+    assert "surge" in result.stdout

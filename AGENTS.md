@@ -62,9 +62,9 @@ Prompting cue (use when writing docs):
 ## HA Compose Deployment
 
 - Use the `$codex-lb-ha-deploy` skill automatically when an operator asks to deploy application changes to this repository's single-host Compose production environment.
-- When `.codex-lb-ha/active-slot` exists, deploy only through `./scripts/deploy-compose-ha.sh deploy`; do not recreate the active application service with direct `docker compose up` commands.
-- A generic deploy request authorizes the existing blue/green rollout, status checks, and readiness verification. It does not authorize a commit, push, first-time HA bootstrap, or manual runtime-state mutation.
-- First-time `bootstrap` requires explicit acknowledgement because ownership of public port `2455` must be rebound once. Rollback requires an explicit operator request and is available only while the predecessor is draining.
+- When `.codex-lb-ha/active-slot` exists, deploy only through `./scripts/deploy-compose-ha.sh deploy`; do not recreate blue, green, or surge with direct `docker compose up` commands.
+- A generic deploy request authorizes the existing active-active surge rollout, status checks, and readiness verification. It does not authorize a commit, push, first-time HA bootstrap, rollback, or manual runtime-state mutation.
+- First-time `bootstrap` requires explicit acknowledgement because ownership of public port `2455` must be rebound once. Rollback requires an explicit operator request and is available only while a healthy blue or green backend is visibly draining.
 
 ## Contributing & Merge Gates
 

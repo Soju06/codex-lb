@@ -429,7 +429,13 @@ async def test_submit_abandoned_operation_returns_full_history_recovery_without_
         event_spool_complete=False,
         response_id=None,
     )
+    # Model a recovery checkpoint that was journaled for this request before
+    # the operation ledger revealed the abandoned row.
+    request_state.recovery_attempt_fingerprint = "recovery-attempt-abandoned-operation"
+    request_state.recovery_attempt_session_id = session.durable_session_id
+    request_state.recovery_attempt_owner_epoch = session.durable_owner_epoch
     claim_unknown = AsyncMock()
+    rollback_recovery_attempt = AsyncMock(return_value=True)
     service._durable_bridge = cast(
         Any,
         SimpleNamespace(
@@ -437,6 +443,7 @@ async def test_submit_abandoned_operation_returns_full_history_recovery_without_
             get_operation=AsyncMock(return_value=abandoned),
             record_operation=AsyncMock(return_value=abandoned),
             claim_unknown_operation_for_recovery=claim_unknown,
+            rollback_recovery_attempt_before_dispatch=rollback_recovery_attempt,
         ),
     )
     monkeypatch.setattr(
@@ -466,6 +473,13 @@ async def test_submit_abandoned_operation_returns_full_history_recovery_without_
     assert exc_info.value.payload["error"]["param"] == "previous_response_id"
     claim_unknown.assert_not_awaited()
     send_text.assert_not_awaited()
+    # The journaled UNKNOWN checkpoint is released with the rejection so an
+    # identical resend is not refused as an in-flight recovery request.
+    rollback_recovery_attempt.assert_awaited_once()
+    rollback_call = rollback_recovery_attempt.await_args
+    assert rollback_call is not None
+    assert rollback_call.kwargs["session_id"] == session.durable_session_id
+    assert rollback_call.kwargs["request_fingerprint"] == "recovery-attempt-abandoned-operation"
 
 
 @pytest.mark.asyncio

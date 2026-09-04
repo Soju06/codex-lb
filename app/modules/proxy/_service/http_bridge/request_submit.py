@@ -1605,6 +1605,17 @@ class _HTTPBridgeRequestSubmitMixin:
                     session_id=request_state.session_id,
                     upstream_error_code="previous_response_not_found",
                 )
+                # The recovery journal may already hold an UNKNOWN row for
+                # this request. Release it before rejecting so an identical
+                # anchored resend sees the same 400 instead of a 502
+                # "another recovery request is already in flight".
+                await self._cleanup_http_bridge_submit_interruption(
+                    session,
+                    request_state=request_state,
+                    gate_acquired=False,
+                    request_enqueued=False,
+                    counted_in_queue=False,
+                )
                 raise ProxyResponseError(
                     400,
                     (

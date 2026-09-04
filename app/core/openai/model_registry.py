@@ -74,6 +74,7 @@ class ModelRegistryExport:
 
 
 _BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = (
+    "gpt-6-*",
     "gpt-5.6-*",
     "gpt-5.5",
     "gpt-5.5-*",
@@ -150,6 +151,34 @@ _BOOTSTRAP_GPT56_AVAILABLE_IN_PLANS = frozenset(
         "edu_pro",
         "enterprise_cbp_automation",
         "sci",
+    }
+)
+
+_BOOTSTRAP_GPT6_ASTRA_AVAILABLE_IN_PLANS = frozenset(
+    {
+        "business",
+        "edu",
+        "edu_plus",
+        "edu_pro",
+        "education",
+        "enterprise",
+        "enterprise_cbp_automation",
+        "enterprise_cbp_trial",
+        "enterprise_cbp_usage_based",
+        "finserv",
+        "free",
+        "free_workspace",
+        "go",
+        "hc",
+        "k12",
+        "plus",
+        "pro",
+        "prolite",
+        "quorum",
+        "sci",
+        "self_serve_business_prolite",
+        "self_serve_business_usage_based",
+        "team",
     }
 )
 
@@ -265,6 +294,50 @@ def _gpt56_raw(
     }
 
 
+def _gpt6_astra_raw() -> dict[str, JsonValue]:
+    """Raw catalog fields captured from the upstream live proxy on 2026-09-05.
+
+    The large instruction payload is intentionally not bundled; live upstream
+    registry refresh remains authoritative when available.
+    """
+    return {
+        "apply_patch_tool_type": "freeform",
+        "web_search_tool_type": "text_and_image",
+        "supports_image_detail_original": True,
+        "truncation_policy": {"mode": "tokens", "limit": 10_000},
+        "experimental_supported_tools": ["send_user_message_async", "clock"],
+        "tool_mode": "code_mode_only",
+        "multi_agent_version": "v2",
+        "multi_agent_reasoning_effort": "xhigh",
+        "use_responses_lite": True,
+        "include_skills_usage_instructions": False,
+        "include_apps_usage_instructions": False,
+        "include_plugin_usage_instructions": False,
+        "node_repl_auto_review_required": True,
+        "node_repl_disabled": False,
+        "requires_sandboxed_review": False,
+        "auto_review_model_override": None,
+        "model_specialty": None,
+        "max_context_window": 872_000,
+        "auto_compact_token_limit": None,
+        "comp_hash": "3000",
+        "default_reasoning_summary": "none",
+        "availability_nux": None,
+        "upgrade": None,
+        "supports_search_tool": True,
+        "default_service_tier": "priority",
+        "service_tiers": [
+            {
+                "id": "priority",
+                "name": "Fast",
+                "description": "2x speed, increased usage",
+            }
+        ],
+        "additional_speed_tiers": ["fast"],
+        "supports_reasoning_summary_parameter": True,
+    }
+
+
 # Static bundled fallback models used before the first upstream registry refresh.
 # This mirrors Codex's model-manager pattern: ship a conservative catalog so
 # startup/offline paths have usable metadata, then treat the live upstream
@@ -275,6 +348,19 @@ def _gpt56_raw(
 # dropped from upstream's bundled catalog at rust-v0.144.x but are retained
 # here for older pinned clients; the upstream backend still serves them.
 _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
+    _bootstrap_model(
+        "gpt-6-astra",
+        "GPT-6-Astra",
+        description="Our most capable model for complex, demanding work.",
+        prefer_websockets=True,
+        minimal_client_version="0.153.0",
+        reasoning_levels=_REASONING_LEVELS_ULTRA,
+        context_window=272_000,
+        default_reasoning_level="medium",
+        priority=1,
+        available_in_plans=_BOOTSTRAP_GPT6_ASTRA_AVAILABLE_IN_PLANS,
+        raw=_gpt6_astra_raw(),
+    ),
     _bootstrap_model(
         "gpt-5.6-sol",
         "GPT-5.6-Sol",

@@ -189,7 +189,7 @@ the env-file locations have to be known before env files are read.
 | Environment variable | Type | Default |
 | --- | --- | --- |
 | `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` | `dict[str, int]` | `{}` |
-| `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION` | `str` | `'0.144.0'` |
+| `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION` | `str` | `'0.153.0'` |
 | `CODEX_LB_MODEL_REGISTRY_ENABLED` | `bool` | `True` |
 | `CODEX_LB_MODEL_REGISTRY_SNAPSHOT_MAX_AGE_SECONDS` | `int` | `86400` |
 

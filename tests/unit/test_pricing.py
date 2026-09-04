@@ -67,6 +67,9 @@ def test_get_pricing_for_model_gpt_5_4_alias():
 @pytest.mark.parametrize(
     ("requested_model", "canonical_model"),
     [
+        ("gpt-6", "gpt-6-astra"),
+        ("gpt-6-astra", "gpt-6-astra"),
+        ("gpt-6-astra-2026-09-05", "gpt-6-astra"),
         ("gpt-5.6", "gpt-5.6-sol"),
         ("gpt-5.6-sol", "gpt-5.6-sol"),
         ("gpt-5.6-sol-2026-07-13", "gpt-5.6-sol"),
@@ -76,7 +79,7 @@ def test_get_pricing_for_model_gpt_5_4_alias():
         ("gpt-5.6-luna-2026-07-13", "gpt-5.6-luna"),
     ],
 )
-def test_get_pricing_for_model_gpt_5_6_aliases(requested_model: str, canonical_model: str) -> None:
+def test_get_pricing_for_model_gpt_family_aliases(requested_model: str, canonical_model: str) -> None:
     result = get_pricing_for_model(requested_model, DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
 
     assert result == (canonical_model, DEFAULT_PRICING_MODELS[canonical_model])
@@ -230,6 +233,12 @@ def test_calculate_cost_from_usage_flex_service_tier():
 @pytest.mark.parametrize(
     ("model", "service_tier", "expected_cost"),
     [
+        ("gpt-6-astra", None, 51.1),
+        ("gpt-6-astra", "flex", 25.55),
+        ("gpt-6-astra", "batch", 25.55),
+        ("gpt-6-astra", "priority", 102.2),
+        ("gpt-6-astra", "fast", 102.2),
+        ("gpt-5.6-sol", "batch", 30.55),
         ("gpt-5.6-sol", None, 30.55),
         ("gpt-5.6-sol", "flex", 15.275),
         ("gpt-5.6-sol", "priority", 61.1),
@@ -244,7 +253,7 @@ def test_calculate_cost_from_usage_flex_service_tier():
         ("gpt-5.6-luna", "fast", 2.444),
     ],
 )
-def test_calculate_cost_from_usage_gpt_5_6_service_tiers(
+def test_calculate_cost_from_usage_gpt_family_service_tiers(
     model: str,
     service_tier: str | None,
     expected_cost: float,
@@ -263,6 +272,12 @@ def test_calculate_cost_from_usage_gpt_5_6_service_tiers(
 @pytest.mark.parametrize(
     ("model", "service_tier", "expected_cost"),
     [
+        ("gpt-6-astra", None, 12.6),
+        ("gpt-6-astra", "priority", 15.1),
+        ("gpt-6-astra", "fast", 15.1),
+        ("gpt-6-astra", "flex", 6.3),
+        ("gpt-6-astra", "batch", 6.3),
+        ("gpt-5.6-sol", "batch", 7.05),
         ("gpt-5.6-sol", None, 7.05),
         ("gpt-5.6-sol", "flex", 3.525),
         ("gpt-5.6-terra", None, 2.82),
@@ -271,7 +286,7 @@ def test_calculate_cost_from_usage_gpt_5_6_service_tiers(
         ("gpt-5.6-luna", "flex", 0.141),
     ],
 )
-def test_calculate_cost_from_usage_gpt_5_6_long_context(
+def test_calculate_cost_from_usage_gpt_family_long_context(
     model: str,
     service_tier: str | None,
     expected_cost: float,
@@ -290,12 +305,13 @@ def test_calculate_cost_from_usage_gpt_5_6_long_context(
 @pytest.mark.parametrize(
     ("model", "standard_input_rate", "long_context_input_rate"),
     [
+        ("gpt-6-astra", 10.0, 20.0),
         ("gpt-5.6-sol", 5.0, 10.0),
         ("gpt-5.6-terra", 2.0, 4.0),
         ("gpt-5.6-luna", 0.2, 0.4),
     ],
 )
-def test_calculate_cost_from_usage_gpt_5_6_uses_272k_long_context_boundary(
+def test_calculate_cost_from_usage_gpt_family_uses_272k_long_context_boundary(
     model: str,
     standard_input_rate: float,
     long_context_input_rate: float,

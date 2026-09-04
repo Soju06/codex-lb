@@ -755,6 +755,30 @@ async def _capture_raw_compaction_trigger_error(request: Request) -> None:
         request.state.compaction_trigger_error = exc
 
 
+async def _capture_raw_v1_compaction_trigger_error(request: Request) -> None:
+    """Keep V1 duplicate-trigger normalization, but reject hidden non-terminal triggers."""
+    try:
+        raw_payload = await request.json()
+    except (JSONDecodeError, UnicodeDecodeError, ValueError):
+        return
+    if not is_json_mapping(raw_payload):
+        return
+    input_value = raw_payload.get("input")
+    if not is_json_list(input_value):
+        return
+    trigger_seen = any(is_json_mapping(item) and item.get("type") == "compaction_trigger" for item in input_value)
+    terminal_trigger = bool(
+        input_value and is_json_mapping(input_value[-1]) and input_value[-1].get("type") == "compaction_trigger"
+    )
+    if trigger_seen and not terminal_trigger:
+        request.state.compaction_trigger_error = ClientPayloadError(
+            "compaction_trigger must appear as the final top-level input item",
+            param="input",
+            code="invalid_request_error",
+            error_type="invalid_request_error",
+        )
+
+
 def _raw_compaction_trigger_error(request: Request) -> ClientPayloadError | None:
     error = getattr(request.state, "compaction_trigger_error", None)
     return error if isinstance(error, ClientPayloadError) else None
@@ -6744,7 +6768,7 @@ async def responses_compact(
 async def v1_responses_compact(
     request: Request,
     payload: V1ResponsesCompactRequest = Body(...),
-    _raw_trigger_validation: None = Depends(_capture_raw_compaction_trigger_error),
+    _raw_trigger_validation: None = Depends(_capture_raw_v1_compaction_trigger_error),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
@@ -6770,6 +6794,7 @@ async def v1_responses_compact(
         codex_session_affinity=False,
         openai_cache_affinity=True,
         prohibit_fast_mode=await _prohibit_fast_mode_enabled(),
+        validate_compaction_trigger_shape=False,
     )
 
 
@@ -6781,6 +6806,7 @@ async def _compact_responses(
     codex_session_affinity: bool = False,
     openai_cache_affinity: bool = False,
     prohibit_fast_mode: bool = False,
+    validate_compaction_trigger_shape: bool = True,
 ) -> JSONResponse:
     # The replaced effort is discarded: this path is subscription-only, so the
     # rewrite that works around the backend hang must stick.
@@ -6794,11 +6820,12 @@ async def _compact_responses(
         service_tier_was_enforced=service_tier_was_enforced,
     )
     validate_model_access(api_key, payload.model)
-    try:
-        strip_terminal_compaction_trigger_input(payload, strip_trigger=False)
-    except ClientPayloadError as exc:
-        error = openai_client_payload_error(exc)
-        return _logged_error_json_response(request, 400, error)
+    if validate_compaction_trigger_shape:
+        try:
+            strip_terminal_compaction_trigger_input(payload, strip_trigger=False)
+        except ClientPayloadError as exc:
+            error = openai_client_payload_error(exc)
+            return _logged_error_json_response(request, 400, error)
     try:
         request_usage_budget = estimate_api_key_request_usage(payload)
     except ClientPayloadError as exc:

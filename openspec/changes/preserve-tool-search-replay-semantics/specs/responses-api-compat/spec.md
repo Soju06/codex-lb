@@ -31,9 +31,11 @@ matching output and following user input.
 
 ### Requirement: Compact triggers are terminal and singular
 
-The Responses compact endpoint MUST forward one terminal
+The canonical Responses compact endpoint MUST forward one terminal
 `compaction_trigger` unchanged. It MUST reject duplicate triggers and
-non-terminal trigger states before dispatching upstream work.
+non-terminal trigger states before dispatching upstream work. The OpenAI
+compatible `/v1/responses/compact` endpoint MUST retain its existing duplicate
+terminal trigger normalization for compatible clients.
 
 #### Scenario: One terminal trigger is forwarded
 
@@ -48,3 +50,11 @@ non-terminal trigger states before dispatching upstream work.
   `compaction_trigger`
 - **WHEN** the proxy validates the request
 - **THEN** it returns a client error before dispatching upstream work
+
+#### Scenario: OpenAI-compatible compact normalizes duplicate terminal triggers
+
+- **WHEN** a client calls `POST /v1/responses/compact` with duplicate terminal
+  top-level `compaction_trigger` items
+- **THEN** codex-lb preserves the existing compatibility behavior and returns
+  HTTP 200 when the compact operation succeeds
+- **AND** the forwarded compact input contains one terminal trigger

@@ -195,3 +195,41 @@ async def test_v1_proxy_compact_preserves_single_terminal_trigger(async_client, 
         {"role": "user", "content": "hello"},
         {"type": "compaction_trigger"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_v1_proxy_compact_normalizes_duplicate_terminal_triggers(async_client, monkeypatch):
+    email = "v1-compact-trigger-duplicate@example.com"
+    raw_account_id = "acc_v1_compact_trigger_duplicate"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_payloads: list[dict[str, object]] = []
+
+    async def fake_compact(payload, *args, **kwargs):
+        del args, kwargs
+        seen_payloads.append(cast(dict[str, object], payload.to_payload()))
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/v1/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "input": [
+                {"role": "user", "content": "hello"},
+                {"type": "compaction_trigger"},
+                {"type": "compaction_trigger"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 1
+    assert seen_payloads[0]["input"] == [
+        {"role": "user", "content": "hello"},
+        {"type": "compaction_trigger"},
+    ]

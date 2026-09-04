@@ -408,6 +408,18 @@ class _RedactedRepr:
 # Context values the default handler renders as text rather than repr().
 _UNREDACTED_LOOP_CONTEXT_KEYS = frozenset({"message", "exception", "source_traceback", "handle_traceback"})
 _REDACTING_LOOP_HANDLER_MARKER = "_codex_lb_redacting_loop_handler"
+_LOOP_CONTEXT_REDACTION_FAILED = "[REDACTED: loop context redaction failed]"
+
+
+def _fail_closed_loop_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Keep the textual entries and replace every object value with an opaque stand-in."""
+    try:
+        return {
+            key: value if key in _UNREDACTED_LOOP_CONTEXT_KEYS else _RedactedRepr(_LOOP_CONTEXT_REDACTION_FAILED)
+            for key, value in context.items()
+        }
+    except Exception:
+        return {"message": _LOOP_CONTEXT_REDACTION_FAILED}
 
 
 def install_redacting_loop_exception_handler(loop: asyncio.AbstractEventLoop) -> None:
@@ -418,7 +430,10 @@ def install_redacting_loop_exception_handler(loop: asyncio.AbstractEventLoop) ->
     ``BasicAuth(... password='pw')``) into the ``asyncio`` logger before any
     formatter runs. Idempotent; delegates to the previously installed handler
     (or the default one) so formatting stays byte-identical for contexts that
-    contain no secrets, and falls back to the raw context on any failure.
+    contain no secrets. Fails closed: a value whose ``repr()`` raises is
+    replaced by an opaque stand-in, and any other failure delegates a context
+    whose object values are all stand-ins, so the report is still emitted but
+    no unredacted value ever reaches the delegate.
     """
     previous = loop.get_exception_handler()
     if previous is not None and getattr(previous, _REDACTING_LOOP_HANDLER_MARKER, False):
@@ -438,14 +453,16 @@ def install_redacting_loop_exception_handler(loop: asyncio.AbstractEventLoop) ->
                     continue
                 try:
                     rendered = repr(value)
-                except Exception:
+                except Exception as exc:
+                    # The default handler would call repr() again and lose the
+                    # whole report; an opaque stand-in keeps the message line.
+                    safe_context[key] = _RedactedRepr(f"<{type(value).__name__} repr failed: {type(exc).__name__}>")
                     continue
                 redacted = redact_rendered_log_text(rendered)
                 if redacted != rendered:
                     safe_context[key] = _RedactedRepr(redacted)
         except Exception:
-            _delegate(target_loop, context)
-            return
+            safe_context = _fail_closed_loop_context(context)
         _delegate(target_loop, safe_context)
 
     setattr(_handler, _REDACTING_LOOP_HANDLER_MARKER, True)

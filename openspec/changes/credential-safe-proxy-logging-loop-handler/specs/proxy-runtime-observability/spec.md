@@ -8,9 +8,12 @@ redacts the `repr()` of every context value the default handler would render
 `handle_traceback` entries) before delegating to the previously installed or
 default handler. Secret-free context output MUST be byte-identical to the
 default handler output, the exception object and its traceback MUST be passed
-through unchanged, installation MUST be idempotent, and any failure inside the
-redacting handler MUST fall back to delegating the original context so no
-diagnostic is lost.
+through unchanged, installation MUST be idempotent, and the handler MUST fail
+closed: a context value whose `repr()` raises MUST be replaced by an opaque
+stand-in, and any other failure inside the redacting handler MUST delegate a
+context that keeps the textual entries and replaces every other value with an
+opaque stand-in, so the report is still emitted and no unredacted value reaches
+the delegate.
 
 #### Scenario: Unclosed aiohttp connection repr is credential-free before logging
 
@@ -28,5 +31,9 @@ diagnostic is lost.
 
 - **WHEN** the context contains no secret pattern
 - **THEN** the emitted record message and exception info are byte-identical to the default handler output
-- **WHEN** a context value's `repr()` raises, or a handler was already installed
-- **THEN** the record is still emitted and the previously installed handler still receives the (redacted) context
+- **WHEN** a handler was already installed
+- **THEN** the previously installed handler still receives the (redacted) context
+- **WHEN** a context value's `repr()` raises
+- **THEN** the record is still emitted with its `message` line intact and that value rendered as an opaque stand-in naming the value type and the exception type
+- **WHEN** the redaction pass itself fails
+- **THEN** the record is still emitted with its `message`, exception and traceback entries intact and every other value rendered as an opaque redaction-failed stand-in

@@ -17,8 +17,10 @@ included) to API clients under the Responses policy.
   lifespan start. It copies the context, replaces every non-text value whose
   `repr()` changes under redaction with a stand-in carrying the redacted repr,
   and delegates to the previously installed (or default) handler, so
-  secret-free contexts render byte-identically. Idempotent; any failure falls
-  back to the raw context.
+  secret-free contexts render byte-identically. Idempotent and fail-closed: a
+  value whose `repr()` raises becomes an opaque stand-in, and any other failure
+  delegates a context whose object values are all stand-ins, so the report is
+  still emitted without rendering an unredacted value.
 - The dashboard rejects proxy usernames containing `:` at endpoint creation
   with `invalid_proxy_username`, and the endpoint test route reports the
   resolver reason as a failed probe instead of an unhandled error.

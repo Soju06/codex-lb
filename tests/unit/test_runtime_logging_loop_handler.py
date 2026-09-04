@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator
 import pytest
 import uvloop
 
+from app.core import runtime_logging
 from app.core.runtime_logging import install_redacting_loop_exception_handler
 from tests.unit._proxy_test_helpers import runtime_basic_auth_url
 
@@ -134,12 +135,35 @@ def test_handler_chains_previously_installed_handler(loop) -> None:
     assert f"[REDACTED]@{_PROXY_AUTHORITY}" in repr(context["client_connection"])
 
 
-def test_handler_survives_exploding_repr(loop, asyncio_log) -> None:
+def test_handler_replaces_exploding_repr_with_opaque_stand_in(loop, asyncio_log) -> None:
     install_redacting_loop_exception_handler(loop)
 
     loop.call_exception_handler({"message": "Unclosed connection", "client_connection": _ExplodingRepr()})
 
-    assert asyncio_log.records, "a log record must still be emitted"
+    (message,) = asyncio_log.messages
+    # The default handler never sees the raw object, so the message line
+    # survives instead of asyncio's generic "Unhandled error in exception handler".
+    assert message == "Unclosed connection\nclient_connection: <_ExplodingRepr repr failed: RuntimeError>"
+
+
+def test_handler_fails_closed_when_redaction_pass_raises(loop, asyncio_log, monkeypatch) -> None:
+    def _broken_redaction(text: str, **_kwargs: object) -> str:
+        raise ValueError("redaction broke")
+
+    monkeypatch.setattr(runtime_logging, "redact_rendered_log_text", _broken_redaction)
+    install_redacting_loop_exception_handler(loop)
+    exc = RuntimeError("boom")
+
+    loop.call_exception_handler(
+        {"message": "Unclosed connection", "exception": exc, "client_connection": _LeakyConnection()}
+    )
+
+    (record,) = asyncio_log.records
+    message = record.getMessage()
+    assert message.startswith("Unclosed connection\n")
+    assert "SECRETPW" not in message
+    assert "client_connection: [REDACTED: loop context redaction failed]" in message
+    assert record.exc_info is not None and record.exc_info[1] is exc
 
 
 @pytest.mark.parametrize("loop_factory", _LOOP_FACTORIES)

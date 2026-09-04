@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 133 settings. Every setting is an environment
+codex-lb currently exposes 143 settings. Every setting is an environment
 variable with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process). All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
@@ -88,6 +88,8 @@ the env-file locations have to be known before env files are read.
 
 ## HTTP Responses session bridge
 
+*Spec: [responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat)*
+
 | Environment variable | Type | Default |
 | --- | --- | --- |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL` | `str \| None` | `None` |
@@ -96,6 +98,10 @@ the env-file locations have to be known before env files are read.
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS` | `float` | `2.0` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_IDLE_TTL_SECONDS` | `float` | `900.0` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED` | `bool` | `False` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_COMPLETE_TRANSCRIPT_MAX_BYTES` | `int` | `8388608` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_COMPLETE_TRANSCRIPT_MAX_INPUT_ITEMS` | `int` | `4096` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_COMPLETE_TRANSCRIPT_MAX_TURNS` | `int` | `256` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_COMPLETE_TRANSCRIPT_RECOVERY_ENABLED` | `bool` | `False` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED` | `bool` | `True` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_GATEWAY_SAFE_MODE` | `bool` | `False` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_IDLE_TTL_SECONDS` | `float` | `120.0` |
@@ -110,10 +116,16 @@ the env-file locations have to be known before env files are read.
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_LEDGER_ENABLED` | `bool` | `True` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_SPOOL_FORMAT` | `'rows_v1' \| 'chunks_v2'` | `'rows_v1'` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_SPOOL_RETENTION_SECONDS` | `float` | `604800` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_PARKED_RECOVERY_ENABLED` | `bool` | `False` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_PARKED_RECOVERY_RECENT_UNKNOWN_LIMIT` | `int` | `8` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_PARKED_RECOVERY_RECENT_UNKNOWN_MAX_AGE_SECONDS` | `float` | `900` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_PRE_RESPONSE_KEEPALIVE_MAX_COUNT` | `int` | `6` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_QUEUE_LIMIT` | `int` | `8` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_REQUEST_BUDGET_SECONDS` | `float` | `7200.0` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS` | `int` | `6` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS` | `float` | `300.0` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_UNSAFE_NEW_RESPONSE_RECOVERY_ENABLED` | `bool` | `False` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_UNSAFE_PARTIAL_REPLAY_ENABLED` | `bool` | `False` |
 
 ## Proxy admission & account caps
 

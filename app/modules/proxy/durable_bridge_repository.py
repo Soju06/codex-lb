@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
@@ -207,6 +207,14 @@ class DurableBridgeOperationSnapshot:
     recovery_dispatch_count: int = 0
     request_text: str | None = None
     event_spool_complete: bool = True
+    transcript_version: int = 0
+    response_output_items_json: str | None = None
+    response_output_items_complete: bool = False
+    response_replay_input_json: str | None = None
+    response_replay_input_complete: bool = False
+    # Number of conversation turns represented by the self-contained replay
+    # snapshot.  A synthetic snapshot turn may embed many older turns.
+    response_replay_input_turn_count: int = 0
     created: bool = False
     rebound: bool = False
     rebound_from_session_id: str | None = None
@@ -219,6 +227,13 @@ class DurableBridgeOperationSnapshot:
 class DurableBridgeTranscriptTurn:
     operation: DurableBridgeOperationSnapshot
     events: tuple[str, ...]
+    response_output_items_json: str = "[]"
+    # A replay snapshot already contains the operation's terminal output in
+    # its canonical input list.  Keep that fact on the synthetic turn so the
+    # replay builder does not append the same output a second time when the
+    # client resends it as the continuation prefix.
+    replay_input_includes_response_output: bool = False
+    represented_turn_count: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +243,7 @@ class DurableBridgeOperationEventInput:
     instance_id: str
     owner_epoch: int
     event_text: str
+    recovery_dispatch_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -927,6 +943,34 @@ class DurableBridgeRepository:
         result = await self._session.execute(statement)
         row = result.scalar_one_or_none()
         return _to_snapshot(row)
+
+    async def resolve_retained_response_alias(
+        self,
+        *,
+        alias_kind: str,
+        alias_value: str,
+        api_key_scope: str,
+    ) -> tuple[DurableBridgeSessionSnapshot, str] | None:
+        statement = (
+            select(HttpBridgeSessionAlias.target_response_id, HttpBridgeSessionRecord)
+            .join(HttpBridgeSessionRecord, HttpBridgeSessionAlias.session_id == HttpBridgeSessionRecord.id)
+            .where(
+                HttpBridgeSessionAlias.alias_kind == alias_kind,
+                HttpBridgeSessionAlias.alias_hash == durable_bridge_hash(alias_value),
+                HttpBridgeSessionAlias.api_key_scope == api_key_scope,
+                HttpBridgeSessionAlias.target_response_id.is_not(None),
+            )
+            .limit(1)
+        )
+        result = await self._session.execute(statement)
+        row = result.one_or_none()
+        if row is None:
+            return None
+        snapshot = _to_snapshot(row[1])
+        target_response_id = row[0]
+        if snapshot is None or not isinstance(target_response_id, str) or not target_response_id:
+            return None
+        return snapshot, target_response_id
 
     async def find_session_by_latest_turn_state(
         self,
@@ -1799,7 +1843,7 @@ class DurableBridgeRepository:
                     operation.account_id = account_id
                     operation.model = model
                     operation.parent_response_id = parent_response_id
-                    if request_text is not None and operation.request_text is None:
+                    if request_text is not None:
                         operation.request_text = request_text
                     operation.state = "submitted"
                     operation.response_id = None
@@ -1811,6 +1855,12 @@ class DurableBridgeRepository:
                     operation.event_bytes = 0
                     operation.event_spool_complete = False
                     operation.spool_format = HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
+                    operation.response_output_items_json = None
+                    operation.response_output_items_complete = False
+                    operation.response_replay_input_json = None
+                    operation.response_replay_input_complete = False
+                    operation.response_replay_input_turn_count = 0
+                    operation.transcript_version = 0
                     operation.updated_at = utcnow()
                     rebound = True
                 if request_text is not None and operation.request_text is None:
@@ -1871,6 +1921,106 @@ class DurableBridgeRepository:
             await self._session.refresh(operation)
             return _to_operation_snapshot(operation, created=True)
 
+    async def rebind_operation_for_complete_transcript(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        account_id: str | None,
+        model: str | None,
+        request_text: str,
+        allow_acknowledged: bool = False,
+        expected_recovery_dispatch_count: int | None = None,
+    ) -> DurableBridgeOperationSnapshot | None:
+        """Atomically replace a pending operation with a complete replay.
+
+        Transcript recovery must not expose a retryable ``failed`` row between
+        the old-anchor retirement and the replay rebind. Keep the owner fence,
+        operation validation, spool reset, and new submitted body in one write
+        transaction so a failed rebind leaves the original operation fenced.
+
+        ``allow_acknowledged`` is reserved for the explicit unsafe partial
+        replay path, which replaces an already acknowledged in-flight response
+        after a transport close. A supplied ``expected_recovery_dispatch_count``
+        is a compare-and-set claim and advances the recovery generation so
+        late events and concurrent recovery attempts remain fenced.
+        """
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation_filters = [
+                HttpBridgeOperationRecord.operation_id == operation_id,
+                HttpBridgeOperationRecord.session_id == session_id,
+                HttpBridgeOperationRecord.state.in_(
+                    ("submitted", "unknown", "acknowledged") if allow_acknowledged else ("submitted", "unknown")
+                ),
+            ]
+            if not allow_acknowledged:
+                operation_filters.append(HttpBridgeOperationRecord.response_id.is_(None))
+            if expected_recovery_dispatch_count is not None:
+                # Recovery is a compare-and-set claim. A second concurrent
+                # recovery must not rebind the row after the first caller
+                # advances its dispatch generation.
+                operation_filters.append(
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count
+                )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord).where(*operation_filters).with_for_update()
+            )
+            if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return None
+            rebound_from_session_id = operation.session_id
+            rebound_from_account_id = operation.account_id
+            rebound_from_model = operation.model
+            rebound_from_parent_response_id = operation.parent_response_id
+            # Recovery may rebind an operation that was using the chunked
+            # spool. Clear both spool backends before the replacement starts;
+            # otherwise stale chunks would be mixed with the new transcript
+            # and would also block undispatched rollback detection.
+            await self._delete_operation_spool_material((operation_id,))
+            operation.account_id = account_id
+            operation.model = model
+            operation.parent_response_id = None
+            operation.request_text = request_text
+            operation.state = "submitted"
+            operation.response_id = None
+            operation.event_bytes = 0
+            operation.event_spool_complete = False
+            operation.spool_format = HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
+            operation.response_output_items_json = None
+            operation.response_output_items_complete = False
+            operation.response_replay_input_json = None
+            operation.response_replay_input_complete = False
+            operation.response_replay_input_turn_count = 0
+            operation.transcript_version = 0
+            if expected_recovery_dispatch_count is not None:
+                # Advance the generation for both complete-transcript and
+                # unsafe partial recovery. This makes a successful rebind
+                # visible to a concurrent caller that read the same prior
+                # generation before awaiting transcript reconstruction.
+                operation.recovery_dispatch_count += 1
+            operation.updated_at = utcnow()
+            snapshot = _to_operation_snapshot(
+                operation,
+                rebound=True,
+                rebound_from_session_id=rebound_from_session_id,
+                rebound_from_account_id=rebound_from_account_id,
+                rebound_from_model=rebound_from_model,
+                rebound_from_parent_response_id=rebound_from_parent_response_id,
+            )
+            await self._session.commit()
+        return snapshot
+
     async def get_operation(self, *, operation_id: str) -> DurableBridgeOperationSnapshot | None:
         operation = await self._session.scalar(
             select(HttpBridgeOperationRecord).where(HttpBridgeOperationRecord.operation_id == operation_id)
@@ -1912,6 +2062,12 @@ class DurableBridgeRepository:
             operation.event_bytes = 0
             operation.event_spool_complete = False
             operation.spool_format = HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
+            operation.response_output_items_json = None
+            operation.response_output_items_complete = False
+            operation.response_replay_input_json = None
+            operation.response_replay_input_complete = False
+            operation.response_replay_input_turn_count = 0
+            operation.transcript_version = 0
             operation.updated_at = utcnow()
             await self._session.commit()
         return True
@@ -1965,6 +2121,12 @@ class DurableBridgeRepository:
             operation.event_bytes = 0
             operation.event_spool_complete = False
             operation.spool_format = HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
+            operation.response_output_items_json = None
+            operation.response_output_items_complete = False
+            operation.response_replay_input_json = None
+            operation.response_replay_input_complete = False
+            operation.response_replay_input_turn_count = 0
+            operation.transcript_version = 0
             operation.updated_at = utcnow()
             await self._session.commit()
         return True
@@ -2036,6 +2198,7 @@ class DurableBridgeRepository:
         rebound_from_account_id: str | None = None,
         rebound_from_model: str | None = None,
         rebound_from_parent_response_id: str | None = None,
+        expected_recovery_dispatch_count: int | None = None,
     ) -> bool:
         """Undo an operation transition that never reached upstream."""
         async with sqlite_writer_section():
@@ -2056,6 +2219,11 @@ class DurableBridgeRepository:
                     HttpBridgeOperationRecord.state == "submitted",
                     HttpBridgeOperationRecord.response_id.is_(None),
                     HttpBridgeOperationRecord.event_bytes == 0,
+                    *(
+                        [HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count + 1]
+                        if expected_recovery_dispatch_count is not None
+                        else []
+                    ),
                 )
                 .with_for_update()
             )
@@ -2068,6 +2236,11 @@ class DurableBridgeRepository:
             if restore_rebound:
                 operation.state = "failed"
                 operation.event_spool_complete = False
+                if expected_recovery_dispatch_count is not None:
+                    # Rebind increments the generation before dispatch. A
+                    # pre-dispatch rollback must refund that exact claim so a
+                    # later retry can claim the same generation safely.
+                    operation.recovery_dispatch_count = expected_recovery_dispatch_count
                 if rebound_from_session_id is not None:
                     operation.session_id = rebound_from_session_id
                     operation.account_id = rebound_from_account_id
@@ -2164,12 +2337,124 @@ class DurableBridgeRepository:
             expected_sequence += chunk.event_count
         return events if remaining_bytes == 0 else []
 
+    async def get_unique_unknown_operation_for_latest_parent(
+        self,
+        *,
+        session_id: str,
+        model: str | None = None,
+        api_key_scope: str | None = None,
+    ) -> DurableBridgeOperationSnapshot | None:
+        """Find one safely recoverable UNKNOWN turn for this session's latest parent."""
+        if not isinstance(model, str) or not model:
+            return None
+        latest_parent_statement = select(HttpBridgeSessionRecord.latest_response_id).where(
+            HttpBridgeSessionRecord.id == session_id,
+        )
+        if api_key_scope is not None:
+            latest_parent_statement = latest_parent_statement.where(
+                HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+            )
+        predicates = [
+            HttpBridgeOperationRecord.session_id == session_id,
+            HttpBridgeOperationRecord.parent_response_id == latest_parent_statement.scalar_subquery(),
+            HttpBridgeOperationRecord.state == "unknown",
+            HttpBridgeOperationRecord.model == model,
+        ]
+        result = await self._session.execute(
+            select(HttpBridgeOperationRecord)
+            .where(*predicates)
+            .order_by(HttpBridgeOperationRecord.updated_at.desc())
+            .limit(2)
+        )
+        rows = result.scalars().all()
+        if len(rows) != 1:
+            return None
+        return _to_operation_snapshot(rows[0])
+
+    async def get_unique_unknown_operation_for_root(
+        self,
+        *,
+        session_id: str,
+        model: str | None = None,
+        api_key_scope: str | None = None,
+    ) -> DurableBridgeOperationSnapshot | None:
+        """Find one safely recoverable UNKNOWN root turn for this session."""
+        if not isinstance(model, str) or not model:
+            return None
+        session_statement = select(HttpBridgeSessionRecord.id).where(
+            HttpBridgeSessionRecord.id == session_id,
+        )
+        if api_key_scope is not None:
+            session_statement = session_statement.where(
+                HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+            )
+        predicates = [
+            HttpBridgeOperationRecord.session_id == session_statement.scalar_subquery(),
+            HttpBridgeOperationRecord.parent_response_id.is_(None),
+            HttpBridgeOperationRecord.state == "unknown",
+            HttpBridgeOperationRecord.model == model,
+        ]
+        result = await self._session.execute(
+            select(HttpBridgeOperationRecord)
+            .where(*predicates)
+            .order_by(HttpBridgeOperationRecord.updated_at.desc())
+            .limit(2)
+        )
+        rows = result.scalars().all()
+        if len(rows) != 1:
+            return None
+        return _to_operation_snapshot(rows[0])
+
+    async def get_recent_unknown_operations(
+        self,
+        *,
+        session_id: str,
+        model: str | None = None,
+        api_key_scope: str | None = None,
+        max_age_seconds: float = 15 * 60,
+        limit: int = 8,
+    ) -> list[DurableBridgeOperationSnapshot]:
+        """Return a bounded set of recent UNKNOWN turns for one session."""
+        if not isinstance(model, str) or not model:
+            return []
+        try:
+            bounded_age = max(1.0, float(max_age_seconds))
+        except (TypeError, ValueError):
+            bounded_age = 15 * 60
+        try:
+            # Callers request one extra row as an overflow sentinel so they
+            # can distinguish an exact page from a truncated candidate set.
+            # The public setting remains capped at 32; permit that internal
+            # ``limit + 1`` query without dropping the sentinel row.
+            bounded_limit = min(33, max(1, int(limit)))
+        except (TypeError, ValueError):
+            bounded_limit = 8
+        cutoff = utcnow() - timedelta(seconds=bounded_age)
+        statement = select(HttpBridgeOperationRecord).where(
+            HttpBridgeOperationRecord.session_id == session_id,
+            HttpBridgeOperationRecord.state == "unknown",
+            HttpBridgeOperationRecord.model == model,
+            HttpBridgeOperationRecord.created_at >= cutoff,
+        )
+        if api_key_scope is not None:
+            statement = statement.join(
+                HttpBridgeSessionRecord,
+                HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+            ).where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
+        result = await self._session.execute(
+            statement.order_by(HttpBridgeOperationRecord.updated_at.desc()).limit(bounded_limit)
+        )
+        return [_to_operation_snapshot(row) for row in result.scalars().all()]
+
     async def get_operation_by_response_id(self, *, response_id: str) -> DurableBridgeOperationSnapshot | None:
         operation = await self._session.scalar(
-            select(HttpBridgeOperationRecord).where(
+            select(HttpBridgeOperationRecord)
+            .where(
                 HttpBridgeOperationRecord.response_id == response_id,
                 HttpBridgeOperationRecord.state.in_(("completed", "incomplete")),
             )
+            .order_by(HttpBridgeOperationRecord.updated_at.desc())
+            .limit(1)
         )
         return _to_operation_snapshot(operation) if operation is not None else None
 
@@ -2177,7 +2462,7 @@ class DurableBridgeRepository:
         self,
         *,
         response_id: str,
-        max_turns: int = 128,
+        max_turns: int = 256,
         max_bytes: int = 8 * 1024 * 1024,
     ) -> list[DurableBridgeTranscriptTurn] | None:
         """Return a complete parent-response chain, newest turn last.
@@ -2186,11 +2471,12 @@ class DurableBridgeRepository:
         chain make the transcript ineligible for reconstruction.
         """
         turns: list[DurableBridgeTranscriptTurn] = []
+        represented_turns = 0
         visited: set[str] = set()
         total_bytes = 0
         current_response_id: str | None = response_id
         while current_response_id is not None:
-            if current_response_id in visited or len(turns) >= max_turns:
+            if current_response_id in visited or represented_turns >= max_turns:
                 return None
             visited.add(current_response_id)
             operation = await self.get_operation_by_response_id(response_id=current_response_id)
@@ -2213,8 +2499,144 @@ class DurableBridgeRepository:
             total_bytes += turn_bytes
             if total_bytes > max_bytes:
                 return None
-            turns.append(DurableBridgeTranscriptTurn(operation=operation, events=tuple(events)))
+            turns.append(
+                DurableBridgeTranscriptTurn(
+                    operation=operation,
+                    events=tuple(events),
+                    response_output_items_json=operation.response_output_items_json or "[]",
+                )
+            )
+            represented_turns += 1
             current_response_id = operation.parent_response_id
+        turns.reverse()
+        return turns
+
+    async def get_complete_transcript(
+        self,
+        *,
+        response_id: str,
+        max_turns: int = 256,
+        max_bytes: int = 8 * 1024 * 1024,
+        api_key_scope: str | None = None,
+    ) -> list[DurableBridgeTranscriptTurn] | None:
+        """Return the request/output chain without requiring SSE spool replay.
+
+        Complete transcript recovery only needs the canonical request body and
+        terminal response output for each parent turn. The event spool remains
+        independently bounded and may be incomplete without invalidating this
+        reconstruction path.
+        """
+        turns: list[DurableBridgeTranscriptTurn] = []
+        represented_turns = 0
+        visited: set[str] = set()
+        total_bytes = 0
+        current_response_id: str | None = response_id
+        while current_response_id is not None:
+            if current_response_id in visited or represented_turns >= max_turns:
+                return None
+            visited.add(current_response_id)
+            statement = (
+                select(HttpBridgeOperationRecord)
+                .join(
+                    HttpBridgeSessionRecord,
+                    HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+                )
+                .where(
+                    HttpBridgeOperationRecord.response_id == current_response_id,
+                    HttpBridgeOperationRecord.state == "completed",
+                )
+                .order_by(HttpBridgeOperationRecord.updated_at.desc())
+                .limit(1)
+            )
+            if api_key_scope is not None:
+                statement = statement.where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
+            operation = await self._session.scalar(statement)
+            snapshot = _to_operation_snapshot(operation) if operation is not None else None
+            if snapshot is not None and snapshot.response_replay_input_complete and snapshot.response_replay_input_json:
+                # The turn-count migration uses zero for pre-existing rows.  A
+                # complete snapshot with that sentinel has unknown historical
+                # depth, so treating it as one could bypass the configured
+                # max-turns bound.  Fail closed until a trustworthy count is
+                # available.
+                if snapshot.response_replay_input_turn_count <= 0:
+                    return None
+                # A complete replay snapshot replaces the oldest retained
+                # ancestor, but the newer turns already collected still carry
+                # the continuation that led to the requested response. Keep
+                # them so recovery does not silently skip the tail of a long
+                # session.
+                try:
+                    replay_input = json.loads(snapshot.response_replay_input_json)
+                    original_payload = json.loads(snapshot.request_text or "")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    replay_input = None
+                    original_payload = None
+                if (
+                    isinstance(replay_input, list)
+                    and len(snapshot.response_replay_input_json.encode("utf-8")) <= max_bytes
+                    and isinstance(original_payload, dict)
+                ):
+                    replay_payload = dict(original_payload)
+                    replay_payload.pop("previous_response_id", None)
+                    replay_payload.pop("stream", None)
+                    replay_payload["type"] = "response.create"
+                    replay_payload["input"] = replay_input
+                    # The synthetic request carries the original payload
+                    # fields as well as the self-contained replay input. Count
+                    # the exact serialized request so retained instructions,
+                    # tools, or metadata cannot bypass the byte bound.
+                    synthetic_request_text = json.dumps(replay_payload, ensure_ascii=True, separators=(",", ":"))
+                    snapshot_bytes = len(synthetic_request_text.encode("utf-8"))
+                    snapshot_turn_count = max(1, snapshot.response_replay_input_turn_count)
+                    if represented_turns + snapshot_turn_count > max_turns or total_bytes + snapshot_bytes > max_bytes:
+                        return None
+                    synthetic_operation = replace(
+                        snapshot,
+                        parent_response_id=None,
+                        request_text=synthetic_request_text,
+                    )
+                    turns.append(
+                        DurableBridgeTranscriptTurn(
+                            operation=synthetic_operation,
+                            events=(),
+                            response_output_items_json=snapshot.response_output_items_json or "[]",
+                            replay_input_includes_response_output=True,
+                            represented_turn_count=snapshot_turn_count,
+                        )
+                    )
+                    turns.reverse()
+                    return turns
+            if (
+                snapshot is None
+                or snapshot.request_text is None
+                or not snapshot.response_output_items_complete
+                or not snapshot.response_output_items_json
+            ):
+                return None
+            persisted_turn_count = int(snapshot.response_replay_input_turn_count or 0)
+            if snapshot.parent_response_id is None and persisted_turn_count <= 0:
+                # Root requests can contain an arbitrary client-supplied
+                # history. Without a persisted snapshot there is no
+                # trustworthy turn count, so representing the whole request as
+                # one turn could bypass the configured replay bound.
+                return None
+            represented_turn_count = max(1, persisted_turn_count)
+            turn_bytes = len(snapshot.request_text.encode("utf-8")) + len(
+                snapshot.response_output_items_json.encode("utf-8")
+            )
+            total_bytes += turn_bytes
+            if total_bytes > max_bytes or represented_turns + represented_turn_count > max_turns:
+                return None
+            turns.append(
+                DurableBridgeTranscriptTurn(
+                    operation=snapshot,
+                    events=(),
+                    response_output_items_json=snapshot.response_output_items_json,
+                    represented_turn_count=represented_turn_count,
+                )
+            )
+            represented_turns += represented_turn_count
+            current_response_id = snapshot.parent_response_id
         turns.reverse()
         return turns
 
@@ -2319,6 +2741,7 @@ class DurableBridgeRepository:
             or event.session_id != first.session_id
             or event.instance_id != first.instance_id
             or event.owner_epoch != first.owner_epoch
+            or event.recovery_dispatch_count != first.recovery_dispatch_count
             for event in events
         ):
             return False
@@ -2346,6 +2769,7 @@ class DurableBridgeRepository:
                 session_id=first.session_id,
                 instance_id=first.instance_id,
                 owner_epoch=first.owner_epoch,
+                expected_recovery_dispatch_count=first.recovery_dispatch_count,
             )
             if locked_operation is None:
                 return False
@@ -2615,6 +3039,7 @@ class DurableBridgeRepository:
             or event.session_id != first.session_id
             or event.instance_id != first.instance_id
             or event.owner_epoch != first.owner_epoch
+            or event.recovery_dispatch_count != first.recovery_dispatch_count
             for event in events
         ):
             return False
@@ -2638,6 +3063,13 @@ class DurableBridgeRepository:
                 .with_for_update()
             )
             if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return False
+            # A recovery rebind increments this generation. Events already
+            # queued by the interrupted attempt must not be appended after the
+            # replacement row is committed, even if their in-memory batch was
+            # taken before the rebind fence acquired its lock.
+            if operation.recovery_dispatch_count != first.recovery_dispatch_count:
                 await self._session.rollback()
                 return False
             next_sequence = await self._session.scalar(
@@ -2841,7 +3273,13 @@ class DurableBridgeRepository:
         instance_id: str,
         owner_epoch: int,
         state: str,
+        expected_recovery_dispatch_count: int | None = None,
         response_id: str | None = None,
+        response_output_items_json: str | None = None,
+        response_output_items_complete: bool = False,
+        response_replay_input_json: str | None = None,
+        response_replay_input_complete: bool = False,
+        response_replay_input_turn_count: int = 0,
     ) -> bool:
         async with sqlite_writer_section():
             owner_exists = await self._session.scalar(
@@ -2859,14 +3297,27 @@ class DurableBridgeRepository:
             values: dict[str, object] = {"state": state, "updated_at": utcnow()}
             if response_id is not None:
                 values["response_id"] = response_id
-            result = await self._session.execute(
-                update(HttpBridgeOperationRecord)
-                .where(
-                    HttpBridgeOperationRecord.operation_id == operation_id,
-                    HttpBridgeOperationRecord.session_id == session_id,
-                )
-                .values(**values)
-            )
+            if response_output_items_json is not None:
+                values["response_output_items_json"] = response_output_items_json
+                values["response_output_items_complete"] = response_output_items_complete
+                values["transcript_version"] = 1
+            if response_replay_input_json is not None:
+                values["response_replay_input_json"] = response_replay_input_json
+                values["response_replay_input_complete"] = response_replay_input_complete
+                values["response_replay_input_turn_count"] = max(0, int(response_replay_input_turn_count))
+            elif response_replay_input_turn_count > 0:
+                # Retain a positive over-bound marker even when the snapshot
+                # itself is intentionally omitted. The reader uses it to
+                # reject the unsnapshotted root instead of treating it as one
+                # represented turn and bypassing ``max_turns``.
+                values["response_replay_input_turn_count"] = max(0, int(response_replay_input_turn_count))
+            conditions = [
+                HttpBridgeOperationRecord.operation_id == operation_id,
+                HttpBridgeOperationRecord.session_id == session_id,
+            ]
+            if expected_recovery_dispatch_count is not None:
+                conditions.append(HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count)
+            result = await self._session.execute(update(HttpBridgeOperationRecord).where(*conditions).values(**values))
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))
 
@@ -3397,6 +3848,7 @@ class DurableBridgeRepository:
         latest_input_item_count: int | None = None,
         latest_input_full_fingerprint: str | None = None,
         latest_pending_tool_calls: Mapping[str, str] | None = None,
+        target_response_id: str | None = None,
     ) -> DurableBridgeAliasRegistration:
         """Register continuity only while the caller still owns the durable row."""
 
@@ -3444,6 +3896,7 @@ class DurableBridgeRepository:
                 alias_kind=alias_kind,
                 alias_value=alias_value,
                 api_key_scope=api_key_scope,
+                target_response_id=target_response_id,
                 target_account_neutral_replay=is_http_bridge_account_neutral_replay(
                     kind=target.session_key_kind,
                     key=target.session_key_value,
@@ -3698,6 +4151,7 @@ class DurableBridgeRepository:
         alias_kind: str,
         alias_value: str,
         api_key_scope: str,
+        target_response_id: str | None = None,
         target_account_neutral_replay: bool | None = None,
     ) -> bool:
         dialect = self._session.get_bind().dialect.name
@@ -3708,6 +4162,7 @@ class DurableBridgeRepository:
             "alias_value": alias_value,
             "alias_hash": durable_bridge_hash(alias_value),
             "api_key_scope": api_key_scope,
+            "target_response_id": target_response_id,
         }
         existing_target_is_account_neutral_replay = HttpBridgeSessionAlias.session_id.in_(
             select(HttpBridgeSessionRecord.id).where(
@@ -3758,6 +4213,7 @@ class DurableBridgeRepository:
                     set_={
                         "session_id": session_id,
                         "alias_value": alias_value,
+                        "target_response_id": target_response_id,
                         "updated_at": now,
                     },
                     where=conflict_where,
@@ -3777,6 +4233,7 @@ class DurableBridgeRepository:
                     set_={
                         "session_id": session_id,
                         "alias_value": alias_value,
+                        "target_response_id": target_response_id,
                         "updated_at": now,
                     },
                     where=conflict_where,
@@ -3950,6 +4407,12 @@ def _to_operation_snapshot(
         recovery_dispatch_count=row.recovery_dispatch_count,
         request_text=row.request_text,
         event_spool_complete=bool(row.event_spool_complete),
+        transcript_version=int(row.transcript_version or 0),
+        response_output_items_json=row.response_output_items_json,
+        response_output_items_complete=bool(row.response_output_items_complete),
+        response_replay_input_json=row.response_replay_input_json,
+        response_replay_input_complete=bool(row.response_replay_input_complete),
+        response_replay_input_turn_count=int(getattr(row, "response_replay_input_turn_count", 0) or 0),
         created=created,
         rebound=rebound,
         rebound_from_session_id=rebound_from_session_id,

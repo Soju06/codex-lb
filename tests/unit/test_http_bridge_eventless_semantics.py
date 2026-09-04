@@ -360,7 +360,8 @@ def test_http_bridge_local_resets_do_not_blame_the_upstream() -> None:
     call_count = source.count(reset_call)
     # Pinned to the number of local-reset call sites on current main so a new
     # site that reintroduces upstream-blaming wording cannot slip in unnoticed.
-    assert call_count == 5
+    # The parked-recovery terminal path adds one intentional local reset site.
+    assert call_count == 6
     for chunk in source.split(reset_call)[1:]:
         call_body = chunk.split(")\n", 1)[0]
         assert "_HTTP_BRIDGE_LOCAL_RESET_MESSAGE" in call_body

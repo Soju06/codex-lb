@@ -42,9 +42,10 @@ from app.core.clients.proxy_websocket import (
     WebsocketsUpstreamWebSocket,
 )
 from app.core.config.settings import Settings
-from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, openai_error
+from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, OpenAIErrorParam, openai_error
 from app.core.openai.models import OpenAIError
 from app.core.openai.requests import ResponsesRequest
+from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
 from app.db.models import AccountStatus, Base, HttpBridgeSessionState
 from app.modules.proxy import affinity as proxy_affinity
@@ -78,6 +79,15 @@ from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, Catalo
 from tests.unit.hypothesis_strategies import json_values as hypothesis_json_values
 
 pytestmark = pytest.mark.unit
+
+
+def test_missing_durable_bridge_table_error_includes_recovery_attempts() -> None:
+    assert http_bridge_helpers_module._is_missing_durable_bridge_table_error(
+        Exception('relation "http_bridge_recovery_attempts" does not exist')
+    )
+    assert not http_bridge_helpers_module._is_missing_durable_bridge_table_error(
+        Exception('relation "http_bridge_recovery_attempts" is unavailable')
+    )
 
 
 def _durable_owner_lookup(*, process_epoch: str, lease_expires_at: datetime) -> DurableBridgeLookup:
@@ -316,6 +326,145 @@ def test_http_bridge_operation_fingerprint_strips_account_installation_metadata(
     }
 
 
+def test_http_bridge_root_operation_fingerprint_is_session_scoped() -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-root-fingerprint",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    request_text = '{"type":"response.create","input":"first turn"}'
+    unscoped = http_bridge_request_submit_module._http_bridge_operation_fingerprint(
+        session_id="session-root",
+        api_key_scope="api-key-scope",
+        request_state=request_state,
+        text_data=request_text,
+    )
+    scoped = http_bridge_request_submit_module._http_bridge_operation_fingerprint(
+        session_id="session-root",
+        api_key_scope="api-key-scope",
+        request_state=request_state,
+        text_data=request_text,
+        scope_root_to_session=True,
+    )
+
+    assert scoped != unscoped
+    assert scoped == http_bridge_request_submit_module._http_bridge_operation_fingerprint(
+        session_id="session-root",
+        api_key_scope="api-key-scope",
+        request_state=request_state,
+        text_data=request_text,
+        scope_root_to_session=True,
+    )
+
+
+def test_http_bridge_operation_fingerprint_is_json_order_insensitive() -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-canonical-fingerprint",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    first = http_bridge_request_submit_module._http_bridge_operation_fingerprint(
+        session_id="durable-canonical-fingerprint",
+        api_key_scope="key-scope",
+        request_state=request_state,
+        text_data=('{"type":"response.create","input":"same","client_metadata":{"caller":"stable","x":"1"}}'),
+    )
+    second = http_bridge_request_submit_module._http_bridge_operation_fingerprint(
+        session_id="durable-canonical-fingerprint",
+        api_key_scope="key-scope",
+        request_state=request_state,
+        text_data=('{"client_metadata":{"x":"1","caller":"stable"},"input":"same","type":"response.create"}'),
+    )
+    assert first == second
+
+
+def test_http_bridge_request_shape_diagnostic_excludes_request_content() -> None:
+    shape = http_bridge_request_submit_module._http_bridge_request_shape(
+        json.dumps(
+            {
+                "type": "response.create",
+                "input": "private prompt text",
+                "tools": [{"name": "private-tool"}],
+            }
+        )
+    )
+
+    assert "private prompt text" not in shape
+    assert "private-tool" not in shape
+    assert "keys=input,tools,type" in shape
+    assert "input=str:19" in shape
+    assert "hash=sha256:" in shape
+
+
+def test_http_bridge_parked_recovery_tuning_is_opt_in_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_parked_recovery_enabled=True,
+            http_responses_session_bridge_parked_recovery_recent_unknown_max_age_seconds=1800,
+            http_responses_session_bridge_parked_recovery_recent_unknown_limit=12,
+            http_responses_session_bridge_pre_response_keepalive_max_count=8,
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 6)
+
+    assert http_bridge_request_submit_module._http_bridge_recent_unknown_operation_max_age_seconds() == 1800
+    assert http_bridge_request_submit_module._http_bridge_recent_unknown_operation_limit() == 12
+    assert http_bridge_streaming_module._stream_keepalive_max_count() == 8
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="fail_closed",
+            http_responses_session_bridge_parked_recovery_enabled=True,
+            http_responses_session_bridge_parked_recovery_recent_unknown_max_age_seconds=3600,
+            http_responses_session_bridge_parked_recovery_recent_unknown_limit=32,
+            http_responses_session_bridge_pre_response_keepalive_max_count=12,
+        ),
+    )
+    assert http_bridge_request_submit_module._http_bridge_recent_unknown_operation_max_age_seconds() == 900
+    assert http_bridge_request_submit_module._http_bridge_recent_unknown_operation_limit() == 8
+    assert http_bridge_streaming_module._stream_keepalive_max_count() == 6
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_parked_recovery_disabled_keepalive_emits_no_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(sse_keepalive_interval_seconds=0.0),
+    )
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", no_sleep)
+
+    frames = [
+        frame
+        async for frame in http_bridge_streaming_module._iter_http_bridge_parked_recovery_sse(
+            request_deadline=100.0,
+            sleep_seconds=0.001,
+        )
+    ]
+
+    assert frames == []
+
+
 @pytest.mark.asyncio
 async def test_submit_hard_turn_walks_completed_operation_chain_before_recording(
     monkeypatch: pytest.MonkeyPatch,
@@ -396,6 +545,223 @@ async def test_submit_hard_turn_walks_completed_operation_chain_before_recording
     assert recorded["parent_response_id"] == "resp-3"
     assert recorded["request_fingerprint"] != initial_fingerprint
     assert json.loads(request_state.request_text or "{}")["previous_response_id"] == "resp-3"
+
+
+@pytest.mark.asyncio
+async def test_submit_root_turn_records_operation_for_complete_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="root-transcript-operation")
+    session.codex_session = True
+    session.durable_session_id = "durable-root-transcript-operation"
+    session.durable_owner_epoch = 4
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-root-transcript-operation",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create","input":"first turn"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    recorded: dict[str, Any] = {}
+
+    async def record_operation(**kwargs: Any) -> Any:
+        recorded.update(kwargs)
+        raise RuntimeError("stop after root operation identity assertion")
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=AsyncMock(return_value=None),
+            get_operation=AsyncMock(return_value=None),
+            record_operation=record_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_instance_id="instance-root-transcript-operation",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-root-transcript-operation",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
+    assert recorded["parent_response_id"] is None
+    assert json.loads(recorded["request_text"])["input"] == "first turn"
+
+
+@pytest.mark.asyncio
+async def test_submit_root_full_history_hydrates_durable_recovery_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="root-full-history-hydration")
+    session.codex_session = True
+    session.durable_session_id = "durable-root-full-history-hydration"
+    session.durable_owner_epoch = 4
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-root-full-history-hydration",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "previous_response_id": None,
+                "input": [{"type": "message", "role": "user", "content": "continue"}],
+            }
+        ),
+        transport="http",
+    )
+    recorded: dict[str, Any] = {}
+
+    async def record_operation(**kwargs: Any) -> Any:
+        recorded.update(kwargs)
+        raise RuntimeError("stop after root hydration assertion")
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=AsyncMock(return_value=None),
+            get_operation=AsyncMock(return_value=None),
+            lookup_sessions=AsyncMock(
+                return_value=[
+                    SimpleNamespace(
+                        session_id=session.durable_session_id,
+                        account_id=session.account.id,
+                        owner_epoch=session.durable_owner_epoch,
+                        latest_response_id="resp-hydrated-root",
+                    )
+                ]
+            ),
+            record_operation=record_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_instance_id="instance-root-full-history-hydration",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-root-full-history-hydration",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
+    assert request_state.hard_continuity_anchor is True
+    assert request_state.complete_transcript_recovery_anchor == "resp-hydrated-root"
+    assert recorded["parent_response_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_submit_root_delta_keeps_unverified_injected_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="root-delta-injected-anchor")
+    session.codex_session = True
+    session.durable_session_id = "durable-root-delta-injected-anchor"
+    session.durable_owner_epoch = 4
+    anchored_text = json.dumps(
+        {
+            "type": "response.create",
+            "previous_response_id": "resp-root-anchor",
+            "input": [{"type": "message", "role": "user", "content": "delta only"}],
+        }
+    )
+    unanchored_text = json.dumps(
+        {
+            "type": "response.create",
+            "previous_response_id": None,
+            "input": [{"type": "message", "role": "user", "content": "delta only"}],
+        }
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-root-delta-injected-anchor",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text=anchored_text,
+        previous_response_id="resp-root-anchor",
+        hard_continuity_anchor=True,
+        proxy_injected_previous_response_id=True,
+        complete_transcript_recovery_anchor="resp-root-anchor",
+        fresh_upstream_request_text=unanchored_text,
+        fresh_upstream_request_is_retry_safe=False,
+        transport="http",
+    )
+    recorded: dict[str, Any] = {}
+
+    async def record_operation(**kwargs: Any) -> Any:
+        recorded.update(kwargs)
+        raise RuntimeError("stop after anchor retention assertion")
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=AsyncMock(return_value=None),
+            get_operation=AsyncMock(return_value=None),
+            record_operation=record_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_instance_id="instance-root-delta-injected-anchor",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=anchored_text,
+            queue_limit=8,
+            request_scope_id="scope-root-delta-injected-anchor",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
+    assert json.loads(recorded["request_text"])["previous_response_id"] == "resp-root-anchor"
+    assert recorded["parent_response_id"] == "resp-root-anchor"
 
 
 @pytest.mark.asyncio
@@ -898,8 +1264,377 @@ def test_http_bridge_explicit_previous_response_rejection_normalizes_error_type(
     error = proxy_service.openai_error("upstream_error", "Previous response with id 'resp_missing' not found.")
     error["error"]["type"] = "previous_response_not_found"
     error["error"].pop("code")
-
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(ProxyResponseError(400, error)) is True
+
+
+@pytest.mark.asyncio
+async def test_hard_continuity_operation_replay_falls_back_to_latest_parent_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-parent-fallback")
+    session.durable_session_id = "durable-hard-fence-parent-fallback"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-parent-fallback",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery"
+        ),
+    )
+    operation = SimpleNamespace(
+        operation_id="op-latest-parent-fallback",
+        request_fingerprint="fingerprint-latest-parent-fallback",
+        parent_response_id="resp-latest-parent",
+        session_id=session.durable_session_id,
+        state="unknown",
+        event_spool_complete=False,
+        request_text='{"type":"response.create","input":"retry"}',
+    )
+    exact_lookup = AsyncMock(return_value=None)
+    parent_lookup = AsyncMock(return_value=operation)
+    service._durable_bridge = SimpleNamespace(
+        get_operation_by_fingerprint=exact_lookup,
+        get_unique_unknown_operation_for_latest_parent=parent_lookup,
+    )
+
+    allowed, reason = await service._http_bridge_operation_fenced_continuity_replay_diagnostic(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"retry"}',
+    )
+
+    assert allowed is True
+    assert reason == "operation_unknown_latest_parent"
+    exact_lookup.assert_awaited_once()
+    parent_lookup.assert_awaited_once_with(
+        session_id=session.durable_session_id,
+        model=request_state.model,
+        api_key_scope="__anonymous__",
+    )
+
+
+@pytest.mark.asyncio
+async def test_hard_continuity_operation_replay_falls_back_to_root_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-root-fallback")
+    session.durable_session_id = "durable-hard-fence-root-fallback"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-root-fallback",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery"
+        ),
+    )
+    operation = SimpleNamespace(
+        operation_id="op-root-fallback",
+        request_fingerprint="fingerprint-root-fallback",
+        parent_response_id=None,
+        session_id=session.durable_session_id,
+        state="unknown",
+        event_spool_complete=False,
+        request_text='{"type":"response.create","input":"retry"}',
+    )
+    exact_lookup = AsyncMock(return_value=None)
+    root_lookup = AsyncMock(return_value=operation)
+    parent_lookup = AsyncMock(return_value=None)
+    service._durable_bridge = SimpleNamespace(
+        get_operation_by_fingerprint=exact_lookup,
+        get_unique_unknown_operation_for_root=root_lookup,
+        get_unique_unknown_operation_for_latest_parent=parent_lookup,
+    )
+
+    allowed, reason = await service._http_bridge_operation_fenced_continuity_replay_diagnostic(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"retry"}',
+    )
+
+    assert allowed is True
+    assert reason == "operation_unknown_root"
+    exact_lookup.assert_awaited_once()
+    root_lookup.assert_awaited_once_with(
+        session_id=session.durable_session_id,
+        model=request_state.model,
+        api_key_scope="__anonymous__",
+    )
+    parent_lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_hard_continuity_parked_recovery_skips_unbounded_root_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-root-parked-gate")
+    session.durable_session_id = "durable-hard-fence-root-parked-gate"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-root-parked-gate",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_parked_recovery_enabled=True,
+        ),
+    )
+    operation = SimpleNamespace(
+        operation_id="op-root-parked-gate",
+        request_fingerprint="fingerprint-root-parked-gate",
+        parent_response_id="resp-recent-parent",
+        session_id=session.durable_session_id,
+        state="unknown",
+        event_spool_complete=False,
+        request_text='{"type":"response.create","input":"retry"}',
+    )
+    root_lookup = AsyncMock(
+        return_value=SimpleNamespace(
+            operation_id="op-unsafe-root",
+            parent_response_id=None,
+            session_id=session.durable_session_id,
+            state="unknown",
+            request_text=operation.request_text,
+        )
+    )
+    recent_lookup = AsyncMock(return_value=[operation])
+    service._durable_bridge = SimpleNamespace(
+        get_operation_by_fingerprint=AsyncMock(return_value=None),
+        get_unique_unknown_operation_for_root=root_lookup,
+        get_unique_unknown_operation_for_latest_parent=AsyncMock(return_value=None),
+        get_recent_unknown_operations=recent_lookup,
+    )
+
+    allowed, reason = await service._http_bridge_operation_fenced_continuity_replay_diagnostic(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"retry"}',
+    )
+
+    assert allowed is True
+    assert reason == "operation_unknown_recent_parent"
+    root_lookup.assert_not_awaited()
+    recent_lookup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_hard_continuity_operation_replay_falls_back_to_one_recent_parent_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-recent-parent-fallback")
+    session.durable_session_id = "durable-hard-fence-recent-parent-fallback"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-recent-parent-fallback",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_parked_recovery_enabled=True,
+        ),
+    )
+    operation = SimpleNamespace(
+        operation_id="op-recent-parent-fallback",
+        request_fingerprint="fingerprint-recent-parent-fallback",
+        parent_response_id="resp-stale-parent",
+        session_id=session.durable_session_id,
+        state="unknown",
+        event_spool_complete=False,
+        request_text='{"type":"response.create","input":"retry"}',
+    )
+    service._durable_bridge = SimpleNamespace(
+        get_operation_by_fingerprint=AsyncMock(return_value=None),
+        get_unique_unknown_operation_for_latest_parent=AsyncMock(return_value=None),
+        get_recent_unknown_operations=AsyncMock(return_value=[operation]),
+    )
+
+    allowed, reason = await service._http_bridge_operation_fenced_continuity_replay_diagnostic(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"retry"}',
+    )
+
+    assert allowed is True
+    assert reason == "operation_unknown_recent_parent"
+    service._durable_bridge.get_recent_unknown_operations.assert_awaited_once_with(
+        session_id=session.durable_session_id,
+        model=request_state.model,
+        api_key_scope="__anonymous__",
+        max_age_seconds=15 * 60,
+        limit=9,
+    )
+
+    service._durable_bridge.get_recent_unknown_operations.reset_mock()
+    service._durable_bridge.get_recent_unknown_operations.return_value = [
+        operation,
+        SimpleNamespace(
+            operation_id="op-recent-parent-fallback-ambiguous",
+            parent_response_id="resp-another-stale-parent",
+            state="unknown",
+            request_text=operation.request_text,
+        ),
+    ]
+    allowed, reason = await service._http_bridge_operation_fenced_continuity_replay_diagnostic(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"retry"}',
+    )
+    assert allowed is False
+    assert reason == "operation_not_found"
+
+
+@pytest.mark.asyncio
+async def test_hard_continuity_recent_parent_fallback_stays_disabled_without_parked_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-recent-parent-disabled")
+    session.durable_session_id = "durable-hard-fence-recent-parent-disabled"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-recent-parent-disabled",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_parked_recovery_enabled=False,
+        ),
+    )
+    operation = SimpleNamespace(
+        operation_id="op-recent-parent-disabled",
+        request_fingerprint="fingerprint-recent-parent-disabled",
+        parent_response_id="resp-stale-parent",
+        session_id=session.durable_session_id,
+        state="unknown",
+        request_text='{"type":"response.create","input":"retry"}',
+    )
+    recent_lookup = AsyncMock(return_value=[operation])
+    service._durable_bridge = SimpleNamespace(
+        get_operation_by_fingerprint=AsyncMock(return_value=None),
+        get_unique_unknown_operation_for_latest_parent=AsyncMock(return_value=None),
+        get_recent_unknown_operations=recent_lookup,
+    )
+
+    allowed, reason = await service._http_bridge_operation_fenced_continuity_replay_diagnostic(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"retry"}',
+    )
+
+    assert allowed is False
+    assert reason == "operation_not_found"
+    recent_lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_submit_rebinds_latest_parent_unknown_before_recording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-submit-fallback")
+    session.durable_session_id = "durable-hard-fence-submit-fallback"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-submit-fallback",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        transport="http",
+        hard_continuity_anchor=True,
+        request_text='{"type":"response.create","input":"retry"}',
+        skip_request_log=True,
+    )
+    operation = SimpleNamespace(
+        operation_id="op-submit-latest-parent-fallback",
+        request_fingerprint="fingerprint-submit-latest-parent-fallback",
+        parent_response_id="resp-latest-parent",
+        session_id=session.durable_session_id,
+        state="unknown",
+        event_spool_complete=False,
+        request_text='{"type":"response.create","input":"retry"}',
+    )
+    recorded: dict[str, Any] = {}
+
+    async def record_operation(**kwargs: Any) -> Any:
+        recorded.update(kwargs)
+        raise RuntimeError("stop after operation identity assertion")
+
+    service._durable_bridge = SimpleNamespace(
+        get_operation_by_fingerprint=AsyncMock(return_value=None),
+        get_unique_unknown_operation_for_latest_parent=AsyncMock(return_value=operation),
+        record_operation=record_operation,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_instance_id="instance-hard-fence-submit-fallback",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-hard-fence-submit-fallback",
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
+    assert recorded["operation_id"] == operation.operation_id
+    assert recorded["request_fingerprint"] == operation.request_fingerprint
+    assert recorded["parent_response_id"] == operation.parent_response_id
 
 
 @pytest.mark.parametrize("code", ["previous_response_not_found", "bridge_previous_response_not_found"])
@@ -911,6 +1646,161 @@ def test_http_bridge_stale_anchor_recovery_rejects_malformed_present_param(code:
 
     assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(exc) is False
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(exc) is False
+
+
+def test_http_bridge_unsafe_new_response_recovery_requires_full_history_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-unsafe-new-response",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-stale",
+        previous_response_not_found_rewritten=True,
+        fresh_upstream_request_is_retry_safe=True,
+        fresh_upstream_request_text='{"type":"response.create","input":[{"role":"user","content":"retry"}]}',
+    )
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_unsafe_new_response_recovery_enabled=True,
+        ),
+    )
+
+    assert http_bridge_streaming_module._http_bridge_unsafe_new_response_recovery_eligible(request_state) is True
+
+    request_state.response_event_count = 1
+    assert http_bridge_streaming_module._http_bridge_unsafe_new_response_recovery_eligible(request_state) is False
+
+    request_state.response_event_count = 0
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+        ),
+    )
+    assert http_bridge_streaming_module._http_bridge_unsafe_new_response_recovery_eligible(request_state) is False
+
+
+def test_http_bridge_unsafe_new_response_recovery_classifies_terse_anchor_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_unsafe_new_response_recovery_enabled=True,
+        ),
+    )
+
+    assert (
+        http_bridge_upstream_events_module._http_bridge_unsafe_new_response_anchor_error(
+            code="invalid_request_error",
+            param=None,
+            message="Invalid `previous_response_id`.",
+        )
+        is True
+    )
+    assert (
+        http_bridge_upstream_events_module._http_bridge_unsafe_new_response_anchor_error(
+            code="invalid_request_error",
+            param="input",
+            message="Invalid input.",
+        )
+        is False
+    )
+    assert (
+        http_bridge_upstream_events_module._http_bridge_unsafe_new_response_anchor_error(
+            code="invalid_request_error",
+            param="previous_response_id",
+            message="Invalid response format.",
+        )
+        is False
+    )
+
+    for malformed_param in (OpenAIErrorParam(True, None), OpenAIErrorParam(True, " "), OpenAIErrorParam(True, 0)):
+        assert (
+            http_bridge_upstream_events_module._http_bridge_unsafe_new_response_anchor_error(
+                code="invalid_request_error",
+                param=malformed_param,
+                message="Invalid `previous_response_id`.",
+            )
+            is False
+        )
+
+
+def test_http_bridge_unsafe_new_response_recovery_keeps_precreated_admission_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_unsafe_new_response_recovery_enabled=True,
+        ),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-unsafe-admission",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-stale",
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","input":[{"role":"user","content":"retry"}]}',
+    )
+    payload = {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "Invalid `previous_response_id`.",
+        },
+    }
+
+    assert (
+        websocket_helpers_module._websocket_precreated_retry_error_code(
+            request_state,
+            event_type="error",
+            payload=cast(dict[str, JsonValue], payload),
+            has_other_pending_requests=False,
+            allow_unsafe_previous_response_recovery=True,
+        )
+        == "stream_incomplete"
+    )
+
+    request_state.response_event_count = 1
+    assert (
+        websocket_helpers_module._websocket_precreated_retry_error_code(
+            request_state,
+            event_type="error",
+            payload=cast(dict[str, JsonValue], payload),
+            has_other_pending_requests=False,
+            allow_unsafe_previous_response_recovery=True,
+        )
+        is None
+    )
+
+    request_state.response_event_count = 0
+    request_state.previous_response_id = None
+    assert (
+        websocket_helpers_module._websocket_precreated_retry_error_code(
+            request_state,
+            event_type="error",
+            payload=cast(dict[str, JsonValue], payload),
+            has_other_pending_requests=False,
+            allow_unsafe_previous_response_recovery=True,
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("param", ["", "   "])
@@ -1377,6 +2267,180 @@ async def test_hard_continuity_operation_replay_requires_matching_unknown_fence(
     )
 
 
+@pytest.mark.asyncio
+async def test_parked_recovery_claims_unknown_operation_once_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-claim")
+    session.durable_session_id = "durable-hard-fence-claim"
+    session.durable_owner_epoch = 3
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_instance_id="instance-1",
+        ),
+    )
+    claim_lock = asyncio.Lock()
+    claim_taken = False
+    claim_calls: list[dict[str, object]] = []
+
+    async def claim_unknown_operation_for_recovery(**kwargs: object) -> bool:
+        nonlocal claim_taken
+        async with claim_lock:
+            claim_calls.append(kwargs)
+            if claim_taken:
+                return False
+            claim_taken = True
+            return True
+
+    service._durable_bridge = SimpleNamespace(
+        claim_unknown_operation_for_recovery=claim_unknown_operation_for_recovery,
+    )
+    request_states = [
+        proxy_service._WebSocketRequestState(
+            request_id=f"req-hard-fence-claim-{index}",
+            model="gpt-5.6",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=0.0,
+            operation_id="op-hard-fence-claim",
+            operation_registered=True,
+            operation_attempt_generation=2,
+        )
+        for index in range(2)
+    ]
+
+    results = await asyncio.gather(
+        *(
+            service._claim_http_bridge_operation_fenced_continuity_replay(session, request_state)
+            for request_state in request_states
+        )
+    )
+
+    assert sorted(results) == [False, True]
+    assert sum(request_state.operation_recovery_claimed for request_state in request_states) == 1
+    assert sorted(request_state.operation_attempt_generation for request_state in request_states) == [2, 3]
+    assert len(claim_calls) == 2
+    assert {call["operation_id"] for call in claim_calls} == {"op-hard-fence-claim"}
+
+
+@pytest.mark.asyncio
+async def test_parked_recovery_claim_defers_cancellation_until_claim_state_is_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence-claim-cancel")
+    session.durable_session_id = "durable-hard-fence-claim-cancel"
+    session.durable_owner_epoch = 3
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_instance_id="instance-1",
+        ),
+    )
+    claim_started = asyncio.Event()
+    release_claim = asyncio.Event()
+
+    async def claim_unknown_operation_for_recovery(**kwargs: object) -> bool:
+        del kwargs
+        claim_started.set()
+        await release_claim.wait()
+        return True
+
+    service._durable_bridge = SimpleNamespace(
+        claim_unknown_operation_for_recovery=claim_unknown_operation_for_recovery,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-claim-cancel",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        operation_id="op-hard-fence-claim-cancel",
+        operation_registered=True,
+        operation_attempt_generation=2,
+    )
+
+    claim_task = asyncio.create_task(
+        service._claim_http_bridge_operation_fenced_continuity_replay(session, request_state)
+    )
+    await claim_started.wait()
+    claim_task.cancel()
+    release_claim.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await claim_task
+    assert request_state.operation_recovery_claimed is True
+    assert request_state.operation_attempt_generation == 3
+
+
+@pytest.mark.asyncio
+async def test_operation_fenced_retry_refunds_claim_when_admission_deadline_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "operation-fenced-abort", None),
+        key_value="operation-fenced-abort",
+        queued_request_count=1,
+    )
+    session.durable_session_id = "durable-operation-fenced-abort"
+    session.durable_owner_epoch = 4
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-operation-fenced-abort",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() - 1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","input":"retry"}',
+        operation_id="op-operation-fenced-abort",
+        operation_registered=True,
+        operation_attempt_generation=0,
+        account_response_create_lease=cast(Any, object()),
+        response_create_admission_reacquire_required=True,
+    )
+    session.pending_requests.append(request_state)
+
+    async def claim_operation(_session: Any, state: Any) -> bool:
+        state.operation_recovery_claimed = True
+        state.operation_attempt_generation = 1
+        return True
+
+    claim = AsyncMock(side_effect=claim_operation)
+    mark_operation_unknown = AsyncMock(return_value=True)
+    service._durable_bridge = cast(Any, SimpleNamespace(mark_operation_unknown=mark_operation_unknown))
+    monkeypatch.setattr(service, "_claim_http_bridge_operation_fenced_continuity_replay", claim)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_release_request_state_account_response_create_lease", AsyncMock())
+
+    assert (
+        await service._retry_http_bridge_precreated_request(
+            session,
+            allow_operation_fenced_continuity_replay=True,
+        )
+        is False
+    )
+
+    claim.assert_awaited_once_with(session, request_state)
+    mark_operation_unknown.assert_awaited_once()
+    assert mark_operation_unknown.await_args is not None
+    assert mark_operation_unknown.await_args.kwargs["restore_recovery_dispatch_claim"] is True
+    assert request_state.operation_recovery_claimed is False
+    assert request_state.operation_attempt_generation == 0
+
+
 def _make_app_settings(*, bridge_enabled: bool = True, **overrides: Any) -> Settings:
     return Settings(http_responses_session_bridge_enabled=bridge_enabled, **overrides)
 
@@ -1459,6 +2523,38 @@ def test_http_bridge_account_neutral_replay_rejects_account_scoped_file_input() 
     )
 
     assert http_bridge_streaming_module._http_bridge_payload_is_account_neutral_fresh_replay(payload) is False
+
+
+def test_http_bridge_fresh_replay_payload_drops_retained_response_alias() -> None:
+    """A replacement retry must not carry the client-visible response alias.
+
+    This is the serialized-body invariant used after a trimmed alias
+    translation; the fresh retry must retain the full input while dropping
+    only the stale upstream anchor.
+    """
+    request_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "instructions": "continue",
+            "previous_response_id": "resp-client-alias",
+            "input": [
+                {"role": "user", "content": "history"},
+                {"role": "user", "content": "follow up"},
+            ],
+        },
+        separators=(",", ":"),
+    )
+
+    fresh_payload = json.loads(
+        http_bridge_streaming_module._http_bridge_request_text_without_previous_response_id(request_text)
+    )
+
+    assert "previous_response_id" not in fresh_payload
+    assert fresh_payload["input"] == [
+        {"role": "user", "content": "history"},
+        {"role": "user", "content": "follow up"},
+    ]
 
 
 def _make_eventless_http_bridge_owner(
@@ -3063,6 +4159,179 @@ async def test_stale_response_rejection_preserves_newer_same_session_registratio
         if not stale_registration.done():
             stale_registration.cancel()
         await asyncio.gather(stale_registration, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_previous_response_alias_can_retain_replacement_latest_response_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.durable_session_id = "durable-session"
+    session.durable_owner_epoch = 1
+    service._http_bridge_sessions[session.key] = session
+    register = AsyncMock(return_value=DurableBridgeAliasRegistration.REGISTERED)
+    service._durable_bridge = SimpleNamespace(register_previous_response_id=register)
+    monkeypatch.setattr(http_bridge_helpers_module, "get_settings", _make_app_settings)
+
+    registered = await service._register_http_bridge_previous_response_id(
+        session,
+        "resp-retained",
+        latest_response_id="resp-replacement",
+    )
+
+    assert registered is True
+    assert register.await_args is not None
+    assert register.await_args.kwargs["response_id"] == "resp-retained"
+    assert register.await_args.kwargs["latest_response_id"] == "resp-replacement"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable_outcome", ["protected", "exception"])
+async def test_retained_response_alias_requires_durable_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    durable_outcome: str,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="retained-alias-durable-required")
+    session.durable_session_id = "durable-retained-alias"
+    session.durable_owner_epoch = 1
+    service._http_bridge_sessions[session.key] = session
+
+    async def register_alias(**_kwargs: Any) -> DurableBridgeAliasRegistration:
+        if durable_outcome == "exception":
+            raise RuntimeError("durable alias write failed")
+        return DurableBridgeAliasRegistration.ALIAS_PROTECTED
+
+    service._durable_bridge = SimpleNamespace(register_previous_response_id=register_alias)
+    monkeypatch.setattr(http_bridge_helpers_module, "get_settings", _make_app_settings)
+
+    registered = await service._register_http_bridge_previous_response_id(
+        session,
+        "resp-retained-required",
+        latest_response_id="resp-replacement",
+        retained_replay=True,
+    )
+
+    alias_key = proxy_service._http_bridge_previous_response_alias_key("resp-retained-required", session.key.api_key_id)
+    assert registered is False
+    assert "resp-retained-required" not in session.previous_response_ids
+    assert alias_key not in service._http_bridge_previous_response_index
+
+
+@pytest.mark.asyncio
+async def test_retained_response_alias_without_durable_identity_is_rejected() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="retained-alias-missing-durable")
+    service._http_bridge_sessions[session.key] = session
+
+    registered = await service._register_http_bridge_previous_response_id(
+        session,
+        "resp-retained-missing-durable",
+        latest_response_id="resp-replacement",
+        retained_replay=True,
+    )
+
+    alias_key = proxy_service._http_bridge_previous_response_alias_key(
+        "resp-retained-missing-durable", session.key.api_key_id
+    )
+    assert registered is False
+    assert "resp-retained-missing-durable" not in session.previous_response_ids
+    assert alias_key not in service._http_bridge_previous_response_index
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_event_spool_uses_generation_for_current_receive_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-receive-generation",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_id=None,
+        operation_id="op-receive-generation",
+        operation_attempt_generation=0,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="receive-generation",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.durable_session_id = "durable-receive-generation"
+    session.durable_owner_epoch = 1
+    enqueue = AsyncMock()
+    service._durable_bridge = cast(Any, SimpleNamespace())
+    service._http_bridge_operation_event_batcher = cast(Any, SimpleNamespace(enqueue=enqueue))
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_update_http_bridge_operation_state", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.created",
+                "response": {"id": "resp-receive-generation"},
+            }
+        ),
+        operation_attempt_generations={request_state.request_id: 0},
+    )
+
+    enqueue.assert_awaited_once()
+    assert enqueue.await_args is not None
+    assert enqueue.await_args.kwargs["recovery_dispatch_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_drops_terminal_event_from_superseded_receive_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-stale-receive-terminal",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_id=None,
+        operation_attempt_generation=1,
+        awaiting_response_created=True,
+        replay_downstream_response_id="resp-client-visible",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="stale-receive-terminal",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {"id": "resp-retired-upstream", "status": "completed", "output": []},
+            }
+        ),
+        operation_attempt_generations={request_state.request_id: 0},
+    )
+
+    assert list(session.pending_requests) == [request_state]
+    assert request_state.response_id is None
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty()
+    finalize.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -4861,6 +6130,55 @@ def test_durable_tool_call_manifest_requires_complete_added_and_done_lifecycle()
     assert duplicate_done_state.tool_call_manifest_invalid is True
 
 
+@pytest.mark.parametrize(
+    "event_type",
+    ["response.function_call_arguments.delta", "response.output_tool_call.delta"],
+)
+def test_durable_tool_call_manifest_rejects_unvalidated_tool_delta(event_type: str) -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-unvalidated-tool-delta",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+        state,
+        event_type=event_type,
+        payload={"type": event_type, "call_id": "call_unvalidated", "item_id": "item_unvalidated"},
+    )
+
+    assert state.tool_call_manifest_invalid is True
+
+
+def test_durable_tool_call_manifest_accepts_tool_delta_after_added_item() -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-validated-tool-delta",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+    http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+        state,
+        event_type="response.output_item.added",
+        payload={
+            "type": "response.output_item.added",
+            "item": {"id": "item_validated", "type": "function_call", "call_id": "call_validated"},
+        },
+    )
+    http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+        state,
+        event_type="response.function_call_arguments.delta",
+        payload={"type": "response.function_call_arguments.delta", "item_id": "item_validated", "delta": "{}"},
+    )
+
+    assert state.tool_call_manifest_invalid is False
+
+
 def test_durable_tool_call_manifest_rejects_unobserved_terminal_call() -> None:
     state = proxy_service._WebSocketRequestState(
         request_id="req-terminal-manifest",
@@ -4973,6 +6291,107 @@ def test_durable_tool_call_manifest_rejects_mixed_client_settled_call_types() ->
         },
     )
     assert lifecycle_state.tool_call_manifest_invalid is True
+
+
+@pytest.mark.parametrize(
+    ("event_type", "item_type"),
+    [
+        ("response.output_item.added", "web_search_call"),
+        ("response.output_item.done", "file_search_call"),
+        ("response.output_item.added", "code_interpreter_call"),
+        ("response.output_item.done", "mcp_list_tools"),
+        ("response.output_item.added", "tool_search_call"),
+    ],
+)
+def test_durable_tool_call_manifest_rejects_hosted_tool_items(
+    event_type: str,
+    item_type: str,
+) -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id=f"req-hosted-{item_type}",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+        state,
+        event_type=event_type,
+        payload={"type": event_type, "item": {"type": item_type, "id": "hosted_1"}},
+    )
+
+    assert state.tool_call_manifest_invalid is True
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "response.web_search_call.in_progress",
+        "response.image_generation_call.partial_image",
+        "response.mcp_call.completed",
+    ],
+)
+def test_durable_tool_call_manifest_rejects_hosted_tool_events(event_type: str) -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id=f"req-hosted-event-{event_type}",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+        state,
+        event_type=event_type,
+        payload=None,
+    )
+
+    assert state.tool_call_manifest_invalid is True
+
+
+def test_durable_tool_call_manifest_rejects_unknown_output_item_type() -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-unknown-output-item",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+        state,
+        event_type="response.output_item.added",
+        payload={
+            "type": "response.output_item.added",
+            "item": {"type": "future_hosted_tool_call", "id": "future_1"},
+        },
+    )
+
+    assert state.tool_call_manifest_invalid is True
+
+
+def test_durable_tool_call_manifest_accepts_safe_output_item_without_call_id() -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-safe-output-item",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+
+    for item_type in ("message", "reasoning", "compaction"):
+        http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+            state,
+            event_type="response.output_item.added",
+            payload={"type": "response.output_item.added", "item": {"type": item_type}},
+        )
+
+    assert state.tool_call_manifest_invalid is False
 
 
 @pytest.mark.asyncio
@@ -5814,6 +7233,70 @@ async def test_recovery_completed_alias_persistence_failure_fails_response_and_r
 
 
 @pytest.mark.asyncio
+async def test_retained_replay_alias_persistence_failure_fails_normal_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-normal-retained-alias-failure",
+        response_id="resp-replacement-normal",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.replay_downstream_response_id = "resp-retained-normal"
+    session = _make_bridge_session(
+        key_value="normal-retained-alias-failure",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    register_previous = AsyncMock(side_effect=[True, False])
+    finalize = AsyncMock()
+    close_session = AsyncMock()
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_previous)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+    monkeypatch.setattr(service, "_close_http_bridge_session", close_session)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp-replacement-normal",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        ),
+    )
+
+    assert request_state.event_queue is not None
+    event_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert isinstance(event_block, str)
+    failed = proxy_service.parse_sse_data_json(event_block)
+    assert failed is not None
+    assert failed["type"] == "response.failed"
+    failed_response = failed.get("response")
+    assert isinstance(failed_response, dict)
+    failed_error = failed_response.get("error")
+    assert isinstance(failed_error, dict)
+    assert failed_error["code"] == "bridge_continuity_persistence_failed"
+    assert await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0) is None
+    assert register_previous.await_count == 2
+    assert session.upstream_control.reconnect_requested is True
+    assert session.upstream_control.retire_after_drain is True
+    finalize.assert_awaited_once()
+    close_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_incomplete_event_terminalizes_operation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5863,13 +7346,133 @@ async def test_http_bridge_incomplete_event_terminalizes_operation(
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
+async def test_http_bridge_replay_terminal_before_created_preserves_downstream_response_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = proxy_service._WebSocketRequestState(
+        request_id="req-replay-terminal-before-created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        replay_downstream_response_id="resp-client-visible",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="replay-terminal-before-created",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.incomplete",
+                "response": {
+                    "id": "resp-replacement",
+                    "object": "response",
+                    "status": "incomplete",
+                    "output": [],
+                },
+            }
+        ),
+    )
+
+    assert request_state.response_id == "resp-replacement"
+    assert request_state not in session.pending_requests
+    assert request_state.event_queue is not None
+    terminal_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert terminal_block is not None
+    terminal_payload = proxy_service.parse_sse_data_json(terminal_block)
+    assert isinstance(terminal_payload, dict)
+    assert terminal_payload["type"] == "response.incomplete"
+    terminal_response = terminal_payload.get("response")
+    assert isinstance(terminal_response, dict)
+    assert terminal_response["id"] == "resp-client-visible"
+    finalize.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_replay_error_before_created_preserves_downstream_response_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-replay-error-before-created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        replay_downstream_response_id="resp-client-visible-error",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="replay-error-before-created",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 502,
+                "response": {"id": "resp-replacement-error"},
+                "error": {
+                    "type": "server_error",
+                    "code": "upstream_error",
+                    "message": "replacement failed",
+                },
+            }
+        ),
+    )
+
+    assert request_state.response_id == "resp-replacement-error"
+    assert request_state not in session.pending_requests
+    assert request_state.event_queue is not None
+    terminal_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert terminal_block is not None
+    terminal_payload = proxy_service.parse_sse_data_json(terminal_block)
+    assert isinstance(terminal_payload, dict)
+    assert terminal_payload["type"] == "response.failed"
+    terminal_response = terminal_payload.get("response")
+    assert isinstance(terminal_response, dict)
+    assert terminal_response["id"] == "resp-client-visible-error"
+    finalize.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_batched_terminal_delivery_precedes_snapshot_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_unsafe_partial_replay_enabled=False,
+            http_responses_session_bridge_instance_id="test-instance",
+        ),
+    )
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
         request_id="req-batched-terminal-order",
-        response_id="resp-batched-terminal-order",
+        response_id="resp-batched-terminal-upstream",
         model="gpt-5.6-sol",
         service_tier=None,
         reasoning_effort=None,
@@ -5879,6 +7482,7 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
         transport="http",
         skip_request_log=True,
     )
+    request_state.replay_downstream_response_id = "resp-batched-terminal-visible"
     request_state.operation_id = "op-batched-terminal-order"
     session = _make_bridge_session(
         key_value="batched-terminal-order",
@@ -5888,15 +7492,20 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
     session.durable_session_id = "durable-batched-terminal-order"
     session.durable_owner_epoch = 1
     order: list[str] = []
+    persisted_response_ids: list[str | None] = []
 
     async def update_state(*args: Any, **kwargs: Any) -> None:
-        del args, kwargs
+        del args
+        assert request_state.event_queue is not None
+        assert request_state.event_queue.qsize() == 2
         order.append("state")
+        persisted_response_ids.append(kwargs["response_id"])
 
     async def append_terminal_event(*args: Any, **kwargs: Any) -> bool:
         del args
         assert kwargs["session_id"] == session.durable_session_id
         order.append("terminal")
+        persisted_response_ids.append(kwargs["response_id"])
         return True
 
     monkeypatch.setattr(http_bridge_upstream_events_module, "_update_http_bridge_operation_state", update_state)
@@ -5912,9 +7521,14 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
         'data: {"type":"response.completed"}\n\n',
         terminal=True,
         terminal_state="completed",
+        terminal_event_queue=request_state.event_queue,
     )
 
-    assert order == ["terminal"]
+    assert order == ["terminal", "state"]
+    assert persisted_response_ids == [
+        "resp-batched-terminal-upstream",
+        "resp-batched-terminal-upstream",
+    ]
 
 
 @pytest.mark.asyncio
@@ -5968,16 +7582,2259 @@ async def test_terminal_append_failure_retains_last_persisted_response_id_after_
 
 
 @pytest.mark.asyncio
+async def test_completed_bridge_operation_materializes_output_items_from_event_spool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = SimpleNamespace(
+        operation_id="op-materialize-output-items",
+        operation_attempt_generation=0,
+        operation_persisted_response_id=None,
+        response_id="resp-materialize-output-items",
+        replay_downstream_response_id=None,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-test",
+                "input": [{"type": "message", "role": "user", "content": "question"}],
+            }
+        ),
+        operation_parent_response_id=None,
+        response_output_items=[],
+        response_output_items_complete=False,
+        recovery_replay_turn_count=7,
+    )
+    session = _make_bridge_session(key_value="materialize-output-items")
+    session.durable_session_id = "durable-materialize-output-items"
+    session.durable_owner_epoch = 1
+    events = [
+        (
+            "event: response.output_item.done\ndata: "
+            '{"type":"response.output_item.done","output_index":0,"item":'
+            '{"id":"msg_1","type":"message","role":"assistant",'
+            '"content":[{"type":"output_text","text":"answer"}]}}\n\n'
+        ),
+        ('event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n'),
+    ]
+    update_operation = AsyncMock(return_value=True)
+    get_operation = AsyncMock(return_value=SimpleNamespace(event_spool_complete=True))
+    get_operation_events = AsyncMock(return_value=events)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            update_operation=update_operation,
+            get_operation=get_operation,
+            get_operation_events=get_operation_events,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024 * 1024,
+            http_responses_session_bridge_instance_id="instance-materialize-output-items",
+        ),
+    )
+
+    await http_bridge_upstream_events_module._update_http_bridge_operation_state(
+        service,
+        session,
+        request_state,
+        state="completed",
+        response_id="resp-materialize-output-items",
+    )
+
+    get_operation_events.assert_awaited_once_with(operation_id="op-materialize-output-items")
+    await_args = update_operation.await_args
+    assert await_args is not None
+    persisted = await_args.kwargs["response_output_items_json"]
+    assert persisted is not None
+    assert json.loads(persisted)[0]["type"] == "message"
+    assert await_args.kwargs["response_output_items_complete"] is True
+    replay_snapshot = await_args.kwargs["response_replay_input_json"]
+    assert replay_snapshot is not None
+    assert [item["role"] for item in json.loads(replay_snapshot)] == ["user", "assistant"]
+    assert await_args.kwargs["response_replay_input_complete"] is True
+    assert await_args.kwargs["response_replay_input_turn_count"] == 8
+
+
+@pytest.mark.asyncio
+async def test_completed_bridge_operation_skips_overbound_replay_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = SimpleNamespace(
+        operation_id="op-overbound-snapshot",
+        operation_attempt_generation=0,
+        operation_persisted_response_id=None,
+        response_id="resp-overbound-snapshot",
+        replay_downstream_response_id=None,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "previous_response_id": "resp-parent-overbound",
+                "input": [{"type": "message", "role": "user", "content": "question"}],
+            }
+        ),
+        operation_parent_response_id="resp-parent-overbound",
+        response_output_items=[{"type": "message", "role": "assistant", "content": []}],
+        response_output_items_complete=True,
+        recovery_replay_turn_count=0,
+    )
+    session = _make_bridge_session(key_value="overbound-snapshot")
+    session.durable_session_id = "durable-overbound-snapshot"
+    session.durable_owner_epoch = 1
+    update_operation = AsyncMock(return_value=True)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            update_operation=update_operation,
+            get_operation=AsyncMock(return_value=SimpleNamespace(event_spool_complete=True)),
+            get_complete_transcript=AsyncMock(return_value=[SimpleNamespace(represented_turn_count=1)]),
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_replay_input_snapshot",
+        lambda *_args, **_kwargs: '[{"type":"message","role":"user","content":"history"}]',
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=1,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024 * 1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-overbound-snapshot",
+        ),
+    )
+
+    await http_bridge_upstream_events_module._update_http_bridge_operation_state(
+        service,
+        session,
+        request_state,
+        state="completed",
+        response_id="resp-overbound-snapshot",
+    )
+
+    await_args = update_operation.await_args
+    assert await_args is not None
+    assert await_args.kwargs["response_output_items_complete"] is True
+    assert await_args.kwargs["response_replay_input_json"] is None
+    assert await_args.kwargs["response_replay_input_complete"] is False
+    assert await_args.kwargs["response_replay_input_turn_count"] == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("upstream_response_id", "replay_response_id", "expected_response_id", "alternate_expected_response_id"),
+    ("recovery_replay_turn_count", "snapshot_expected", "expected_turn_count"),
+    [(-1, False, 0), (0, True, 1)],
+)
+async def test_completed_bridge_operation_skips_unknown_root_replay_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_replay_turn_count: int,
+    snapshot_expected: bool,
+    expected_turn_count: int,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = SimpleNamespace(
+        operation_id="op-unknown-root-snapshot",
+        operation_attempt_generation=0,
+        operation_persisted_response_id=None,
+        response_id="resp-unknown-root-snapshot",
+        replay_downstream_response_id=None,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "input": [{"type": "message", "role": "user", "content": "question"}],
+            }
+        ),
+        operation_parent_response_id=None,
+        response_output_items=[{"type": "message", "role": "assistant", "content": []}],
+        response_output_items_complete=True,
+        recovery_replay_turn_count=recovery_replay_turn_count,
+    )
+    session = _make_bridge_session(key_value="unknown-root-snapshot")
+    session.durable_session_id = "durable-unknown-root-snapshot"
+    session.durable_owner_epoch = 1
+    update_operation = AsyncMock(return_value=True)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            update_operation=update_operation,
+            get_operation=AsyncMock(return_value=SimpleNamespace(event_spool_complete=True)),
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024 * 1024,
+            http_responses_session_bridge_instance_id="instance-unknown-root-snapshot",
+        ),
+    )
+
+    await http_bridge_upstream_events_module._update_http_bridge_operation_state(
+        service,
+        session,
+        request_state,
+        state="completed",
+        response_id="resp-unknown-root-snapshot",
+    )
+
+    await_args = update_operation.await_args
+    assert await_args is not None
+    assert await_args.kwargs["response_output_items_complete"] is True
+    if snapshot_expected:
+        assert await_args.kwargs["response_replay_input_json"] is not None
+        assert await_args.kwargs["response_replay_input_complete"] is True
+    else:
+        assert await_args.kwargs["response_replay_input_json"] is None
+        assert await_args.kwargs["response_replay_input_complete"] is False
+    assert await_args.kwargs["response_replay_input_turn_count"] == expected_turn_count
+
+
+@pytest.mark.asyncio
+async def test_complete_transcript_recovery_does_not_replay_after_response_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    get_transcript = AsyncMock()
+    service._durable_bridge = cast(Any, SimpleNamespace(get_complete_transcript=get_transcript))
+    session = _make_bridge_session(key_value="recovery-after-response-progress")
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            previous_response_id="resp-stale-anchor",
+            request_text='{"type":"response.create","input":[]}',
+            response_event_count=1,
+            upstream_model_output_seen=False,
+            downstream_visible=False,
+            last_downstream_sequence_number=None,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_complete_transcript_recovery_enabled=True),
+    )
+
+    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    get_transcript.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_complete_transcript_recovery_rebinds_durable_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-operation-rebind")
+    session.durable_session_id = "durable-recovery-operation-rebind"
+    session.durable_owner_epoch = 3
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-recovery-operation-rebind",
+            model="gpt-test",
+            request_text='{"type":"response.create","previous_response_id":"resp-stale","input":[]}',
+            previous_response_id="resp-stale",
+            operation_id="op-stale",
+            operation_fingerprint="fingerprint-stale",
+            operation_parent_response_id="resp-stale",
+            operation_registered=True,
+            operation_created=True,
+            operation_recovery_claimed=False,
+            operation_dispatched=False,
+            operation_attempt_generation=0,
+            response_event_count=0,
+            replay_count=0,
+            upstream_model_output_seen=False,
+            downstream_visible=False,
+            last_downstream_sequence_number=None,
+            response_id=None,
+            fresh_upstream_request_text=None,
+            fresh_upstream_request_is_retry_safe=False,
+            proxy_injected_previous_response_id=True,
+            hard_continuity_anchor=True,
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+            draining_until_terminal=False,
+        ),
+    )
+    rebind_operation = AsyncMock(
+        return_value=SimpleNamespace(
+            rebound=True,
+            created=False,
+            recovery_dispatch_count=1,
+        )
+    )
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[SimpleNamespace(represented_turn_count=7)]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_complete_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=128,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-recovery-operation-rebind",
+        ),
+    )
+    retry = AsyncMock(return_value=True)
+    service._retry_http_bridge_request_on_fresh_upstream = retry
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_retry_circuit_generation",
+        AsyncMock(return_value=(True, None)),
+    )
+
+    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is True
+    assert request_state.operation_id == "op-stale"
+    assert request_state.operation_registered is True
+    assert request_state.operation_rebound is True
+    assert request_state.operation_attempt_generation == 1
+    assert request_state.recovery_replay_turn_count == 7
+    assert request_state.verified_stale_anchor_replay is True
+    assert request_state.verified_stale_anchor_retry_circuit_generation_captured is True
+    assert rebind_operation.await_args is not None
+    assert rebind_operation.await_args.kwargs["request_text"].startswith('{"type":"response.create"')
+    assert rebind_operation.await_args.kwargs["expected_recovery_dispatch_count"] == 0
+    get_complete_transcript = service._durable_bridge.get_complete_transcript
+    get_complete_transcript.assert_awaited_once()
+    assert get_complete_transcript.await_args is not None
+    assert get_complete_transcript.await_args.kwargs["api_key_scope"] == "__anonymous__"
+    retry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_complete_transcript_recovery_rejects_continuation_at_turn_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-turn-limit")
+    session.durable_session_id = "durable-recovery-turn-limit"
+    session.durable_owner_epoch = 1
+    rebind_operation = AsyncMock()
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-recovery-turn-limit",
+            model="gpt-test",
+            request_text='{"type":"response.create","previous_response_id":"resp-parent","input":[]}',
+            previous_response_id="resp-parent",
+            complete_transcript_recovery_anchor=None,
+            operation_id="op-turn-limit",
+            operation_fingerprint="fingerprint-turn-limit",
+            operation_parent_response_id="resp-parent",
+            operation_registered=True,
+            operation_dispatched=True,
+            operation_attempt_generation=0,
+            response_event_count=0,
+            replay_count=0,
+            upstream_model_output_seen=False,
+            downstream_visible=False,
+            last_downstream_sequence_number=None,
+        ),
+    )
+    get_transcript = AsyncMock(return_value=[SimpleNamespace(represented_turn_count=1)])
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=get_transcript,
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=1,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-recovery-turn-limit",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_retry_circuit_generation", AsyncMock(return_value=(True, None)))
+
+    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    rebind_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_partial_transcript_recovery_rejects_continuation_at_turn_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="unsafe-turn-limit")
+    session.durable_session_id = "durable-unsafe-turn-limit"
+    session.durable_owner_epoch = 1
+    rebind_operation = AsyncMock()
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-unsafe-turn-limit",
+            model="gpt-test",
+            request_text='{"type":"response.create","previous_response_id":"resp-parent","input":[]}',
+            previous_response_id="resp-parent",
+            operation_parent_response_id="resp-parent",
+            operation_id="op-unsafe-turn-limit",
+            operation_registered=True,
+            operation_dispatched=True,
+            operation_attempt_generation=0,
+            response_event_count=1,
+            unsafe_partial_replay_count=0,
+        ),
+    )
+    get_transcript = AsyncMock(return_value=[SimpleNamespace(represented_turn_count=1)])
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=get_transcript,
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_unsafe_partial_replay_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=1,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-unsafe-turn-limit",
+        ),
+    )
+
+    recovered = await http_bridge_upstream_events_module._try_unsafe_partial_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    rebind_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_complete_transcript_root_recovery_rejects_unknown_history_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-root-count")
+    session.durable_session_id = "durable-recovery-root-count"
+    session.durable_owner_epoch = 1
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-recovery-root-count",
+            model="gpt-test",
+            request_text='{"type":"response.create","input":[{"type":"message"}]}',
+            previous_response_id=None,
+            complete_transcript_recovery_anchor="resp-root-anchor",
+            operation_id="op-root-count",
+            operation_fingerprint="fingerprint-root-count",
+            operation_parent_response_id=None,
+            operation_registered=True,
+            operation_created=True,
+            operation_recovery_claimed=False,
+            operation_dispatched=True,
+            operation_attempt_generation=0,
+            response_event_count=0,
+            replay_count=0,
+            upstream_model_output_seen=False,
+            downstream_visible=False,
+            last_downstream_sequence_number=None,
+            response_id=None,
+            fresh_upstream_request_text=None,
+            fresh_upstream_request_is_retry_safe=False,
+            proxy_injected_previous_response_id=False,
+            hard_continuity_anchor=False,
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+            draining_until_terminal=False,
+        ),
+    )
+    rebind_operation = AsyncMock(
+        return_value=SimpleNamespace(rebound=True, created=False, recovery_dispatch_count=1),
+    )
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_unanchored_root_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=1,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-recovery-root-count",
+        ),
+    )
+    retry = AsyncMock(return_value=True)
+    service._retry_http_bridge_request_on_fresh_upstream = retry
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_retry_circuit_generation",
+        AsyncMock(return_value=(True, None)),
+    )
+
+    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    rebind_operation.assert_not_awaited()
+    retry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_complete_transcript_root_recovery_rejects_history_over_turn_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-root-overbound")
+    session.durable_session_id = "durable-recovery-root-overbound"
+    session.durable_owner_epoch = 1
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-recovery-root-overbound",
+            model="gpt-test",
+            request_text=json.dumps(
+                {
+                    "type": "response.create",
+                    "input": [
+                        {"type": "message", "role": "user", "content": "first"},
+                        {"type": "message", "role": "user", "content": "second"},
+                    ],
+                }
+            ),
+            previous_response_id=None,
+            complete_transcript_recovery_anchor="resp-root-overbound",
+            operation_id="op-root-overbound",
+            operation_fingerprint="fingerprint-root-overbound",
+            operation_parent_response_id=None,
+            operation_registered=True,
+            operation_created=True,
+            operation_recovery_claimed=False,
+            operation_dispatched=True,
+            operation_attempt_generation=0,
+            response_event_count=0,
+            replay_count=0,
+            upstream_model_output_seen=False,
+            downstream_visible=False,
+            last_downstream_sequence_number=None,
+        ),
+    )
+    rebind_operation = AsyncMock()
+    build_root_replay = Mock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(http_bridge_upstream_events_module, "build_unanchored_root_replay_payload", build_root_replay)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=1,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-recovery-root-overbound",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_retry_circuit_generation", AsyncMock(return_value=(True, None)))
+
+    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    build_root_replay.assert_not_called()
+    rebind_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_complete_transcript_recovery_cancellation_waiting_for_pending_lock_cleans_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-pending-lock-cancel")
+    session.durable_session_id = "durable-recovery-pending-lock-cancel"
+    session.durable_owner_epoch = 1
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-recovery-pending-lock-cancel",
+            model="gpt-test",
+            request_text='{"type":"response.create","previous_response_id":"resp-parent","input":[]}',
+            previous_response_id="resp-parent",
+            complete_transcript_recovery_anchor=None,
+            operation_id="op-recovery-pending-lock-cancel",
+            operation_fingerprint="fingerprint-recovery-pending-lock-cancel",
+            operation_parent_response_id="resp-parent",
+            operation_registered=True,
+            operation_created=True,
+            operation_recovery_claimed=False,
+            operation_dispatched=True,
+            operation_attempt_generation=0,
+            response_event_count=0,
+            replay_count=0,
+            upstream_model_output_seen=False,
+            downstream_visible=False,
+            last_downstream_sequence_number=None,
+        ),
+    )
+    rebind_started = asyncio.Event()
+
+    async def rebind_operation(**_: Any) -> Any:
+        rebind_started.set()
+        return SimpleNamespace(rebound=True, recovery_dispatch_count=1)
+
+    cleanup = AsyncMock()
+    service._cleanup_http_bridge_submit_interruption = cleanup
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[SimpleNamespace(represented_turn_count=1)]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_complete_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=128,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-recovery-pending-lock-cancel",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_retry_circuit_generation", AsyncMock(return_value=(True, None)))
+
+    await session.pending_lock.acquire()
+    try:
+        task = asyncio.create_task(
+            http_bridge_upstream_events_module._try_complete_transcript_recovery(
+                service,
+                session,
+                request_state,
+            )
+        )
+        await asyncio.wait_for(rebind_started.wait(), timeout=1.0)
+        for _ in range(100):
+            if session.pending_lock.statistics().tasks_waiting:
+                break
+            await asyncio.sleep(0)
+        assert session.pending_lock.statistics().tasks_waiting
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        session.pending_lock.release()
+
+    cleanup.assert_awaited_once()
+    assert cleanup.await_args is not None
+    assert cleanup.await_args.kwargs["request_enqueued"] is False
+    assert cleanup.await_args.kwargs["counted_in_queue"] is False
+
+
+@pytest.mark.asyncio
+async def test_complete_transcript_recovery_rolls_back_rebind_when_dispatch_not_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-rebind-dispatch-fails")
+    session.durable_session_id = "durable-recovery-rebind-dispatch-fails"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-recovery-rebind-dispatch-fails",
+        model="gpt-test",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","previous_response_id":"resp-stale","input":[]}',
+        previous_response_id="resp-stale",
+        operation_id="op-stale",
+        operation_fingerprint="fingerprint-stale",
+        operation_parent_response_id="resp-stale",
+        operation_registered=True,
+        operation_created=True,
+        operation_dispatched=False,
+        operation_attempt_generation=0,
+        hard_continuity_anchor=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    rebind_operation = AsyncMock(
+        return_value=SimpleNamespace(
+            rebound=True,
+            created=False,
+            recovery_dispatch_count=1,
+            rebound_from_session_id="durable-original",
+            rebound_from_account_id="acc-original",
+            rebound_from_model="gpt-original",
+            rebound_from_parent_response_id="resp-original",
+        )
+    )
+    rollback_operation = AsyncMock(return_value=True)
+    rollback_fence_operation = AsyncMock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[object()]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+            rollback_operation_before_dispatch=rollback_operation,
+        ),
+    )
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(rollback_fence_operation=rollback_fence_operation),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_complete_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=128,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-recovery-rebind-dispatch-fails",
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_retry_circuit_generation",
+        AsyncMock(return_value=(True, None)),
+    )
+    retry = AsyncMock(return_value=False)
+    service._retry_http_bridge_request_on_fresh_upstream = retry
+
+    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    retry.assert_awaited_once()
+    rollback_operation.assert_awaited_once()
+    assert rollback_operation.await_args is not None
+    assert rollback_operation.await_args.kwargs["restore_rebound"] is True
+    assert rollback_operation.await_args.kwargs["rebound_from_session_id"] == "durable-original"
+    rollback_fence_operation.assert_awaited_once_with(operation_id="op-stale", recovery_dispatch_count=0)
+    assert request_state not in session.pending_requests
+    assert session.queued_request_count == 0
+    assert request_state.operation_registered is False
+    assert request_state.operation_rebound is False
+    assert request_state.operation_rebind_required is True
+
+
+@pytest.mark.asyncio
+async def test_complete_transcript_recovery_keeps_terminal_concurrent_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-terminal-concurrent-winner")
+    session.durable_session_id = "durable-recovery-terminal-concurrent-winner"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-recovery-terminal-concurrent-winner",
+        model="gpt-test",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        request_text='{"type":"response.create","previous_response_id":"resp-stale","input":[]}',
+        previous_response_id="resp-stale",
+        hard_continuity_anchor=True,
+        operation_id="op-terminal-concurrent-winner",
+        operation_fingerprint="fingerprint-terminal-concurrent-winner",
+        operation_registered=True,
+        operation_dispatched=True,
+        operation_attempt_generation=0,
+    )
+    rebind_operation = AsyncMock(return_value=None)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[object()]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+            lookup_sessions=AsyncMock(
+                return_value=[
+                    SimpleNamespace(
+                        session_id=session.durable_session_id,
+                        owner_instance_id="instance-terminal-concurrent-winner",
+                        owner_epoch=session.durable_owner_epoch,
+                    )
+                ]
+            ),
+            get_operation=AsyncMock(
+                return_value=SimpleNamespace(
+                    recovery_dispatch_count=1,
+                    state="completed",
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_complete_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=128,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-terminal-concurrent-winner",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_retry_circuit_generation", AsyncMock(return_value=(True, None)))
+
+    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is True
+    assert request_state.operation_id == "op-terminal-concurrent-winner"
+    assert request_state.operation_registered is True
+    assert request_state.operation_attempt_generation == 0
+    rebind_operation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_complete_transcript_recovery_preserves_state_when_rebind_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-operation-rebind-fails")
+    session.durable_session_id = "durable-recovery-operation-rebind-fails"
+    session.durable_owner_epoch = 3
+    original_request_text = '{"type":"response.create","previous_response_id":"resp-stale","input":[]}'
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-recovery-operation-rebind-fails",
+            model="gpt-test",
+            request_text=original_request_text,
+            previous_response_id="resp-stale",
+            operation_id="op-stale",
+            operation_fingerprint="fingerprint-stale",
+            operation_parent_response_id="resp-stale",
+            operation_registered=True,
+            operation_created=True,
+            operation_recovery_claimed=False,
+            operation_dispatched=False,
+            operation_attempt_generation=0,
+            response_event_count=0,
+            replay_count=0,
+            upstream_model_output_seen=False,
+            downstream_visible=False,
+            last_downstream_sequence_number=None,
+            response_id=None,
+            fresh_upstream_request_text=None,
+            fresh_upstream_request_is_retry_safe=False,
+            proxy_injected_previous_response_id=True,
+            hard_continuity_anchor=True,
+            response_output_items=[{"type": "message"}],
+            response_output_items_by_index={1: {"type": "message"}},
+            response_output_item_added_indexes={1},
+            response_output_items_event_invalid=False,
+            response_output_items_complete=True,
+            draining_until_terminal=False,
+        ),
+    )
+    rebind_operation = AsyncMock(return_value=None)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[object()]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_complete_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=128,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-recovery-operation-rebind-fails",
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_retry_circuit_generation",
+        AsyncMock(return_value=(True, None)),
+    )
+
+    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    assert request_state.request_text == original_request_text
+    assert request_state.previous_response_id == "resp-stale"
+    assert request_state.fresh_upstream_request_text is None
+    assert request_state.hard_continuity_anchor is True
+    assert request_state.response_output_items == [{"type": "message"}]
+    assert request_state.operation_id is None
+    assert request_state.operation_registered is False
+    assert request_state.operation_rebind_required is True
+    assert request_state.operation_rebound is False
+    rebind_operation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-ambiguous-rebind")
+    session.durable_session_id = "durable-recovery-ambiguous-rebind"
+    session.durable_owner_epoch = 3
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-recovery-ambiguous-rebind",
+            model="gpt-test",
+            request_text='{"type":"response.create","previous_response_id":"resp-stale","input":[]}',
+            previous_response_id="resp-stale",
+            operation_id="op-ambiguous-rebind",
+            operation_fingerprint="fingerprint-ambiguous-rebind",
+            operation_parent_response_id="resp-stale",
+            operation_registered=True,
+            operation_created=True,
+            operation_recovery_claimed=False,
+            operation_dispatched=False,
+            operation_attempt_generation=0,
+            response_event_count=0,
+            replay_count=0,
+            upstream_model_output_seen=False,
+            downstream_visible=False,
+            last_downstream_sequence_number=None,
+            response_id=None,
+            fresh_upstream_request_text=None,
+            fresh_upstream_request_is_retry_safe=False,
+            proxy_injected_previous_response_id=True,
+            hard_continuity_anchor=True,
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+            draining_until_terminal=False,
+        ),
+    )
+    rebind_operation = AsyncMock(side_effect=RuntimeError("connection lost after commit"))
+    rollback_operation = AsyncMock(return_value=True)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[object()]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+            rollback_operation_before_dispatch=rollback_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_complete_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=128,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-recovery-ambiguous-rebind",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_retry_circuit_generation", AsyncMock(return_value=(True, None)))
+
+    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    rollback_operation.assert_awaited_once()
+    assert rollback_operation.await_args is not None
+    assert rollback_operation.await_args.kwargs["restore_rebound"] is True
+    assert request_state.operation_registered is False
+    assert request_state.operation_rebind_required is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_transport_close_can_use_complete_transcript_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-transport-close-recovery",
+        model="gpt-test",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        previous_response_id="resp-stale-transport-close",
+        hard_continuity_anchor=True,
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("thread_header", "transport-close-recovery", None),
+        pending_requests=deque([request_state]),
+    )
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_complete_transcript_recovery_enabled=True),
+    )
+    recover = AsyncMock(return_value=True)
+    monkeypatch.setattr(http_bridge_request_submit_module, "_try_complete_transcript_recovery", recover)
+
+    retried = await service._retry_http_bridge_precreated_request(
+        session,
+        allow_complete_transcript_recovery=True,
+    )
+
+    assert retried is True
+    recover.assert_awaited_once_with(service, session, request_state)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_root_full_history_can_use_complete_transcript_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-root-full-history-recovery",
+        model="gpt-test",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        previous_response_id=None,
+        hard_continuity_anchor=True,
+    )
+    request_state.complete_transcript_recovery_anchor = "resp-root-full-history"
+    request_state.request_text = json.dumps(
+        {
+            "type": "response.create",
+            "input": [{"type": "message", "role": "user", "content": "full history"}],
+        }
+    )
+    request_state.operation_id = "op-root-full-history-recovery"
+    request_state.operation_registered = True
+    request_state.operation_dispatched = True
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("thread_header", "root-full-history-recovery", None),
+        pending_requests=deque([request_state]),
+    )
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_complete_transcript_recovery_enabled=True),
+    )
+    recover = AsyncMock(return_value=True)
+    monkeypatch.setattr(http_bridge_request_submit_module, "_try_complete_transcript_recovery", recover)
+
+    retried = await service._retry_http_bridge_precreated_request(
+        session,
+        allow_complete_transcript_recovery=True,
+    )
+
+    assert retried is True
+    recover.assert_awaited_once_with(service, session, request_state)
+
+
+def test_http_bridge_root_recovery_keeps_unverified_injected_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-root-delta-with-injected-anchor",
+        model="gpt-test",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        previous_response_id="resp-root-anchor",
+        hard_continuity_anchor=True,
+        proxy_injected_previous_response_id=True,
+        complete_transcript_recovery_anchor="resp-root-anchor",
+        fresh_upstream_request_is_retry_safe=False,
+    )
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_complete_transcript_recovery_enabled=True),
+    )
+
+    assert (
+        http_bridge_request_submit_module._http_bridge_complete_transcript_root_recovery_candidate(
+            request_state,
+            json.dumps(
+                {
+                    "type": "response.create",
+                    "previous_response_id": None,
+                    "input": [{"type": "message", "role": "user", "content": "delta only"}],
+                }
+            ),
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_transcript_recovery_blocks_second_fresh_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-after-fresh-replay")
+    session.durable_session_id = "durable-recovery-after-fresh-replay"
+    session.durable_owner_epoch = 4
+    session.last_completed_response_id = "resp-stale-after-fresh-replay"
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-recovery-after-fresh-replay",
+            model="gpt-test",
+            request_text='{"type":"response.create","input":[{"type":"message"}]}',
+            previous_response_id=None,
+            complete_transcript_recovery_anchor="resp-stale-after-fresh-replay",
+            complete_transcript_recovery_count=0,
+            complete_transcript_recovery_retry_authorized=False,
+            operation_id="op-recovery-after-fresh-replay",
+            operation_fingerprint="fingerprint-recovery-after-fresh-replay",
+            operation_parent_response_id=None,
+            operation_registered=True,
+            operation_created=False,
+            operation_recovery_claimed=False,
+            operation_dispatched=True,
+            operation_attempt_generation=0,
+            response_event_count=0,
+            replay_count=1,
+            upstream_model_output_seen=False,
+            downstream_visible=False,
+            last_downstream_sequence_number=None,
+            response_id=None,
+            fresh_upstream_request_text='{"type":"response.create","input":[{"type":"message"}]}',
+            fresh_upstream_request_is_retry_safe=True,
+            proxy_injected_previous_response_id=False,
+            hard_continuity_anchor=True,
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+            draining_until_terminal=False,
+        ),
+    )
+    update_operation = AsyncMock(return_value=True)
+    record_operation = AsyncMock(
+        return_value=SimpleNamespace(
+            rebound=True,
+            created=False,
+            recovery_dispatch_count=1,
+        )
+    )
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[object()]),
+            update_operation=update_operation,
+            record_operation=record_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_complete_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"},{"type":"assistant"}]}',
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=128,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-recovery-after-fresh-replay",
+        ),
+    )
+    retry = AsyncMock(return_value=True)
+    service._retry_http_bridge_request_on_fresh_upstream = retry
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_retry_circuit_generation",
+        AsyncMock(return_value=(True, None)),
+    )
+
+    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    assert request_state.complete_transcript_recovery_count == 0
+    assert request_state.complete_transcript_recovery_retry_authorized is False
+    assert request_state.complete_transcript_recovery_anchor == "resp-stale-after-fresh-replay"
+    assert record_operation.await_args is None
+    assert retry.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_unsafe_partial_transcript_recovery_rebinds_one_new_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="unsafe-partial-recovery")
+    session.durable_session_id = "durable-unsafe-partial-recovery"
+    session.durable_owner_epoch = 5
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-unsafe-partial-recovery",
+        model="gpt-test",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        request_text='{"type":"response.create","previous_response_id":"resp-parent","input":[{"type":"message"}]}',
+        previous_response_id="resp-parent",
+        operation_id="op-unsafe-partial",
+        operation_fingerprint="fingerprint-unsafe-partial",
+        operation_parent_response_id="resp-parent",
+        operation_registered=True,
+        operation_dispatched=True,
+        response_id="resp-partial-original",
+        response_event_count=4,
+        operation_attempt_generation=0,
+    )
+    session.pending_requests.append(request_state)
+    rebind_operation = AsyncMock(
+        return_value=SimpleNamespace(rebound=True, recovery_dispatch_count=1),
+    )
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[object()]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_unsafe_partial_replay_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=128,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-unsafe-partial",
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_complete_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+    retry = AsyncMock(return_value=True)
+    service._retry_http_bridge_request_on_fresh_upstream = retry
+
+    recovered = await http_bridge_upstream_events_module._try_unsafe_partial_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is True
+    assert request_state.response_event_count == 0
+    assert request_state.previous_response_id is None
+    assert request_state.replay_downstream_response_id == "resp-partial-original"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.unsafe_partial_replay_count == 1
+    assert request_state.unsafe_partial_replay_retry_authorized is True
+    assert request_state.operation_rebound is True
+    assert rebind_operation.await_args is not None
+    assert rebind_operation.await_args.kwargs["allow_acknowledged"] is True
+    assert rebind_operation.await_args.kwargs["expected_recovery_dispatch_count"] == 0
+    assert rebind_operation.await_args.kwargs["request_text"].startswith('{"type":"response.create"')
+    retry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_partial_root_recovery_rejects_history_over_turn_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="unsafe-root-overbound")
+    session.durable_session_id = "durable-unsafe-root-overbound"
+    session.durable_owner_epoch = 1
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            request_id="req-unsafe-root-overbound",
+            model="gpt-test",
+            request_text=json.dumps(
+                {
+                    "type": "response.create",
+                    "input": [
+                        {"type": "message", "role": "user", "content": "first"},
+                        {"type": "message", "role": "user", "content": "second"},
+                    ],
+                }
+            ),
+            previous_response_id=None,
+            operation_parent_response_id=None,
+            complete_transcript_recovery_anchor=None,
+            operation_id="op-unsafe-root-overbound",
+            operation_registered=True,
+            operation_dispatched=True,
+            operation_attempt_generation=0,
+            response_event_count=1,
+            unsafe_partial_replay_count=0,
+        ),
+    )
+    rebind_operation = AsyncMock()
+    build_root_replay = Mock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(http_bridge_upstream_events_module, "build_unanchored_root_replay_payload", build_root_replay)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_unsafe_partial_replay_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=1,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-unsafe-root-overbound",
+        ),
+    )
+
+    recovered = await http_bridge_upstream_events_module._try_unsafe_partial_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    build_root_replay.assert_not_called()
+    rebind_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_partial_transcript_recovery_rolls_back_rebind_when_dispatch_not_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="unsafe-partial-rebind-dispatch-fails")
+    session.durable_session_id = "durable-unsafe-partial-rebind-dispatch-fails"
+    session.durable_owner_epoch = 5
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-unsafe-partial-rebind-dispatch-fails",
+        model="gpt-test",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        request_text='{"type":"response.create","previous_response_id":"resp-parent","input":[]}',
+        previous_response_id="resp-parent",
+        operation_id="op-unsafe-partial",
+        operation_fingerprint="fingerprint-unsafe-partial",
+        operation_parent_response_id="resp-parent",
+        operation_registered=True,
+        operation_dispatched=True,
+        response_id="resp-partial-original",
+        response_event_count=2,
+        operation_attempt_generation=0,
+    )
+    session.pending_requests.append(request_state)
+    rebind_operation = AsyncMock(
+        return_value=SimpleNamespace(
+            rebound=True,
+            recovery_dispatch_count=1,
+            rebound_from_session_id="durable-original",
+            rebound_from_account_id="acc-original",
+            rebound_from_model="gpt-original",
+            rebound_from_parent_response_id="resp-original",
+        )
+    )
+    rollback_operation = AsyncMock(return_value=True)
+    rollback_fence_operation = AsyncMock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[object()]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+            rollback_operation_before_dispatch=rollback_operation,
+        ),
+    )
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(rollback_fence_operation=rollback_fence_operation),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_unsafe_partial_replay_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=128,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-unsafe-partial-rebind-dispatch-fails",
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_complete_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+    retry = AsyncMock(return_value=False)
+    service._retry_http_bridge_request_on_fresh_upstream = retry
+
+    recovered = await http_bridge_upstream_events_module._try_unsafe_partial_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    retry.assert_awaited_once()
+    rollback_operation.assert_awaited_once()
+    assert rollback_operation.await_args is not None
+    assert rollback_operation.await_args.kwargs["restore_rebound"] is True
+    assert rollback_operation.await_args.kwargs["rebound_from_session_id"] == "durable-original"
+    rollback_fence_operation.assert_awaited_once_with(operation_id="op-unsafe-partial", recovery_dispatch_count=0)
+    assert request_state not in session.pending_requests
+    assert session.queued_request_count == 0
+    assert request_state.operation_registered is False
+    assert request_state.operation_rebound is False
+    assert request_state.operation_rebind_required is True
+
+
+@pytest.mark.asyncio
+async def test_unsafe_partial_transcript_recovery_rejects_tool_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="unsafe-partial-tool-reject")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-unsafe-partial-tool-reject",
+        model="gpt-test",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        request_text='{"type":"response.create","input":[]}',
+        operation_id="op-tool-reject",
+        operation_registered=True,
+        operation_dispatched=True,
+        response_event_count=2,
+        pending_tool_call_types={"call_1": "function_call"},
+    )
+    service._durable_bridge = cast(Any, SimpleNamespace(get_complete_transcript=AsyncMock()))
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_unsafe_partial_replay_enabled=True),
+    )
+
+    recovered = await http_bridge_upstream_events_module._try_unsafe_partial_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    assert request_state.response_event_count == 2
+    service._durable_bridge.get_complete_transcript.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_partial_transcript_recovery_fails_closed_without_parent_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="unsafe-partial-no-parent")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-unsafe-partial-no-parent",
+        model="gpt-test",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        request_text='{"type":"response.create","previous_response_id":"resp-missing","input":[]}',
+        previous_response_id="resp-missing",
+        operation_id="op-no-parent",
+        operation_fingerprint="fingerprint-no-parent",
+        operation_registered=True,
+        operation_dispatched=True,
+        response_event_count=1,
+    )
+    get_transcript = AsyncMock(return_value=None)
+    service._durable_bridge = cast(Any, SimpleNamespace(get_complete_transcript=get_transcript))
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_unsafe_partial_replay_enabled=True),
+    )
+
+    recovered = await http_bridge_upstream_events_module._try_unsafe_partial_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    assert request_state.response_event_count == 1
+    get_transcript.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_partial_transcript_recovery_preserves_fence_when_rebind_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="unsafe-partial-rebind-fails")
+    session.durable_session_id = "durable-unsafe-partial-rebind-fails"
+    session.durable_owner_epoch = 2
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-unsafe-partial-rebind-fails",
+        model="gpt-test",
+        service_tier=None,
+        api_key_reservation=None,
+        reasoning_effort=None,
+        started_at=1.0,
+        transport="http",
+        request_text='{"type":"response.create","previous_response_id":"resp-parent","input":[]}',
+        previous_response_id="resp-parent",
+        operation_id="op-rebind-fails",
+        operation_fingerprint="fingerprint-rebind-fails",
+        operation_parent_response_id="resp-parent",
+        operation_registered=True,
+        operation_dispatched=True,
+        response_event_count=1,
+    )
+    rebind_operation = AsyncMock(return_value=None)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[object()]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_unsafe_partial_replay_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=128,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-unsafe-partial-rebind-fails",
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_complete_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+
+    recovered = await http_bridge_upstream_events_module._try_unsafe_partial_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    assert request_state.operation_id is None
+    assert request_state.operation_rebind_required is True
+    assert request_state.response_event_count == 1
+    rebind_operation.assert_awaited_once()
+    assert rebind_operation.await_args is not None
+    assert rebind_operation.await_args.kwargs["allow_acknowledged"] is True
+
+
+@pytest.mark.asyncio
+async def test_unsafe_partial_transcript_recovery_keeps_winning_claim_on_cas_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="unsafe-partial-cas-loser")
+    session.durable_session_id = "durable-unsafe-partial-cas-loser"
+    session.durable_owner_epoch = 2
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-unsafe-partial-cas-loser",
+        model="gpt-test",
+        service_tier=None,
+        api_key_reservation=None,
+        reasoning_effort=None,
+        started_at=1.0,
+        transport="http",
+        request_text='{"type":"response.create","previous_response_id":"resp-parent","input":[]}',
+        previous_response_id="resp-parent",
+        operation_id="op-cas-loser",
+        operation_fingerprint="fingerprint-cas-loser",
+        operation_parent_response_id="resp-parent",
+        operation_registered=True,
+        operation_dispatched=True,
+        operation_attempt_generation=0,
+        response_event_count=1,
+    )
+
+    async def lose_cas(**_kwargs: Any) -> None:
+        request_state.unsafe_partial_replay_count = 1
+        request_state.operation_attempt_generation = 1
+        return None
+
+    rebind_operation = AsyncMock(side_effect=lose_cas)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[object()]),
+            get_session_by_id=AsyncMock(
+                return_value=SimpleNamespace(
+                    owner_instance_id="instance-unsafe-partial-cas-loser",
+                    owner_epoch=2,
+                )
+            ),
+            rebind_operation_for_complete_transcript=rebind_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_unsafe_partial_replay_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=128,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-unsafe-partial-cas-loser",
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_complete_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+
+    recovered = await http_bridge_upstream_events_module._try_unsafe_partial_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is True
+    assert request_state.operation_id == "op-cas-loser"
+    assert request_state.operation_registered is True
+    assert request_state.unsafe_partial_replay_count == 1
+    assert request_state.operation_attempt_generation == 1
+
+
+@pytest.mark.asyncio
+async def test_unsafe_partial_replay_authorization_is_consumed_before_second_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="unsafe-partial-one-shot")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-unsafe-partial-one-shot",
+        model="gpt-test",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        request_text='{"type":"response.create","input":[]}',
+        fresh_upstream_request_text='{"type":"response.create","input":[]}',
+        unsafe_partial_replay_retry_authorized=True,
+        response_event_count=3,
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    assert isinstance(request_state.request_text, str)
+
+    first = await service._retry_http_bridge_request_on_fresh_upstream(
+        session=session,
+        request_state=request_state,
+        text_data=request_state.request_text,
+        send_request=False,
+    )
+    second = await service._retry_http_bridge_request_on_fresh_upstream(
+        session=session,
+        request_state=request_state,
+        text_data=request_state.request_text,
+        send_request=False,
+    )
+
+    assert first is True
+    assert second is False
+    assert request_state.unsafe_partial_replay_retry_authorized is False
+    reconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_transport_close_selects_unsafe_partial_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-unsafe-partial-precreated",
+        model="gpt-test",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        request_text='{"type":"response.create","input":[]}',
+        operation_id="op-unsafe-partial-precreated",
+        operation_registered=True,
+        operation_dispatched=True,
+        response_event_count=2,
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("thread_header", "unsafe-partial-precreated", None),
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_unsafe_partial_replay_enabled=True),
+    )
+    unsafe_recovery = AsyncMock(return_value=True)
+    complete_recovery = AsyncMock(return_value=False)
+    monkeypatch.setattr(http_bridge_request_submit_module, "_try_unsafe_partial_transcript_recovery", unsafe_recovery)
+    monkeypatch.setattr(http_bridge_request_submit_module, "_try_complete_transcript_recovery", complete_recovery)
+
+    retried = await service._retry_http_bridge_precreated_request(
+        session,
+        allow_complete_transcript_recovery=True,
+    )
+
+    assert retried is True
+    unsafe_recovery.assert_awaited_once_with(service, session, request_state)
+    complete_recovery.assert_not_awaited()
+
+
+def test_unsafe_partial_replay_setting_defaults_off() -> None:
+    assert _make_app_settings().http_responses_session_bridge_unsafe_partial_replay_enabled is False
+
+
+def test_unsafe_partial_replay_keeps_sequence_numbers_monotonic() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            replay_downstream_response_id="resp-original",
+            replay_downstream_sequence_offset=None,
+            last_downstream_sequence_number=7,
+        ),
+    )
+
+    first, first_sequence = http_bridge_upstream_events_module._rewrite_http_bridge_replay_sequence_number(
+        {"type": "response.output_text.delta", "sequence_number": 0},
+        request_state,
+    )
+    second, second_sequence = http_bridge_upstream_events_module._rewrite_http_bridge_replay_sequence_number(
+        {"type": "response.output_text.delta", "sequence_number": 1},
+        request_state,
+    )
+
+    assert first["sequence_number"] == 8
+    assert second["sequence_number"] == 9
+    assert first_sequence == 8
+    assert second_sequence == 9
+    assert request_state.last_downstream_sequence_number == 7
+
+
+def test_response_output_capture_reconstructs_empty_completed_output() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={"output_index": 1, "item": {"type": "message", "id": "msg_1"}},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={"output_index": 0, "item": {"type": "reasoning", "id": "rs_1"}},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.completed",
+        payload={"response": {"output": []}},
+    )
+
+    assert [item["type"] for item in request_state.response_output_items] == ["reasoning", "message"]
+    assert request_state.response_output_items_complete is True
+
+
+def test_response_output_capture_rejects_added_done_identity_mismatch() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.added",
+        payload={
+            "output_index": 0,
+            "item": {"id": "item_shared", "call_id": "call_a", "type": "function_call"},
+        },
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={
+            "output_index": 0,
+            "item": {"id": "item_shared", "call_id": "call_b", "type": "message"},
+        },
+    )
+
+    assert request_state.response_output_items_by_index == {}
+    assert request_state.response_output_items_event_invalid is True
+
+
+def test_response_output_capture_rejects_done_missing_added_identity_field() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_item_added_identities={},
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.added",
+        payload={
+            "output_index": 0,
+            "item": {"id": "item_shared", "call_id": "call_a", "type": "function_call"},
+        },
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={
+            "output_index": 0,
+            "item": {"id": "item_shared", "type": "function_call"},
+        },
+    )
+
+    assert request_state.response_output_items_by_index == {}
+    assert request_state.response_output_items_event_invalid is True
+
+
+def test_response_output_capture_rejects_duplicate_added_indexes() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+    item = {"type": "message", "id": "msg_duplicate_added"}
+
+    for _ in range(2):
+        http_bridge_upstream_events_module._record_http_bridge_response_output(
+            request_state,
+            event_type="response.output_item.added",
+            payload={"output_index": 0, "item": item},
+        )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={"output_index": 0, "item": item},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.completed",
+        payload={"response": {"output": []}},
+    )
+
+    assert request_state.response_output_items == []
+    assert request_state.response_output_items_complete is False
+    assert request_state.response_output_items_event_invalid is True
+
+
+def test_response_output_capture_rejects_duplicate_done_indexes() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+    item = {"type": "message", "id": "msg_duplicate_done"}
+
+    for _ in range(2):
+        http_bridge_upstream_events_module._record_http_bridge_response_output(
+            request_state,
+            event_type="response.output_item.done",
+            payload={"output_index": 0, "item": item},
+        )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.completed",
+        payload={"response": {"output": []}},
+    )
+
+    assert request_state.response_output_items == []
+    assert request_state.response_output_items_complete is False
+    assert request_state.response_output_items_event_invalid is True
+
+
+def test_response_output_capture_rejects_added_after_done_index() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+    item = {"type": "message", "id": "msg_added_after_done"}
+
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={"output_index": 0, "item": item},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.added",
+        payload={"output_index": 0, "item": item},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.completed",
+        payload={"response": {"output": []}},
+    )
+
+    assert request_state.response_output_items == []
+    assert request_state.response_output_items_complete is False
+    assert request_state.response_output_items_event_invalid is True
+
+
+def test_response_output_capture_rejects_sparse_indexes_without_terminal_output() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+
+    for output_index in (0, 2):
+        http_bridge_upstream_events_module._record_http_bridge_response_output(
+            request_state,
+            event_type="response.output_item.done",
+            payload={"output_index": output_index, "item": {"type": "message"}},
+        )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.completed",
+        payload={"response": {}},
+    )
+
+    assert request_state.response_output_items == []
+    assert request_state.response_output_items_complete is False
+    assert request_state.response_output_items_event_invalid is True
+
+
+def test_response_output_capture_rejects_boolean_indexes() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={"output_index": False, "item": {"type": "message"}},
+    )
+
+    assert request_state.response_output_items_by_index == {}
+    assert request_state.response_output_items_complete is False
+    assert request_state.response_output_items_event_invalid is True
+
+
+def test_response_output_capture_rejects_unfinished_added_output_item() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.added",
+        payload={"output_index": 0, "item": {"type": "message", "id": "msg_unfinished"}},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={"output_index": 1, "item": {"type": "message", "id": "msg_done"}},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.completed",
+        payload={"response": {"output": []}},
+    )
+
+    assert request_state.response_output_items == []
+    assert request_state.response_output_items_complete is False
+
+
+def test_response_output_capture_rejects_conflicting_done_items_with_terminal_output() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={"output_index": 0, "item": {"type": "message", "id": "msg_first"}},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={"output_index": 0, "item": {"type": "message", "id": "msg_conflict"}},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.completed",
+        payload={"response": {"output": [{"type": "message", "id": "msg_terminal"}]}},
+    )
+
+    assert request_state.response_output_items == []
+    assert request_state.response_output_items_complete is False
+
+
+def test_response_output_capture_rejects_terminal_item_mismatch() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={"output_index": 0, "item": {"type": "message", "id": "msg_done"}},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.completed",
+        payload={"response": {"output": [{"type": "message", "id": "msg_terminal"}]}},
+    )
+
+    assert request_state.response_output_items == []
+    assert request_state.response_output_items_complete is False
+    assert request_state.response_output_items_event_invalid is True
+
+
+def test_response_output_capture_rejects_sparse_done_indexes() -> None:
+    request_state = cast(
+        Any,
+        SimpleNamespace(
+            response_output_items=[],
+            response_output_items_by_index={},
+            response_output_item_added_indexes=set(),
+            response_output_items_event_invalid=False,
+            response_output_items_complete=False,
+        ),
+    )
+
+    for output_index in (0, 2):
+        http_bridge_upstream_events_module._record_http_bridge_response_output(
+            request_state,
+            event_type="response.output_item.done",
+            payload={"output_index": output_index, "item": {"type": "message", "id": f"msg_{output_index}"}},
+        )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.completed",
+        payload={"response": {"output": []}},
+    )
+
+    assert request_state.response_output_items == []
+    assert request_state.response_output_items_complete is False
+    assert request_state.response_output_items_event_invalid is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "upstream_response_id",
+        "replay_response_id",
+        "expected_response_id",
+        "alternate_expected_response_id",
+        "expected_operation_response_id",
+    ),
     [
         (
             "resp-terminal-append-fallback-order",
             "resp-client-visible-replay",
             "resp-terminal-append-fallback-order",
             "resp-client-visible-replay",
+            "resp-terminal-append-fallback-order",
         ),
-        (None, "resp-persisted-before-replay", "resp-persisted-before-replay", None),
+        (None, "resp-persisted-before-replay", "resp-persisted-before-replay", None, "resp-persisted-before-replay"),
     ],
 )
 async def test_terminal_append_failure_queues_before_stalled_fallback_settlement(
@@ -5985,6 +9842,7 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
     replay_response_id: str,
     expected_response_id: str,
     alternate_expected_response_id: str | None,
+    expected_operation_response_id: str,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     event_queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -6058,12 +9916,12 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
     assert persist_task.done() is False
     release_append.set()
     await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
-    assert append_kwargs["response_id"] == replay_response_id
+    assert append_kwargs["response_id"] == expected_operation_response_id
     assert append_kwargs["expected_recovery_dispatch_count"] == 2
     assert settlement_kwargs["expected_response_id"] == expected_response_id
     assert settlement_kwargs["expected_recovery_dispatch_count"] == 2
     assert settlement_kwargs["alternate_expected_response_id"] == alternate_expected_response_id
-    assert settlement_kwargs["response_id"] == replay_response_id
+    assert settlement_kwargs["response_id"] == expected_operation_response_id
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) == event_block
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) is None
     assert event_queue.empty()
@@ -6561,6 +10419,13 @@ async def test_http_bridge_upstream_non_text_archives_with_request_archive_id(
         ),
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+        ),
+    )
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
     monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
@@ -13267,6 +17132,13 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(
         service._durable_bridge,
         "lookup_request_targets",
         AsyncMock(
@@ -13310,6 +17182,8 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
 
     assert chunks == []
     assert captured["previous_response_id"] is None
+    assert request_state.hard_continuity_anchor is True
+    assert request_state.complete_transcript_recovery_anchor == "resp_latest"
     # Full-resend payloads are explicitly excluded from durable anchor
     # injection, so the bridge prepares the original request exactly once.
     assert prepared_input_lengths == [3]
@@ -15717,6 +19591,203 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
 
 
 @pytest.mark.asyncio
+async def test_stream_via_http_bridge_translates_retained_response_alias_before_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "hello",
+            "previous_response_id": "resp-retained",
+        }
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-retained-alias-translation",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    await event_queue.put(None)
+    prepared_previous_response_ids: list[str | None] = []
+
+    def fake_prepare(
+        prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip
+        prepared_previous_response_ids.append(prepared_payload.previous_response_id)
+        request_state.previous_response_id = prepared_payload.previous_response_id
+        return request_state, '{"type":"response.create"}'
+
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="sess-retained-alias",
+        canonical_kind="session_header",
+        canonical_key="sid-retained-alias",
+        api_key_scope="__anonymous__",
+        account_id="acc-1",
+        owner_instance_id="instance-a",
+        owner_epoch=1,
+        lease_expires_at=datetime.now(timezone.utc),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="turn-retained-alias",
+        latest_response_id="resp-replacement",
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-retained-alias", None),
+        key_value="sid-retained-alias",
+    )
+    alias_lookup = AsyncMock(return_value=durable_lookup)
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(service._durable_bridge, "lookup_previous_response_id_target", alias_lookup)
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=session))
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-session-id": "sid-retained-alias"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == []
+    alias_lookup.assert_awaited_once_with(response_id="resp-retained", api_key_id=None)
+    assert prepared_previous_response_ids[0] is None
+    assert prepared_previous_response_ids[-1] == "resp-replacement"
+    assert request_state.previous_response_id == "resp-replacement"
+    assert request_state.proxy_injected_previous_response_id is True
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_fails_closed_when_retained_alias_lookup_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "hello",
+            "previous_response_id": "resp-retained-unavailable",
+        }
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="sess-retained-alias-unavailable",
+        canonical_kind="session_header",
+        canonical_key="sid-retained-alias-unavailable",
+        api_key_scope="__anonymous__",
+        account_id="acc-1",
+        owner_instance_id="instance-a",
+        owner_epoch=1,
+        lease_expires_at=datetime.now(timezone.utc),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="turn-retained-alias-unavailable",
+        latest_response_id="resp-replacement-unavailable",
+    )
+    alias_lookup = AsyncMock(side_effect=RuntimeError("database temporarily unavailable"))
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-retained-alias-unavailable", None),
+        key_value="sid-retained-alias-unavailable",
+    )
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(service._durable_bridge, "lookup_previous_response_id_target", alias_lookup)
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=session))
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                        openai_prompt_cache_key_derivation_enabled=True,
+                    )
+                )
+            ),
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-session-id": "sid-retained-alias-unavailable"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        ):
+            pass
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
+    alias_lookup.assert_awaited_once_with(response_id="resp-retained-unavailable", api_key_id=None)
+
+
+@pytest.mark.asyncio
 async def test_stream_via_http_bridge_resolves_previous_response_owner_from_request_logs_when_durable_lookup_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -16844,6 +20915,164 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_for_local_p
     assert get_or_create.await_count == 3
     assert prepare_reservations == [initial_reservation, retried_reservation]
     reserve_retry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_local_recovery_cancellation_during_replacement_close_copies_dispatch_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled replacement close must not lose the durable dispatch marker."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "hello",
+            "prompt_cache_key": "bridge-cancel-rebind",
+            "previous_response_id": "resp_prev_cancel",
+        }
+    )
+    initial_state = proxy_service._WebSocketRequestState(
+        request_id="req-cancel-initial",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        previous_response_id="resp_prev_cancel",
+    )
+    initial_state.request_stage = "follow_up"
+    initial_state.preferred_account_id = "acc-1"
+    initial_state.recovery_attempt_fingerprint = "recovery-fingerprint"
+    initial_state.recovery_attempt_session_id = "recovery-session"
+    initial_state.recovery_attempt_owner_epoch = 1
+    initial_state.recovery_attempt_claimed = True
+    initial_state.recovery_attempt_dispatched = True
+    retry_state = proxy_service._WebSocketRequestState(
+        request_id="req-cancel-retry",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        previous_response_id="resp_prev_cancel",
+    )
+    key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-cancel-rebind", None)
+    initial_session = _make_bridge_session(key=key, key_value="bridge-cancel-rebind")
+    retry_session = _make_bridge_session(key=key, key_value="bridge-cancel-rebind")
+    initial_session.account = cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE))
+    retry_session.account = cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE))
+    service._http_bridge_sessions[key] = initial_session
+
+    prepare_calls = 0
+
+    def fake_prepare(
+        prepared_payload: proxy_service.ResponsesRequest,
+        _headers: Mapping[str, str],
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del prepared_payload, api_key, api_key_reservation, client_ip
+        nonlocal prepare_calls
+        prepare_calls += 1
+        if prepare_calls == 1:
+            return initial_state, '{"type":"response.create","request":"initial"}'
+        return retry_state, '{"type":"response.create","request":"retry"}'
+
+    class _Events:
+        def __init__(self, state: proxy_service._WebSocketRequestState, *, retry: bool) -> None:
+            self.state = state
+            self.retry = retry
+            self.yielded = False
+
+        def __aiter__(self) -> "_Events":
+            return self
+
+        async def __anext__(self) -> str:
+            if not self.retry:
+                raise ProxyResponseError(400, proxy_service.openai_error("previous_response_not_found", "missing"))
+            if self.yielded:
+                raise StopAsyncIteration
+            self.yielded = True
+            # Simulate the request submitter proving the replacement send.
+            assert self.state.recovery_attempt_dispatched is False
+            self.state.recovery_attempt_dispatched = True
+            return 'data: {"type":"response.completed"}\n\n'
+
+        async def aclose(self) -> None:
+            if self.retry:
+                raise asyncio.CancelledError()
+
+    stream_calls = 0
+
+    def fake_stream_http_bridge_session_events(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+        propagate_http_errors: bool,
+        downstream_turn_state: str | None,
+        request_deadline: float | None = None,
+    ) -> _Events:
+        del text_data, queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
+        nonlocal stream_calls
+        stream_calls += 1
+        return _Events(request_state, retry=stream_calls > 1)
+
+    get_or_create = AsyncMock(side_effect=[initial_session, retry_session])
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)
+    monkeypatch.setattr(service, "_close_http_bridge_session", AsyncMock())
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in service._stream_via_http_bridge(
+            payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=900.0,
+            max_sessions=8,
+            queue_limit=4,
+        ):
+            pass
+
+    assert stream_calls == 2
+    assert initial_state.recovery_attempt_dispatched is True
+    assert retry_state.recovery_attempt_dispatched is True
 
 
 @pytest.mark.asyncio
@@ -23415,6 +27644,89 @@ async def test_cleanup_http_bridge_submit_interruption_clears_restored_operation
 
 
 @pytest.mark.asyncio
+async def test_cleanup_http_bridge_submit_interruption_restores_recovery_event_fence() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    rollback_operation = AsyncMock(return_value=True)
+    rollback_fence_operation = AsyncMock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(rollback_operation_before_dispatch=rollback_operation),
+    )
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(rollback_fence_operation=rollback_fence_operation),
+    )
+    session = _make_bridge_session(key_value="restore-recovery-event-fence")
+    session.durable_session_id = "durable-restore-recovery-event-fence"
+    session.durable_owner_epoch = 2
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-restore-recovery-event-fence",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        operation_id="operation-rebound-fence",
+        operation_fingerprint="fingerprint-rebound-fence",
+        operation_registered=True,
+        operation_rebound=True,
+        operation_recovery_expected_generation=2,
+    )
+
+    await service._cleanup_http_bridge_submit_interruption(
+        session,
+        request_state=request_state,
+        gate_acquired=False,
+        request_enqueued=False,
+        counted_in_queue=False,
+    )
+
+    rollback_operation.assert_awaited_once()
+    rollback_fence_operation.assert_awaited_once_with(
+        operation_id="operation-rebound-fence",
+        recovery_dispatch_count=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_http_bridge_submit_interruption_preserves_zero_owner_epoch() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    rollback_recovery_attempt = AsyncMock(return_value=True)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(rollback_recovery_attempt_before_dispatch=rollback_recovery_attempt),
+    )
+    session = _make_bridge_session(key_value="preserve-zero-owner-epoch")
+    session.durable_session_id = "durable-preserve-zero-owner-epoch"
+    session.durable_owner_epoch = 7
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-preserve-zero-owner-epoch",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        recovery_attempt_fingerprint="fingerprint-zero-owner-epoch",
+        recovery_attempt_session_id="durable-preserve-zero-owner-epoch",
+        recovery_attempt_owner_epoch=0,
+    )
+
+    await service._cleanup_http_bridge_submit_interruption(
+        session,
+        request_state=request_state,
+        gate_acquired=False,
+        request_enqueued=False,
+        counted_in_queue=False,
+    )
+
+    rollback_recovery_attempt.assert_awaited_once()
+    assert rollback_recovery_attempt.await_args is not None
+    assert rollback_recovery_attempt.await_args.kwargs["session_id"] == "durable-preserve-zero-owner-epoch"
+    assert rollback_recovery_attempt.await_args.kwargs["owner_epoch"] == 0
+    assert rollback_recovery_attempt.await_args.kwargs["request_fingerprint"] == "fingerprint-zero-owner-epoch"
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_capacity_retry_reclaims_unknown_operation_before_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -24558,6 +28870,86 @@ async def test_retry_http_bridge_request_on_fresh_upstream_reconnects_without_re
         require_preferred_account=False,
     )
     send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_request_on_fresh_upstream_claims_stale_anchor_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="stale-anchor-generation")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-stale-anchor-generation",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        previous_response_id=None,
+        transport="http",
+        verified_stale_anchor_replay=True,
+        verified_stale_anchor_retry_circuit_generation_captured=True,
+        verified_stale_anchor_retry_circuit_key=session.key,
+        verified_stale_anchor_retry_circuit_generation=None,
+    )
+    claim_generation = AsyncMock(return_value=False)
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_claim_http_bridge_retry_circuit_generation", claim_generation)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    recovered = await service._retry_http_bridge_request_on_fresh_upstream(
+        session=session,
+        request_state=request_state,
+        text_data='{"type":"response.create"}',
+        send_request=False,
+    )
+
+    assert recovered is False
+    assert request_state.replay_count == 0
+    claim_generation.assert_awaited_once_with(
+        key=session.key,
+        captured=True,
+        generation=None,
+    )
+    reconnect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_request_on_fresh_upstream_skips_generation_claim_after_replay_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="stale-anchor-generation-budget")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-stale-anchor-generation-budget",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        previous_response_id=None,
+        transport="http",
+        replay_count=1,
+        verified_stale_anchor_replay=True,
+        verified_stale_anchor_retry_circuit_generation_captured=True,
+        verified_stale_anchor_retry_circuit_key=session.key,
+        verified_stale_anchor_retry_circuit_generation=None,
+    )
+    claim_generation = AsyncMock(return_value=True)
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_claim_http_bridge_retry_circuit_generation", claim_generation)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    recovered = await service._retry_http_bridge_request_on_fresh_upstream(
+        session=session,
+        request_state=request_state,
+        text_data='{"type":"response.create"}',
+        send_request=False,
+    )
+
+    assert recovered is False
+    claim_generation.assert_not_awaited()
+    reconnect.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -26022,6 +30414,7 @@ async def test_create_http_bridge_session_does_not_classify_post_selection_failu
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_reset_db_state")
 async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_previous_response_owner_misses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -26601,6 +30994,11 @@ async def test_stream_via_http_bridge_recovers_dead_owner_with_replayable_full_r
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(http_bridge_streaming_module, "http_bridge_owner_process_epoch", lambda: "boot-new")
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_previous_response_id_target",
+        AsyncMock(return_value=None),
+    )
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
@@ -27213,7 +31611,7 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     assert owner.response_event_count == (1 if leading_telemetry else 0)
     if leading_telemetry:
         assert owner.latency_first_upstream_event_ms is not None
-    retry_precreated.assert_awaited_once_with(session)
+    retry_precreated.assert_awaited_once_with(session, allow_complete_transcript_recovery=True)
     assert write_request_log.await_count == 2
     assert {call.kwargs["error_code"] for call in write_request_log.await_args_list} == {"upstream_request_timeout"}
     fail_reader.assert_awaited_once()
@@ -27295,7 +31693,9 @@ async def test_http_bridge_stream_and_reader_count_one_eventless_send_once(
         _session: proxy_service._HTTPBridgeSession,
         *,
         restart_reader: bool = False,
+        allow_complete_transcript_recovery: bool = False,
     ) -> bool:
+        del allow_complete_transcript_recovery
         if restart_reader:
             await asyncio.wait_for(reader_retry_started.wait(), timeout=2.0)
             return False
@@ -27575,7 +31975,11 @@ async def test_http_bridge_eventless_timeout_does_not_mark_or_clear_after_late_r
     )
     await asyncio.wait_for(reader_task, timeout=1.0)
 
-    process_text.assert_awaited_once_with(session, "late response")
+    process_text.assert_awaited_once_with(
+        session,
+        "late response",
+        operation_attempt_generations={"req-late-response": 0},
+    )
     retry_precreated.assert_not_awaited()
     clear_anchor.assert_not_awaited()
     assert owner.failure_phase_override is None
@@ -28740,6 +33144,48 @@ async def test_http_bridge_reader_exception_captures_attempt_before_lifecycle_wa
     )
     assert retry_circuit_attempt_selection.attempt is original_attempt
     assert replacement_attempt.retry_circuit_failure_recorded is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_exception_retries_before_retiring_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_eventless_http_bridge_owner(request_id="req-reader-exception-retry")
+    session = _make_bridge_session(
+        key_value="bridge-reader-exception-retry",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    transport_error = UpstreamWebSocketTransportError(
+        "Upstream websocket closed before response.completed",
+        error_code="stream_incomplete",
+    )
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(
+                side_effect=[
+                    transport_error,
+                    UpstreamWebSocketMessage(kind="close", close_code=1000),
+                ]
+            ),
+            close=AsyncMock(),
+            archive_received=lambda _message: None,
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    retry_precreated = AsyncMock(side_effect=[True, False])
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    fail_reader = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_fail_http_bridge_reader_and_maybe_retire", fail_reader)
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    assert retry_precreated.await_count == 2
+    assert retry_precreated.await_args_list[0].kwargs["allow_complete_transcript_recovery"] is True
+    assert retry_precreated.await_args_list[1].kwargs["allow_complete_transcript_recovery"] is True
+    fail_reader.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -31767,6 +36213,11 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
             previous_response_id=request_payload.previous_response_id,
             operation_registered=True,
             operation_id="op-terse-recovery",
+            recovery_attempt_fingerprint=("recovery-fingerprint-origin" if not request_states else None),
+            recovery_attempt_session_id=("durable-recovery-origin" if not request_states else None),
+            recovery_attempt_owner_epoch=(7 if not request_states else None),
+            recovery_attempt_claimed=(True if not request_states else False),
+            recovery_attempt_dispatched=False,
         )
         request_states.append(request_state)
         return request_state, '{"type":"response.create"}'
@@ -31797,7 +36248,22 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
         stream_attempts.append(request_state.previous_response_id)
         del text_data
         if len(stream_attempts) == 1:
+            assert request_state.recovery_attempt_fingerprint == "recovery-fingerprint-origin"
+            assert request_state.recovery_attempt_session_id == "durable-recovery-origin"
+            assert request_state.recovery_attempt_owner_epoch == 7
+            assert request_state.recovery_attempt_claimed is True
+            assert request_state.recovery_attempt_dispatched is False
             raise terse_rejection
+        assert request_state.recovery_attempt_fingerprint == "recovery-fingerprint-origin"
+        assert request_state.recovery_attempt_session_id == "durable-recovery-origin"
+        assert request_state.recovery_attempt_owner_epoch == 7
+        assert request_state.recovery_attempt_claimed is True
+        assert request_state.recovery_attempt_dispatched is False
+        request_state.recovery_attempt_fingerprint = "recovery-fingerprint-final"
+        request_state.recovery_attempt_session_id = "durable-recovery-final"
+        request_state.recovery_attempt_owner_epoch = 8
+        request_state.recovery_attempt_claimed = True
+        request_state.recovery_attempt_dispatched = True
         yield 'data: {"type":"response.completed"}\n\n'
 
     monkeypatch.setattr(
@@ -31870,6 +36336,11 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
     assert recovery_call.kwargs["request_stage"] == "reattach"
     assert stream_attempts == ["resp_stale_anchor", "resp_stale_anchor"]
     assert request_states
+    assert request_states[0].recovery_attempt_fingerprint == "recovery-fingerprint-final"
+    assert request_states[0].recovery_attempt_session_id == "durable-recovery-final"
+    assert request_states[0].recovery_attempt_owner_epoch == 8
+    assert request_states[0].recovery_attempt_claimed is True
+    assert request_states[0].recovery_attempt_dispatched is True
     assert ordered_events == ["reset", "retire"]
     reset_operation_event_spool.assert_awaited_once_with(
         operation_id="op-terse-recovery",

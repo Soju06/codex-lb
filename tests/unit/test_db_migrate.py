@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 import sqlalchemy as sa
@@ -1876,6 +1877,23 @@ def test_run_upgrade_fails_for_unsupported_alembic_version_id(tmp_path: Path) ->
         run_upgrade(url, "head", bootstrap_legacy=False)
 
 
+def test_persisted_recovery_schema_repair_precedes_ownership_registry_repair(tmp_path: Path) -> None:
+    from alembic.script import ScriptDirectory
+
+    config = _build_alembic_config(_db_url(tmp_path / "compatibility-head.db"))
+    script_directory = ScriptDirectory.from_config(config)
+    compatibility_revision = "20260828_020000_merge_http_bridge_recovery_heads"
+    repair_revision = "20260901_000000_repair_persisted_schema_drift"
+    ownership_revision = "20260904_000000_repair_http_bridge_ownership_registry"
+
+    assert script_directory.get_revision(compatibility_revision) is not None
+    assert script_directory.get_revision(repair_revision) is not None
+    assert script_directory.get_revision(repair_revision).down_revision == compatibility_revision
+    assert script_directory.get_revision(ownership_revision) is not None
+    assert script_directory.get_revision(ownership_revision).down_revision == repair_revision
+    assert script_directory.get_heads() == [ownership_revision]
+
+
 def test_check_migration_policy_reports_head_and_format_violations(monkeypatch, tmp_path: Path) -> None:
     class _FakeRevision:
         def __init__(self, revision: str, path: str) -> None:
@@ -2073,6 +2091,126 @@ def test_routing_policy_persistence_downgrade_does_not_drop_shared_columns(monke
     monkeypatch.setattr(migration, "op", _OpMustNotAlter())
 
     migration.downgrade()
+
+
+def test_persisted_recovery_schema_repair_downgrade_preserves_parent_objects(monkeypatch) -> None:
+    migration = importlib.import_module("app.db.alembic.versions.20260901_000000_repair_persisted_schema_drift")
+
+    class _OpMustNotAlter:
+        def get_bind(self):  # pragma: no cover - assertion helper
+            raise AssertionError("repair downgrade must not inspect a bind")
+
+        def batch_alter_table(self, table_name: str):  # pragma: no cover - assertion helper
+            raise AssertionError(f"unexpected schema alteration for {table_name}")
+
+        def drop_index(self, index_name: str, *, table_name: str):  # pragma: no cover - assertion helper
+            raise AssertionError(f"unexpected index drop {index_name} on {table_name}")
+
+    monkeypatch.setattr(migration, "op", _OpMustNotAlter())
+
+    migration.downgrade()
+
+
+def test_recent_unknown_index_migration_preserves_preexisting_index(monkeypatch) -> None:
+    migration = importlib.import_module("app.db.alembic.versions.20260815_000000_add_http_bridge_recent_unknown_index")
+    bind = object()
+    create_index = Mock()
+    drop_index = Mock()
+    ensure_ownership_table = Mock()
+    mark_created = Mock()
+    forget_created = Mock()
+    was_created = Mock(return_value=False)
+    drop_ownership_table_if_empty = Mock()
+
+    monkeypatch.setattr(
+        migration,
+        "op",
+        SimpleNamespace(get_bind=lambda: bind, create_index=create_index, drop_index=drop_index),
+    )
+    monkeypatch.setattr(migration, "_has_table", lambda _bind: True)
+    monkeypatch.setattr(migration, "_has_index", lambda _bind: True)
+    monkeypatch.setattr(migration, "ensure_ownership_table", ensure_ownership_table)
+    monkeypatch.setattr(migration, "mark_created", mark_created)
+    monkeypatch.setattr(migration, "was_created", was_created)
+    monkeypatch.setattr(migration, "forget_created", forget_created)
+    monkeypatch.setattr(migration, "drop_ownership_table_if_empty", drop_ownership_table_if_empty)
+
+    migration.upgrade()
+    migration.downgrade()
+
+    create_index.assert_not_called()
+    ensure_ownership_table.assert_not_called()
+    mark_created.assert_not_called()
+    was_created.assert_called_once_with(bind, migration.revision, "index", migration._INDEX)
+    drop_index.assert_not_called()
+    forget_created.assert_not_called()
+    drop_ownership_table_if_empty.assert_called_once_with(bind)
+
+
+def test_persisted_recovery_schema_repair_records_parent_index_ownership(monkeypatch) -> None:
+    migration = importlib.import_module("app.db.alembic.versions.20260901_000000_repair_persisted_schema_drift")
+    bind = SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+    create_index = Mock()
+    ensure_ownership_table = Mock()
+    mark_created = Mock()
+
+    monkeypatch.setattr(
+        migration,
+        "op",
+        SimpleNamespace(get_bind=lambda: bind, create_index=create_index),
+    )
+    monkeypatch.setattr(migration, "_has_table", lambda _bind, table_name: table_name == migration._OPERATIONS_TABLE)
+    monkeypatch.setattr(migration, "_has_index", lambda _bind, _table_name, _index_name: False)
+    monkeypatch.setattr(migration, "ensure_ownership_table", ensure_ownership_table)
+    monkeypatch.setattr(migration, "mark_created", mark_created)
+
+    migration.upgrade()
+
+    ensure_ownership_table.assert_called_once_with(bind)
+    create_index.assert_called_once_with(
+        migration._OPERATIONS_INDEX,
+        migration._OPERATIONS_TABLE,
+        ["session_id", "state", "created_at"],
+        unique=False,
+    )
+    mark_created.assert_called_once_with(
+        bind,
+        migration._OPERATIONS_INDEX_REVISION,
+        "index",
+        migration._OPERATIONS_INDEX,
+    )
+
+
+def test_ownership_registry_repair_bootstraps_missing_table(monkeypatch) -> None:
+    migration = importlib.import_module("app.db.alembic.versions.20260904_000000_repair_http_bridge_ownership_registry")
+    bind = object()
+    ensure_ownership_table = Mock()
+
+    monkeypatch.setattr(migration, "op", SimpleNamespace(get_bind=lambda: bind))
+    monkeypatch.setattr(migration, "ensure_ownership_table", ensure_ownership_table)
+
+    migration.upgrade()
+
+    ensure_ownership_table.assert_called_once_with(bind)
+
+
+def test_ownership_registry_repair_restores_missing_table(tmp_path: Path) -> None:
+    url = _db_url(tmp_path / "missing-ownership-registry.db")
+    repair_revision = "20260901_000000_repair_persisted_schema_drift"
+
+    run_upgrade(url, repair_revision, bootstrap_legacy=False)
+
+    with create_engine(to_sync_database_url(url), future=True).begin() as connection:
+        connection.execute(text("DROP TABLE http_bridge_migration_object_ownership"))
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        assert inspect(engine).has_table("http_bridge_migration_object_ownership")
+    finally:
+        engine.dispose()
+    assert check_schema_drift(url) == ()
 
 
 def test_replica_guardrails_migration_round_trips_with_version_backfill(tmp_path: Path) -> None:

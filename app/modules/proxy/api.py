@@ -253,6 +253,12 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import required_capability_metadata_values
+from app.modules.proxy.complete_transcript import (
+    _items_match_for_echo,
+    _output_item_identities_match,
+    _output_item_identity,
+    _output_item_identity_is_valid,
+)
 from app.modules.proxy.helpers import _openai_error_param, _parse_openai_error, _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.images_observability import (
@@ -8703,9 +8709,13 @@ async def _collect_responses_payload(
     captured_turn_state_headers: dict[str, str] | None = None,
 ) -> OpenAIResponseResult:
     output_items: dict[int, dict[str, JsonValue]] = {}
+    added_output_indexes: set[int] = set()
+    added_output_identities: dict[int, dict[str, str]] = {}
+    done_output_indexes: set[int] = set()
     terminal_result: OpenAIResponseResult | None = None
     nonterminal_result: OpenAIResponsePayload | None = None
     contract_violation_kind: str | None = None
+    output_lifecycle_invalid = False
     async for line in stream:
         payload = _parse_sse_payload(line)
         if not payload:
@@ -8715,7 +8725,16 @@ async def _collect_responses_payload(
         if captured_turn_state_headers is not None:
             _capture_response_metadata_turn_state(payload, captured_turn_state_headers)
         event_type = classify_event_type(payload)
-        _collect_output_item_event(payload, output_items)
+        if not _collect_output_item_event(
+            payload,
+            output_items,
+            added_indexes=added_output_indexes,
+            added_identities=added_output_identities,
+            done_indexes=done_output_indexes,
+            terminal_seen=terminal_result is not None,
+        ):
+            contract_violation_kind = contract_violation_kind or "invalid_output_item"
+            output_lifecycle_invalid = True
         if terminal_result is not None:
             continue
         if event_type == "error":
@@ -8757,9 +8776,22 @@ async def _collect_responses_payload(
                 _public_contract_error_message(error_kind),
             )
 
+    contract_error_kind = contract_violation_kind
+    if contract_error_kind is None and (output_lifecycle_invalid or added_output_indexes - done_output_indexes):
+        contract_error_kind = "invalid_output_item"
     if terminal_result is not None:
+        if contract_error_kind is not None:
+            return _public_contract_error_envelope(
+                contract_error_kind,
+                _public_contract_error_message(contract_error_kind),
+            )
         return terminal_result
     if nonterminal_result is not None:
+        if contract_error_kind is not None:
+            return _public_contract_error_envelope(
+                contract_error_kind,
+                _public_contract_error_message(contract_error_kind),
+            )
         return nonterminal_result
     error_kind = contract_violation_kind or "upstream_stream_truncated"
     return _public_contract_error_envelope(
@@ -8771,15 +8803,42 @@ async def _collect_responses_payload(
 def _collect_output_item_event(
     payload: dict[str, JsonValue],
     output_items: dict[int, dict[str, JsonValue]],
-) -> None:
+    *,
+    added_indexes: set[int],
+    added_identities: dict[int, dict[str, str]],
+    done_indexes: set[int],
+    terminal_seen: bool = False,
+) -> bool:
     event_type = payload.get("type")
     if event_type not in ("response.output_item.added", "response.output_item.done"):
-        return
+        return True
+    if terminal_seen:
+        return False
     output_index = payload.get("output_index")
     item = payload.get("item")
-    if not isinstance(output_index, int) or not isinstance(item, dict):
-        return
+    if type(output_index) is not int or output_index < 0 or not isinstance(item, dict):
+        return False
+    if event_type == "response.output_item.added":
+        if output_index in added_indexes or output_index in done_indexes:
+            return False
+        identity = _output_item_identity(item)
+        if not _output_item_identity_is_valid(identity):
+            return False
+        added_indexes.add(output_index)
+        added_identities[output_index] = identity
+    else:
+        if output_index in done_indexes:
+            return False
+        identity = _output_item_identity(item)
+        if not _output_item_identity_is_valid(identity):
+            return False
+        if output_index in added_identities and not _output_item_identities_match(
+            added_identities[output_index], identity
+        ):
+            return False
+        done_indexes.add(output_index)
     output_items[output_index] = dict(item)
+    return True
 
 
 def _merge_collected_output_items(
@@ -8796,6 +8855,65 @@ def _merge_collected_output_items(
 
     merged["output"] = [item for _, item in sorted(output_items.items())]
     return merged
+
+
+def _collected_output_items_match_terminal(
+    response: Mapping[str, JsonValue],
+    output_items: dict[int, dict[str, JsonValue]],
+) -> bool:
+    """Require terminal output to agree with streamed done items.
+
+    The upstream can carry the same output twice: once in
+    ``response.output_item.done`` events and again in ``response.completed``.
+    A non-empty terminal payload that disagrees with the collected items is a
+    malformed lifecycle and must fail closed instead of selecting one
+    representation nondeterministically.  Omitted status fields remain
+    compatible with the normal echo-matching rules.
+    """
+    if not output_items:
+        return True
+
+    # The output indexes are part of the public lifecycle contract.  Sorting
+    # a sparse mapping would silently collapse a missing item (for example an
+    # only-seen ``output_index=1``) into position zero during backfill.
+    output_indexes = sorted(output_items)
+    if output_indexes != list(range(len(output_indexes))):
+        return False
+
+    if "output" not in response:
+        return True
+    terminal_output = response["output"]
+    # Backfill is valid only for an omitted output or an explicitly empty
+    # array.  A present non-list value is a malformed terminal envelope.
+    if not isinstance(terminal_output, list):
+        return False
+    if not terminal_output:
+        return True
+    collected_output = [item for _, item in sorted(output_items.items())]
+    if len(terminal_output) != len(collected_output):
+        return False
+    terminal_types = [
+        _output_item_identity(item).get("type") if isinstance(item, dict) else None for item in terminal_output
+    ]
+    collected_types = [_output_item_identity(item).get("type") for item in collected_output]
+    # A streamed tool-call lifecycle may be followed by a terminal assistant
+    # message at the same output index; those are distinct representations, not
+    # an echoed item with a conflicting identity.  Only compare identities when
+    # every pair is the same output-item type.
+    if any(terminal_type != collected_type for terminal_type, collected_type in zip(terminal_types, collected_types)):
+        return True
+    for terminal_item, collected_item in zip(terminal_output, collected_output):
+        terminal_identity = _output_item_identity(terminal_item) if isinstance(terminal_item, dict) else {}
+        collected_identity = _output_item_identity(collected_item)
+        # ``_items_match_for_echo`` intentionally strips response-owned IDs;
+        # lifecycle validation must compare those stable identities first.
+        if not _output_item_identities_match(collected_identity, terminal_identity):
+            return False
+        if not _output_item_identities_match(terminal_identity, collected_identity):
+            return False
+        if not _items_match_for_echo(terminal_item, collected_item):
+            return False
+    return True
 
 
 async def _normalize_public_responses_stream(
@@ -8824,6 +8942,7 @@ async def _normalize_public_responses_stream(
     done_seen = False
     unparseable_forwarded = False
     contract_violation_kind: str | None = None
+    output_lifecycle_invalid = False
     next_sequence_number = 0
     seen_text_delta_keys: set[tuple[str | None, int | None]] = set()
     # Collect output items from streamed ``response.output_item.added`` /
@@ -8835,6 +8954,9 @@ async def _normalize_public_responses_stream(
     # ``stream.get_final_response().output`` see the same items the
     # non-streaming endpoint returns.
     output_items: dict[int, dict[str, JsonValue]] = {}
+    added_output_indexes: set[int] = set()
+    added_output_identities: dict[int, dict[str, str]] = {}
+    done_output_indexes: set[int] = set()
     # Track whether the first standard ``response.*`` event the public stream
     # emits is ``response.created``. The OpenAI Responses SSE contract requires
     # ``response.created`` to be the first event. The upstream Codex backend
@@ -8938,6 +9060,12 @@ async def _normalize_public_responses_stream(
                     failure_phase="upstream",
                 )
         raw_event_type = payload.get("type")
+        if terminal_seen and raw_event_type in {"response.output_item.added", "response.output_item.done"}:
+            # A terminal response closes the output lifecycle. Do not let a
+            # late frame mutate the collected replay or leak to the client.
+            contract_violation_kind = contract_violation_kind or "invalid_output_item"
+            output_lifecycle_invalid = True
+            continue
         if (
             enforce_openai_sdk_contract
             and isinstance(raw_event_type, str)
@@ -8949,6 +9077,31 @@ async def _normalize_public_responses_stream(
         ):
             response_obj = payload.get("response")
             if is_json_mapping(response_obj):
+                if (
+                    contract_violation_kind is not None
+                    or output_lifecycle_invalid
+                    or added_output_indexes - done_output_indexes
+                ):
+                    error_kind = contract_violation_kind or "invalid_output_item"
+                    contract_violation_kind = error_kind
+                    output_lifecycle_invalid = True
+                    for formatted_payload in _public_response_failed_event_blocks(
+                        error_kind,
+                        include_created=not created_emitted,
+                        sequence_number=next_sequence_number,
+                    ):
+                        yield formatted_payload
+                    return
+                if output_items and not _collected_output_items_match_terminal(response_obj, output_items):
+                    contract_violation_kind = contract_violation_kind or "invalid_output_item"
+                    output_lifecycle_invalid = True
+                    for formatted_payload in _public_response_failed_event_blocks(
+                        "invalid_output_item",
+                        include_created=False,
+                        sequence_number=next_sequence_number,
+                    ):
+                        yield formatted_payload
+                    return
                 existing_output = response_obj.get("output")
                 needs_backfill = not (isinstance(existing_output, list) and existing_output)
                 if needs_backfill and output_items:
@@ -8958,6 +9111,7 @@ async def _normalize_public_responses_stream(
         normalized_payload, violation_kind = _normalize_public_stream_payload(
             payload,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            output_items=output_items if enforce_openai_sdk_contract else None,
         )
         if violation_kind is not None:
             contract_violation_kind = contract_violation_kind or violation_kind
@@ -9040,7 +9194,29 @@ async def _normalize_public_responses_stream(
                 yield formatted_payload
             return
 
-        _collect_output_item_event(normalized_payload, output_items)
+        if not _collect_output_item_event(
+            normalized_payload,
+            output_items,
+            added_indexes=added_output_indexes,
+            added_identities=added_output_identities,
+            done_indexes=done_output_indexes,
+            terminal_seen=terminal_seen,
+        ):
+            contract_violation_kind = contract_violation_kind or "invalid_output_item"
+            output_lifecycle_invalid = True
+            continue
+        if (
+            enforce_openai_sdk_contract
+            and event_type in {"response.completed", "response.incomplete"}
+            and (output_lifecycle_invalid or added_output_indexes - done_output_indexes)
+        ):
+            for formatted_payload in _public_response_failed_event_blocks(
+                "invalid_output_item",
+                include_created=False,
+                sequence_number=next_sequence_number,
+            ):
+                yield formatted_payload
+            return
         if event_type == "response.output_text.delta":
             seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
         # Both the backfill branch and _normalize_public_stream_payload copy
@@ -9360,6 +9536,7 @@ def _normalize_public_stream_payload(
     payload: dict[str, JsonValue],
     *,
     enforce_openai_sdk_contract: bool = True,
+    output_items: dict[int, dict[str, JsonValue]] | None = None,
 ) -> tuple[dict[str, JsonValue] | None, str | None]:
     event_type = classify_event_type(payload)
     if event_type == "response.reasoning_summary_text.done" and isinstance(payload.get("text"), str):
@@ -9422,7 +9599,7 @@ def _normalize_public_stream_payload(
                 ),
                 "invalid_json",
             )
-        normalized_response, violation_kind = _normalize_public_response_mapping(response)
+        normalized_response, violation_kind = _normalize_public_response_mapping(response, output_items)
         if normalized_response is None:
             error_kind = violation_kind or "invalid_output_item"
             return (
@@ -9633,8 +9810,14 @@ def _normalize_public_response_mapping(
     response: Mapping[str, JsonValue],
     output_items: dict[int, dict[str, JsonValue]] | None = None,
 ) -> tuple[dict[str, JsonValue] | None, str | None]:
+    if output_items and not _collected_output_items_match_terminal(response, output_items):
+        _record_public_contract_violation("invalid_output_item")
+        return None, "invalid_output_item"
     merged = _merge_collected_output_items(response, output_items or {})
     output = merged.get("output")
+    if "output" in merged and not isinstance(output, list):
+        _record_public_contract_violation("invalid_output_item")
+        return None, "invalid_output_item"
     if not isinstance(output, list):
         return merged, None
     normalized_output: list[JsonValue] = []

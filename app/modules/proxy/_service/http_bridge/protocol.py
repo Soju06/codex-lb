@@ -106,6 +106,8 @@ class _HTTPBridgeServiceProtocol(Protocol):
         session: _HTTPBridgeSession,
         response_id: str,
         *,
+        latest_response_id: str | None = None,
+        retained_replay: bool = False,
         input_item_count: int | None = None,
         input_full_fingerprint: str | None = None,
         pending_tool_calls: Mapping[str, str] | None = None,

@@ -144,6 +144,14 @@ def _http_bridge_retry_circuit_suppression_message(block_reason: str, retry_afte
     )
 
 
+class HTTPBridgeParkedRecovery(Exception):
+    """Signal that a proven recovery request should wait through cooldown."""
+
+    def __init__(self, retry_after_seconds: float) -> None:
+        self.retry_after_seconds = max(0.0, float(retry_after_seconds))
+        super().__init__(f"HTTP bridge recovery parked for {self.retry_after_seconds:.1f}s")
+
+
 @dataclass(slots=True)
 class _HTTPBridgeRetryCircuitState:
     consecutive_failures: int = 0
@@ -1142,6 +1150,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     and state.half_open_until > now
                     and not allow_fresh_hard_account_switch
                     and not allow_proof_gated_continuity_replay
+                    and not allow_operation_fenced_continuity_replay
                 ):
                     if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
                         http_bridge_retry_circuit_total.labels(outcome="suppressed").inc()

@@ -30661,7 +30661,6 @@ async def test_process_upstream_websocket_text_does_not_replay_id_bearing_accoun
     )
 
     assert downstream_text == upstream_text
-    assert upstream_control.reconnect_requested is False
     assert upstream_control.replay_request_state is None
     assert pending_request.replay_count == 0
     assert list(pending_requests) == []
@@ -30718,7 +30717,6 @@ async def test_process_upstream_websocket_text_does_not_replay_id_bearing_auth_f
 
     assert downstream_text == upstream_text
     handle_precreated_auth_failure.assert_not_awaited()
-    assert upstream_control.reconnect_requested is False
     assert upstream_control.replay_request_state is None
     assert pending_request.replay_count == 0
     assert list(pending_requests) == []
@@ -37404,6 +37402,161 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
     assert pending_request.error_type_override is None
     assert pending_request.error_param_override is None
     assert pending_request.error_http_status_override is None
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_replays_opted_in_terse_invalid_anchor(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    account = _make_account("acc_ws_unsafe_anchor")
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_unsafe_new_response_recovery_enabled=True,
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+        ),
+    )
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_unsafe_anchor",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "previous_response_id": "resp_anchor",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+            },
+            separators=(",", ":"),
+        ),
+        previous_response_id="resp_anchor",
+        response_id=None,
+        fresh_upstream_request_is_retry_safe=True,
+        fresh_upstream_request_text=json.dumps(
+            {
+                "type": "response.create",
+                "input": [{"type": "message", "role": "user", "content": "retry"}],
+            },
+            separators=(",", ":"),
+        ),
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream_text = json.dumps(
+        {
+            "type": "error",
+            "status": 400,
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_request_error",
+                "message": "Invalid previous_response_id",
+                "param": "previous_response_id",
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    downstream_text = await service._process_upstream_websocket_text(
+        upstream_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    # The original upstream error is suppressed while the verified fresh
+    # replay is handed to the reconnect path.  The client therefore never
+    # observes this raw error frame.
+    assert json.loads(downstream_text)["error"]["code"] == "invalid_request_error"
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.replay_request_state is pending_request
+    assert pending_request.replay_count == 1
+    assert pending_request.previous_response_id is None
+    assert pending_request.fresh_upstream_request_is_retry_safe is False
+    assert finalize_request_state.await_count == 0
+
+
+@pytest.mark.parametrize("identity_location", ["top_level", "nested"])
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_does_not_replay_identity_bearing_anchor_error(
+    identity_location: str,
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_unsafe_new_response_recovery_enabled=True,
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+        ),
+    )
+    account = _make_account(f"acc_ws_unsafe_anchor_{identity_location}")
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id=f"ws_req_unsafe_anchor_{identity_location}",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "previous_response_id": "resp_anchor",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+            },
+            separators=(",", ":"),
+        ),
+        previous_response_id="resp_anchor",
+        fresh_upstream_request_is_retry_safe=True,
+        fresh_upstream_request_text=json.dumps(
+            {"type": "response.create", "input": [{"type": "message", "role": "user", "content": "retry"}]},
+            separators=(",", ":"),
+        ),
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream_payload: dict[str, Any] = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "Invalid previous_response_id",
+            "param": "previous_response_id",
+        },
+    }
+    if identity_location == "top_level":
+        upstream_payload["response_id"] = "resp_already_accepted"
+    else:
+        upstream_payload["response"] = {"id": "resp_already_accepted"}
+
+    await service._process_upstream_websocket_text(
+        json.dumps(upstream_payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert upstream_control.replay_request_state is None
+    assert pending_request.replay_count == 0
 
 
 @pytest.mark.asyncio

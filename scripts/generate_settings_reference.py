@@ -120,6 +120,13 @@ _SECTION_ORDER: tuple[str, ...] = (
     _SECTION_OTHER,
 )
 
+_SECTION_SPEC_LINKS: dict[str, str] = {
+    "HTTP Responses session bridge": (
+        "*Spec: [responses-api-compat]"
+        "(https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat)*"
+    ),
+}
+
 
 def _section_for(name: str) -> str:
     exact = _EXACT_SECTIONS.get(name)
@@ -240,6 +247,10 @@ def render_settings_reference() -> str:
         lines.append("")
         lines.append(f"## {section}")
         lines.append("")
+        section_spec_link = _SECTION_SPEC_LINKS.get(section)
+        if section_spec_link is not None:
+            lines.append(section_spec_link)
+            lines.append("")
         lines.extend(_render_section_table(names, fields))
 
     lines.extend(

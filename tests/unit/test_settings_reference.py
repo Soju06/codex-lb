@@ -77,7 +77,13 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # bound-eventless-server-recovery spec called it "configured"; the maintainer
 # asked for it to be promoted to a setting on PR #1633 (2026-08-20/08-26),
 # consistent with that PR's budget-from-settings principle.
-MAX_SETTINGS_FIELDS = 133
+# 133 -> 138: complete transcript recovery controls. These remain opt-in
+# because they retain sensitive prompt/output material, increase database
+# storage proportional to conversation length, and partial replay is
+# explicitly at-least-once.
+# 138 -> 143: parked-recovery and unsafe-new-response controls. These remain
+# explicit operator settings because they govern an at-least-once tradeoff.
+MAX_SETTINGS_FIELDS = 143
 
 
 def test_generated_settings_reference_matches_code() -> None:

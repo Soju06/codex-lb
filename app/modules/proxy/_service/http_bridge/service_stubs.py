@@ -85,7 +85,27 @@ def _service_inline_input_image_urls() -> Any:
 
 def _stream_keepalive_max_count() -> int:
     service_override = int(_service_global_or("_STREAM_KEEPALIVE_MAX_COUNT", _STREAM_KEEPALIVE_MAX_COUNT))
-    return max(1, service_override)
+    # Preserve the test/runtime service override. In production the service
+    # constant remains at the default and the explicit parked-recovery setting
+    # can extend the window by a small, bounded amount.
+    if service_override != _STREAM_KEEPALIVE_MAX_COUNT:
+        return max(1, service_override)
+    settings = _service_get_settings()
+    if not (
+        bool(getattr(settings, "http_responses_session_bridge_parked_recovery_enabled", False))
+        and getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
+        == "server_indefinite_recovery"
+    ):
+        return _STREAM_KEEPALIVE_MAX_COUNT
+    configured = getattr(
+        settings,
+        "http_responses_session_bridge_pre_response_keepalive_max_count",
+        _STREAM_KEEPALIVE_MAX_COUNT,
+    )
+    try:
+        return max(1, min(12, int(configured)))
+    except (TypeError, ValueError):
+        return _STREAM_KEEPALIVE_MAX_COUNT
 
 
 def _prewarm_response_timeout_seconds() -> float:
@@ -418,6 +438,10 @@ def _find_websocket_request_state_by_response_id(*args: Any, **kwargs: Any) -> A
 
 def _match_websocket_request_state_for_anonymous_event(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_match_websocket_request_state_for_anonymous_event")(*args, **kwargs)
+
+
+def _match_websocket_request_state_for_precreated_terminal_event(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_match_websocket_request_state_for_precreated_terminal_event")(*args, **kwargs)
 
 
 def _service_tier_from_event_payload(*args: Any, **kwargs: Any) -> Any:

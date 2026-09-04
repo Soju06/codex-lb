@@ -289,6 +289,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.request_submit import (
     _text_with_account_installation_id as _text_with_account_installation_id,
 )
+from app.modules.proxy._service.http_bridge.upstream_events import (
+    _http_bridge_unsafe_new_response_anchor_error as _http_bridge_unsafe_new_response_anchor_error,
+)
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
 )
@@ -5664,7 +5667,10 @@ class _WebSocketMixin:
                 surface="websocket",
             )
 
-        retry_is_previous_response_not_found = is_previous_response_not_found_event
+        # An identity-bearing terminal frame belongs to an already selected
+        # response, even when the rewrite below removes that identity from the
+        # public error envelope. Do not turn it into a replay candidate.
+        retry_is_previous_response_not_found = is_previous_response_not_found_event and response_id is None
         retry_error_code = _websocket_precreated_retry_error_code(
             request_state,
             event_type=event_type,
@@ -5695,6 +5701,19 @@ class _WebSocketMixin:
         if retry_safe_previous_response_not_found:
             downstream_text = text
         else:
+            unsafe_error_param = _websocket_event_error_param(event_type, payload)
+            unsafe_new_response_recovery = _http_bridge_unsafe_new_response_anchor_error(
+                code=_normalize_error_code(
+                    _websocket_event_error_code(event_type, payload),
+                    _websocket_event_error_type(event_type, payload),
+                ),
+                # Preserve parameter presence and validity.  Passing only the
+                # normalized string would collapse an omitted field and a
+                # present-but-malformed field into the same ``None`` value,
+                # allowing the unsafe opt-in to recover on malformed input.
+                param=unsafe_error_param,
+                message=_websocket_event_error_message(event_type, payload),
+            )
             event, payload, event_type, downstream_text = _maybe_rewrite_websocket_previous_response_not_found_event(
                 request_state=request_state,
                 event=event,
@@ -5702,7 +5721,24 @@ class _WebSocketMixin:
                 event_type=event_type,
                 upstream_control=upstream_control,
                 original_text=text,
+                unsafe_new_response_recovery=unsafe_new_response_recovery,
             )
+            if unsafe_new_response_recovery:
+                # The terse invalid-anchor shape is intentionally normalized
+                # by the rewrite above, but it must also enter the verified
+                # fresh-replay branch below. Reuse the pre-created admission
+                # checks so a sequenced or unanchored request cannot be
+                # upgraded into a fresh replay by this opt-in classifier.
+                unsafe_retry_error_code = _websocket_precreated_retry_error_code(
+                    request_state,
+                    event_type=event_type,
+                    payload=payload,
+                    has_other_pending_requests=has_other_pending_requests,
+                    allow_unsafe_previous_response_recovery=True,
+                )
+                if unsafe_retry_error_code is not None and response_id is None:
+                    retry_is_previous_response_not_found = True
+                    retry_error_code = unsafe_retry_error_code
         if event_type in {"response.failed", "response.incomplete", "error"} and isinstance(payload, dict):
             public_payload = _sanitize_public_websocket_event_payload(payload, event_type=event_type)
             if public_payload is not payload:
@@ -5716,6 +5752,14 @@ class _WebSocketMixin:
                 payload=payload,
                 has_other_pending_requests=has_other_pending_requests,
             )
+        if response_id is not None and is_previous_response_not_found_event:
+            # A terminal frame carrying a response identity belongs to an
+            # already selected response.  Even if its error payload matches a
+            # retry classifier (for example, an invalid previous anchor or a
+            # pre-created model rejection), it must settle normally rather
+            # than mutating replay state or scheduling a reconnect.
+            retry_is_previous_response_not_found = False
+            retry_error_code = None
         retry_safe_owner_replay = bool(
             retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
             and request_state.previous_response_id is not None
@@ -5800,6 +5844,14 @@ class _WebSocketMixin:
                 request_state.awaiting_response_created = True
                 request_state.response_id = None
                 request_state.response_event_count = 0
+                request_state.response_output_items = []
+                request_state.response_output_items_by_index = {}
+                request_state.response_output_item_added_indexes = set()
+                request_state.response_output_item_added_identities = {}
+                request_state.added_tool_call_item_ids = set()
+                request_state.tool_call_manifest_invalid = False
+                request_state.response_output_items_event_invalid = False
+                request_state.response_output_items_complete = False
                 upstream_control.reconnect_requested = True
                 upstream_control.suppress_downstream_event = True
                 upstream_control.replay_request_state = request_state

@@ -455,7 +455,16 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
+    request_state.response_output_items = []
+    request_state.response_output_items_by_index = {}
+    request_state.response_output_item_added_indexes = set()
+    request_state.response_output_item_added_identities = {}
+    request_state.added_tool_call_item_ids = set()
+    request_state.tool_call_manifest_invalid = False
+    request_state.response_output_items_event_invalid = False
+    request_state.response_output_items_complete = False
     request_state.replay_downstream_response_id = downstream_response_id
+    request_state.replay_downstream_sequence_offset = None
     request_state.suppress_next_created_downstream = downstream_response_id is not None
     _clear_websocket_request_error_overrides(request_state)
     return request_text
@@ -791,6 +800,7 @@ def _websocket_precreated_retry_error_code(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
     has_other_pending_requests: bool,
+    allow_unsafe_previous_response_recovery: bool = False,
 ) -> str | None:
     if request_state is None:
         return None
@@ -812,6 +822,14 @@ def _websocket_precreated_retry_error_code(
         return None
     if event_type not in {"error", "response.failed"}:
         return None
+
+    if allow_unsafe_previous_response_recovery:
+        if request_state.previous_response_id is None:
+            return None
+        # The caller has already classified the provider's terse invalid-anchor
+        # shape. Reuse this helper's pre-created admission checks, but do not
+        # require the strict error classifier to recognize that shape.
+        return "stream_incomplete"
 
     error_code = _normalize_error_code(
         _websocket_event_error_code(event_type, payload),
@@ -996,6 +1014,14 @@ def _prepare_websocket_request_state_for_auth_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
+    request_state.response_output_items = []
+    request_state.response_output_items_by_index = {}
+    request_state.response_output_item_added_indexes = set()
+    request_state.response_output_item_added_identities = {}
+    request_state.added_tool_call_item_ids = set()
+    request_state.tool_call_manifest_invalid = False
+    request_state.response_output_items_event_invalid = False
+    request_state.response_output_items_complete = False
     _clear_websocket_request_error_overrides(request_state)
     return request_text
 
@@ -1216,6 +1242,7 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
     event_type: str | None,
     upstream_control: _WebSocketUpstreamControl,
     original_text: str,
+    unsafe_new_response_recovery: bool = False,
 ) -> tuple[OpenAIEvent | None, dict[str, JsonValue] | None, str | None, str]:
     error_code = _normalize_error_code(
         _websocket_event_error_code(event_type, payload),
@@ -1228,6 +1255,8 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
         param=error_param,
         message=error_message,
     )
+    if not should_rewrite and unsafe_new_response_recovery:
+        should_rewrite = True
     reason = "previous_response_not_found"
     if not should_rewrite and _facade()._is_previous_response_not_found_public_shape(
         code=error_code,
@@ -1709,11 +1738,15 @@ def _match_websocket_request_state_for_anonymous_event(
 
 def _match_websocket_request_state_for_precreated_terminal_event(
     pending_requests: deque[_WebSocketRequestState],
+    *,
+    require_replay_downstream_response_id: bool = False,
 ) -> _WebSocketRequestState | None:
     unresolved_requests = [
         request_state
         for request_state in pending_requests
-        if request_state.response_id is None and request_state.awaiting_response_created
+        if request_state.response_id is None
+        and request_state.awaiting_response_created
+        and (not require_replay_downstream_response_id or request_state.replay_downstream_response_id is not None)
     ]
     if len(unresolved_requests) == 1:
         return unresolved_requests[0]

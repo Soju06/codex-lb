@@ -156,7 +156,8 @@ test-integration-core-3:
 test-integration-bridge: frontend-build
 	uv sync --dev --frozen
 	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) -vv \
-	  tests/integration/test_http_responses_bridge.py \
+	  tests/integration/test_http_responses_bridge.py
+	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) -vv \
 	  tests/integration/test_proxy_websocket_responses.py
 
 test-e2e: frontend-build

@@ -318,6 +318,9 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/aaravrav"><img src="https://avatars.githubusercontent.com/u/37036762?v=4?s=100" width="100px;" alt="Aarav"/><br /><sub><b>Aarav</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=aaravrav" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/Evan-Haug"><img src="https://avatars.githubusercontent.com/u/90289817?v=4?s=100" width="100px;" alt="Evan Haug"/><br /><sub><b>Evan Haug</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Evan-Haug" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Evan-Haug" title="Tests">⚠️</a></td>
     </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/hongzexin"><img src="https://avatars.githubusercontent.com/u/136784169?v=4?s=100" width="100px;" alt="Jason HONG"/><br /><sub><b>Jason HONG</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=hongzexin" title="Code">💻</a></td>
+    </tr>
   </tbody>
 </table>
 

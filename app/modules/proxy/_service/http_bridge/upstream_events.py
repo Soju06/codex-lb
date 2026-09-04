@@ -385,23 +385,59 @@ async def _persist_http_bridge_operation_event(
     append_event = getattr(getattr(service, "_durable_bridge", None), "append_operation_event", None)
     if not operation_id or session_id is None or owner_epoch is None:
         return False
-    append_barrier_released = False
-    delivery_barrier_released = False
+    append_barrier_task: asyncio.Task[None] | None = None
+    delivery_barrier_task: asyncio.Task[None] | None = None
     terminal_enqueued = False
+    deferred_cancellation: asyncio.CancelledError | None = None
 
-    async def release_terminal_append_barrier() -> None:
-        nonlocal append_barrier_released
-        if terminal_append_barrier is None or append_barrier_released:
-            return
-        append_barrier_released = True
-        await terminal_append_barrier()
+    async def release_terminal_append_barrier() -> asyncio.CancelledError | None:
+        nonlocal append_barrier_task
+        if terminal_append_barrier is None:
+            return None
+        if append_barrier_task is None:
 
-    async def release_terminal_delivery_barrier() -> None:
-        nonlocal delivery_barrier_released
-        if terminal_delivery_barrier is None or delivery_barrier_released:
-            return
-        delivery_barrier_released = True
-        await terminal_delivery_barrier()
+            async def await_append_barrier() -> None:
+                await terminal_append_barrier()
+
+            append_barrier_task = asyncio.create_task(
+                await_append_barrier(),
+                name=f"http-bridge-terminal-append-barrier-{operation_id}",
+            )
+        _, cancellation = await _await_task_deferring_cancellation(append_barrier_task)
+        return cancellation
+
+    async def release_terminal_delivery_barrier() -> asyncio.CancelledError | None:
+        nonlocal delivery_barrier_task
+        if terminal_delivery_barrier is None:
+            return None
+        if delivery_barrier_task is None:
+
+            async def await_delivery_barrier() -> None:
+                await terminal_delivery_barrier()
+
+            delivery_barrier_task = asyncio.create_task(
+                await_delivery_barrier(),
+                name=f"http-bridge-terminal-delivery-barrier-{operation_id}",
+            )
+        _, cancellation = await _await_task_deferring_cancellation(delivery_barrier_task)
+        return cancellation
+
+    async def enqueue_terminal_delivery() -> bool:
+        if terminal_event_queue is None:
+            return False
+        await terminal_event_queue.put(event_block)
+        await terminal_event_queue.put(None)
+        if terminal_delivery_scope is not None:
+            async with session.pending_lock:
+                terminal_delivery_scope.terminal_enqueued = True
+        return True
+
+    async def enqueue_terminal_delivery_deferring_cancellation() -> tuple[bool, asyncio.CancelledError | None]:
+        delivery_task = asyncio.create_task(
+            enqueue_terminal_delivery(),
+            name=f"http-bridge-terminal-delivery-{operation_id}",
+        )
+        return await _await_task_deferring_cancellation(delivery_task)
 
     try:
         batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
@@ -423,49 +459,48 @@ async def _persist_http_bridge_operation_event(
             alternate_expected_response_id = expected_response_ids[1] if len(expected_response_ids) > 1 else None
             response_id = _websocket_downstream_response_id(request_state)
 
-            async def enqueue_terminal_delivery() -> bool:
-                if terminal_event_queue is None:
-                    return False
-                await terminal_event_queue.put(event_block)
-                await terminal_event_queue.put(None)
-                if terminal_delivery_scope is not None:
-                    async with session.pending_lock:
-                        terminal_delivery_scope.terminal_enqueued = True
-                return True
-
-            async def enqueue_terminal_delivery_deferring_cancellation() -> tuple[bool, asyncio.CancelledError | None]:
-                delivery_task = asyncio.create_task(
-                    enqueue_terminal_delivery(),
-                    name=f"http-bridge-terminal-delivery-{operation_id}",
-                )
-                return await _await_task_deferring_cancellation(delivery_task)
+            async def append_terminal_batch_capturing_error() -> tuple[Any | None, Exception | None]:
+                try:
+                    return (
+                        await append_terminal_batch(
+                            operation_id=operation_id,
+                            session_id=session_id,
+                            instance_id=instance_id,
+                            owner_epoch=owner_epoch,
+                            event_text=event_block,
+                            max_bytes=int(
+                                getattr(
+                                    _service_get_settings(),
+                                    "http_responses_session_bridge_operation_event_spool_max_bytes",
+                                    2 * 1024 * 1024,
+                                )
+                            ),
+                            state=terminal_state,
+                            expected_recovery_dispatch_count=request_state.operation_attempt_generation,
+                            response_id=response_id,
+                        ),
+                        None,
+                    )
+                except Exception as exc:
+                    # Return the optional-spool failure as data so the canonical
+                    # defer helper can also return a caller-cancellation marker.
+                    return None, exc
 
             append_task = asyncio.create_task(
-                append_terminal_batch(
-                    operation_id=operation_id,
-                    session_id=session_id,
-                    instance_id=instance_id,
-                    owner_epoch=owner_epoch,
-                    event_text=event_block,
-                    max_bytes=int(
-                        getattr(
-                            _service_get_settings(),
-                            "http_responses_session_bridge_operation_event_spool_max_bytes",
-                            2 * 1024 * 1024,
-                        )
-                    ),
-                    state=terminal_state,
-                    expected_recovery_dispatch_count=request_state.operation_attempt_generation,
-                    response_id=response_id,
-                ),
+                append_terminal_batch_capturing_error(),
                 name=f"http-bridge-terminal-append-{operation_id}",
             )
             # Counted grouped siblings wait on this barrier; release it even when
             # append raises so gather(..., return_exceptions=True) cannot strand them.
             try:
-                append_result, deferred_cancellation = await _await_task_deferring_cancellation(append_task)
+                (append_result, append_error), deferred_cancellation = await _await_task_deferring_cancellation(
+                    append_task
+                )
             finally:
-                await release_terminal_append_barrier()
+                barrier_cancellation = await release_terminal_append_barrier()
+                deferred_cancellation = deferred_cancellation or barrier_cancellation
+            if append_error is not None:
+                raise append_error
             persisted = bool(append_result)
             if not persisted:
                 logger.info("HTTP bridge terminal event spool became incomplete operation_id=%s", operation_id)
@@ -477,7 +512,8 @@ async def _persist_http_bridge_operation_event(
                 if not terminal_enqueued:
                     terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
                     deferred_cancellation = deferred_cancellation or delivery_cancellation
-                await release_terminal_delivery_barrier()
+                barrier_cancellation = await release_terminal_delivery_barrier()
+                deferred_cancellation = deferred_cancellation or barrier_cancellation
             if settlement_required:
                 settle_terminal_batch = getattr(batcher, "settle_terminal_event", None)
 
@@ -556,22 +592,22 @@ async def _persist_http_bridge_operation_event(
         # when every event was durably persisted, so never fail a live stream
         # because the optional spool is unavailable.
         logger.warning("Failed to persist HTTP bridge operation event operation_id=%s", operation_id, exc_info=True)
-        await release_terminal_append_barrier()
+        barrier_cancellation = await release_terminal_append_barrier()
+        deferred_cancellation = deferred_cancellation or barrier_cancellation
         if terminal_event_queue is not None and terminal and not terminal_enqueued:
             try:
-                await terminal_event_queue.put(event_block)
-                await terminal_event_queue.put(None)
-                if terminal_delivery_scope is not None:
-                    async with session.pending_lock:
-                        terminal_delivery_scope.terminal_enqueued = True
-                terminal_enqueued = True
+                terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
+                deferred_cancellation = deferred_cancellation or delivery_cancellation
             except Exception:
                 logger.debug(
                     "Failed to enqueue HTTP bridge terminal after spool error operation_id=%s",
                     operation_id,
                     exc_info=True,
                 )
-        await release_terminal_delivery_barrier()
+        barrier_cancellation = await release_terminal_delivery_barrier()
+        deferred_cancellation = deferred_cancellation or barrier_cancellation
+        if deferred_cancellation is not None:
+            raise deferred_cancellation
         return terminal_enqueued
 
 

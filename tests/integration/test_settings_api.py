@@ -11,7 +11,7 @@ from sqlalchemy import text
 import app.modules.settings.api as settings_api_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings_cache import get_settings_cache
-from app.db.models import Account, AccountStatus, DashboardSettings
+from app.db.models import Account, AccountStatus, DashboardSettings, ProxyEndpoint
 from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
@@ -773,6 +773,43 @@ async def test_upstream_proxy_endpoint_create_rejects_plaintext_credentials(asyn
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "plaintext_proxy_credentials_forbidden"
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_create_rejects_colon_in_username(async_client):
+    response = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={
+            "name": "Colon proxy",
+            "scheme": "https",
+            "host": "proxy.internal",
+            "port": 8080,
+            "username": "user:name",
+            "password": "secret",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_proxy_username"
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_test_reports_unresolvable_persisted_row(async_client):
+    # A row persisted before the resolver rule existed must report the reason,
+    # not surface an unhandled 500 from the test route.
+    async with SessionLocal() as session:
+        row = ProxyEndpoint(name="Legacy", scheme="https", host="proxy.internal", port=8080, username="user:name")
+        session.add(row)
+        await session.commit()
+        endpoint_id = row.id
+
+    response = await async_client.post(f"/api/settings/upstream-proxy/endpoints/{endpoint_id}/test")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["error"] == "invalid_proxy_username"
+    assert payload["statusCode"] is None
 
 
 @pytest.mark.asyncio

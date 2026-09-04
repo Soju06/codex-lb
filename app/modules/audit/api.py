@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
-from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.dependencies import require_dashboard_admin_access, set_dashboard_error_format
 from app.dependencies import AuditContext, get_audit_context
 from app.modules.audit.schemas import AuditLogResponse
 
 router = APIRouter(
     prefix="/api/audit-logs",
     tags=["dashboard"],
-    dependencies=[Depends(validate_dashboard_session), Depends(set_dashboard_error_format)],
+    dependencies=[Depends(require_dashboard_admin_access), Depends(set_dashboard_error_format)],
 )
 
 

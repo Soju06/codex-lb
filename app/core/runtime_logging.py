@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
@@ -7,7 +8,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 from fastapi import Request
 from uvicorn.config import LOGGING_CONFIG
@@ -390,6 +391,82 @@ def build_log_config() -> LogConfig:
         "level": "INFO",
     }
     return cast(LogConfig, config)
+
+
+class _RedactedRepr:
+    """Stand-in whose repr is the redacted rendering of the original object."""
+
+    __slots__ = ("_text",)
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def __repr__(self) -> str:
+        return self._text
+
+
+# Context values the default handler renders as text rather than repr().
+_UNREDACTED_LOOP_CONTEXT_KEYS = frozenset({"message", "exception", "source_traceback", "handle_traceback"})
+_REDACTING_LOOP_HANDLER_MARKER = "_codex_lb_redacting_loop_handler"
+_LOOP_CONTEXT_REDACTION_FAILED = "[REDACTED: loop context redaction failed]"
+
+
+def _fail_closed_loop_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Keep the textual entries and replace every object value with an opaque stand-in."""
+    try:
+        return {
+            key: value if key in _UNREDACTED_LOOP_CONTEXT_KEYS else _RedactedRepr(_LOOP_CONTEXT_REDACTION_FAILED)
+            for key, value in context.items()
+        }
+    except Exception:
+        return {"message": _LOOP_CONTEXT_REDACTION_FAILED}
+
+
+def install_redacting_loop_exception_handler(loop: asyncio.AbstractEventLoop) -> None:
+    """Redact credential-bearing object reprs before the loop's default handler logs them.
+
+    The default asyncio/uvloop handler renders every context value with
+    ``repr()`` (aiohttp ``Connection<ConnectionKey(... proxy=URL('http://u:pw@host'))>``,
+    ``BasicAuth(... password='pw')``) into the ``asyncio`` logger before any
+    formatter runs. Idempotent; delegates to the previously installed handler
+    (or the default one) so formatting stays byte-identical for contexts that
+    contain no secrets. Fails closed: a value whose ``repr()`` raises is
+    replaced by an opaque stand-in, and any other failure delegates a context
+    whose object values are all stand-ins, so the report is still emitted but
+    no unredacted value ever reaches the delegate.
+    """
+    previous = loop.get_exception_handler()
+    if previous is not None and getattr(previous, _REDACTING_LOOP_HANDLER_MARKER, False):
+        return
+
+    def _delegate(target_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        if previous is None:
+            target_loop.default_exception_handler(context)
+        else:
+            previous(target_loop, context)
+
+    def _handler(target_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        try:
+            safe_context = dict(context)
+            for key, value in context.items():
+                if key in _UNREDACTED_LOOP_CONTEXT_KEYS:
+                    continue
+                try:
+                    rendered = repr(value)
+                except Exception as exc:
+                    # The default handler would call repr() again and lose the
+                    # whole report; an opaque stand-in keeps the message line.
+                    safe_context[key] = _RedactedRepr(f"<{type(value).__name__} repr failed: {type(exc).__name__}>")
+                    continue
+                redacted = redact_rendered_log_text(rendered)
+                if redacted != rendered:
+                    safe_context[key] = _RedactedRepr(redacted)
+        except Exception:
+            safe_context = _fail_closed_loop_context(context)
+        _delegate(target_loop, safe_context)
+
+    setattr(_handler, _REDACTING_LOOP_HANDLER_MARKER, True)
+    loop.set_exception_handler(_handler)
 
 
 def log_error_response(

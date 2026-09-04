@@ -4431,6 +4431,16 @@ class _HTTPBridgeStreamingMixin:
                 request_state.request_id,
                 retry_cooldown_seconds,
             )
+            # Session creation precedes this startup admission check (issue
+            # #1943).  Retire the opened bridge before returning the terminal
+            # cooldown result so no later request reuses its socket — unless
+            # another turn (an admitted probe, pending work, a handoff owner)
+            # owns it, in which case that owner's lifecycle governs it.  A
+            # continuity-bound request never holds the unanchored handoff.
+            await self._retire_idle_http_bridge_session_on_cooldown_suppression(
+                session,
+                owned_unanchored_handoff=False,
+            )
             # This path returns before the request is submitted, so the normal
             # detach/finally cleanup cannot settle an API-key reservation.
             # Release it before handing the synthetic terminal event to the

@@ -403,6 +403,15 @@ def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
     return payload
 
 
+def _http_bridge_hard_continuity_full_history_recovery_error() -> OpenAIErrorEnvelope:
+    """Ask Codex to discard a hard turn-state anchor and resend full history."""
+    return openai_error(
+        "previous_response_not_found",
+        "Continuity state was not found; retry with full history.",
+        error_type="invalid_request_error",
+    )
+
+
 async def _rollback_http_bridge_recovery_turn_state_registration(
     service: Any,
     receipt: DurableBridgeAliasRegistrationReceipt,
@@ -647,6 +656,33 @@ def _request_kind_from_headers(headers: Mapping[str, str] | None) -> str:
     if request_kind in {"normal", "prewarm"}:
         return request_kind
     return "normal"
+
+
+def _http_bridge_session_unowned_locked(
+    session: "_HTTPBridgeSession",
+    *,
+    ignore_unanchored_reservation: bool = False,
+) -> bool:
+    """Whether no turn owns ``session`` right now; call under ``pending_lock``.
+
+    A registered admission waiter owns a turn that has not yet been counted
+    into the queue (it may be suspended on the pre-lock fair-share resolve,
+    issue #1971, or anywhere between the retry-circuit gate and dispatch);
+    retiring under it would fail an admitted turn with upstream_unavailable.
+    A deferred retirement re-runs on the turn's own drain triggers once it
+    proceeds; if the waiter instead fails admission, its cleanup releases the
+    registration and the submit finalizer retires the flagged session.
+    """
+    has_visible_pending = any(
+        _http_bridge_request_counts_against_queue(request_state) for request_state in session.pending_requests
+    )
+    return (
+        not has_visible_pending
+        and session.queued_request_count == 0
+        and session.admission_waiter_count == 0
+        and (ignore_unanchored_reservation or session.unanchored_reservation_id is None)
+        and not session.upstream_close_attempted
+    )
 
 
 class _HTTPBridgeRequestSubmitMixin:
@@ -988,6 +1024,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 session,
                 request_scope_id=request_scope_id,
             )
+            # Like the half-open lease below, the admission registration the
+            # submit took at entry is handed back here when no dispatch took
+            # it over.
+            released_admission_waiter = await self._release_http_bridge_admission_preregistration(
+                session, request_state=request_state
+            )
             if request_state.claimed_half_open_until > 0.0 and request_state.response_create_attempt_count == 0:
                 # This admission claimed the half-open probe but the request
                 # never ATTEMPTED the upstream send — a poisoned-anchor
@@ -1012,11 +1054,13 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.claimed_half_open_until = 0.0
             # Inner pre-submit cleanup may clear the reservation before control
             # returns here, so ownership must be captured before awaiting it.
-            # Only that request can make detached-session retirement newly
-            # ready; an ordinary send/reader failure already owns terminal
-            # settlement, and closing again would run that funnel twice.
+            # Only that request, or one whose pre-dispatch exit just released
+            # the admission registration a retirement was deferring on, can
+            # make detached-session retirement newly ready; an ordinary
+            # send/reader failure already owns terminal settlement, and
+            # closing again would run that funnel twice.
             if (
-                owned_unanchored_handoff
+                (owned_unanchored_handoff or released_admission_waiter)
                 and session.upstream_control.retire_after_drain
                 and not session.upstream_close_attempted
             ):
@@ -1078,6 +1122,15 @@ class _HTTPBridgeRequestSubmitMixin:
         owned_unanchored_handoff: bool,
         recovery_turn_state: str | None = None,
     ) -> None:
+        # Own admission from submit entry, not from the dispatch registration:
+        # a concurrent cooldown-suppressed sibling retires a session no turn
+        # owns, and between the retry-circuit gate and that registration this
+        # turn would otherwise be invisible to it (issue #1943 follow-up).
+        # The dispatch registration takes this over; the interruption cleanup
+        # and the submit finalizer release it on every earlier exit.
+        async with session.pending_lock:
+            session.admission_waiter_count += 1
+        request_state.admission_waiter_preregistered = True
         recovery_attempt_consumed = False
         allow_operation_fenced_continuity_replay = False
         if _http_bridge_operation_fence_for_hard_continuity_enabled(request_state):
@@ -1122,6 +1175,20 @@ class _HTTPBridgeRequestSubmitMixin:
         if not retry_allowed:
             block_seconds, block_reason = await self._http_bridge_precreated_retry_block(session)
             retry_after_seconds = max(1, math.ceil(block_seconds))
+            # The session may have been created before this late admission
+            # check (issue #1943).  Do not leave an unsubmitted socket
+            # reusable during the cooldown: hand back this request's own
+            # admission registration, then retire the session when no other
+            # turn owns it, letting the bounded drain path handle registry
+            # detach, aliases, leases, and close ownership.  An admitted
+            # sibling (the half-open probe this cooldown permits) is a live
+            # owner even before its dispatch registration; flagging the
+            # session under it would fail that one allowed submission.
+            await self._release_http_bridge_admission_preregistration(session, request_state=request_state)
+            await self._retire_idle_http_bridge_session_on_cooldown_suppression(
+                session,
+                owned_unanchored_handoff=owned_unanchored_handoff,
+            )
             _log_http_bridge_event(
                 "submit_retry_circuit_suppressed",
                 session.key,
@@ -1522,6 +1589,41 @@ class _HTTPBridgeRequestSubmitMixin:
                         "The recovery checkpoint was already consumed; retry the request.",
                     ),
                 )
+            if not operation.created and operation.state == "abandoned":
+                hard_continuity_recovery = (
+                    request_state.previous_response_id is None
+                    and _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
+                )
+                _record_continuity_fail_closed(
+                    surface="http_bridge",
+                    reason=(
+                        "abandoned_hard_continuity_full_history_recovery"
+                        if hard_continuity_recovery
+                        else "abandoned_operation_full_history_recovery"
+                    ),
+                    previous_response_id=request_state.previous_response_id,
+                    session_id=request_state.session_id,
+                    upstream_error_code="previous_response_not_found",
+                )
+                # The recovery journal may already hold an UNKNOWN row for
+                # this request. Release it before rejecting so an identical
+                # anchored resend sees the same 400 instead of a 502
+                # "another recovery request is already in flight".
+                await self._cleanup_http_bridge_submit_interruption(
+                    session,
+                    request_state=request_state,
+                    gate_acquired=False,
+                    request_enqueued=False,
+                    counted_in_queue=False,
+                )
+                raise ProxyResponseError(
+                    400,
+                    (
+                        _http_bridge_hard_continuity_full_history_recovery_error()
+                        if hard_continuity_recovery
+                        else _http_bridge_client_full_history_recovery_error()
+                    ),
+                )
             if not operation.created and not getattr(operation, "rebound", False):
                 if operation.state in {"completed", "incomplete"}:
                     if getattr(operation, "event_spool_complete", False):
@@ -1696,6 +1798,7 @@ class _HTTPBridgeRequestSubmitMixin:
             )
         if session.upstream_control.retire_after_drain and not owned_unanchored_handoff:
             await _cleanup_unsubmitted_recovery_claim()
+            await self._release_http_bridge_admission_preregistration(session, request_state=request_state)
             if not session.upstream_close_attempted:
                 await self._retire_http_bridge_after_drain_if_ready(session)
             raise ProxyResponseError(
@@ -1787,7 +1890,12 @@ class _HTTPBridgeRequestSubmitMixin:
             # unwinding concurrently cannot see an apparently idle session
             # and release the lease the reacquire installs.
             async with session.pending_lock:
-                session.admission_waiter_count += 1
+                if request_state.admission_waiter_preregistered:
+                    # The submit entry already counted this turn; take that
+                    # registration over instead of counting it twice.
+                    request_state.admission_waiter_preregistered = False
+                else:
+                    session.admission_waiter_count += 1
                 admission_waiter_registered = True
                 # Snapshot under the same lock: with the waiter registered, a
                 # held lease cannot be idle-released, so a session that does
@@ -2692,8 +2800,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.pending_requests.remove(request_state)
             if counted_in_queue:
                 session.queued_request_count = max(0, session.queued_request_count - 1)
-            if admission_waiter_registered:
+            if admission_waiter_registered or request_state.admission_waiter_preregistered:
                 session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
+                request_state.admission_waiter_preregistered = False
             retire_closed_session = session.closed and session.admission_waiter_count == 0
         if (
             request_state.recovery_attempt_fingerprint is not None
@@ -3233,28 +3342,45 @@ class _HTTPBridgeRequestSubmitMixin:
                 ),
             )
 
+    async def _release_http_bridge_admission_preregistration(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+    ) -> bool:
+        """Hand back a submit-entry admission registration the dispatch never took over.
+
+        Mirrors the interruption cleanup's waiter release for a turn that
+        never reached dispatch: the last waiter to leave a session that was
+        closed under it retires the session when nothing else owns it (a
+        fence-closed session with pending work and a live reader is settled
+        by that reader, not here), and a session left with no in-flight work
+        gives up an idle lease.
+        """
+        if not request_state.admission_waiter_preregistered:
+            return False
+        async with session.pending_lock:
+            session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
+            request_state.admission_waiter_preregistered = False
+            retire_closed_session = session.closed and _http_bridge_session_unowned_locked(session)
+        if retire_closed_session:
+            await self._retire_stale_pending_http_bridge_session(
+                session,
+                detail="last_admission_waiter_cancelled",
+                response_events_seen=max(
+                    request_state.response_event_count,
+                    int(request_state.response_id is not None or request_state.latency_response_created_ms is not None),
+                ),
+                allow_liveness_revive=False,
+            )
+        await self._maybe_release_idle_http_bridge_session_lease(session)
+        return True
+
     async def _retire_http_bridge_after_drain_if_ready(self: Any, session: "_HTTPBridgeSession") -> bool:
         if not (session.upstream_control.reconnect_requested and session.upstream_control.retire_after_drain):
             return False
         async with session.pending_lock:
-            has_visible_pending = any(
-                _http_bridge_request_counts_against_queue(request_state) for request_state in session.pending_requests
-            )
-            should_reconnect = (
-                not has_visible_pending
-                and session.queued_request_count == 0
-                # A registered admission waiter owns a turn that has not yet
-                # been counted into the queue (it may be suspended on the
-                # pre-lock fair-share resolve, issue #1971); retiring under it
-                # would fail an admitted turn with upstream_unavailable. A
-                # deferred retirement re-runs on the turn's own drain
-                # triggers once it proceeds; if the waiter instead fails
-                # admission, its cleanup releases the idle lease and the
-                # flagged session falls back to idle-TTL close.
-                and session.admission_waiter_count == 0
-                and session.unanchored_reservation_id is None
-                and not session.upstream_close_attempted
-            )
+            should_reconnect = _http_bridge_session_unowned_locked(session)
             if should_reconnect:
                 session.pending_requests.clear()
                 session.upstream_close_attempted = True
@@ -3262,6 +3388,40 @@ class _HTTPBridgeRequestSubmitMixin:
             return False
 
         await self._close_http_bridge_session_bounded(session, reason="retire_after_drain")
+        return True
+
+    async def _retire_idle_http_bridge_session_on_cooldown_suppression(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        owned_unanchored_handoff: bool,
+    ) -> bool:
+        """Retire a cooldown-suppressed session unless another turn owns it.
+
+        The bridge opens or selects the session before the hard-key retry
+        circuit decides admission, so a suppressed request can leave a socket
+        that never carried ``response.create`` in the reuse pool, where the
+        next half-open probe picks it up (issue #1943). Flagging the session
+        for retirement and running the bounded drain path closes that socket
+        — but only when no other turn owns the session. A pending or queued
+        turn, a registered admission waiter (the admitted probe between its
+        gate and dispatch), or a foreign unanchored handoff is a live owner
+        whose own lifecycle governs retirement; flagging the session under it
+        would trip the pre-dispatch retiring fence for the one submission the
+        cooldown permits. The caller's own unanchored handoff does not count:
+        its submit finalizer releases it and retires the flagged session.
+        """
+        async with session.pending_lock:
+            idle = _http_bridge_session_unowned_locked(
+                session,
+                ignore_unanchored_reservation=owned_unanchored_handoff,
+            )
+            if idle:
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
+        if not idle:
+            return False
+        await self._retire_http_bridge_after_drain_if_ready(session)
         return True
 
     async def _http_bridge_claim_miss_shows_remote_probe(

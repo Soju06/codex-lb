@@ -1636,7 +1636,7 @@ async def test_callback_server_remains_owned_when_stop_waiter_cancels_or_stop_fa
 
 
 @pytest.mark.asyncio
-async def test_persistent_callback_server_stop_failure_is_bounded_and_retriable(monkeypatch):
+async def test_persistent_callback_server_stop_failure_is_bounded_and_retriable(monkeypatch, caplog):
     retry_delays: list[float] = []
     should_fail = True
 
@@ -1656,6 +1656,7 @@ async def test_persistent_callback_server_stop_failure_is_bounded_and_retriable(
     store = oauth_module.OAuthStateStore()
     service = _make_replica_service(store)
     server = FakeCallbackServer()
+    caplog.set_level(logging.ERROR, logger=oauth_module.__name__)
     monkeypatch.setattr(oauth_module, "_callback_server_stop_retry_sleep", immediate_retry)
     async with store.lock:
         store._callback_server = cast(oauth_module.OAuthCallbackServer, server)
@@ -1665,6 +1666,7 @@ async def test_persistent_callback_server_stop_failure_is_bounded_and_retriable(
 
     assert server.stop_count == oauth_module._CALLBACK_SERVER_STOP_MAX_ATTEMPTS
     assert retry_delays == [1] * (oauth_module._CALLBACK_SERVER_STOP_MAX_ATTEMPTS - 1)
+    assert any(record.getMessage() == "OAuth callback server stop failed" for record in caplog.records)
     async with store.lock:
         first_owner = store._callback_server_stop_task
         assert first_owner is not None and first_owner.done()

@@ -8,7 +8,7 @@ Starting a new browser flow concurrently with deadline cleanup MUST either reuse
 
 Callback-listener startup and shutdown MUST remain process-owned across request cancellation and full-store reset. A browser flow MUST NOT expose an untracked listener or remain pending locally without deadline ownership. A browser flow that becomes terminal through a callback or durable reconciliation MUST begin the same no-pending listener cleanup without waiting for its original deadline.
 
-Process-owned listener cleanup MUST retry transient shutdown failures without requiring another request. A full-store reset MUST fence both an in-flight browser-start persistence write and an in-flight durable reconciliation read so work begun before the reset cannot republish local flow state, a listener, or deadline work afterward. Once account tokens have been persisted from a successful callback, cancellation of that callback request MUST NOT interrupt the corresponding local terminal transition and listener cleanup.
+Process-owned listener cleanup MUST retry transient shutdown failures without requiring another request. Each cleanup task MUST bound its retry batch; if every attempt fails, it MUST preserve listener ownership and fail the current waiter so a later operation can retry instead of waiting indefinitely. A full-store reset MUST fence both an in-flight browser-start persistence write and an in-flight durable reconciliation read so work begun before the reset cannot republish local flow state, a listener, or deadline work afterward. Once account tokens have been persisted from a successful callback, cancellation of that callback request MUST NOT interrupt the corresponding local terminal transition and listener cleanup.
 
 #### Scenario: Sole abandoned browser flow expires
 
@@ -59,6 +59,14 @@ Process-owned listener cleanup MUST retry transient shutdown failures without re
 - **WHEN** the first attempt to stop its callback listener fails transiently
 - **THEN** the process-owned cleanup task keeps the listener tracked and retries without another request
 - **AND** no replacement listener is published until cleanup succeeds
+
+#### Scenario: Listener shutdown keeps failing
+
+- **GIVEN** callback-listener shutdown fails on every attempt in one cleanup task
+- **WHEN** that task exhausts its bounded retry batch
+- **THEN** the current waiter receives the terminal shutdown error instead of waiting indefinitely
+- **AND** the listener remains tracked so a later cleanup operation can retry
+- **AND** no replacement listener is published while the prior listener may remain bound
 
 #### Scenario: Durable terminal is reconciled on the origin replica
 

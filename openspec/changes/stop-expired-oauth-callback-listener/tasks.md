@@ -5,6 +5,7 @@
 - [x] 1.3 Add concurrency, early-completion, and reset coverage proving a start racing listener shutdown receives a live replacement and retired deadline work is drained.
 - [x] 1.4 Add cancellation and startup/reset overlap coverage proving listener startup cannot become untracked.
 - [x] 1.5 Add transient-shutdown and post-persistence cancellation coverage proving cleanup remains process-owned without a later request.
+- [x] 1.6 Add persistent-shutdown coverage proving retries are bounded, exhaustion is surfaced, ownership is retained, and a later operation can retry.
 
 ## 2. OAuth Listener Lifecycle
 
@@ -13,6 +14,7 @@
 - [x] 2.3 Serialize browser-flow insertion against a callback-server stop registered after the initial wait; verify the concurrent-start regression passes.
 - [x] 2.4 Own callback-server startup, retrying shutdown, and terminal cleanup so cancellation, reconciliation, and reset cannot orphan runtime work.
 - [x] 2.5 Fence browser-start persistence and durable reconciliation against full-store reset with store generations.
+- [x] 2.6 Bound each callback-server shutdown retry batch while preserving listener ownership after exhaustion.
 
 ## 3. Validation
 

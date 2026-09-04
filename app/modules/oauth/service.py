@@ -72,6 +72,7 @@ _SUCCESS_TEMPLATE = Path(__file__).resolve().parent / "templates" / "oauth_succe
 _TERMINAL_OAUTH_STATUSES = {"error", "success"}
 _MAX_RETAINED_TERMINAL_OAUTH_FLOWS = 16
 _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS = 15 * 60
+_CALLBACK_SERVER_STOP_MAX_ATTEMPTS = 3
 _ACCOUNT_IDENTITY_CONFLICT_MESSAGE = (
     "Multiple accounts match the authenticated identity. Remove duplicate accounts and retry OAuth."
 )
@@ -328,7 +329,7 @@ class OAuthStateStore:
                         raise
                 except Exception:
                     pass
-            while True:
+            for attempt in range(_CALLBACK_SERVER_STOP_MAX_ATTEMPTS):
                 try:
                     await server.stop()
                     stopped = True
@@ -336,6 +337,8 @@ class OAuthStateStore:
                 except asyncio.CancelledError:
                     raise
                 except Exception:
+                    if attempt + 1 >= _CALLBACK_SERVER_STOP_MAX_ATTEMPTS:
+                        raise
                     logger.exception("OAuth callback server stop failed; retrying")
                     await _callback_server_stop_retry_sleep(1)
         finally:

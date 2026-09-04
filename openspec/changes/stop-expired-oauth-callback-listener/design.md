@@ -53,7 +53,7 @@ Listener startup is also store-owned. A browser flow is persisted before any loc
 
 When a local browser flow becomes terminal—or durable reconciliation removes or terminalizes it—the same store lock transition checks whether any browser flow remains pending. If none does, it cancels the obsolete deadline task and registers the store-owned listener-stop task immediately. Callers drain the canceled deadline task, but callback handlers do not await listener shutdown because the server cleanup may wait for the active callback response to finish.
 
-The shared stop supervisor retains listener ownership and retries transient shutdown failures with bounded delay. Retry belongs to the shared supervisor, not the expiry watchdog, so expiry, terminal completion, durable reconciliation, reset, and partial-start cleanup all receive the same behavior without needing a later request to trigger another attempt.
+The shared stop supervisor retains listener ownership and retries transient shutdown failures with bounded delay and a bounded attempt count. If one attempt batch is exhausted, its waiter receives the terminal error while the listener and completed stop task remain tracked; a later cleanup or browser start can create a fresh bounded attempt batch without publishing a replacement prematurely. Retry belongs to the shared supervisor, not the expiry watchdog, so expiry, terminal completion, durable reconciliation, reset, and partial-start cleanup all receive the same behavior.
 
 Successful callback settlement is also store-owned across cancellation. Account-token persistence, cache invalidation, and the local terminal transition run in one shielded operation so cancellation cannot leave durable success paired with a locally pending flow and obsolete listener lifetime.
 
@@ -74,7 +74,7 @@ The watchdog removes expired process-local state and releases the process-local 
 - **[Risk] A new flow starts while the old listener is stopping.** → Re-check the stop-task slot under the insertion lock and retry after shutdown completes.
 - **[Risk] A request is canceled or reset runs while the listener is starting.** → Keep startup in a shielded store-owned task; reset serializes stop after startup, and the flow always has deadline ownership before the request awaits startup.
 - **[Risk] A terminal callback tries to stop the server serving that callback.** → Register stop atomically but do not await it from the callback handler; the response returns before runner cleanup completes.
-- **[Risk] Listener shutdown fails transiently.** → Keep the listener pointer and stop-task ownership intact and retry in the shared stop supervisor before any replacement can be installed.
+- **[Risk] Listener shutdown keeps failing.** → Bound each retry batch, propagate exhaustion, retain listener ownership, and let a later operation retry before any replacement can be installed.
 - **[Risk] Database work begun before reset completes afterward.** → Capture and verify a store generation before publishing any local result.
 - **[Risk] A successful callback request is canceled after account persistence.** → Run account persistence and local terminal settlement as one shielded, store-owned transition.
 - **[Risk] Tests or reset leak a long-lived sleeper.** → Store the task explicitly, cancel and await it during reset, and drain injected stores in tests.

@@ -1636,6 +1636,50 @@ async def test_callback_server_remains_owned_when_stop_waiter_cancels_or_stop_fa
 
 
 @pytest.mark.asyncio
+async def test_persistent_callback_server_stop_failure_is_bounded_and_retriable(monkeypatch):
+    retry_delays: list[float] = []
+    should_fail = True
+
+    async def immediate_retry(delay: float) -> None:
+        retry_delays.append(delay)
+        await asyncio.sleep(0)
+
+    class FakeCallbackServer:
+        def __init__(self) -> None:
+            self.stop_count = 0
+
+        async def stop(self) -> None:
+            self.stop_count += 1
+            if should_fail:
+                raise OSError("persistent cleanup failure")
+
+    store = oauth_module.OAuthStateStore()
+    service = _make_replica_service(store)
+    server = FakeCallbackServer()
+    monkeypatch.setattr(oauth_module, "_callback_server_stop_retry_sleep", immediate_retry)
+    async with store.lock:
+        store._callback_server = cast(oauth_module.OAuthCallbackServer, server)
+
+    with pytest.raises(OSError, match="persistent cleanup failure"):
+        await asyncio.wait_for(service._stop_callback_server_if_idle(), timeout=1)
+
+    assert server.stop_count == oauth_module._CALLBACK_SERVER_STOP_MAX_ATTEMPTS
+    assert retry_delays == [1] * (oauth_module._CALLBACK_SERVER_STOP_MAX_ATTEMPTS - 1)
+    async with store.lock:
+        first_owner = store._callback_server_stop_task
+        assert first_owner is not None and first_owner.done()
+        assert store._callback_server is server
+
+    should_fail = False
+    await asyncio.wait_for(service._wait_for_callback_server_stop(), timeout=1)
+
+    assert server.stop_count == oauth_module._CALLBACK_SERVER_STOP_MAX_ATTEMPTS + 1
+    async with store.lock:
+        assert store._callback_server is None
+        assert store._callback_server_stop_task is None
+
+
+@pytest.mark.asyncio
 async def test_callback_server_stop_owner_propagates_simultaneous_start_cancellation():
     start_entered = asyncio.Event()
 

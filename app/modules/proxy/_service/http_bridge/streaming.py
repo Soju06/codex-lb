@@ -2016,6 +2016,7 @@ class _HTTPBridgeStreamingMixin:
             else dict(headers)
         )
         fresh_replay_excluded_account_ids: set[str] = set()
+        model_transition_owner_conflict_fork_attempted = False
         unanchored_fork_spill_attempted = False
         verified_stale_anchor_generation_captured = False
         verified_stale_anchor_circuit_key: _HTTPBridgeSessionKey | None = None
@@ -2068,6 +2069,70 @@ class _HTTPBridgeStreamingMixin:
                     durable_full_resend_fresh_payload
                 )
             return durable_full_resend_is_account_neutral
+
+        def switch_model_transition_to_account_neutral_fork(exc: ProxyResponseError) -> bool:
+            nonlocal account_neutral_recovery
+            nonlocal affinity
+            nonlocal bridge_session_key
+            nonlocal downstream_turn_state
+            nonlocal force_local_recovery_creation
+            nonlocal incoming_turn_state_header
+            nonlocal model_transition_owner_conflict_fork_attempted
+            nonlocal preferred_account_has_continuity_provenance
+            nonlocal request_state
+            nonlocal session_creation_headers
+            nonlocal session_header_fallback_key
+
+            error_code, _error_message = _proxy_error_code_message(exc)
+            if (
+                durable_model_transition_lookup is None
+                or error_code != "continuity_owner_conflict"
+                or model_transition_owner_conflict_fork_attempted
+                or forwarded_request
+                or not _http_bridge_payload_is_account_neutral_fresh_replay(effective_payload)
+                or request_state.previous_response_id is not None
+                or rewritten_file_account_id is not None
+            ):
+                return False
+            reused_parent_turn_state = (
+                incoming_turn_state_header is not None and downstream_turn_state == incoming_turn_state_header
+            )
+            failed_owner_id = request_state.preferred_account_id
+            _log_http_bridge_event(
+                "model_transition_owner_conflict_fork",
+                bridge_session_key,
+                account_id=failed_owner_id,
+                model=effective_payload.model,
+                detail="outcome=retry_without_previous_model_owner",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                owner_check_applied=True,
+            )
+            if failed_owner_id is not None:
+                fresh_replay_excluded_account_ids.add(failed_owner_id)
+            session_creation_headers = without_http_bridge_session_affinity_headers(session_creation_headers)
+            incoming_turn_state_header = None
+            session_header_fallback_key = None
+            affinity = _AffinityPolicy()
+            replay_kind, replay_key = make_http_bridge_account_neutral_replay_key(uuid4().hex)
+            bridge_session_key = _HTTPBridgeSessionKey(
+                replay_kind,
+                replay_key,
+                bridge_session_key.api_key_id,
+                strength="hard",
+            )
+            account_neutral_recovery = True
+            force_local_recovery_creation = True
+            model_transition_owner_conflict_fork_attempted = True
+            request_state.affinity_policy = affinity
+            request_state.hard_continuity_anchor = False
+            request_state.preferred_account_id = None
+            request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
+            preferred_account_has_continuity_provenance = False
+            if reused_parent_turn_state:
+                request_state.session_id = None
+                downstream_turn_state = None
+            return True
 
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
             return (
@@ -2279,6 +2344,8 @@ class _HTTPBridgeStreamingMixin:
                 # carries its own continuity is a safe fresh raw-HTTP replay.
                 if effective_payload.previous_response_id != payload.previous_response_id:
                     setattr(exc, _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR, True)
+                if switch_model_transition_to_account_neutral_fork(exc):
+                    continue
                 if not owner_unavailable_allows_account_neutral_replay(exc):
                     exc_code, _exc_message = _proxy_error_code_message(exc)
                     if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(

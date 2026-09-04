@@ -38,6 +38,7 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
         "websocket",
         "websocket_responses_events_v1",
         "websocket_responses_routing_v1",
+        "websocket_close_frame_provenance_v1",
         "websocket_send_ack",
     }
 )
@@ -636,7 +637,7 @@ class NativeEgressWebSocket:
                 if event_type == "websocket_close":
                     code = item.get("code")
                     reason = item.get("reason")
-                    close_frame_received = item.get("close_frame_received", code is not None)
+                    close_frame_received = item.get("close_frame_received")
                     if code is not None and not isinstance(code, int):
                         raise NativeEgressProtocolError("native websocket close code is invalid")
                     if reason is not None and not isinstance(reason, str):

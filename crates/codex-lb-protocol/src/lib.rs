@@ -18,6 +18,7 @@ pub const CAPABILITIES: &[&str] = &[
     "websocket",
     "websocket_responses_events_v1",
     "websocket_responses_routing_v1",
+    "websocket_close_frame_provenance_v1",
     "websocket_send_ack",
 ];
 

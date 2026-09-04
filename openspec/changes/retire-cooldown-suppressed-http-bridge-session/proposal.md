@@ -18,8 +18,12 @@ retiring the session that was already opened.
 - Mark a session as `reconnect_requested` and `retire_after_drain` whenever a
   hard-key cooldown rejects a request before upstream dispatch.
 - Invoke the existing bounded drain-retirement helper immediately so an idle
-  session is detached and closed; sessions with other pending work remain
-  non-reusable until that work drains.
+  session is detached and closed; a session another turn owns (pending work,
+  a registered admission waiter such as the admitted half-open probe, or a
+  foreign unanchored handoff) is left to that owner and is not marked.
+- Count a submit as an admission waiter from submit entry, so a turn between
+  its admission decision and its dispatch registration is visible to a
+  concurrent suppression instead of being fenced off its own session.
 - Cover both late submit suppression and startup pre-submit terminal paths.
 - Preserve proof-gated and operation-fenced replay bypasses, durable retry
   circuit state, reservation settlement, and the existing 503 envelope.
@@ -29,8 +33,8 @@ retiring the session that was already opened.
 - Cooldown-suppressed bridge sessions cannot be reused for later requests.
 - Newly opened but never-dispatched WebSockets are closed and removed from the
   registry when no other work owns the session.
-- Shared sessions with pending work drain through the existing lifecycle and
-  are not force-closed or double-settled.
+- Sessions owned by other work are neither marked nor closed by a concurrent
+  suppression; the half-open probe the cooldown admits keeps its session.
 - No new setting, schema, migration, retry threshold, or cooldown duration is
   introduced.
 

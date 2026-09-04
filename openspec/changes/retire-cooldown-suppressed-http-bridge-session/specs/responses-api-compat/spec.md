@@ -16,14 +16,27 @@ treated as a repeated failure. A pending request that has already emitted a
 response event MUST remain excluded from this pre-response circuit.
 
 When hard-key retry-circuit cooldown suppresses a request after its bridge
-session has been created but before `response.create` is dispatched, the proxy
-MUST mark that session `reconnect_requested` and `retire_after_drain`, then
-MUST invoke the bounded drain-retirement path before returning the suppression
-error. The session MUST become ineligible for new reuse immediately. If other
-pending work or an unanchored handoff still owns the session, closure MAY wait
-for that work to drain, but the retirement marker MUST remain set and the
-session MUST NOT accept new requests. This applies to both late submit
-suppression and startup pre-submit cooldown terminal handling.
+session has been created but before `response.create` is dispatched, and no
+other turn owns that session (no visible pending or queued request, no
+registered admission waiter, no unanchored handoff held by another request),
+the proxy MUST mark the session `reconnect_requested` and `retire_after_drain`
+and MUST invoke the bounded drain-retirement path before returning the
+suppression error, so the never-dispatched socket is closed and detached rather
+than left reusable. If another turn owns the session — in particular the
+half-open probe the cooldown admitted, which may still sit between its
+admission decision and its dispatch registration — the suppressed request MUST
+leave the session unmarked and MUST NOT close it; that owner's own lifecycle
+governs retirement, and the admitted turn MUST proceed. If the suppressed
+request itself holds the session's unanchored handoff, the session counts as
+unowned and its submit finalizer completes the retirement after releasing the
+handoff. This applies to both late submit suppression and startup pre-submit
+cooldown terminal handling.
+
+So that a concurrent suppression can see it, a submit MUST count as a
+registered admission waiter on its session from submit entry, before the
+retry-circuit admission decision, until the dispatch path takes that
+registration over; every pre-dispatch exit MUST release it, and the release
+MUST re-run any retirement the registration was deferring.
 
 Proof-gated full-resend replay and operation-fenced continuity replay remain
 eligible bypasses and MUST NOT be retired by this suppression requirement.
@@ -132,11 +145,30 @@ and durable circuit state.
 - **THEN** the request remains eligible for that authorized replay
 - **AND** the generic cooldown suppression retirement is not triggered
 
-#### Scenario: shared pending work drains before close
+#### Scenario: a concurrently admitted probe keeps its session
 
-- **GIVEN** cooldown suppression marks a session that owns other visible
-  pending work or an unanchored handoff
-- **WHEN** bounded retirement runs
-- **THEN** it does not force-close or double-settle the active work
-- **AND** new requests cannot reuse the session
-- **AND** the existing owner settlement path may close it after drain
+- **GIVEN** a hard-key retry circuit at cooldown expiry
+- **AND** request A passes admission as the half-open probe and has not yet
+  reached its dispatch registration
+- **WHEN** request B on the same session is suppressed by A's probe lease
+- **THEN** B returns the existing HTTP 503 cooldown error
+- **AND** the session is not marked for reconnect or retirement and is not
+  closed
+- **AND** A proceeds past the pre-dispatch retiring fence to dispatch
+
+#### Scenario: a session owned by other work is left to its owner
+
+- **GIVEN** cooldown suppression rejects a request on a session that owns
+  visible pending work, a registered admission waiter, or another request's
+  unanchored handoff
+- **WHEN** the suppression returns
+- **THEN** the session is not marked for retirement and is not closed
+- **AND** the owning work's own settlement path governs the session
+
+#### Scenario: a suppressed request releases only its own admission registration
+
+- **GIVEN** a submit counted itself as an admission waiter at entry
+- **WHEN** the retry circuit suppresses it or any other pre-dispatch exit fails it
+- **THEN** its registration is released without disturbing other waiters
+- **AND** a retirement that registration was deferring runs once the session
+  is unowned

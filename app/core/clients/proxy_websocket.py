@@ -189,8 +189,10 @@ class UpstreamWebSocketMessage:
     data: bytes | None = None
     close_code: int | None = None
     close_reason: str | None = None
+    close_frame_received: bool = False
     error: str | None = None
     error_code: str | None = None
+    transport_ended: bool = False
 
 
 class UpstreamWebSocketTransportError(RuntimeError):
@@ -347,6 +349,8 @@ class WebsocketsUpstreamWebSocket:
                 kind="close",
                 close_code=_close_code_from_exception(exc),
                 close_reason=_close_reason_from_exception(exc),
+                close_frame_received=exc.rcvd is not None,
+                transport_ended=True,
             )
         except ConnectionClosedError as exc:
             if self._preserve_close_semantics and exc.rcvd is not None:
@@ -354,6 +358,8 @@ class WebsocketsUpstreamWebSocket:
                     kind="close",
                     close_code=_close_code_from_exception(exc),
                     close_reason=_close_reason_from_exception(exc),
+                    close_frame_received=True,
+                    transport_ended=True,
                 )
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)
             await _rotate_after_websocket_network_failure(error_code)
@@ -375,6 +381,8 @@ class WebsocketsUpstreamWebSocket:
                     else str(exc)
                 ),
                 error_code=relay_error_code,
+                close_frame_received=exc.rcvd is not None,
+                transport_ended=True,
             )
         except Exception as exc:
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)
@@ -383,6 +391,7 @@ class WebsocketsUpstreamWebSocket:
                 kind="error",
                 error=codex_transport_error_message("websocket receive", None, exc),
                 error_code=_relay_receive_error_code(error_code),
+                transport_ended=True,
             )
 
         if isinstance(message, str):
@@ -436,6 +445,7 @@ class NativeUpstreamWebSocket:
                 kind="error",
                 error=str(error),
                 error_code=_relay_receive_error_code(error.error_code),
+                transport_ended=isinstance(exc, NativeEgressTransportError),
             )
         return UpstreamWebSocketMessage(
             kind=message.kind,
@@ -443,6 +453,8 @@ class NativeUpstreamWebSocket:
             data=message.data,
             close_code=message.close_code,
             close_reason=message.close_reason,
+            close_frame_received=message.close_frame_received,
+            transport_ended=message.kind == "close",
         )
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
@@ -517,6 +529,7 @@ class CodexUpstreamWebSocket:
                 kind="error",
                 error=codex_transport_error_message("websocket receive", self._endpoint_id, classification_exc),
                 error_code=_relay_receive_error_code(error_code),
+                transport_ended=True,
             )
         if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED):
             liveness_exception = _aiohttp_stored_liveness_exception(self._websocket)
@@ -530,11 +543,14 @@ class CodexUpstreamWebSocket:
                         liveness_exception,
                     ),
                     error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+                    transport_ended=True,
                 )
             return UpstreamWebSocketMessage(
                 kind="close",
                 close_code=_aiohttp_ws_close_code(self._websocket, msg),
                 close_reason=_aiohttp_ws_close_reason(msg),
+                close_frame_received=msg.type == aiohttp.WSMsgType.CLOSE,
+                transport_ended=True,
             )
         if msg.type == aiohttp.WSMsgType.ERROR:
             exception = (
@@ -554,6 +570,7 @@ class CodexUpstreamWebSocket:
                     else "Upstream websocket error"
                 ),
                 error_code=_relay_receive_error_code(error_code),
+                transport_ended=True,
             )
         if msg.type == aiohttp.WSMsgType.TEXT:
             text = msg.data if isinstance(msg.data, str) else str(msg.data)

@@ -179,6 +179,7 @@ pub(crate) async fn execute_websocket(
                                         request_id,
                                         code: Some(code),
                                         reason: (!reason.is_empty()).then_some(reason),
+                                        close_frame_received: false,
                                     },
                                 ).await?;
                                 return Ok(());
@@ -237,7 +238,12 @@ pub(crate) async fn execute_websocket(
                             .unwrap_or((None, None));
                         emit(
                             output,
-                            &NativeEvent::WebsocketClose { request_id, code, reason },
+                            &NativeEvent::WebsocketClose {
+                                request_id,
+                                code,
+                                reason,
+                                close_frame_received: true,
+                            },
                         ).await?;
                         return Ok(());
                     }
@@ -250,6 +256,7 @@ pub(crate) async fn execute_websocket(
                                 request_id,
                                 code: None,
                                 reason: None,
+                                close_frame_received: false,
                             },
                         ).await?;
                         return Ok(());

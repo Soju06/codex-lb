@@ -38,6 +38,7 @@ print(json.dumps({
         "http",
         "http2_profile_v1",
         "websocket",
+        "websocket_close_frame_provenance_v1",
         "websocket_send_ack",
     ],
 }), flush=True)
@@ -550,6 +551,7 @@ for line in sys.stdin:
         print(json.dumps({
             "type": "websocket_close", "request_id": request_id,
             "code": command["code"], "reason": command["reason"],
+            "close_frame_received": False,
         }), flush=True)
     elif kind == "cancel":
         print(json.dumps({"type": "cancelled", "request_id": request_id}), flush=True)
@@ -582,7 +584,12 @@ async def test_native_websocket_routes_frames_and_send_acknowledgements(tmp_path
 
     process = client._process
     await websocket.close(code=1000, reason="done")
-    assert await websocket.receive() == NativeWebSocketMessage(kind="close", close_code=1000, close_reason="done")
+    assert await websocket.receive() == NativeWebSocketMessage(
+        kind="close",
+        close_code=1000,
+        close_reason="done",
+        close_frame_received=False,
+    )
     with pytest.raises(NativeEgressTransportError, match="closed"):
         await asyncio.wait_for(websocket.receive(), timeout=0.1)
     assert client._process is process
@@ -615,6 +622,7 @@ for line in sys.stdin:
         print(json.dumps({
             "type": "websocket_close", "request_id": request_id,
             "code": 1000, "reason": "peer done",
+            "close_frame_received": True,
         }), flush=True)
     elif command["type"] == "websocket_close":
         print(json.dumps({
@@ -643,6 +651,7 @@ for line in sys.stdin:
         kind="close",
         close_code=1000,
         close_reason="peer done",
+        close_frame_received=True,
     )
     await websocket.close()
     await websocket.close()

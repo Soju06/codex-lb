@@ -11,6 +11,7 @@ pub const CAPABILITIES: &[&str] = &[
     "http",
     "http2_profile_v1",
     "websocket",
+    "websocket_close_frame_provenance_v1",
     "websocket_send_ack",
 ];
 
@@ -109,6 +110,7 @@ pub enum NativeEvent {
         request_id: String,
         code: Option<u16>,
         reason: Option<String>,
+        close_frame_received: bool,
     },
     WebsocketError {
         request_id: String,

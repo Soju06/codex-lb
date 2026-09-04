@@ -18,5 +18,5 @@
 - [x] 3.1 Run focused compact tests and the related proxy suite.
 - [x] 3.2 Run changed-file lint, formatting, type, architecture, and strict
   OpenSpec validation.
-- [ ] 3.3 Exercise the live remote-compact task after an atomic deployment with
+- [x] 3.3 Exercise the live remote-compact task after an atomic deployment with
   a pre-cutover data backup and rollback container.

@@ -8893,7 +8893,7 @@ def _collected_output_items_match_terminal(
     if len(terminal_output) != len(collected_output):
         return False
     for terminal_item, collected_item in zip(terminal_output, collected_output):
-        terminal_identity = _output_item_identity(terminal_item) if is_json_mapping(terminal_item) else {}
+        terminal_identity = _output_item_identity(terminal_item) if isinstance(terminal_item, dict) else {}
         collected_identity = _output_item_identity(collected_item)
         # ``_items_match_for_echo`` intentionally strips response-owned IDs;
         # lifecycle validation must compare those stable identities first.

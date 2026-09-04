@@ -118,6 +118,8 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
         if completed_output is not None and completed_output:
             for terminal_item, indexed_item in zip(completed_output, materialized_output):
                 terminal_identity = _output_item_identity(terminal_item) if isinstance(terminal_item, dict) else {}
+                if not isinstance(indexed_item, dict):
+                    return None
                 indexed_identity = _output_item_identity(indexed_item)
                 # Replay validation must retain lifecycle identity checks even
                 # though the payload comparison tolerates an omitted status

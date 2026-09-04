@@ -1062,7 +1062,7 @@ class AuthManager:
             if applied:
                 account.status = status
                 account.deactivation_reason = reason
-                if status == AccountStatus.DEACTIVATED:
+                if status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
                     mark_account_routing_unavailable(account.id)
                 get_account_selection_cache().invalidate()
                 return None

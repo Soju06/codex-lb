@@ -781,7 +781,7 @@ class UsageUpdater:
         await self._auth_manager._repo.update_status(account.id, status, reason)
         account.status = status
         account.deactivation_reason = reason
-        if status == AccountStatus.DEACTIVATED:
+        if status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
             mark_account_routing_unavailable(account.id)
         get_account_selection_cache().invalidate()
 

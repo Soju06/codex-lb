@@ -417,7 +417,7 @@ async def test_client_close_is_idempotent_and_prevents_restart(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_client_close_does_not_hang_when_stream_queue_is_full(tmp_path: Path) -> None:
+async def test_http_stream_delivers_burst_beyond_former_event_queue_limit(tmp_path: Path) -> None:
     helper = tmp_path / "native-helper"
     _write_helper(
         helper,
@@ -450,7 +450,7 @@ for line in sys.stdin:
 """,
     )
     client = SubprocessNativeEgressClient(helper)
-    stalled = await client.request(
+    burst = await client.request(
         NativeEgressRequest(method="GET", url="https://example.test/slow-consumer", headers={})
     )
     await asyncio.sleep(0.05)
@@ -458,8 +458,7 @@ for line in sys.stdin:
     healthy = await client.request(NativeEgressRequest(method="GET", url="https://example.test/healthy", headers={}))
 
     assert await asyncio.wait_for(healthy.read(), timeout=2.0) == b"ok"
-    with pytest.raises(NativeEgressTransportError, match="bounded event queue"):
-        await stalled.read()
+    assert await asyncio.wait_for(burst.read(), timeout=2.0) == b"x" * 256
 
     await asyncio.wait_for(client.aclose(), timeout=2.0)
 

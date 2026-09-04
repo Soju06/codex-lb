@@ -515,7 +515,7 @@ class SubprocessNativeEgressClient:
         process, generation = await self._ensure_process()
         self._request_sequence += 1
         request_id = f"{generation}:{self._request_sequence}"
-        events: asyncio.Queue[dict[str, object] | BaseException] = asyncio.Queue(maxsize=_NATIVE_STREAM_QUEUE_LIMIT)
+        events: asyncio.Queue[dict[str, object] | BaseException] = asyncio.Queue()
         self._streams[request_id] = (generation, events)
         request_event = {
             "type": "request",

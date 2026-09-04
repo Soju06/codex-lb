@@ -1691,6 +1691,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                 default=0,
             )
             pending_request_states = list(session.pending_requests)
+        upstream_output_seen = any(
+            getattr(request_state, "upstream_model_output_seen", False) for request_state in pending_request_states
+        )
         if retry_circuit_attempt_selection is None:
             retry_circuit_attempt_selection = _http_bridge_retry_circuit_attempt_selection_for_pending_requests(
                 pending_request_states
@@ -1759,7 +1762,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             # requests. Classify each operation from its own event count;
             # using the session-wide maximum would mark an eventless
             # sibling as safely retryable after another request streamed.
-            operation_state = "unknown" if getattr(request_state, "response_event_count", 0) == 0 else "acknowledged"
+            operation_state = (
+                "acknowledged"
+                if getattr(request_state, "response_event_count", 0) > 0
+                or getattr(request_state, "upstream_model_output_seen", False)
+                else "unknown"
+            )
             await _update_http_bridge_operation_state(
                 self,
                 session,
@@ -1793,6 +1801,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 failed_pending_count > 0
                 and reservations_settled is not False
                 and observed_response_events == 0
+                and not upstream_output_seen
                 and (
                     retire_detail == _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
                     or account_neutral_transport_drop
@@ -2258,14 +2267,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                         (request_state.response_event_count for request_state in session.pending_requests),
                         default=0,
                     )
-                    # Buffered reasoning preludes are suppressed from
-                    # response_event_count on purpose, but they are still
-                    # application-layer output: a drop after one is not an
-                    # eventless drop for account-health purposes.
-                    upstream_output_observed = any(
-                        getattr(request_state, "upstream_model_output_seen", False)
-                        for request_state in session.pending_requests
-                    )
                     reader_failure_retry_circuit_attempt_selection = (
                         _http_bridge_retry_circuit_attempt_selection_for_pending_requests(
                             tuple(session.pending_requests)
@@ -2290,21 +2291,18 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if message.close_code is not None
                     else None
                 )
-                # An abrupt drop with no close frame and no response events is
-                # weaker account-health evidence than a graceful pre-created
-                # close, which is already exempted below. Keep the individual
-                # drop account-neutral; repeated eventless drops still feed
-                # the windowed account drain signal inside the failure path.
+                # A missing close frame is transport evidence, not account
+                # evidence. Response progress still blocks replay, but does not
+                # make a frame-less socket loss account-attributable. Only
+                # genuinely eventless drops feed the windowed account signal
+                # inside the failure path.
                 # Only terminal transport messages qualify: a protocol-invalid
                 # binary frame also carries no close code but did not end the
                 # socket, so it keeps the existing penalty semantics.
                 account_neutral_transport_drop = (
-                    message.kind in ("close", "error")
+                    (message.kind == "close" or (message.kind == "error" and message.transport_ended))
                     and not account_neutral
-                    and not upstream_output_observed
-                    and _is_account_neutral_transport_drop(
-                        message.close_code, response_events_seen=response_events_seen
-                    )
+                    and _is_account_neutral_transport_drop(message.close_code)
                 )
                 async with session.lifecycle_lock:
                     if (

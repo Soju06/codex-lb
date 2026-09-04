@@ -262,6 +262,7 @@ async def test_live_direct_adapter_preserves_abnormal_close_code_and_reason() ->
     assert message.close_code == 1011
     assert message.close_reason == "server restart"
     assert message.error is None
+    assert message.transport_ended is True
 
 
 @pytest.mark.asyncio
@@ -276,6 +277,7 @@ async def test_direct_adapter_classifies_keepalive_timeout() -> None:
 
     assert message.kind == "error"
     assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    assert message.transport_ended is True
 
 
 @pytest.mark.asyncio
@@ -294,6 +296,7 @@ async def test_direct_adapter_classifies_keepalive_timeout_after_close_ack() -> 
 
     assert message.kind == "error"
     assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    assert message.transport_ended is True
 
 
 @pytest.mark.asyncio
@@ -329,6 +332,7 @@ async def test_direct_adapter_does_not_trust_peer_keepalive_timeout_marker() -> 
 
     assert message.kind == "error"
     assert message.error_code is None
+    assert message.transport_ended is True
 
 
 @pytest.mark.asyncio
@@ -341,6 +345,7 @@ async def test_routed_adapter_classifies_heartbeat_timeout() -> None:
 
     assert message.kind == "error"
     assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    assert message.transport_ended is True
 
 
 @pytest.mark.asyncio
@@ -1480,6 +1485,7 @@ async def test_connect_responses_websocket_sanitizes_ws_error_payload(monkeypatc
     assert "proxy.local:8080" not in message.error
     assert message.error == "Codex upstream websocket receive failed via proxy endpoint ep_1: OSError"
     assert message.error_code is None
+    assert message.transport_ended is True
 
 
 @pytest.mark.asyncio
@@ -1493,6 +1499,7 @@ async def test_routed_websocket_error_message_defers_ordinary_code_to_relay(with
 
     assert message.kind == "error"
     assert message.error_code is None
+    assert message.transport_ended is True
 
 
 @pytest.mark.asyncio

@@ -338,26 +338,42 @@ are pending and have not reached a terminal event, the proxy MUST record a
 transient upstream error for the account before signaling failure for those
 pending requests, except when the close carries a classified process-wide
 network failure or upstream WebSocket liveness timeout, is a clean close
-(`close_code = 1000`) before any `response.*` event, or carries the classified
-per-socket `upstream_keepalive_timeout` transport error. Clean pre-response
-closes, keepalive timeouts, process-wide network failures, and liveness
-timeouts MUST remain account-neutral and use their classified error and bounded
-retry or retry-circuit handling. For other closes, the proxy MUST surface
-`stream_incomplete` to affected pending requests except when a direct Responses
-WebSocket request has already successfully emitted a finite integer
-`sequence_number`. For that sequenced direct-WebSocket case, the proxy MUST
-record the request outcome as `stream_incomplete` without emitting a synthetic
-terminal frame under the active response id, then MUST close the downstream
-WebSocket with code 1011.
+(`close_code = 1000`) before any `response.*` event, carries the classified
+per-socket `upstream_keepalive_timeout` transport error, or is a terminal HTTP
+bridge close/error with no upstream-authored close frame (`close_code` is absent
+or the adapter-synthesized RFC 6455 code `1006`). A frame-less terminal HTTP
+bridge ending MUST remain account-neutral regardless of response-event count or
+buffered model-output progress. Unless an existing bounded pre-created recovery
+succeeds, it MUST still fail the interrupted request as `stream_incomplete`.
+It MUST NOT make a post-output request eligible for transparent redispatch, and
+an operation with response events or buffered model output MUST remain
+acknowledged rather than recoverable. Only a frame-less drop with zero response events and no
+buffered model output MAY contribute to the existing windowed eventless account
+drain signal; a post-output drop MUST NOT contribute to that signal.
+
+For other closes, the proxy MUST surface `stream_incomplete` to affected pending
+requests except when a direct Responses WebSocket request has already
+successfully emitted a finite integer `sequence_number`. For that sequenced
+direct-WebSocket case, the proxy MUST record the request outcome as
+`stream_incomplete` without emitting a synthetic terminal frame under the
+active response id, then MUST close the downstream WebSocket with code 1011.
 
 #### Scenario: websocket closes before pending responses complete
 
 - **GIVEN** a streamed response request is pending on an upstream websocket
 - **AND** the direct downstream response has not emitted a numeric sequence, or the request uses another transport
 - **WHEN** the websocket closes before a terminal response event is observed
-- **AND** the close does not carry a classified process-wide network failure or upstream WebSocket liveness timeout
+- **AND** the close is neither a classified account-neutral failure nor a frame-less terminal HTTP bridge ending
 - **THEN** the pending request fails with `stream_incomplete`
 - **AND** the account receives a transient upstream failure signal for routing
+
+#### Scenario: frame-less HTTP bridge drop after output remains account-neutral
+
+- **GIVEN** an HTTP bridge request has emitted response events or buffered model output
+- **WHEN** its upstream WebSocket ends without an upstream-authored close frame
+- **THEN** the request fails once with `stream_incomplete`
+- **AND** the upstream request is not transparently redispatched
+- **AND** the account receives no error-health write or eventless account signal
 
 #### Scenario: sequenced direct websocket closes before completion
 

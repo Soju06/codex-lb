@@ -44815,19 +44815,14 @@ def test_classify_upstream_close_clean_for_clean_close_before_any_response_event
     assert proxy_service._classify_upstream_close(1011, response_events_seen=0) == "transient"
 
 
-def test_account_neutral_transport_drop_requires_no_close_frame_and_no_response_events():
-    # Issue #1754: only a frame-less drop before any application-layer
-    # response event is account-neutral; any close frame or streamed events
-    # keep the account penalty semantics.
-    assert proxy_service._is_account_neutral_transport_drop(None, response_events_seen=0) is True
-    assert proxy_service._is_account_neutral_transport_drop(None, response_events_seen=8) is False
-    assert proxy_service._is_account_neutral_transport_drop(1000, response_events_seen=0) is False
-    assert proxy_service._is_account_neutral_transport_drop(1008, response_events_seen=0) is False
-    assert proxy_service._is_account_neutral_transport_drop(1011, response_events_seen=0) is False
+def test_account_neutral_transport_drop_requires_no_upstream_close_frame():
+    assert proxy_service._is_account_neutral_transport_drop(None) is True
+    assert proxy_service._is_account_neutral_transport_drop(1000) is False
+    assert proxy_service._is_account_neutral_transport_drop(1008) is False
+    assert proxy_service._is_account_neutral_transport_drop(1011) is False
     # RFC 6455 reserves 1006: it never travels in an actual close frame, so a
     # synthesized abnormal-closure code counts as frame-less.
-    assert proxy_service._is_account_neutral_transport_drop(1006, response_events_seen=0) is True
-    assert proxy_service._is_account_neutral_transport_drop(1006, response_events_seen=1) is False
+    assert proxy_service._is_account_neutral_transport_drop(1006) is True
 
 
 @pytest.mark.asyncio

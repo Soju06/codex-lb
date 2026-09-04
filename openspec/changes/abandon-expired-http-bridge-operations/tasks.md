@@ -25,6 +25,10 @@
       parameterless full-history contract for abandoned hard turn-state work.
 - [x] 2.9 Fence the shared `chunks_v2` lock helper so a lease-expired owner's
       late chunk batch or terminal chunk cannot resurrect an `abandoned` row.
+- [x] 2.10 Compare the CAS inactivity clock against the cutoff instead of the
+      loaded value so SQLite's second-precision `onupdate` timestamps match,
+      and release a journaled recovery checkpoint before the abandoned
+      rejection.
 
 ## 3. Verification
 
@@ -45,3 +49,6 @@
       abandoned hard turn-state recovery.
 - [x] 3.9 Cover late `chunks_v2` batch and terminal chunk writes from the
       original lease-expired owner against an abandoned operation.
+- [x] 3.10 Cover a row aged in SQLite's `CURRENT_TIMESTAMP` text form after a
+      real ORM event append, and the recovery-journal rollback on the abandoned
+      rejection path.

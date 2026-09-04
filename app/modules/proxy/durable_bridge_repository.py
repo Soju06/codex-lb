@@ -1980,6 +1980,13 @@ class DurableBridgeRepository:
             ):
                 page_filter = list(candidate_filter)
                 if cursor is not None:
+                    # Best-effort keyset resume: on SQLite a row whose
+                    # ``updated_at`` was stamped by ``onupdate`` shares the
+                    # cursor row's second but not its text form, so it is
+                    # neither ``>`` nor ``==`` the bound cursor value and is
+                    # skipped until the cursor wraps to ``None``. The sweep
+                    # still converges because every pass restarts from the
+                    # oldest unprotected row once the scan reaches the end.
                     page_filter.append(
                         or_(
                             HttpBridgeOperationRecord.updated_at > cursor.updated_at,
@@ -2071,12 +2078,21 @@ class DurableBridgeRepository:
                         )
                     )
                     owner_lease_outcome = "expired"
+                # The inactivity clock is compared against ``cutoff`` rather
+                # than for equality with the loaded candidate value. SQLite
+                # stores the ``onupdate=func.now()`` timestamp written by the
+                # event appenders as second-precision text while the ORM
+                # binds the loaded datetime back with microseconds, so an
+                # equality predicate never matches the rows this sweep
+                # exists for. Any competing progress, claim, or renewal write
+                # stamps ``updated_at`` at roughly ``now``, which is never
+                # older than ``cutoff``, so the race fence is preserved.
                 compare_and_set = await self._session.execute(
                     update(HttpBridgeOperationRecord)
                     .where(
                         HttpBridgeOperationRecord.operation_id == operation.operation_id,
                         HttpBridgeOperationRecord.state == source_state,
-                        HttpBridgeOperationRecord.updated_at == candidate_updated_at,
+                        HttpBridgeOperationRecord.updated_at < cutoff,
                         HttpBridgeOperationRecord.event_bytes == candidate_event_bytes,
                         exists(select(HttpBridgeSessionRecord.id).where(*owner_predicates)),
                     )

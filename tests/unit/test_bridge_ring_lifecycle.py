@@ -3317,6 +3317,113 @@ async def test_durable_event_progress_fences_abandonment_cas(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("append_mode", ["single", "batch"])
+async def test_sweep_abandons_rows_whose_inactivity_clock_was_stamped_by_onupdate(
+    async_session_factory: Callable[[], AsyncSession],
+    append_mode: str,
+) -> None:
+    """The CAS must match ``updated_at`` values written by ``onupdate=func.now()``.
+
+    An acknowledged ghost row streamed at least one event before its transport
+    was lost, so its last ``updated_at`` write came from the ORM appender's
+    ``onupdate`` default: on SQLite that is second-precision text, while the
+    loaded datetime binds back with microseconds. An equality predicate on the
+    loaded value never matches such rows and the sweep silently no-ops. This
+    ages the row with SQLite's own text format instead of a Python datetime.
+    """
+    session = async_session_factory()
+    try:
+        bind = session.get_bind()
+        if bind is None or bind.dialect.name != "sqlite":
+            pytest.skip("SQLite text-form inactivity clock regression")
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-onupdate-clock",
+            session_key_value="sid-onupdate-clock",
+        )
+        fingerprint = durable_bridge_hash("onupdate-clock")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-onupdate-clock",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-onupdate-clock",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+        )
+        if append_mode == "single":
+            appended = await repository.append_operation_event(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id="inst-onupdate-clock",
+                owner_epoch=claim.owner_epoch,
+                event_text="data: response.in_progress\n\n",
+                max_bytes=1024,
+            )
+        else:
+            appended = await repository.append_operation_events(
+                events=[
+                    DurableBridgeOperationEventInput(
+                        operation_id=operation_id,
+                        session_id=claim.id,
+                        instance_id="inst-onupdate-clock",
+                        owner_epoch=claim.owner_epoch,
+                        event_text="data: response.in_progress\n\n",
+                    )
+                ],
+                max_bytes=1024,
+            )
+        assert appended is True
+        # Age the row in the exact text form SQLite's CURRENT_TIMESTAMP
+        # produces (no fractional seconds) so the CAS sees the production
+        # representation rather than a Python-bound microsecond string.
+        await session.execute(
+            text(
+                "UPDATE http_bridge_operations "
+                "SET updated_at = strftime('%Y-%m-%d %H:%M:%S', 'now', '-3 hours') "
+                "WHERE operation_id = :operation_id"
+            ),
+            {"operation_id": operation_id},
+        )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == claim.id)
+            .values(lease_expires_at=utcnow() - timedelta(minutes=5))
+        )
+        await session.commit()
+        raw_updated_at = await session.scalar(
+            text("SELECT updated_at FROM http_bridge_operations WHERE operation_id = :operation_id"),
+            {"operation_id": operation_id},
+        )
+        assert "." not in str(raw_updated_at), raw_updated_at
+
+        sweep = await repository.abandon_stale_operations(
+            cutoff=utcnow() - timedelta(minutes=30),
+            lease_expired_before=utcnow() - timedelta(seconds=30),
+        )
+
+        assert len(sweep.abandonments) == 1
+        assert sweep.abandonments[0].source_state == "acknowledged"
+        assert sweep.abandonments[0].owner_lease_outcome == "expired"
+        persisted = await repository.get_operation(operation_id=operation_id)
+        assert persisted is not None
+        assert persisted.state == "abandoned"
+        assert await repository.get_operation_events(operation_id=operation_id) == ["data: response.in_progress\n\n"]
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_stale_operation_sweep_protects_live_recently_expired_and_local_pending_id(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

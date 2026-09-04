@@ -30,7 +30,9 @@ keeps the returned `(updated_at, operation_id)` keyset cursor and supplies it
 to the next heartbeat, wrapping back to the beginning after the eligible
 range is exhausted. This preserves every protected operation while allowing
 unrelated stale rows to converge without holding the SQLite writer section for
-an unbounded scan.
+an unbounded scan. The cursor is best-effort on SQLite: a row whose
+`updated_at` shares the cursor row's second but was stamped in a different
+text form may be skipped for one wrap and is picked up when the scan restarts.
 
 ## Goals / Non-Goals
 
@@ -86,7 +88,12 @@ those IDs. For all other candidates it locks the operation and owning session,
 then requires:
 
 - state is still `unknown` or `acknowledged`;
-- `updated_at` still equals the candidate value;
+- `updated_at` is still older than the inactivity cutoff (compared against the
+  cutoff rather than for equality with the loaded value: on SQLite the
+  `onupdate` timestamp written by the event appenders is second-precision text
+  while the loaded datetime binds back with microseconds, so an equality
+  predicate never matches the acknowledged rows that streamed at least one
+  event before their transport was lost);
 - the owner instance and epoch still equal the candidate values; and
 - the session has no owner or its lease is expired.
 
@@ -132,7 +139,8 @@ request text, response IDs, API keys, and account emails are not included.
 ## Race handling
 
 - A current owner renewing or claiming a row changes the session epoch or
-  operation `updated_at`; the compare-and-set then affects zero rows. If a
+  stamps the operation `updated_at` at roughly now, which is never older than
+  the cutoff; the compare-and-set then affects zero rows. If a
   renewal is briefly delayed, the additional lease-period grace keeps the row
   ineligible before the compare-and-set is attempted.
 - A nonterminal status event that commits after candidate selection advances

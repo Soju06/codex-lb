@@ -138,7 +138,8 @@ async def test_error_close_during_request_leaves_cycle_disconnected(protocol_cla
 
 def _reset_after_one_request(port: int) -> None:
     """Blocking client: complete one GET, then close with an RST instead of a FIN."""
-    with socket.create_connection(("127.0.0.1", port)) as client:
+    # Finite timeout so a server that never completes the response fails the test instead of hanging it.
+    with socket.create_connection(("127.0.0.1", port), timeout=5.0) as client:
         client.sendall(_REQUEST)
         buffer = b""
         while b"\r\n\r\n" not in buffer or not buffer.split(b"\r\n\r\n", 1)[1]:

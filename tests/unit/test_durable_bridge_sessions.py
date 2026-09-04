@@ -3767,3 +3767,99 @@ async def test_durable_bridge_lookup_keeps_closed_rows_that_still_name_their_acc
     assert lookup.account_id == "acc-1"
     assert lookup.state == HttpBridgeSessionState.CLOSED
     assert lookup.latest_response_id == "resp_released"
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_detached_row_fences_prior_generation_operations(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    """Re-owning a detached row must fence the invalidated generation's writes.
+
+    Reclaiming a detached row reuses its ``session_id``, so the replacement
+    account inherits the row's retained ``http_bridge_operations`` (the
+    recovery ledger is intentionally never cascade-deleted). That reuse is
+    safe only because every claim advances ``owner_epoch`` and
+    ``record_operation`` fences on ``(instance_id, owner_epoch)`` owning the
+    session: a write from the dead generation lands on no owner and is
+    rejected, so the invalidated account can never mutate the re-owned row.
+    """
+
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="thread_header",
+        session_key_value="thread-fence",
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=120.0,
+        account_id="acc-invalidated",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    old_fingerprint = "fingerprint-old-generation"
+    old_operation_id = durable_bridge_operation_id(claimed.session_id, old_fingerprint)
+    recorded = await coordinator.record_operation(
+        operation_id=old_operation_id,
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        request_fingerprint=old_fingerprint,
+        account_id="acc-invalidated",
+        model="gpt-5.4",
+        parent_response_id=None,
+        request_text='{"model":"gpt-5.4","input":"old turn"}',
+    )
+    assert recorded is not None
+
+    await _detach_rows_like_account_invalidation(async_session_factory, "acc-invalidated")
+
+    reclaimed = await coordinator.claim_live_session(
+        session_key_kind="thread_header",
+        session_key_value="thread-fence",
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=120.0,
+        account_id="acc-replacement",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    assert reclaimed.session_id == claimed.session_id
+    assert reclaimed.owner_epoch > claimed.owner_epoch
+
+    # A write from the invalidated generation (old owner_epoch) is fenced:
+    # record_operation requires the current (instance_id, owner_epoch) to own
+    # the session, so the dead generation cannot mutate the re-owned row.
+    fenced = await coordinator.record_operation(
+        operation_id=durable_bridge_operation_id(claimed.session_id, "fingerprint-dead-generation"),
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        request_fingerprint="fingerprint-dead-generation",
+        account_id="acc-invalidated",
+        model="gpt-5.4",
+        parent_response_id=None,
+        request_text='{"model":"gpt-5.4","input":"replayed dead turn"}',
+    )
+    assert fenced is None
+
+    # The current generation owns the re-owned row and can record normally.
+    new_fingerprint = "fingerprint-new-generation"
+    accepted = await coordinator.record_operation(
+        operation_id=durable_bridge_operation_id(reclaimed.session_id, new_fingerprint),
+        session_id=reclaimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=reclaimed.owner_epoch,
+        request_fingerprint=new_fingerprint,
+        account_id="acc-replacement",
+        model="gpt-5.4",
+        parent_response_id=None,
+        request_text='{"model":"gpt-5.4","input":"new turn"}',
+    )
+    assert accepted is not None

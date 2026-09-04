@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,22 @@ import yaml
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_PUBLISH_FLAG = re.compile(r"(?:^|\s)(?:-p(?:=|\s*)|--publish(?:=|\s+))(?P<mapping>[^\s\\]+)")
+
+
+def _publishes_host_port(mapping: Any, port: int) -> bool:
+    if isinstance(mapping, dict):
+        published = mapping.get("published")
+    elif isinstance(mapping, str):
+        fields = mapping.rsplit("/", 1)[0].rsplit(":", 2)
+        published = fields[-2] if len(fields) >= 2 else None
+    else:
+        published = None
+    try:
+        start, _, end = str(published).partition("-")
+        return int(start) <= port <= int(end or start)
+    except ValueError:
+        return False
 
 
 @pytest.mark.parametrize("compose_name", ["docker-compose.yml", "docker-compose.prod.yml"])
@@ -19,6 +36,16 @@ def test_stock_compose_uses_user_defined_default_bridge(compose_name: str) -> No
     for service in compose["services"].values():
         assert service.get("network_mode") != "bridge"
         assert "dns" not in service
+
+
+@pytest.mark.parametrize("compose_name", ["docker-compose.yml", "docker-compose.prod.yml"])
+def test_stock_compose_keeps_host_oauth_callback_port_free(compose_name: str) -> None:
+    compose: dict[str, Any] = yaml.safe_load((_REPO_ROOT / compose_name).read_text(encoding="utf-8"))
+    published_ports = compose["services"]["server"]["ports"]
+
+    assert "2455:2455" in published_ports
+    for service in compose["services"].values():
+        assert all(not _publishes_host_port(mapping, 1455) for mapping in service.get("ports", []) or [])
 
 
 def test_standalone_docker_examples_use_named_bridge() -> None:
@@ -36,13 +63,39 @@ def test_standalone_docker_examples_use_named_bridge() -> None:
     assert "--dns " not in readme
 
 
+def test_documented_default_docker_commands_keep_host_oauth_callback_port_free() -> None:
+    for relative_path in (
+        "README.md",
+        "README.zh-CN.md",
+        "docs/getting-started.md",
+        "docs/deployment/docker.md",
+    ):
+        content = (_REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        fenced_code = "\n".join(re.findall(r"```[^\n]*\n(.*?)```", content, re.DOTALL)).replace("\\\n", " ")
+        publish_mappings = (match.group("mapping") for match in _PUBLISH_FLAG.finditer(fenced_code))
+        assert all(
+            not _publishes_host_port(mapping, 1455)
+            or (relative_path == "docs/deployment/docker.md" and mapping == "127.0.0.1:1455:1455")
+            for mapping in publish_mappings
+        ), relative_path
+
+    docker_docs = (_REPO_ROOT / "docs/deployment/docker.md").read_text(encoding="utf-8")
+    assert "Codex Desktop also uses host port 1455" in docker_docs
+    assert "choose the device-code method (recommended)" in docker_docs
+    assert "manual callback field" in docker_docs
+    assert "-p 127.0.0.1:1455:1455" in docker_docs
+    assert "Windows port-forward helper is not compatible with the stock Docker mapping" in docker_docs
+
+
 def test_docker_docs_basic_run_uses_named_bridge() -> None:
     docker_docs = (_REPO_ROOT / "docs/deployment/docker.md").read_text(encoding="utf-8")
     basic_run = docker_docs.split("## Basic run", 1)[1].split("## Switching Wi-Fi or other networks", 1)[0]
+    publish_mappings = (match.group("mapping") for match in _PUBLISH_FLAG.finditer(basic_run.replace("\\\n", " ")))
 
     assert "docker network inspect codex-lb-net >/dev/null 2>&1 || docker network create codex-lb-net" in basic_run
     assert "--network codex-lb-net" in basic_run
     assert "--dns " not in basic_run
+    assert all(not _publishes_host_port(mapping, 1455) for mapping in publish_mappings)
 
 
 def test_network_switching_guidance_is_cross_platform_and_approachable() -> None:

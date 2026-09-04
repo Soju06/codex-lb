@@ -451,6 +451,7 @@ class NativeUpstreamWebSocket:
                 kind="error",
                 error=str(error),
                 error_code=_relay_receive_error_code(error.error_code),
+                transport_ended=True,
             )
         return UpstreamWebSocketMessage(
             kind=message.kind,
@@ -458,10 +459,14 @@ class NativeUpstreamWebSocket:
             data=message.data,
             close_code=message.close_code,
             close_reason=message.close_reason,
+<<<<<<< HEAD
             responses_interpreted=message.responses_interpreted,
             event_type=message.event_type,
             payload=message.payload,
             routing=message.routing,
+=======
+            transport_ended=message.kind == "close",
+>>>>>>> 09a22a2f5 (fix(proxy): mark native websocket terminal events)
         )
 
     async def close(self, code: int = 1000, reason: str = "") -> None:

@@ -286,6 +286,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _trim_http_bridge_previous_response_input_items as _trim_http_bridge_previous_response_input_items,
 )
+from app.modules.proxy._service.http_bridge.request_submit import (
+    _text_with_account_installation_id as _text_with_account_installation_id,
+)
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
 )
@@ -812,12 +815,8 @@ async def _wait_for_process_network_recovery(
 
 
 def _websocket_text_with_account_installation_id(text_data: str, account: Account) -> str:
-    payload = json.loads(text_data)
-    if not isinstance(payload, dict):
-        return text_data
     codex_installation_id = getattr(account, "codex_installation_id", None)
-    apply_codex_installation_metadata(cast(dict[str, JsonValue], payload), codex_installation_id)
-    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    return _text_with_account_installation_id(text_data, codex_installation_id)
 
 
 def _websocket_enforce_response_create_text_size(

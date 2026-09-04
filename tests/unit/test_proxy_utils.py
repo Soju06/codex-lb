@@ -5343,6 +5343,37 @@ def test_response_create_client_metadata_strips_installation_id_without_account_
     assert metadata is None
 
 
+def test_websocket_installation_metadata_stamping_matches_full_reencode() -> None:
+    account = cast(Any, SimpleNamespace(id="acc_ws_installation", codex_installation_id="account-installation"))
+    trailing = json.dumps(
+        {
+            "type": "response.create",
+            "input": [{"role": "user", "content": "caf\u00e9"}],
+            "client_metadata": {
+                "x-codex-installation-id": "client-installation",
+                "x-codex-turn-metadata": '{"installation_id":"client-installation","turn_id":"t"}',
+            },
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    leading = json.dumps(
+        {"client_metadata": {"k": "v"}, "type": "response.create", "input": "x"},
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    absent = '{"type":"response.create","input":"x"}'
+
+    for text in (trailing, leading, absent):
+        payload = json.loads(text)
+        proxy_module.apply_codex_installation_metadata(payload, "account-installation")
+        expected = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        stamped = websocket_mixin._websocket_text_with_account_installation_id(text, account)
+        assert stamped == expected
+        assert json.loads(stamped)["client_metadata"]["x-codex-installation-id"] == "account-installation"
+        assert websocket_mixin._websocket_text_with_account_installation_id(stamped, account) == expected
+
+
 def test_websocket_installation_metadata_stamping_rechecks_response_create_size(monkeypatch):
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_ws_installation_size",

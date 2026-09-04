@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,6 +24,15 @@ def _settings() -> SimpleNamespace:
 async def _drain_close_tasks() -> None:
     await asyncio.sleep(0)
     await asyncio.sleep(0)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_shared_ssl_context() -> Iterator[None]:
+    # The shared context is a process-wide cache; every test starts from an
+    # empty cache so ``_build_ssl_context`` patches take effect per test.
+    http_module._reset_shared_ssl_context()
+    yield
+    http_module._reset_shared_ssl_context()
 
 
 @pytest.mark.asyncio
@@ -336,6 +346,76 @@ def test_build_ssl_context_preserves_default_roots_and_adds_certifi_bundle() -> 
     create_default_context.assert_called_once_with()
     ssl_context.load_verify_locations.assert_called_once_with(cafile="/tmp/cacert.pem")
     assert context is ssl_context
+
+
+def test_build_ssl_context_is_not_cached() -> None:
+    first_context = MagicMock()
+    second_context = MagicMock()
+    with (
+        patch("app.core.clients.http.certifi.where", return_value="/tmp/cacert.pem"),
+        patch(
+            "app.core.clients.http.ssl.create_default_context",
+            side_effect=[first_context, second_context],
+        ) as create_default_context,
+    ):
+        assert http_module._build_ssl_context() is first_context
+        assert http_module._build_ssl_context() is second_context
+
+    assert create_default_context.call_count == 2
+
+
+def test_shared_ssl_context_builds_once_and_returns_the_same_instance() -> None:
+    ssl_context = MagicMock()
+    with patch("app.core.clients.http._build_ssl_context", return_value=ssl_context) as build:
+        first = http_module._shared_ssl_context()
+        second = http_module._shared_ssl_context()
+
+    assert first is ssl_context
+    assert first is second
+    build.assert_called_once_with()
+
+
+def test_reset_shared_ssl_context_forces_rebuild() -> None:
+    first_context = MagicMock()
+    second_context = MagicMock()
+    with patch(
+        "app.core.clients.http._build_ssl_context",
+        side_effect=[first_context, second_context],
+    ) as build:
+        assert http_module._shared_ssl_context() is first_context
+        http_module._reset_shared_ssl_context()
+        assert http_module._shared_ssl_context() is second_context
+        assert http_module._shared_ssl_context() is second_context
+
+    assert build.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_close_http_client_resets_shared_ssl_context() -> None:
+    first_context = MagicMock()
+    second_context = MagicMock()
+    with patch(
+        "app.core.clients.http._build_ssl_context",
+        side_effect=[first_context, second_context],
+    ):
+        assert http_module._shared_ssl_context() is first_context
+        await http_module.close_http_client()
+        assert http_module._shared_ssl_context() is second_context
+
+
+def test_shared_ssl_context_matches_a_fresh_build_verification_policy() -> None:
+    # Sharing must not change what the wire sees: same verification policy
+    # and the same trust store as a per-call build of the context.
+    shared = http_module._shared_ssl_context()
+    fresh = http_module._build_ssl_context()
+
+    assert shared is not fresh
+    assert shared.verify_mode == fresh.verify_mode
+    assert shared.check_hostname == fresh.check_hostname
+    assert shared.minimum_version == fresh.minimum_version
+    assert shared.options == fresh.options
+    assert shared.cert_store_stats() == fresh.cert_store_stats()
+    assert sorted(map(repr, shared.get_ca_certs())) == sorted(map(repr, fresh.get_ca_certs()))
 
 
 @pytest.mark.asyncio

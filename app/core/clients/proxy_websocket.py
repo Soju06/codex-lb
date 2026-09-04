@@ -1132,14 +1132,17 @@ async def _connect_upstream_websocket(
             ),
         ) from exc
     except InvalidProxy as exc:
-        message = (
-            "Invalid upstream websocket proxy configuration"
-            if policy.credential_safe_connect_errors
-            else (str(exc) or "Invalid upstream websocket proxy configuration")
-        )
+        # str(exc) embeds the full proxy URL including userinfo; the URL is
+        # operator configuration, never actionable for the API client. The
+        # websockets reason (``exc.msg``) never contains the URL.
+        logger.warning("%s rejected upstream websocket proxy configuration: %s", policy.operation, exc.msg)
         raise ProxyResponseError(
             502,
-            openai_error("upstream_unavailable", message, error_type="server_error"),
+            openai_error(
+                "upstream_unavailable",
+                "Invalid upstream websocket proxy configuration",
+                error_type="server_error",
+            ),
         ) from exc
     except InvalidHandshake as exc:
         message = (

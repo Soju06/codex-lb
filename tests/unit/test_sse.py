@@ -10,14 +10,19 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from app.core.openai.parsing import _LIFECYCLE_EVENT_TYPES, classify_event_type, parse_sse_event
+from app.core.types import JsonValue
 from app.core.utils.sse import (
     CODEX_KEEPALIVE_FRAME,
     SSE_KEEPALIVE_FRAME,
+    ParsedSseBlock,
     extract_sse_data,
     format_sse_data,
     format_sse_event,
+    format_sse_event_from_text,
     inject_sse_keepalives,
     parse_sse_data_json,
+    parse_sse_data_json_text,
+    sse_block_with_payload,
     sse_event_type_from_block,
 )
 from tests.unit.hypothesis_strategies import json_objects, json_values
@@ -263,3 +268,129 @@ def test_sse_event_type_from_block_rejects_non_lf_framing_and_multiline_data():
 def test_sse_event_type_from_block_rejects_non_object_data_payloads():
     assert sse_event_type_from_block("event: done\ndata: [DONE]\n\n") is None
     assert sse_event_type_from_block("event: ping\ndata: \n\n") is None
+
+
+_UNUSUAL_DATA_TEXTS = [
+    "",
+    "   ",
+    "[DONE]",
+    " [DONE] ",
+    "{not-json}",
+    "[1,2]",
+    "null",
+    '"string"',
+    '{"a":1}\n',
+    '{"a":1}\r\n',
+    ' {"a":1}',
+    '{"a":1} ',
+    '{\n  "type": "response.completed",\n  "response": {"id": "resp_1"}\n}',
+    '{"type":"response.output_text.delta","delta":"\u2028\u2029 \ud55c\uae00 \ud14d\uc2a4\ud2b8"}',
+    '{"error":{"code":"server_error","message":"boom"}}',
+]
+
+
+@pytest.mark.parametrize("text", _UNUSUAL_DATA_TEXTS)
+def test_parse_sse_data_json_text_matches_framed_parse(text: str) -> None:
+    assert parse_sse_data_json_text(text) == parse_sse_data_json(f"data: {text}\n\n")
+
+
+@given(payload=json_objects, ensure_ascii=st.booleans(), indent=st.sampled_from([None, 2]))
+@settings(max_examples=60, deadline=None)
+def test_parse_sse_data_json_text_matches_framed_parse_for_json_objects(payload, ensure_ascii, indent) -> None:
+    text = json.dumps(payload, ensure_ascii=ensure_ascii, indent=indent)
+    assert parse_sse_data_json_text(text) == parse_sse_data_json(f"data: {text}\n\n")
+
+
+def test_parse_sse_data_json_text_preserves_unicode_line_separators() -> None:
+    text = '{"type":"response.output_text.delta","delta":"a\u2028b\u2029c"}'
+    payload = parse_sse_data_json_text(text)
+    assert payload == {"type": "response.output_text.delta", "delta": "a\u2028b\u2029c"}
+
+
+def test_format_sse_event_from_text_frames_upstream_text_verbatim() -> None:
+    text = '{"type":"response.output_text.delta","item_id":"msg_1","delta":"\ud55c\uae00 \u2028 caf\u00e9"}'
+    payload = parse_sse_data_json_text(text)
+    assert payload is not None
+
+    block = format_sse_event_from_text(payload, text)
+
+    assert block == f"event: response.output_text.delta\ndata: {text}\n\n"
+    assert sse_event_type_from_block(block) == "response.output_text.delta"
+    assert parse_sse_data_json(block) == parse_sse_data_json(format_sse_event(payload))
+    # Upstream UTF-8 stays as-is instead of being re-escaped.
+    assert "\ud55c\uae00" in block
+    assert "\\u" not in block
+
+
+def test_format_sse_event_from_text_is_byte_identical_for_ascii_compact_text() -> None:
+    payload = {"type": "response.completed", "sequence_number": 7, "response": {"id": "resp_1", "output": []}}
+    text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    assert format_sse_event_from_text(payload, text) == format_sse_event(payload)
+
+
+def test_format_sse_event_from_text_keeps_typeless_error_frames_data_only() -> None:
+    text = '{"error":{"code":"server_error","message":"boom"}}'
+    payload = parse_sse_data_json_text(text)
+    assert payload is not None
+    assert classify_event_type(payload) == "error"
+
+    block = format_sse_event_from_text(payload, text)
+
+    assert block == f"data: {text}\n\n"
+    assert block == format_sse_event(payload)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{\n  "type": "response.completed",\n  "response": {"id": "resp_1"}\n}',
+        '{"type":"response.completed","response":{"id":"resp_1"}}\n',
+        ' {"type":"response.completed","response":{"id":"resp_1"}}',
+    ],
+)
+def test_format_sse_event_from_text_falls_back_to_serialization_for_non_canonical_text(text: str) -> None:
+    payload = json.loads(text)
+    assert format_sse_event_from_text(payload, text) == format_sse_event(payload)
+
+
+@given(payload=json_objects, ensure_ascii=st.booleans())
+@settings(max_examples=40, deadline=None)
+def test_format_sse_event_from_text_round_trips_arbitrary_json_objects(payload, ensure_ascii) -> None:
+    text = json.dumps(payload, ensure_ascii=ensure_ascii, separators=(",", ":"))
+    block = format_sse_event_from_text(payload, text)
+    assert parse_sse_data_json(block) == payload
+    assert sse_event_type_from_block(block) == sse_event_type_from_block(format_sse_event(payload))
+
+
+def test_parsed_sse_block_behaves_like_str_and_short_circuits_parse() -> None:
+    payload: dict[str, JsonValue] = {"type": "response.output_text.delta", "delta": "hi"}
+    plain = format_sse_event(payload)
+    block = sse_block_with_payload(plain, payload)
+
+    assert isinstance(block, ParsedSseBlock)
+    assert isinstance(block, str)
+    assert block == plain
+    assert block.startswith("event: response.output_text.delta\n")
+    assert block.encode("utf-8") == plain.encode("utf-8")
+    assert parse_sse_data_json(block) is payload
+    # Derived strings are plain ``str`` and take the full parse path.
+    assert type(block.strip()) is str
+    assert parse_sse_data_json(block.strip()) == payload
+    assert parse_sse_data_json(block + "") == payload
+    # Re-attaching the same payload is an identity operation.
+    assert sse_block_with_payload(block, payload) is block
+
+
+def test_parsed_sse_block_with_none_payload_matches_unparseable_parse() -> None:
+    for plain in (": keepalive\n\n", "data: [DONE]\n\n", "data: {not-json}\n\n"):
+        assert parse_sse_data_json(plain) is None
+        assert parse_sse_data_json(sse_block_with_payload(plain, None)) is None
+
+
+@given(payload=json_objects)
+@settings(max_examples=40, deadline=None)
+def test_sse_block_with_payload_agrees_with_full_parse(payload) -> None:
+    plain = format_sse_event(payload)
+    block = sse_block_with_payload(plain, parse_sse_data_json(plain))
+    assert parse_sse_data_json(block) == parse_sse_data_json(plain)
+    assert extract_sse_data(block) == extract_sse_data(plain)

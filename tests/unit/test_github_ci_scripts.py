@@ -8,6 +8,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import pytest
+
 
 def _load_script_module(name: str) -> ModuleType:
     path = Path(".github/scripts") / f"{name}.py"
@@ -83,3 +85,24 @@ def test_detect_changed_areas_falls_back_to_full_suite_after_github_outage(monke
         any(detect_changed_areas._matches(path, patterns) for path in files)
         for patterns in detect_changed_areas.FILTERS.values()
     )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "app/core/clients/codex.py",
+        "app/core/clients/http.py",
+        "app/core/clients/proxy.py",
+        "app/core/clients/proxy_websocket.py",
+        "app/core/config/settings.py",
+        "app/core/openai/requests.py",
+        "app/core/upstream_proxy/router.py",
+        "app/core/utils/proxy_env.py",
+        "pyproject.toml",
+        "uv.lock",
+    ],
+)
+def test_native_routed_python_paths_trigger_rust_probe(path: str) -> None:
+    detect_changed_areas = _load_script_module("detect_changed_areas")
+
+    assert detect_changed_areas._matches(path, detect_changed_areas.FILTERS["rust"])

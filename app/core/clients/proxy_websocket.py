@@ -189,6 +189,7 @@ class UpstreamWebSocketMessage:
     data: bytes | None = None
     close_code: int | None = None
     close_reason: str | None = None
+    close_frame_received: bool = False
     error: str | None = None
     error_code: str | None = None
     transport_ended: bool = False
@@ -449,6 +450,7 @@ class NativeUpstreamWebSocket:
             data=message.data,
             close_code=message.close_code,
             close_reason=message.close_reason,
+            close_frame_received=message.close_frame_received,
             transport_ended=message.kind == "close",
         )
 

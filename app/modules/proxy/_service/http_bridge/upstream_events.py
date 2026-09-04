@@ -2302,7 +2302,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                 account_neutral_transport_drop = (
                     (message.kind == "close" or (message.kind == "error" and message.transport_ended))
                     and not account_neutral
-                    and _is_account_neutral_transport_drop(message.close_code)
+                    and _is_account_neutral_transport_drop(
+                        message.close_code,
+                        close_frame_received=message.close_frame_received,
+                    )
                 )
                 async with session.lifecycle_lock:
                     if (

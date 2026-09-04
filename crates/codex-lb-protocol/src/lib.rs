@@ -109,6 +109,7 @@ pub enum NativeEvent {
         request_id: String,
         code: Option<u16>,
         reason: Option<String>,
+        close_frame_received: bool,
     },
     WebsocketError {
         request_id: String,

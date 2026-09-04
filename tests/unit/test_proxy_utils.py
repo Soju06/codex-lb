@@ -44817,12 +44817,14 @@ def test_classify_upstream_close_clean_for_clean_close_before_any_response_event
 
 def test_account_neutral_transport_drop_requires_no_upstream_close_frame():
     assert proxy_service._is_account_neutral_transport_drop(None) is True
+    assert proxy_service._is_account_neutral_transport_drop(None, close_frame_received=True) is False
     assert proxy_service._is_account_neutral_transport_drop(1000) is False
     assert proxy_service._is_account_neutral_transport_drop(1008) is False
     assert proxy_service._is_account_neutral_transport_drop(1011) is False
     # RFC 6455 reserves 1006: it never travels in an actual close frame, so a
     # synthesized abnormal-closure code counts as frame-less.
     assert proxy_service._is_account_neutral_transport_drop(1006) is True
+    assert proxy_service._is_account_neutral_transport_drop(1006, close_frame_received=True) is False
 
 
 @pytest.mark.asyncio

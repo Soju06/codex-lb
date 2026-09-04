@@ -29174,6 +29174,56 @@ async def test_http_bridge_abrupt_drop_after_response_events_stays_account_neutr
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_empty_close_frame_after_response_events_penalizes_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-empty-close-frame",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+    )
+    request_state.response_event_count = 3
+    request_state.upstream_model_output_seen = True
+    request_state.downstream_visible = True
+    session = _make_bridge_session(
+        key_value="bridge-empty-close-frame",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(
+                return_value=UpstreamWebSocketMessage(
+                    kind="close",
+                    close_code=None,
+                    close_frame_received=True,
+                    transport_ended=True,
+                )
+            ),
+            close=AsyncMock(),
+        ),
+    )
+    fail_pending = AsyncMock(return_value=True)
+    retry_precreated = AsyncMock(return_value=False)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    assert fail_pending.await_args is not None
+    assert fail_pending.await_args.kwargs["penalize_account"] is True
+    assert fail_pending.await_args.kwargs.get("account_neutral_transport_drop", False) is False
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_non_clean_close_frame_before_response_still_penalizes_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

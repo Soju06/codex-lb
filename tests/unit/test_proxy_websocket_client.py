@@ -322,12 +322,13 @@ async def test_native_direct_adapter_classifies_helper_pong_timeout() -> None:
 async def test_native_direct_adapter_marks_peer_close_as_transport_ended() -> None:
     class NativeConnection(_FakeNativeWebSocket):
         async def receive(self) -> NativeWebSocketMessage:
-            return NativeWebSocketMessage(kind="close", close_code=1006)
+            return NativeWebSocketMessage(kind="close", close_code=None, close_frame_received=True)
 
     message = await NativeUpstreamWebSocket(cast(Any, NativeConnection())).receive()
 
     assert message.kind == "close"
-    assert message.close_code == 1006
+    assert message.close_code is None
+    assert message.close_frame_received is True
     assert message.transport_ended is True
 
 

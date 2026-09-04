@@ -487,6 +487,8 @@ def _classify_upstream_close(
 
 def _is_account_neutral_transport_drop(
     close_code: int | None,
+    *,
+    close_frame_received: bool = False,
 ) -> bool:
     """Return whether an upstream websocket ending is account-neutral evidence.
 
@@ -503,7 +505,7 @@ def _is_account_neutral_transport_drop(
     abnormal CLOSED), so it counts as frame-less here.
     """
 
-    return close_code in (None, 1006)
+    return not close_frame_received and close_code in (None, 1006)
 
 
 def _should_infer_upstream_status_from_proxy_error(exc: ProxyResponseError, upstream_error_code: str | None) -> bool:

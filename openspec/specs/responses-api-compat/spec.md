@@ -340,14 +340,17 @@ pending requests, except when the close carries a classified process-wide
 network failure or upstream WebSocket liveness timeout, is a clean close
 (`close_code = 1000`) before any `response.*` event, carries the classified
 per-socket `upstream_keepalive_timeout` transport error, or is a terminal HTTP
-bridge close/error with no upstream-authored close frame (`close_code` is absent
-or the adapter-synthesized RFC 6455 code `1006`). A frame-less terminal HTTP
-bridge ending MUST remain account-neutral regardless of response-event count or
+bridge close/error for which the adapter positively reports that no
+upstream-authored close frame was observed (`close_code` is absent or the
+adapter-synthesized RFC 6455 code `1006`). A frame-less terminal HTTP bridge
+ending MUST remain account-neutral regardless of response-event count or
 buffered model-output progress. Unless an existing bounded pre-created recovery
 succeeds, it MUST still fail the interrupted request as `stream_incomplete`.
 For an error-kind message, the proxy MUST require positive adapter provenance
-that the transport ended; protocol errors without that provenance MUST retain
-their existing account-health treatment.
+that the transport ended; for close-kind messages with an absent close code, it
+MUST require positive adapter provenance that no close frame was received.
+Protocol errors or upstream-authored empty close frames without that provenance
+MUST retain their existing account-health treatment.
 It MUST NOT make a post-output request eligible for transparent redispatch, and
 an operation with response events or buffered model output MUST remain
 acknowledged rather than recoverable. Only a frame-less drop with zero response events and no

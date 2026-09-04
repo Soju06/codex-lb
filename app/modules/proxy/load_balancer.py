@@ -2482,14 +2482,7 @@ def _state_from_account(
             primary_entry=primary_entry,
             long_window_entry=effective_secondary_entry,
         )
-        # One healthy window must not conceal exhaustion in another applicable
-        # window; at least one window must also have supplied actual evidence.
-        all_quota_windows_available = (
-            (primary_used is None or float(primary_used) < 100.0)
-            and (secondary_used is None or float(secondary_used) < 100.0)
-            and (primary_used is not None or secondary_used is not None)
-        )
-        rejected_reset_recovery_evidence = all_quota_windows_available and _usage_entry_is_recent_available(
+        rejected_reset_recovery_evidence = quota_available and _usage_entry_is_recent_available(
             rejected_reset_freshness_entry
         )
         if effective_blocked_at is not None:

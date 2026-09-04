@@ -3605,6 +3605,55 @@ def test_state_from_account_rejected_reset_requires_all_quota_windows_available(
     assert state.reset_at == 15_023_672_358.0
 
 
+@pytest.mark.parametrize(
+    "plan_type, primary_used, secondary_used, credits_balance",
+    [
+        ("free", 100.0, 10.0, None),
+        (None, 10.0, 100.0, 25.0),
+    ],
+    ids=["free-synthetic-primary", "credits-available-secondary"],
+)
+def test_state_from_account_rejected_reset_uses_normalized_quota_availability(
+    monkeypatch, plan_type, primary_used, secondary_used, credits_balance
+):
+    now = 1_700_000_000.0
+    blocked = now - 130.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=15_023_672_358,
+        blocked_at=int(blocked),
+        plan_type=plan_type,
+    )
+    primary = _make_test_usage(
+        window="primary",
+        used_percent=primary_used,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+        credits_balance=credits_balance,
+    )
+    secondary = _make_test_usage(
+        window="monthly" if plan_type == "free" else "secondary",
+        used_percent=secondary_used,
+        reset_at=int(now + 7 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+        window_minutes=43200 if plan_type == "free" else 10080,
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=primary,
+        secondary_entry=secondary,
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
+
+
 def test_state_from_account_rejected_reset_without_block_recovers_from_fresh_usage(monkeypatch):
     now = 1_700_000_000.0
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)

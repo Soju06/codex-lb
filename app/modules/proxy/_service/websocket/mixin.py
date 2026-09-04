@@ -394,7 +394,6 @@ from app.modules.proxy._service.warmup import (
 )
 from app.modules.proxy._service.websocket.helpers import (
     _app_error_to_websocket_event,
-    _assign_websocket_response_id,
     _bind_websocket_request_dispatch_owner,
     _find_websocket_request_state_by_response_id,
     _forget_websocket_stale_previous_response,
@@ -451,8 +450,8 @@ from app.modules.proxy._service.websocket.helpers import (
 )
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
 from app.modules.proxy._service.websocket.steering import (
+    assign_websocket_created_request_state,
     completed_steering_required_input,
-    continuation_for_created,
     process_websocket_steering_event,
     release_steering_request,
     required_steering_input_is_present,
@@ -5432,6 +5431,11 @@ class _WebSocketMixin:
             )
             return text
         response_id = _websocket_response_id(event, payload)
+        if response_id is not None and response_id in upstream_control.suppressed_steering_response_ids:
+            upstream_control.suppress_downstream_event = True
+            if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                upstream_control.suppressed_steering_response_ids.discard(response_id)
+            return text
         error_message = _websocket_event_error_message(event_type, payload)
         is_typeless_error_event = (
             isinstance(payload, dict)
@@ -5486,20 +5490,15 @@ class _WebSocketMixin:
             has_other_pending_requests = False
             grouped_previous_response_request_states: list[_WebSocketRequestState] = []
             if event_type == "response.created":
-                continuation = continuation_for_created(payload, upstream_control)
-                if continuation is not None and continuation.request_state in pending_requests:
-                    request_state = continuation.request_state
-                    continuation.parent.steering_continuation_started = True
-                    request_state.response_id = response_id
-                    if request_state.request_text is not None:
-                        if request_state.steering_configuration is None:
-                            request_state.steering_configuration = json.loads(request_state.request_text)
-                        request_state.request_text = None
-                        request_state.fresh_upstream_request_text = None
-                        request_state.fresh_upstream_request_is_retry_safe = False
-                    upstream_control.steering_continuations.pop(request_state.steering_parent_response_id, None)
-                else:
-                    request_state = _assign_websocket_response_id(pending_requests, response_id)
+                request_state = assign_websocket_created_request_state(
+                    payload,
+                    response_id=response_id,
+                    control=upstream_control,
+                    pending_requests=pending_requests,
+                )
+                if response_id is not None and response_id in upstream_control.suppressed_steering_response_ids:
+                    upstream_control.suppress_downstream_event = True
+                    return text
                 created_request_state = request_state
                 release_create_gate = request_state is not None
             elif response_id is not None:

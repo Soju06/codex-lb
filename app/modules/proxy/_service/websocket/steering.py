@@ -26,7 +26,10 @@ from app.modules.proxy._service.support import (
     _WebSocketSteerSubmission,
     _WebSocketUpstreamControl,
 )
-from app.modules.proxy._service.websocket.helpers import _release_websocket_response_create_gate
+from app.modules.proxy._service.websocket.helpers import (
+    _assign_websocket_response_id,
+    _release_websocket_response_create_gate,
+)
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.request_policy import (
@@ -64,8 +67,8 @@ def validate_steering_input(payload: Mapping[str, JsonValue]) -> tuple[str, list
         for part in content:
             if not isinstance(part, dict) or part.get("type") not in {"input_text", "input_image", "input_file"}:
                 raise steering_error("invalid_input", "Unsupported steering content type.")
-            if part["type"] == "input_text" and not isinstance(part.get("text"), str):
-                raise steering_error("invalid_input", "Steering text requires a text string.")
+            if part["type"] == "input_text" and (not isinstance(part.get("text"), str) or not part["text"]):
+                raise steering_error("invalid_input", "Steering text requires a nonempty text string.")
             if part["type"] == "input_image" and not any(
                 isinstance(part.get(key), str) and part.get(key) for key in ("file_id", "image_url")
             ):
@@ -85,6 +88,8 @@ def steering_parent(
 ) -> _WebSocketRequestState:
     continuation = control.steering_continuations.get(parent_id)
     if continuation is not None:
+        if continuation.request_state not in pending_requests:
+            raise steering_error("response_not_found", "The steering continuation is no longer active.")
         if len(continuation.submissions) >= _MAX_QUEUED_STEERS:
             raise steering_error(
                 "too_many_pending_steers", "Wait for queued steering to be applied before submitting more."
@@ -145,6 +150,33 @@ def continuation_for_created(
     response = payload.get("response") if payload is not None else None
     parent_id = response.get("previous_response_id") if isinstance(response, dict) else None
     return control.steering_continuations.get(parent_id) if isinstance(parent_id, str) else None
+
+
+def assign_websocket_created_request_state(
+    payload: dict[str, JsonValue] | None,
+    *,
+    response_id: str | None,
+    control: _WebSocketUpstreamControl,
+    pending_requests: deque[_WebSocketRequestState],
+) -> _WebSocketRequestState | None:
+    continuation = continuation_for_created(payload, control)
+    if continuation is None:
+        return _assign_websocket_response_id(pending_requests, response_id)
+    request_state = continuation.request_state
+    if request_state not in pending_requests:
+        if response_id is not None:
+            control.suppressed_steering_response_ids.add(response_id)
+        return None
+    continuation.parent.steering_continuation_started = True
+    request_state.response_id = response_id
+    if request_state.request_text is not None:
+        if request_state.steering_configuration is None:
+            request_state.steering_configuration = json.loads(request_state.request_text)
+        request_state.request_text = None
+        request_state.fresh_upstream_request_text = None
+        request_state.fresh_upstream_request_is_retry_safe = False
+    control.steering_continuations.pop(request_state.steering_parent_response_id, None)
+    return request_state
 
 
 def steering_failure_payload(payload: Mapping[str, JsonValue], exc: ProxyResponseError) -> dict[str, JsonValue]:
@@ -346,7 +378,7 @@ async def submit_websocket_steering(
         parent.request_text = None
         parent.fresh_upstream_request_text = None
         parent.fresh_upstream_request_is_retry_safe = False
-    submission = _WebSocketSteerSubmission(input=payload.get("input"))
+    submission = _WebSocketSteerSubmission(input=payload.get("input"), wire_bytes=wire_bytes)
     continuation.submissions.append(submission)
     continuation.queued_input_bytes += wire_bytes
     try:
@@ -404,6 +436,7 @@ async def process_websocket_steering_event(
                 continuation.required_input = required
         elif event_type == "response.steer.failed":
             continuation.submissions.remove(submission)
+            continuation.queued_input_bytes -= submission.wire_bytes
             if not continuation.submissions:
                 control.steering_continuations.pop(parent_id, None)
                 if continuation.explicit_request_prepared:

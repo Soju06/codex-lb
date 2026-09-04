@@ -273,6 +273,10 @@ steers for one parent share one successor lifecycle. The original steered respon
 and the successor each settle their own usage. A client can return required tool
 results immediately after completion without waiting for steer.pending. Ambiguous
 sends and disconnections retire steering state; queued corrections are not replayed.
+A successor whose known continuation is temporarily absent or expired cannot
+claim an unrelated queued create. Rejected submissions release their exact
+contribution to the queued byte budget; structured empty text is rejected before
+admission.
 
 Configuration updates are validated after source selection and again at the final
 subscription anchor boundary. Explicit compaction_trigger stays on /responses

@@ -5777,6 +5777,22 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 - **WHEN** a steering request is invalid, unknown, or upstream reports response.steer.failed
 - **THEN** the failure is returned without assigning its lifecycle to an unrelated queued create or charging usage twice
 
+#### Scenario: A late successor does not consume unrelated admission
+- **GIVEN** a known steering continuation no longer has a pending request state after expiry or during explicit replacement
+- **WHEN** its late response.created event names the original parent
+- **THEN** the event is not assigned through the generic create queue
+- **AND** unrelated request identity, usage ownership and create admission remain unchanged
+
+#### Scenario: A rejected submission releases its queued byte budget
+- **GIVEN** multiple steering submissions share one continuation
+- **WHEN** upstream rejects one submission
+- **THEN** the queued byte count excludes the rejected submission
+- **AND** a subsequent valid submission can use the released capacity
+
+#### Scenario: Empty structured text is rejected before steering admission
+- **WHEN** a steering user message contains an input_text part with an empty text string
+- **THEN** the proxy returns invalid_input before creating or reserving a continuation
+
 ### Requirement: Astra configuration updates preserve compatible history
 For subscription-backed Astra, the proxy SHALL preserve supported configuration_update input items and normalize client-plane ultra to max. It SHALL reject unsupported reasoning values and invalid adjacent updates before upstream work. Histories with configuration updates SHALL reject automatic compaction, automatic truncation, and the standalone compact endpoint. Normal request-level reasoning SHALL remain unchanged by a valid input update. Explicit terminal compaction_trigger items combined with configuration updates SHALL remain on the Responses endpoint instead of being converted to a standalone compact request. Astra-specific model restrictions SHALL NOT be applied to externally configured model sources sharing the same model ID.
 

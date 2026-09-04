@@ -3975,7 +3975,7 @@ async def test_proxy_stream_usage_limit_returns_http_error(async_client, monkeyp
     # unhealthy. Keep the test on the single-candidate branch so PostgreSQL CI
     # does not spend the probe budget on an intentionally absent failover target.
     # Full-suite PostgreSQL runs can spend several seconds persisting the
-    # RATE_LIMITED state before the stream raises the startup error.
+    # QUOTA_EXCEEDED state before the stream raises the startup error.
     monkeypatch.setattr(proxy_module, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
     monkeypatch.setattr(proxy_api_module, "_STREAM_STARTUP_ERROR_PROBE_SECONDS", 30.0)
 
@@ -3990,4 +3990,4 @@ async def test_proxy_stream_usage_limit_returns_http_error(async_client, monkeyp
     async with SessionLocal() as session:
         acc = await session.get(Account, expected_account_id)
         assert acc is not None
-        assert acc.status == AccountStatus.RATE_LIMITED
+        assert acc.status == AccountStatus.QUOTA_EXCEEDED

@@ -590,6 +590,65 @@ async def test_native_websocket_routes_frames_and_send_acknowledgements(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_native_websocket_delivers_event_burst_beyond_former_queue_limit(tmp_path: Path) -> None:
+    helper = tmp_path / "native-helper"
+    _write_helper(
+        helper,
+        """#!/usr/bin/env python3
+import json
+import sys
+
+for line in sys.stdin:
+    command = json.loads(line)
+    request_id = command["request_id"]
+    if command["type"] == "websocket_connect":
+        print(json.dumps({
+            "type": "websocket_open", "request_id": request_id,
+            "status": 101, "headers": [],
+        }), flush=True)
+        for index in range(128):
+            print(json.dumps({
+                "type": "websocket_sent", "request_id": request_id,
+                "command_id": "burst:" + str(index),
+            }), flush=True)
+        print(json.dumps({
+            "type": "websocket_text", "request_id": request_id,
+            "text": "after-burst",
+        }), flush=True)
+    elif command["type"] == "websocket_close":
+        print(json.dumps({
+            "type": "websocket_sent", "request_id": request_id,
+            "command_id": command["command_id"],
+        }), flush=True)
+        print(json.dumps({
+            "type": "websocket_close", "request_id": request_id,
+            "code": command["code"], "reason": command["reason"],
+        }), flush=True)
+    elif command["type"] == "cancel":
+        print(json.dumps({"type": "cancelled", "request_id": request_id}), flush=True)
+""",
+    )
+    client = SubprocessNativeEgressClient(helper)
+    websocket = await client.websocket(
+        NativeWebSocketRequest(
+            url="wss://example.test/codex/responses",
+            headers={},
+            connect_timeout_seconds=2,
+            max_message_bytes=1024,
+        )
+    )
+
+    assert websocket._events.maxsize == 0
+    assert websocket._messages.maxsize == 64
+    assert await asyncio.wait_for(websocket.receive(), timeout=2.0) == NativeWebSocketMessage(
+        kind="text",
+        text="after-burst",
+    )
+    await websocket.close()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_native_websocket_close_is_idempotent_after_peer_close_race(tmp_path: Path) -> None:
     helper = tmp_path / "native-helper"
     _write_helper(

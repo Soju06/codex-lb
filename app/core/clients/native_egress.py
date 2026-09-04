@@ -30,7 +30,6 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
     }
 )
 _NATIVE_EVENT_LINE_LIMIT = 24 * 1024 * 1024
-_NATIVE_STREAM_QUEUE_LIMIT = 64
 _NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT = 64
 _NATIVE_CANCEL_TIMEOUT_SECONDS = 2.0
 _NATIVE_WEBSOCKET_COMMAND_TIMEOUT_SECONDS = 30.0
@@ -586,7 +585,7 @@ class SubprocessNativeEgressClient:
         process, generation = await self._ensure_process()
         self._request_sequence += 1
         request_id = f"{generation}:{self._request_sequence}"
-        events: asyncio.Queue[dict[str, object] | BaseException] = asyncio.Queue(maxsize=_NATIVE_STREAM_QUEUE_LIMIT)
+        events: asyncio.Queue[dict[str, object] | BaseException] = asyncio.Queue()
         self._streams[request_id] = (generation, events)
         try:
             await self._send_command(

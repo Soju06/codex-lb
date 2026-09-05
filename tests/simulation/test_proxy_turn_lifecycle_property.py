@@ -27,11 +27,14 @@ model of them:
   ``_detach_http_bridge_request``, which settles a request still in pending
   ownership and must leave one already claimed by the terminal path alone.
 * ``settlement_cancel`` is a real ``task.cancel()`` delivered into the
-  terminal bookkeeping *after* the production claim, a seeded number of loop
-  turns later, so it lands on different awaits of the claim-to-finalize
-  window. Production then has to settle the claimed request through the
+  terminal bookkeeping *after* the production claim, at a seeded virtual
+  offset (zero, inside the account-lease release, inside the reservation
+  write, after the settlement transfer) plus a seeded number of loop turns,
+  so it lands on different awaits of the claim-to-finalize window and
+  beyond it. Production then has to settle the claimed request through the
   shielded abort path (``_settle_aborted_http_bridge_terminal_states``,
-  issue #1594) or finish the deferred release it was in.
+  issue #1594), finish the deferred release it was in, or leave an already
+  transferred settlement alone.
 * ``retry_request`` runs ``_retry_http_bridge_precreated_request`` once the
   request has left pending ownership; the production ownership guard is what
   must reject it.
@@ -70,7 +73,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import random
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Literal, Protocol, cast
@@ -112,6 +115,12 @@ _STEP_DELAYS: tuple[float, ...] = (0.0, 0.0, 0.05, 0.1)
 # Loop turns a settlement cancel or a retry waits after the production claim
 # before acting, so it lands on different awaits of the bookkeeping.
 _SETTLEMENT_YIELDS: tuple[int, ...] = (0, 0, 1, 2, 3, 5, 8)
+# Virtual seconds a settlement cancel waits after the claim before the loop
+# turns above. Loop turns alone always land before the first modelled write
+# completes, so these offsets reach the account-lease release (0..0.01 under
+# the default latency), the reservation write (0.01..0.02) and the window after
+# the settlement transfer (0.02+); the coverage test proves each is reached.
+_SETTLEMENT_CANCEL_OFFSETS: tuple[float, ...] = (0.0, 0.0, 0.005, 0.015, 0.025)
 _SCHEDULE_COUNT = 200
 _MAX_EXTRA_EVENTS = 3
 _ADVANCE_SECONDS = 0.05
@@ -124,20 +133,23 @@ class _ReleaseLatency:
     """Virtual durations of the modelled DB writes.
 
     ``reservation_write`` is the API-key reservation settlement/release round
-    trip, ``account_lease_release`` the account create-lease release. The
+    trip, ``account_lease_release`` the account create-lease release and
+    ``health_write`` the load balancer's post-settlement success write. The
     writes suspend on a virtual timer so a settlement cancel can land inside
-    them; several profiles are checked because which write finishes first
-    decides which production path reads a still-set reservation.
+    them (and, through the health write, after the settlement transfer);
+    several profiles are checked because which write finishes first decides
+    which production path reads a still-set reservation.
     """
 
     reservation_write: float
     account_lease_release: float
+    health_write: float = 0.01
 
 
 _DEFAULT_LATENCY = _ReleaseLatency(reservation_write=0.01, account_lease_release=0.01)
 _LATENCY_PROFILES: dict[str, _ReleaseLatency] = {
     "uniform-10ms": _DEFAULT_LATENCY,
-    "uniform-30ms": _ReleaseLatency(reservation_write=0.03, account_lease_release=0.03),
+    "uniform-30ms": _ReleaseLatency(reservation_write=0.03, account_lease_release=0.03, health_write=0.03),
     "reservation-slower": _ReleaseLatency(reservation_write=0.02, account_lease_release=0.01),
     "account-lease-slower": _ReleaseLatency(reservation_write=0.01, account_lease_release=0.02),
 }
@@ -145,8 +157,10 @@ _LATENCY_PROFILES: dict[str, _ReleaseLatency] = {
 # anonymous match and the request stays retryable-looking until finalization.
 _COMPLETED_TERMINAL_TEXT = '{"type":"response.completed","response":{"object":"response","status":"completed"}}'
 
-ScheduleStep = tuple[ScheduleEvent, float, int]
+# (event, virtual wake-up delay, post-claim loop turns, post-claim virtual offset)
+ScheduleStep = tuple[ScheduleEvent, float, int, float]
 Schedule = tuple[ScheduleStep, ...]
+CancelLanding = Literal["before_settlement", "inside_reservation_write", "after_settlement"]
 
 # Set by the recording service around each production settlement path so a
 # reservation release can be attributed to the path that performed it. Tasks
@@ -159,7 +173,7 @@ _settlement_path: contextvars.ContextVar[SettlementPath] = contextvars.ContextVa
 class _BridgeTurn(Protocol):
     async def start(self) -> None: ...
 
-    async def dispatch(self, event: ScheduleEvent, delay: float, yields: int) -> None: ...
+    async def dispatch(self, event: ScheduleEvent, delay: float, yields: int, cancel_offset: float) -> None: ...
 
     def snapshot(self) -> "_TurnSnapshot": ...
 
@@ -171,6 +185,7 @@ class _TurnSnapshot:
     reservation_settlements: tuple[SettlementPath, ...]
     redundant_reservation_releases: tuple[SettlementPath, ...]
     interrupted_reservation_writes: int
+    cancel_landings: tuple[CancelLanding, ...]
     finalizations: int
     abort_settlements: int
     response_create_releases: int
@@ -251,7 +266,11 @@ class _RecordingProxyService(proxy_service.ProxyService):
         self._load_balancer.record_success = self._record_account_success
 
     async def _record_account_success(self, account: Any) -> None:
+        # The load balancer's success write is the finalizer's first suspension
+        # after the settlement transfer; giving it a round trip is what lets a
+        # cancellation land on the post-settlement guards.
         del account
+        await self._scheduler.sleep(self.latency.health_write)
         self.account_successes += 1
 
     async def _write_reservation(self, reservation: ApiKeyUsageReservationData, path: SettlementPath) -> None:
@@ -381,6 +400,7 @@ class _ProductionBridgeTurn:
         self.terminal_attempts = 0
         self.terminal_cancellations = 0
         self.settlement_cancel_attempts = 0
+        self.cancel_landings: list[CancelLanding] = []
         self.admission_waiters = 0
         self.admission_waiters_admitted = 0
         self.retry_sends = 0
@@ -486,11 +506,11 @@ class _ProductionBridgeTurn:
     async def _close_upstream(self) -> None:
         self.upstream_closes += 1
 
-    async def dispatch(self, event: ScheduleEvent, delay: float, yields: int) -> None:
+    async def dispatch(self, event: ScheduleEvent, delay: float, yields: int, cancel_offset: float) -> None:
         await self.scheduler.sleep(delay)
-        await self.handle(event, yields)
+        await self.handle(event, yields, cancel_offset)
 
-    async def handle(self, event: ScheduleEvent, yields: int) -> None:
+    async def handle(self, event: ScheduleEvent, yields: int, cancel_offset: float) -> None:
         if event == "admission_wait":
             await self._wait_for_admission()
         elif event == "upstream_terminal":
@@ -498,7 +518,7 @@ class _ProductionBridgeTurn:
         elif event == "downstream_cancel":
             await self._detach_downstream()
         elif event == "settlement_cancel":
-            await self._cancel_in_flight_settlement(yields)
+            await self._cancel_in_flight_settlement(yields, cancel_offset)
         else:
             await self._retry_after_claim(yields)
 
@@ -537,17 +557,23 @@ class _ProductionBridgeTurn:
             await self.service._detach_http_bridge_request(self.session, request_state=self.request_state)
         )
 
-    async def _cancel_in_flight_settlement(self, yields: int) -> None:
+    async def _cancel_in_flight_settlement(self, yields: int, cancel_offset: float) -> None:
         """Deliver a real cancellation into terminal bookkeeping after the claim.
 
         The claim is production's ownership transfer (issue #1594): from here
         on only the bookkeeping continuation can settle the reservation, so a
         cancellation landing anywhere between the claim and finalization must
-        be survived by the shielded abort path or the deferred releases.
+        be survived by the shielded abort path or the deferred releases, and
+        one landing after the settlement transfer must leave the settled
+        reservation alone. The virtual offset is what reaches the release and
+        post-settlement windows: loop turns alone always land before the first
+        modelled write completes.
         """
 
         self.settlement_cancel_attempts += 1
         await self._wait_until_claimed()
+        if cancel_offset > 0:
+            await self.scheduler.sleep(cancel_offset)
         for _ in range(yields):
             await asyncio.sleep(0)
         # One raw cancellation per bookkeeping task, which is the contract the
@@ -558,8 +584,18 @@ class _ProductionBridgeTurn:
         for task in sorted(self._terminal_tasks, key=lambda candidate: candidate.get_name()):
             if not task.done() and task not in self._schedule_cancelled:
                 self._schedule_cancelled.add(task)
+                self.cancel_landings.append(self._classify_cancel_landing())
                 task.cancel()
                 return
+
+    def _classify_cancel_landing(self) -> CancelLanding:
+        """Where the cancellation lands relative to the reservation settlement, from product state."""
+
+        if self.service.reservation_settlements:
+            return "after_settlement"
+        if self.service.reservation_writes_in_flight:
+            return "inside_reservation_write"
+        return "before_settlement"
 
     async def _retry_after_claim(self, yields: int) -> None:
         """Drive the real retry owner check once ownership moved.
@@ -600,6 +636,7 @@ class _ProductionBridgeTurn:
             reservation_settlements=tuple(self.service.reservation_settlements),
             redundant_reservation_releases=tuple(self.service.redundant_reservation_releases),
             interrupted_reservation_writes=self.service.interrupted_reservation_writes,
+            cancel_landings=tuple(self.cancel_landings),
             finalizations=self.service.finalizations,
             abort_settlements=self.service.abort_settlements,
             response_create_releases=0 if lease is None else lease.release_count,
@@ -766,7 +803,8 @@ def _schedule_for_seed(seed: int) -> Schedule:
 
     Every schedule contains all five lifecycle events at least once (so a
     terminal and a settlement cancel always arrive), plus up to three repeats,
-    each with its own virtual wake-up delay and post-claim yield count.
+    each with its own virtual wake-up delay, post-claim yield count and
+    post-claim virtual offset.
     """
 
     rng = random.Random(seed)
@@ -774,7 +812,10 @@ def _schedule_for_seed(seed: int) -> Schedule:
     rng.shuffle(events)
     for _ in range(rng.randint(0, _MAX_EXTRA_EVENTS)):
         events.insert(rng.randrange(len(events) + 1), rng.choice(_EVENTS))
-    return tuple((event, rng.choice(_STEP_DELAYS), rng.choice(_SETTLEMENT_YIELDS)) for event in events)
+    return tuple(
+        (event, rng.choice(_STEP_DELAYS), rng.choice(_SETTLEMENT_YIELDS), rng.choice(_SETTLEMENT_CANCEL_OFFSETS))
+        for event in events
+    )
 
 
 def _assert_bridge_turn_invariants(turn: _BridgeTurn, *, seed: int, schedule: Schedule) -> None:
@@ -786,8 +827,8 @@ def _assert_bridge_turn_invariants(turn: _BridgeTurn, *, seed: int, schedule: Sc
         # leading marker rather than on a field name anywhere in the message.
         return f"violated={invariant} {context}"
 
-    expected_terminal_attempts = sum(event == "upstream_terminal" for event, _delay, _yields in schedule)
-    expected_retry_attempts = sum(event == "retry_request" for event, _delay, _yields in schedule)
+    expected_terminal_attempts = sum(event == "upstream_terminal" for event, _delay, _yields, _offset in schedule)
+    expected_retry_attempts = sum(event == "retry_request" for event, _delay, _yields, _offset in schedule)
     # Exactly one production path settled the API-key reservation: the
     # finalizer, the downstream detach backstop or the shielded abort path.
     # "Settled" is the effective compare-and-set flip the recording service
@@ -795,6 +836,14 @@ def _assert_bridge_turn_invariants(turn: _BridgeTurn, *, seed: int, schedule: Sc
     # are reported separately (``redundant_reservation_releases``) and pinned
     # by ``test_bridge_turn_lifecycle_settles_reservation_with_a_single_write``.
     assert len(snapshot.reservation_settlements) == 1, violated("terminal_outcomes")
+    # Settlement transfer is exclusive: once the finalizer settled the
+    # reservation (or handed it to the detached settlement write and cleared
+    # the claim), the shielded abort path must find no claim and leave the
+    # reservation alone. This is what the post-settlement guards implement;
+    # the detach backstop is deliberately not held to it (known-failing pin).
+    assert not (
+        snapshot.reservation_settlements == ("finalize",) and "abort" in snapshot.redundant_reservation_releases
+    ), violated("abort_after_transfer")
     assert snapshot.finalizations <= 1, violated("finalizations")
     assert snapshot.response_create_releases == 1, violated("response_create_releases")
     assert snapshot.account_releases == 1, violated("account_releases")
@@ -820,8 +869,8 @@ def _assert_bridge_turn_invariants(turn: _BridgeTurn, *, seed: int, schedule: Sc
 async def _run_schedule(turn: _BridgeTurn, schedule: Schedule, scheduler: VirtualScheduler) -> None:
     await turn.start()
     tasks = [
-        scheduler.create_task(turn.dispatch(event, delay, yields), name=f"turn-{index}-{event}")
-        for index, (event, delay, yields) in enumerate(schedule)
+        scheduler.create_task(turn.dispatch(event, delay, yields, cancel_offset), name=f"turn-{index}-{event}")
+        for index, (event, delay, yields, cancel_offset) in enumerate(schedule)
     ]
     await scheduler.drain()
     for _ in range(_ADVANCE_STEPS):
@@ -916,6 +965,16 @@ async def test_bridge_turn_lifecycle_schedules_exercise_every_settlement_path_an
         snapshot.terminal_cancellations > 0 and snapshot.finalizations == 1 for snapshot in snapshots
     )
     assert cancelled_inside_finalizer >= _SCHEDULE_COUNT // 10, cancelled_inside_finalizer
+    # The cancellation reaches every window of the settlement, not only the
+    # gate/lease release before the first write: inside a reservation write
+    # (production's raw cancel cuts through the anyio shield there) and after
+    # the settlement transfer, where the post-settlement guards are what keep
+    # the abort path from settling again.
+    landings = Counter(landing for snapshot in snapshots for landing in snapshot.cancel_landings)
+    assert landings["before_settlement"] >= _SCHEDULE_COUNT // 10, landings
+    assert landings["inside_reservation_write"] >= _SCHEDULE_COUNT // 20, landings
+    assert landings["after_settlement"] >= _SCHEDULE_COUNT // 20, landings
+    assert sum(snapshot.interrupted_reservation_writes for snapshot in snapshots) >= _SCHEDULE_COUNT // 20
     assert any(snapshot.retry_results for snapshot in snapshots)
     assert any(snapshot.admission_waiters_admitted > 1 for snapshot in snapshots)
 
@@ -927,7 +986,7 @@ async def test_bridge_turn_lifecycle_schedule_set_is_large_and_varied() -> None:
     assert len(schedules) >= 200
     assert len(set(schedules)) >= 150, "the seeded schedules collapse onto too few interleavings"
     for schedule in schedules:
-        events = [event for event, _delay, _yields in schedule]
+        events = [event for event, _delay, _yields, _offset in schedule]
         assert set(_EVENTS).issubset(events)
 
 

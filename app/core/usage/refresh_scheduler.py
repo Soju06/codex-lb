@@ -538,7 +538,7 @@ def _select_long_window_entry(
 ) -> UsageHistory | None:
     capacity_plan = (
         resolve_capacity_plan_type(account.plan_type)
-        if account.status in _RECOVERABLE_ACCOUNT_STATUSES
+        if account.status == AccountStatus.RATE_LIMITED
         else account.plan_type
     )
     if monthly_entry is not None and capacity_for_plan(capacity_plan, "monthly") is not None:

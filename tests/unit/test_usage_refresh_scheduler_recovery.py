@@ -1206,10 +1206,11 @@ async def test_reconcile_allows_elapsed_reset_when_secondary_is_exhausted(
     assert account.blocked_at is None
 
 
-def test_select_long_window_entry_preserves_active_alias_advisory_behavior() -> None:
-    account = _make_account("acc_active_guest", plan_type="guest", status=AccountStatus.ACTIVE)
+@pytest.mark.parametrize("status", [AccountStatus.ACTIVE, AccountStatus.QUOTA_EXCEEDED])
+def test_select_long_window_entry_preserves_non_rate_limited_alias_behavior(status: AccountStatus) -> None:
+    account = _make_account("acc_guest", plan_type="guest", status=status)
     monthly = _make_usage(
-        "acc_active_guest",
+        account.id,
         window="monthly",
         used_percent=10.0,
         reset_at=1_700_100_000,
@@ -1217,7 +1218,7 @@ def test_select_long_window_entry_preserves_active_alias_advisory_behavior() -> 
         window_minutes=43_200,
     )
     secondary = _make_usage(
-        "acc_active_guest",
+        account.id,
         window="secondary",
         used_percent=20.0,
         reset_at=1_700_100_000,

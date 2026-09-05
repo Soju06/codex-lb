@@ -472,6 +472,7 @@ from app.modules.proxy.capability_routing import (
     reject_capability_signal_outside_response_create,
     strip_capability_metadata,
 )
+from app.modules.proxy.context_dispatch import record_context_dispatch
 from app.modules.proxy.continuity import resolve_required_account_id
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
@@ -2695,8 +2696,15 @@ class _WebSocketMixin:
                                         error_type="server_error",
                                     ),
                                 )
-                            request_state.response_create_sent_at = time.monotonic()
                         with _websocket_archive_request_context(archive_request_id):
+                            if account is not None:
+                                await record_context_dispatch(text_data, api_key, account.id)
+                            if (
+                                request_state is not None
+                                and payload is not None
+                                and _is_websocket_response_create(payload)
+                            ):
+                                request_state.response_create_sent_at = time.monotonic()
                             await upstream.send_text(text_data)
                 except ProxyResponseError as exc:
                     error = _parse_openai_error(exc.payload)
@@ -3920,7 +3928,9 @@ class _WebSocketMixin:
             account is not None
             and request_state.replay_required_account_id is None
             and request_state.request_text is not None
-            and not _facade()._websocket_request_text_is_account_neutral_fresh_replay(request_state.request_text)
+            and not _facade()._websocket_request_text_is_account_neutral_fresh_replay(
+                request_state.request_text, trusted_ciphertexts=request_state.context_ciphertexts
+            )
         ):
             request_state.preferred_account_id = account.id
             request_state.replay_required_account_id = account.id

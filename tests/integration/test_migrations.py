@@ -52,6 +52,20 @@ _STAMPED_AFTER_LEGACY_PREFIX_4 = OLD_TO_NEW_REVISION_MAP["004_add_accounts_chatg
 _STAMPED_AFTER_LEGACY_PREFIX_1 = OLD_TO_NEW_REVISION_MAP["001_normalize_account_plan_types"]
 
 
+async def _omit_context_tables_from_historical_schema() -> None:
+    """Current metadata must not pre-create tables when simulating older revisions."""
+    async with SessionLocal() as session:
+        await session.execute(text("DROP TABLE IF EXISTS codex_context_participants"))
+        await session.execute(text("DROP TABLE IF EXISTS codex_context_sessions"))
+        await session.commit()
+
+
+@pytest.fixture
+async def db_setup(_reset_db_state):
+    await _omit_context_tables_from_historical_schema()
+    return _reset_db_state
+
+
 def _is_postgresql_database_url(url: str) -> bool:
     return url.startswith("postgresql+")
 
@@ -194,6 +208,7 @@ async def test_run_startup_migrations_handles_unknown_legacy_rows(db_setup):
 @pytest.mark.skipif(not _HAS_REVISION_REMAP, reason="requires revision remap support")
 async def test_run_startup_migrations_auto_remaps_legacy_alembic_revision_ids(db_setup):
     await run_startup_migrations(_DATABASE_URL)
+    await _omit_context_tables_from_historical_schema()
 
     legacy_head = "013_add_dashboard_settings_routing_strategy"
     async with SessionLocal() as session:
@@ -213,6 +228,7 @@ async def test_run_startup_migrations_auto_remaps_legacy_alembic_revision_ids(db
 @pytest.mark.skipif(not _HAS_REVISION_REMAP, reason="requires revision remap support")
 async def test_run_startup_migrations_auto_remaps_firewall_legacy_revision_id(db_setup):
     await run_startup_migrations(_DATABASE_URL)
+    await _omit_context_tables_from_historical_schema()
 
     legacy_firewall_revision = "014_add_api_firewall_allowlist"
     async with SessionLocal() as session:
@@ -235,6 +251,7 @@ async def test_run_startup_migrations_auto_remaps_firewall_legacy_revision_id(db
 @pytest.mark.skipif(not _HAS_REVISION_REMAP, reason="requires revision remap support")
 async def test_run_startup_migrations_handles_legacy_schema_table_and_legacy_alembic_id_together(db_setup):
     await run_startup_migrations(_DATABASE_URL)
+    await _omit_context_tables_from_historical_schema()
 
     async with SessionLocal() as session:
         await session.execute(
@@ -304,6 +321,7 @@ async def test_postgresql_upgrade_head_from_empty_database(db_setup):
 )
 async def test_postgresql_startup_migration_auto_remap_legacy_head(db_setup):
     await run_startup_migrations(_DATABASE_URL)
+    await _omit_context_tables_from_historical_schema()
 
     async with SessionLocal() as session:
         await session.execute(
@@ -1946,6 +1964,45 @@ async def test_conversation_presence_rollup_migration_upgrade_and_downgrade(tmp_
 
 
 @pytest.mark.asyncio
+async def test_codex_context_migration_preserves_rows_and_round_trips(db_setup):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    parent = "20260830_000000_add_quota_warmup_claim_expiry"
+    tables = {"codex_context_sessions", "codex_context_participants"}
+    await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("context-preserved", "test@example.com", "plus"))
+        await session.execute(
+            text("INSERT INTO codex_context_sessions VALUES ('00000000-0000-4000-8000-000000000011', 'key', 'owner')")
+        )
+        await session.execute(
+            text("INSERT INTO codex_context_participants VALUES ('00000000-0000-4000-8000-000000000011', 'owner')")
+        )
+        await session.commit()
+    await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+    async with SessionLocal() as session:
+        assert await session.scalar(text("SELECT count(*) FROM codex_context_participants")) == 1
+        assert await session.scalar(text("SELECT owner_account_id FROM codex_context_sessions")) == "owner"
+    await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(_DATABASE_URL), parent))
+    engine = create_async_engine(_DATABASE_URL)
+    try:
+        async with engine.connect() as conn:
+            assert not tables & set(await conn.run_sync(lambda c: sa_inspect(c).get_table_names()))
+        await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+        async with engine.connect() as conn:
+            assert tables <= set(await conn.run_sync(lambda c: sa_inspect(c).get_table_names()))
+        assert not check_schema_drift(_DATABASE_URL)
+        async with SessionLocal() as session:
+            assert await session.get(Account, "context-preserved") is not None
+            assert await session.scalar(text("SELECT count(*) FROM codex_context_sessions")) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_file_account_pins_migration_upgrade_and_downgrade(tmp_path):
     from alembic import command
     from sqlalchemy import inspect as sa_inspect
@@ -2137,5 +2194,38 @@ async def test_http_bridge_event_chunks_migration_preserves_legacy_and_guards_do
             assert (
                 await conn.execute(text("SELECT COUNT(*) FROM http_bridge_operation_event_chunks"))
             ).scalar_one() == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "existing_tables",
+    [
+        ("codex_context_sessions",),
+        ("codex_context_participants",),
+        ("codex_context_sessions", "codex_context_participants"),
+    ],
+)
+async def test_codex_context_migration_rejects_unowned_tables_without_changes(db_setup, existing_tables):
+    from sqlalchemy import inspect as sa_inspect
+
+    parent = "20260830_000000_add_quota_warmup_claim_expiry"
+    await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, parent, bootstrap_legacy=False))
+    async with SessionLocal() as session:
+        for table in existing_tables:
+            await session.execute(text(f"CREATE TABLE {table} (marker TEXT NOT NULL)"))
+            await session.execute(text(f"INSERT INTO {table} (marker) VALUES ('preserve-me')"))
+        await session.commit()
+    with pytest.raises(RuntimeError, match="Refusing to adopt pre-existing context tables"):
+        await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=False))
+    async with SessionLocal() as session:
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == parent
+        for table in existing_tables:
+            assert (await session.scalars(text(f"SELECT marker FROM {table}"))).all() == ["preserve-me"]
+    engine = create_async_engine(_DATABASE_URL)
+    try:
+        async with engine.connect() as conn:
+            tables = set(await conn.run_sync(lambda c: sa_inspect(c).get_table_names()))
+            assert tables & {"codex_context_sessions", "codex_context_participants"} == set(existing_tables)
     finally:
         await engine.dispose()

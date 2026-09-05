@@ -857,8 +857,13 @@ class _CodexControlAdapter(Protocol):
 
 
 class _PassthroughCodexControlAdapter:
-    privacy_policy: Final[CodexControlRequestPrivacyPolicy] = CodexControlRequestPrivacyPolicy.STANDARD
     success_gate: Final[None] = None
+
+    def __init__(
+        self,
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+    ) -> None:
+        self.privacy_policy = privacy_policy
 
     async def finalize(
         self,
@@ -939,6 +944,15 @@ class _RealtimeCallCodexControlAdapter:
 
 
 _PASSTHROUGH_CODEX_CONTROL_ADAPTER = _PassthroughCodexControlAdapter()
+_CONTEXT_CODEX_CONTROL_ADAPTER = _PassthroughCodexControlAdapter(CodexControlRequestPrivacyPolicy.PRIVATE_CONTEXT)
+
+
+def _codex_context_error_response(request: Request, status_code: int) -> JSONResponse:
+    return _logged_error_json_response(
+        request,
+        status_code,
+        openai_error("context_backend_unavailable", "Codex context backend is unavailable", error_type="server_error"),
+    )
 
 
 async def _codex_control_proxy(
@@ -967,10 +981,14 @@ async def _codex_control_proxy(
             success_gate=adapter.success_gate,
         )
     except ProxyResponseError as exc:
+        if adapter.privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_CONTEXT:
+            return _codex_context_error_response(request, exc.status_code)
         if adapter.privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
             return _realtime_call_error_response(request, status_code=exc.status_code)
         return _logged_error_json_response(request, exc.status_code, exc.payload)
     except Exception:
+        if adapter.privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_CONTEXT:
+            return _codex_context_error_response(request, 503)
         if adapter.privacy_policy is not CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
             raise
         logger.warning(
@@ -979,6 +997,49 @@ async def _codex_control_proxy(
         )
         return _realtime_call_error_response(request, status_code=503)
     return await adapter.finalize(request, context, response)
+
+
+@router.post("/alpha/history/v2/list_windows")
+@router.post("/alpha/history/v2/list_windows/", include_in_schema=False)
+@router.post("/alpha/history/v2/list_items")
+@router.post("/alpha/history/v2/list_items/", include_in_schema=False)
+@router.post("/alpha/history/v2/read_item")
+@router.post("/alpha/history/v2/read_item/", include_in_schema=False)
+@router.post("/alpha/history/v2/search_contents")
+@router.post("/alpha/history/v2/search_contents/", include_in_schema=False)
+@router.post("/alpha/notes/v2/thread_hint")
+@router.post("/alpha/notes/v2/thread_hint/", include_in_schema=False)
+@router.post("/alpha/notes/v2/list_files_by_prefix")
+@router.post("/alpha/notes/v2/list_files_by_prefix/", include_in_schema=False)
+@router.post("/alpha/notes/v2/read_file")
+@router.post("/alpha/notes/v2/read_file/", include_in_schema=False)
+@router.post("/alpha/notes/v2/search_contents")
+@router.post("/alpha/notes/v2/search_contents/", include_in_schema=False)
+@router.post("/alpha/notes/v2/append_to_file")
+@router.post("/alpha/notes/v2/append_to_file/", include_in_schema=False)
+@router.post("/alpha/notes/v2/write_file")
+@router.post("/alpha/notes/v2/write_file/", include_in_schema=False)
+async def codex_history_notes(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData = Security(validate_required_proxy_api_key),
+) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
+    try:
+        response = await context.service.codex_context_request(
+            request.url.path.removeprefix("/backend-api/codex/").rstrip("/"),
+            payload=await request.body(),
+            headers=request.headers,
+            query_params=list(request.query_params.multi_items()),
+            api_key=api_key,
+        )
+    except ProxyResponseError as exc:
+        return _codex_context_error_response(request, exc.status_code)
+    except Exception:
+        return _codex_context_error_response(request, 503)
+    return _codex_control_response(response)
 
 
 @router.get("/thread/goal/get")

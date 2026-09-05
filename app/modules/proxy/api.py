@@ -342,6 +342,7 @@ _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
         "reasoning",
         "web_search_call",
         "file_search_call",
+        "tool_search_output",
         "computer_call",
         "code_interpreter_call",
         "mcp_approval_request",

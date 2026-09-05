@@ -3692,3 +3692,108 @@ async def test_v1_responses_normalizes_tool_messages(async_client, monkeypatch):
         {"type": "function_call_output", "call_id": "call_1", "output": '{"ok":true}'},
         {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("terminal_includes_output", [False, True])
+async def test_public_responses_preserves_tool_search_output(
+    async_client, monkeypatch, stream: bool, terminal_includes_output: bool
+):
+    auth_json = _make_auth_json("acc_tool_search_output", "tool-search@example.com")
+    response = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    )
+    assert response.status_code == 200
+    loaded_tool = {
+        "type": "function",
+        "name": "calculate_total",
+        "defer_loading": True,
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {"a": {"type": "integer"}},
+            "required": ["a"],
+            "additionalProperties": False,
+        },
+    }
+    items = [
+        {
+            "type": "tool_search_call",
+            "id": "tsc_search",
+            "call_id": "call_search",
+            "execution": "server",
+            "status": "completed",
+            "arguments": {"query": "calculate total"},
+        },
+        {
+            "type": "tool_search_output",
+            "id": "tso_loaded",
+            "call_id": "call_search",
+            "execution": "server",
+            "status": "completed",
+            "tools": [loaded_tool],
+        },
+        {
+            "type": "function_call",
+            "id": "fc_loaded",
+            "call_id": "call_function",
+            "name": "calculate_total",
+            "arguments": '{"a":23}',
+            "status": "completed",
+        },
+    ]
+    # This recognized item must not make arbitrary unknown output types pass through.
+    unknown_item = {"type": "unknown_result", "id": "unknown_item", "payload": {"value": "opaque"}}
+    upstream_items = [*items, unknown_item]
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        del payload, headers, access_token, account_id, kwargs
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.created",
+                    "response": {"id": "resp_search", "object": "response", "status": "in_progress", "output": []},
+                }
+            )
+            + "\n\n"
+        )
+        for index, item in enumerate(upstream_items):
+            for event_type in ("response.output_item.added", "response.output_item.done"):
+                yield "data: " + json.dumps({"type": event_type, "output_index": index, "item": item}) + "\n\n"
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_search",
+                        "object": "response",
+                        "status": "completed",
+                        "output": upstream_items if terminal_includes_output else [],
+                        "usage": {"input_tokens": 3, "output_tokens": 5},
+                    },
+                }
+            )
+            + "\n\n"
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    response = await async_client.post(
+        "/v1/responses", json={"model": "gpt-5.4", "instructions": "", "input": "Discover the tool.", "stream": stream}
+    )
+    assert response.status_code == 200
+    if stream:
+        events = [
+            json.loads(line[6:])
+            for line in response.text.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+        for event_type in ("response.output_item.added", "response.output_item.done"):
+            assert [event["item"] for event in events if event.get("type") == event_type] == items
+        completed = next(event["response"] for event in events if event.get("type") == "response.completed")
+    else:
+        assert response.headers["content-type"].startswith("application/json")
+        completed = response.json()
+    assert completed["output"] == items

@@ -20,9 +20,10 @@ the proposal stating the reference client does not emit this yet.
 
 ## Decisions
 
-Keep pending async ids on session/continuity state, not durable
-operation manifests. Durable pending-tool manifests are skipped while
-async calls are outstanding so a later replica does not treat them as
-interrupted sync work.
+Keep pending async ids on session/continuity state. Durable pending-tool
+manifests persist the synchronous subset and filter out outstanding async
+calls so a later replica does not treat async work as interrupted sync
+work. Unresolved async calls in a stored prefix are non-blocking for
+intervening user turns.
 
 Rejected: landing async tools inside #2089. Maintainer required a split.

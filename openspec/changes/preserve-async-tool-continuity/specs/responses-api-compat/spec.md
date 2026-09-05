@@ -29,6 +29,13 @@ calls.
 - **WHEN** the proxy persists the durable pending-tool manifest
 - **THEN** only `call_b` is stored for interrupted-output recovery
 
+#### Scenario: Stored prefixes tolerate unresolved async calls
+
+- **GIVEN** a stored HTTP-bridge prefix contains an unresolved async function call followed by a later user turn
+- **WHEN** the proxy proves a durable full-resend suffix against the synchronous pending-tool manifest
+- **THEN** the unresolved async call does not reject the prefix
+- **AND** the synchronous suffix still matches
+
 #### Scenario: Account-neutral replay accepts settled async pairs
 
 - **GIVEN** a full-history retry contains an async function or custom tool call and its matching typed output

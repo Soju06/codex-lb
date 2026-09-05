@@ -491,6 +491,7 @@ def _direct_tool_call_prefix_state(
     canonical_lite_developer_index: int | None = None,
 ) -> tuple[deque[tuple[str, str]], set[str]] | None:
     pending_calls: deque[tuple[str, str]] = deque()
+    async_unsettled: set[tuple[str, str]] = set()
     seen_call_ids: set[str] = set()
     # A pending window opens when ``pending_calls`` becomes non-empty and closes when it
     # drains. Historical interleaving is proven only for a window that never held more than
@@ -533,6 +534,9 @@ def _direct_tool_call_prefix_state(
             if not isinstance(call_id, str) or not call_id or call_id in seen_call_ids:
                 return None
             seen_call_ids.add(call_id)
+            if item.get("async") is True:
+                async_unsettled.add((item_type, call_id))
+                continue
             pending_calls.append((item_type, call_id))
             if len(pending_calls) > 1:
                 # A window that already spent its interleaved developer message must not
@@ -547,15 +551,18 @@ def _direct_tool_call_prefix_state(
             if item.get("status") not in (None, "completed", "failed"):
                 return None
             call_id = item.get("call_id")
-            if not isinstance(call_id, str) or not pending_calls:
+            if not isinstance(call_id, str):
                 return None
-            if pending_calls[0] != (call_type, call_id):
-                return None
-            pending_calls.popleft()
-            if not pending_calls:
-                pending_window_developer_seen = False
-                pending_window_held_parallel_calls = False
-            continue
+            if pending_calls and pending_calls[0] == (call_type, call_id):
+                pending_calls.popleft()
+                if not pending_calls:
+                    pending_window_developer_seen = False
+                    pending_window_held_parallel_calls = False
+                continue
+            if (call_type, call_id) in async_unsettled:
+                async_unsettled.discard((call_type, call_id))
+                continue
+            return None
         if pending_calls and (
             (item_type in (None, "message") and item.get("role") in _ACCOUNT_NEUTRAL_MESSAGE_ROLES)
             or item_type in {"input_file", "input_image", "input_text"}

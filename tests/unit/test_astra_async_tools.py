@@ -296,6 +296,23 @@ def test_account_neutral_replay_accepts_settled_async_custom_tool_call() -> None
     assert responses_input_items_are_self_contained_fresh_replay(items)
 
 
+def test_stored_prefix_allows_unresolved_async_call_before_user_turn() -> None:
+    stored: list[JsonValue] = [
+        {"role": "user", "content": "first"},
+        {"type": "function_call", "call_id": "async_1", "name": "slow", "arguments": "{}", "async": True},
+        {"role": "user", "content": "later"},
+    ]
+    suffix: list[JsonValue] = [
+        {"type": "function_call", "call_id": "sync_1", "name": "now", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "sync_1", "output": "ok"},
+    ]
+    assert responses_input_suffix_matches_pending_tool_calls(
+        [*stored, *suffix],
+        stored_count=3,
+        pending_tool_calls={"sync_1": "function_call"},
+    )
+
+
 def test_durable_suffix_ignores_settled_async_pairs_when_matching_sync_manifest() -> None:
     stored: list[JsonValue] = [{"role": "user", "content": "first"}]
     suffix: list[JsonValue] = [

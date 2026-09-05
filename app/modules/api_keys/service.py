@@ -1312,6 +1312,10 @@ class ApiKeysService:
             if not claimed:
                 await self._repository.rollback()
                 return
+            reservation = await self._repository.get_usage_reservation(reservation_id)
+            if reservation is None:
+                await self._repository.rollback()
+                return
 
             try:
                 for item in reservation.items:

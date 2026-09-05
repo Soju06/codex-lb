@@ -2448,7 +2448,7 @@ async def test_finalize_usage_reservation_retries_sqlite_busy_settlement(
     assert stored is not None
     assert stored.status == "finalized"
     assert limits[0].current_value == 15
-    assert repo.get_usage_reservation_calls == 4
+    assert repo.get_usage_reservation_calls == 5
     assert repo.rollback_calls >= 2
 
 
@@ -2490,7 +2490,7 @@ async def test_release_usage_reservation_retries_sqlite_busy_settlement(
     assert stored is not None
     assert stored.status == "released"
     assert limits[0].current_value == 0
-    assert repo.get_usage_reservation_calls == 4
+    assert repo.get_usage_reservation_calls == 5
     assert repo.rollback_calls >= 2
 
 

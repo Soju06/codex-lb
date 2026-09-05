@@ -1,5 +1,5 @@
 ## Implementation
-- [x] Require a parsed event before recording HTTP participation.
+- [x] Require a parsed upstream event with a classified event type before recording HTTP participation.
 - [x] Add route regressions for keepalives followed by EOF, error or a valid event.
 - [x] Clarify prior validation counts and synchronize the owning spec.
 

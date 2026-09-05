@@ -79,6 +79,6 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 #### Scenario: Explicit continuation prepares before releasing the placeholder
 - **GIVEN** a steering continuation has a placeholder request state
 - **WHEN** the client sends the matching explicit response.create
-- **THEN** the proxy prepares that request before removing or releasing the placeholder
-- **AND** a failed prepare leaves the placeholder in place
+- **THEN** the proxy prepares and registers that request before removing or releasing the placeholder
+- **AND** a failed prepare or admission leaves the placeholder in place
 

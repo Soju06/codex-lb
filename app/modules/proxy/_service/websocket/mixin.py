@@ -349,6 +349,7 @@ from app.modules.proxy._service.support import (
     _WebSocketContinuityState,
     _WebSocketReceiveTimeout,
     _WebSocketRequestState,
+    _WebSocketSteeringContinuation,
     _WebSocketTransientRefreshFailover,
     _WebSocketUpstreamControl,
     clear_upstream_websocket_transport_failure,
@@ -1563,6 +1564,8 @@ class _WebSocketMixin:
                 request_state_registered = False
                 request_affinity = _AffinityPolicy()
                 payload: dict[str, JsonValue] | None = None
+                pending_steering_continuation: _WebSocketSteeringContinuation | None = None
+                steering_placeholder: _WebSocketRequestState | None = None
 
                 if replay_request_state is not None:
                     request_state = replay_request_state
@@ -1847,18 +1850,13 @@ class _WebSocketMixin:
                                     )
                                 request_state = prepared_request.request_state
                                 if steering_continuation is not None:
-                                    stale_state = steering_continuation.request_state
-                                    async with pending_lock:
-                                        if stale_state in pending_requests:
-                                            pending_requests.remove(stale_state)
-                                    steering_continuation.request_state = request_state
-                                    steering_continuation.explicit_request_prepared = True
+                                    pending_steering_continuation = steering_continuation
+                                    steering_placeholder = steering_continuation.request_state
                                     request_state.steering_parent_response_id = request_state.previous_response_id
                                     request_state.fresh_upstream_request_text = None
                                     request_state.fresh_upstream_request_is_retry_safe = False
                                     request_state.preferred_account_id = account.id if account is not None else None
                                     request_state.replay_required_account_id = request_state.preferred_account_id
-                                    await release_steering_request(proxy, stale_state)
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
                                 if request_state.previous_response_id is not None:
@@ -2421,7 +2419,21 @@ class _WebSocketMixin:
                                 # already visible as active when drain began.
                                 pending_requests.remove(response_create_request_state)
                             else:
+                                if (
+                                    pending_steering_continuation is not None
+                                    and steering_placeholder is not None
+                                    and steering_placeholder in pending_requests
+                                ):
+                                    pending_requests.remove(steering_placeholder)
                                 request_state_registered = True
+                        if (
+                            request_state_registered
+                            and pending_steering_continuation is not None
+                            and steering_placeholder is not None
+                        ):
+                            pending_steering_continuation.request_state = response_create_request_state
+                            pending_steering_continuation.explicit_request_prepared = True
+                            await release_steering_request(proxy, steering_placeholder)
                         if not request_state_registered:
                             await proxy._release_websocket_request_state_reservation(response_create_request_state)
                             await proxy._emit_websocket_terminal_error(

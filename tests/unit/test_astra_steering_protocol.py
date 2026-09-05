@@ -480,7 +480,7 @@ async def test_failed_explicit_continuation_prepare_keeps_placeholder(monkeypatc
             return await original_prepare(*args, **kwargs)
 
         async def release(state, *args, **kwargs):
-            if getattr(state, "steering_parent_response_id", None) == "r1":
+            if getattr(state, "steering_parent_response_id", None) == "r1" and state.request_text is None:
                 order.append("release_placeholder")
             return await original_release(state, *args, **kwargs)
 
@@ -497,6 +497,82 @@ async def test_failed_explicit_continuation_prepare_keeps_placeholder(monkeypatc
     assert len(reservations) == 3
     assert [value[0] for value in settled] == ["res_0", "res_2"]
     assert [call.args[0].reservation_id for call in released.await_args_list if call.args[0] is not None] == ["res_1"]
+
+
+@pytest.mark.asyncio
+async def test_failed_explicit_continuation_admission_keeps_placeholder(monkeypatch):
+    from app.core.clients.proxy import ProxyResponseError
+    from app.core.errors import openai_error
+
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    result = {"type": "function_call_output", "call_id": "call_1", "output": "saved result"}
+    call = {"type": "function_call", "call_id": "call_1", "name": "slow", "arguments": "{}"}
+    continuation = create(parent="r1", input_items=[result])
+    socket = ScriptedSocket(
+        [
+            (create(), lambda _: True),
+            (steer, saw("response.created", "r1")),
+            (continuation, saw("response.steer.pending")),
+            (continuation, saw("response.failed")),
+        ]
+    )
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [
+                {"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}},
+                {"type": "response.output_item.done", "response_id": "r1", "item": call},
+                response("response.completed", "r1", output=[call]),
+                {
+                    "type": "response.steer.pending",
+                    "steer": {"id": "s1", "previous_response_id": "r1"},
+                    "reason": "waiting_for_required_input",
+                    "required_input": [{"type": "function_call_output", "call_id": "call_1"}],
+                },
+            ],
+            [response("response.created", "r2", parent="r1"), response("response.completed", "r2", parent="r1")],
+        ]
+    )
+    order: list[str] = []
+
+    def configure(service, account):
+        del account
+        original_admit = service._acquire_request_state_response_create_admission
+        original_release = service._release_websocket_request_state_reservation
+        failed = False
+
+        async def admit(state, *args, **kwargs):
+            nonlocal failed
+            if getattr(state, "previous_response_id", None) == "r1" and state.request_text is not None and not failed:
+                failed = True
+                order.append("admit_fail")
+                raise ProxyResponseError(
+                    400,
+                    openai_error("invalid_input", "admission failed", error_type="invalid_request_error"),
+                )
+            order.append("admit")
+            return await original_admit(state, *args, **kwargs)
+
+        async def release(state, *args, **kwargs):
+            if getattr(state, "steering_parent_response_id", None) == "r1" and state.request_text is None:
+                order.append("release_placeholder")
+            return await original_release(state, *args, **kwargs)
+
+        monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", admit)
+        monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release)
+
+    _, reservations, settled, released, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
+    assert "admit_fail" in order
+    assert "release_placeholder" in order
+    assert order.index("release_placeholder") > order.index("admit_fail")
+    assert len(upstream.sent) == 3
+    assert upstream.sent[-1]["input"] == [result]
+    assert len(reservations) == 4
+    assert [value[0] for value in settled] == ["res_0", "res_3"]
+    assert [call.args[0].reservation_id for call in released.await_args_list if call.args[0] is not None] == [
+        "res_2",
+        "res_1",
+    ]
 
 
 @pytest.mark.asyncio

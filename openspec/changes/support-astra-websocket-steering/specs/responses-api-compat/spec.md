@@ -66,6 +66,12 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 - **THEN** the event is not assigned through the generic create queue
 - **AND** unrelated request identity, usage ownership and create admission remain unchanged
 
+#### Scenario: A suppressed successor's anonymous error does not settle unrelated work
+- **GIVEN** a late automatic successor was suppressed because its continuation was no longer pending
+- **WHEN** it emits an ID-less top-level error
+- **THEN** the error is not assigned to an unrelated pending request
+- **AND** that unrelated request still owns its later created event
+
 #### Scenario: A rejected submission releases its queued byte budget
 - **GIVEN** multiple steering submissions share one continuation
 - **WHEN** upstream rejects one submission
@@ -81,4 +87,18 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 - **WHEN** the client sends the matching explicit response.create
 - **THEN** the proxy prepares and registers that request before removing or releasing the placeholder
 - **AND** a failed prepare or admission leaves the placeholder in place
+
+#### Scenario: Placeholder refund failure does not abort an explicit continuation
+- **GIVEN** an explicit continuation has been prepared and registered
+- **WHEN** releasing the replaced placeholder reservation fails
+- **THEN** the continuation remains pending and the socket continues
+
+#### Scenario: Apply-patch output is required for explicit continuation
+- **GIVEN** a completed steered response with a synchronous apply_patch_call
+- **WHEN** the client sends the matching apply_patch_call_output before response.steer.pending
+- **THEN** the explicit continuation is forwarded on the same connection
+
+#### Scenario: Upstream steering failures are sanitized before forwarding
+- **WHEN** upstream sends response.steer.failed with a malformed or structured error.param
+- **THEN** the forwarded client payload omits the non-public parameter value
 

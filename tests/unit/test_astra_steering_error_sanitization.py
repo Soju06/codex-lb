@@ -36,3 +36,36 @@ async def test_steering_failure_does_not_expose_raw_exception_text(monkeypatch, 
         "type": "invalid_request_error",
     }
     assert "private-value" not in json.dumps(failure)
+
+
+@pytest.mark.asyncio
+async def test_upstream_steer_failed_sanitizes_error_param(monkeypatch):
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    socket = ScriptedSocket([(create(), lambda _: True), (steer, saw("response.created", "r1"))])
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [
+                {"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}},
+                {
+                    "type": "response.steer.failed",
+                    "steer": {"id": "s1", "previous_response_id": "r1", "input": "Correction"},
+                    "error": {
+                        "code": "successor_creation_failed",
+                        "message": "Rejected",
+                        "param": ["private-field"],
+                    },
+                },
+                response("response.completed", "r1"),
+            ],
+        ]
+    )
+    socket.finish_when = lambda event: event.get("type") == "response.completed" and event["response"]["id"] == "r1"
+
+    await run_socket(monkeypatch, socket, upstream)
+
+    failure = next(event for event in socket.sent if event.get("type") == "response.steer.failed")
+    error = failure["error"]
+    assert isinstance(error, dict)
+    assert "param" not in error
+    assert "private-field" not in json.dumps(failure)

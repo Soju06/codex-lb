@@ -21,6 +21,7 @@ from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import (
+    _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE,
     _REQUEST_TRANSPORT_WEBSOCKET,
     _WebSocketRequestState,
     _WebSocketSteeringContinuation,
@@ -166,7 +167,7 @@ def assign_websocket_created_request_state(
     request_state = continuation.request_state
     if request_state not in pending_requests:
         if response_id is not None:
-            control.suppressed_steering_response_ids.add(response_id)
+            remember_suppressed_steering_response(control, response_id)
         return None
     continuation.parent.steering_continuation_started = True
     request_state.response_id = response_id
@@ -191,6 +192,28 @@ def steering_failure_payload(payload: Mapping[str, JsonValue], exc: ProxyRespons
     }
 
 
+def remember_suppressed_steering_response(control: _WebSocketUpstreamControl, response_id: str) -> None:
+    if response_id in control.suppressed_steering_response_ids:
+        return
+    control.suppressed_steering_response_ids.add(response_id)
+    control.suppressed_steering_anonymous_terminals += 1
+
+
+def forget_suppressed_steering_response(control: _WebSocketUpstreamControl, response_id: str) -> None:
+    if response_id not in control.suppressed_steering_response_ids:
+        return
+    control.suppressed_steering_response_ids.discard(response_id)
+    if control.suppressed_steering_anonymous_terminals > 0:
+        control.suppressed_steering_anonymous_terminals -= 1
+
+
+def consume_suppressed_steering_anonymous_terminal(control: _WebSocketUpstreamControl) -> bool:
+    if control.suppressed_steering_anonymous_terminals <= 0:
+        return False
+    control.suppressed_steering_anonymous_terminals -= 1
+    return True
+
+
 def completed_steering_required_input(payload: dict[str, JsonValue] | None) -> list[JsonValue] | None:
     response = payload.get("response") if payload is not None else None
     output = response.get("output") if isinstance(response, dict) else None
@@ -201,8 +224,11 @@ def completed_steering_required_input(payload: dict[str, JsonValue] | None) -> l
         if not isinstance(item, dict) or item.get("async") is True:
             continue
         item_type = item.get("type")
-        if item_type in {"function_call", "custom_tool_call"} and isinstance(item.get("call_id"), str):
-            required.append({"type": f"{item_type}_output", "call_id": item["call_id"]})
+        output_type = (
+            _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE.get(item_type) if isinstance(item_type, str) else None
+        )
+        if output_type is not None and isinstance(item.get("call_id"), str):
+            required.append({"type": output_type, "call_id": item["call_id"]})
         elif item_type == "mcp_approval_request" and isinstance(item.get("id"), str):
             required.append({"type": "mcp_approval_response", "approval_request_id": item["id"]})
     return required or None

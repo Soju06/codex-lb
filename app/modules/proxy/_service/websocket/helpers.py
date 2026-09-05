@@ -1165,7 +1165,7 @@ def _sanitize_public_websocket_event_payload(
     """Copy a terminal event with only a client-safe ``error.param``."""
 
     normalized = payload
-    if event_type in {"error", "response.failed"}:
+    if event_type in {"error", "response.failed", "response.steer.failed"}:
         error_value = payload.get("error")
         if isinstance(error_value, dict):
             sanitized_error = sanitize_public_error_detail(error_value)

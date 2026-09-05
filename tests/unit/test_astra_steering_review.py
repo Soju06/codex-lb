@@ -20,6 +20,7 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy._service.websocket import steering as steering_module
 from app.modules.proxy._service.websocket.steering import (
     assign_websocket_created_request_state,
+    completed_steering_required_input,
     steering_parent,
     validate_steering_input,
 )
@@ -152,3 +153,24 @@ def test_missing_steering_child_created_event_never_claims_unrelated_fifo_reques
     with pytest.raises(ProxyResponseError) as exc_info:
         steering_parent("r1", pending_requests=pending_requests, control=control)
     assert exc_info.value.payload["error"]["code"] == "response_not_found"
+    assert control.suppressed_steering_anonymous_terminals == 1
+
+
+def test_completed_steering_required_input_includes_apply_patch_calls() -> None:
+    required = completed_steering_required_input(
+        {
+            "response": {
+                "output": [
+                    {"type": "apply_patch_call", "call_id": "patch_1", "status": "completed"},
+                    {"type": "function_call", "call_id": "fn_1", "name": "slow", "arguments": "{}"},
+                    {"type": "apply_patch_call", "call_id": "patch_async", "async": True},
+                    {"type": "mcp_approval_request", "id": "apr_1"},
+                ]
+            }
+        }
+    )
+    assert required == [
+        {"type": "apply_patch_call_output", "call_id": "patch_1"},
+        {"type": "function_call_output", "call_id": "fn_1"},
+        {"type": "mcp_approval_response", "approval_request_id": "apr_1"},
+    ]

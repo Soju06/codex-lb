@@ -452,6 +452,8 @@ from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProto
 from app.modules.proxy._service.websocket.steering import (
     assign_websocket_created_request_state,
     completed_steering_required_input,
+    consume_suppressed_steering_anonymous_terminal,
+    forget_suppressed_steering_response,
     process_websocket_steering_event,
     release_steering_request,
     required_steering_input_is_present,
@@ -2433,7 +2435,13 @@ class _WebSocketMixin:
                         ):
                             pending_steering_continuation.request_state = response_create_request_state
                             pending_steering_continuation.explicit_request_prepared = True
-                            await release_steering_request(proxy, steering_placeholder)
+                            try:
+                                await release_steering_request(proxy, steering_placeholder)
+                            except Exception:
+                                logger.exception(
+                                    "Failed to release steering placeholder reservation request_id=%s",
+                                    steering_placeholder.request_id,
+                                )
                         if not request_state_registered:
                             await proxy._release_websocket_request_state_reservation(response_create_request_state)
                             await proxy._emit_websocket_terminal_error(
@@ -5411,12 +5419,16 @@ class _WebSocketMixin:
             await process_websocket_steering_event(
                 proxy, payload, control=upstream_control, pending_requests=pending_requests, pending_lock=pending_lock
             )
+            if event_type == "response.steer.failed" and isinstance(payload, dict):
+                public_payload = _sanitize_public_websocket_event_payload(payload, event_type=event_type)
+                if public_payload is not payload:
+                    return json.dumps(public_payload, ensure_ascii=True, separators=(",", ":"))
             return text
         response_id = _websocket_response_id(event, payload)
         if response_id is not None and response_id in upstream_control.suppressed_steering_response_ids:
             upstream_control.suppress_downstream_event = True
             if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                upstream_control.suppressed_steering_response_ids.discard(response_id)
+                forget_suppressed_steering_response(upstream_control, response_id)
             return text
         error_message = _websocket_event_error_message(event_type, payload)
         is_typeless_error_event = (
@@ -5487,6 +5499,10 @@ class _WebSocketMixin:
                 request_state = _find_websocket_request_state_by_response_id(pending_requests, response_id)
                 release_create_gate = False
             elif response_id is None:
+                consume_anonymous_suppressed = event_type == "error" or is_typeless_error_event
+                if consume_anonymous_suppressed and consume_suppressed_steering_anonymous_terminal(upstream_control):
+                    upstream_control.suppress_downstream_event = True
+                    return text
                 request_state = _match_websocket_request_state_for_anonymous_event(
                     pending_requests,
                     prefer_previous_response_not_found=is_previous_response_not_found_matching_event

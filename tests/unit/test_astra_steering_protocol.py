@@ -640,6 +640,93 @@ async def test_failed_final_steer_refund_does_not_abort_socket(monkeypatch, capl
 
 
 @pytest.mark.asyncio
+async def test_failed_explicit_placeholder_refund_does_not_abort_continuation(monkeypatch, caplog):
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    result = {"type": "function_call_output", "call_id": "call_1", "output": "saved result"}
+    call = {"type": "function_call", "call_id": "call_1", "name": "slow", "arguments": "{}"}
+    socket = ScriptedSocket(
+        [
+            (create(), lambda _: True),
+            (steer, saw("response.created", "r1")),
+            (create(parent="r1", input_items=[result]), saw("response.steer.pending")),
+        ]
+    )
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [
+                {"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}},
+                {"type": "response.output_item.done", "response_id": "r1", "item": call},
+                response("response.completed", "r1", output=[call]),
+                {
+                    "type": "response.steer.pending",
+                    "steer": {"id": "s1", "previous_response_id": "r1"},
+                    "reason": "waiting_for_required_input",
+                    "required_input": [{"type": "function_call_output", "call_id": "call_1"}],
+                },
+            ],
+            [response("response.created", "r2", parent="r1"), response("response.completed", "r2", parent="r1")],
+        ]
+    )
+
+    def configure(service, account):
+        del account
+        original = service._release_websocket_request_state_reservation
+        raised = False
+
+        async def release(state, *args, **kwargs):
+            nonlocal raised
+            if (
+                not raised
+                and getattr(state, "steering_parent_response_id", None) == "r1"
+                and state.request_text is None
+            ):
+                raised = True
+                raise RuntimeError("placeholder refund failed")
+            return await original(state, *args, **kwargs)
+
+        monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release)
+
+    _, reservations, settled, _, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
+    assert len(reservations) == 3
+    assert [value[0] for value in settled] == ["res_0", "res_2"]
+    assert saw("response.completed", "r2")(socket.sent)
+    assert "Failed to release steering placeholder reservation" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_result_before_pending_owns_explicit_outcome(monkeypatch):
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    result = {"type": "apply_patch_call_output", "call_id": "patch_1", "output": "applied"}
+    call = {"type": "apply_patch_call", "call_id": "patch_1", "status": "completed"}
+    socket = ScriptedSocket(
+        [
+            (create(), lambda _: True),
+            (steer, saw("response.created", "r1")),
+            (create(parent="r1", input_items=[result]), saw("response.completed", "r1")),
+        ]
+    )
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [
+                {"type": "response.steer.accepted", "steer": {"id": "s", "previous_response_id": "r1"}},
+                {"type": "response.output_item.done", "response_id": "r1", "item": call},
+                response("response.completed", "r1", output=[call]),
+            ],
+            [response("response.created", "r2", parent="r1"), response("response.completed", "r2", parent="r1")],
+        ]
+    )
+    socket.finish_when = lambda event: event.get("type") == "response.completed" and event["response"]["id"] == "r2"
+    _, reservations, settled, released, _ = await run_socket(monkeypatch, socket, upstream)
+    assert len(upstream.sent) == 3
+    assert upstream.sent[-1]["input"] == [result]
+    assert len(reservations) == 3
+    assert [entry[0] for entry in settled] == ["res_0", "res_2"]
+    assert [call.args[0].reservation_id for call in released.await_args_list if call.args[0]] == ["res_1"]
+
+
+@pytest.mark.asyncio
 async def test_automatic_successor_never_claims_unrelated_queued_create(monkeypatch):
     steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
     socket = ScriptedSocket(

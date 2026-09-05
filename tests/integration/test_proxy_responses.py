@@ -1890,7 +1890,7 @@ async def test_v1_responses_previous_response_owner_lookup_failure_without_http_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("delivery_point", ["created", "completed", "synthetic", "oversized"])
+@pytest.mark.parametrize("delivery_point", ["created", "completed", "synthetic", "oversized", "normalized_error"])
 async def test_http_previous_response_owner_is_ready_before_persistence(
     app_instance, monkeypatch: pytest.MonkeyPatch, delivery_point: str
 ):
@@ -1906,8 +1906,8 @@ async def test_http_previous_response_owner_is_ready_before_persistence(
     finish_origin = asyncio.Event()
     persist_started = asyncio.Event()
     finish_persistence = asyncio.Event()
-    local_failure = delivery_point in {"synthetic", "oversized"}
-    anchor_id = "req_http_owner_unobserved" if local_failure else "resp_http_owner_before_persistence"
+    synthesized_id = delivery_point in {"synthetic", "oversized", "normalized_error"}
+    anchor_id = "req_http_owner_unobserved" if synthesized_id else "resp_http_owner_before_persistence"
     original_persist = proxy_module.ProxyService._persist_request_log
 
     async def delayed_persist(self, **kwargs):
@@ -1923,9 +1923,26 @@ async def test_http_previous_response_owner_is_ready_before_persistence(
         response_id = "resp_http_owner_followup" if followup else anchor_id
         response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
         await response.prepare(request)
-        if local_failure:
+        if synthesized_id:
             if delivery_point == "oversized":
                 await response.write(b"data: " + b"x" * 2048 + b"\n\n")
+            elif delivery_point == "normalized_error":
+                await response.write(
+                    (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "type": "error",
+                                "error": {
+                                    "type": "server_error",
+                                    "code": "upstream_error",
+                                    "message": "origin failure",
+                                },
+                            }
+                        )
+                        + "\n\n"
+                    ).encode()
+                )
             await response.write_eof()
             return response
         if not followup:
@@ -1993,11 +2010,11 @@ async def test_http_previous_response_owner_is_ready_before_persistence(
                 json={"model": "gpt-5.4", "input": "start", "stream": True},
                 headers={
                     "session_id": "sid_http_owner_before_persistence",
-                    "x-request-id": anchor_id if local_failure else "req_http_owner_start",
+                    "x-request-id": anchor_id if synthesized_id else "req_http_owner_start",
                 },
             ) as first:
                 try:
-                    if local_failure:
+                    if synthesized_id:
                         await first.aread()
                         assert first.status_code == 200
                         failure = next(

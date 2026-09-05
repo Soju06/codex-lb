@@ -515,9 +515,7 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.helpers import (
     _call_stream_with_supported_optional_kwargs as _call_stream_with_supported_optional_kwargs,
 )
-from app.modules.proxy._service.streaming.helpers import (
-    _classify_upstream_close as _classify_upstream_close,
-)
+from app.modules.proxy._service.streaming.helpers import _classify_upstream_close as _classify_upstream_close
 from app.modules.proxy._service.streaming.helpers import (
     _is_account_neutral_transport_drop as _is_account_neutral_transport_drop,
 )

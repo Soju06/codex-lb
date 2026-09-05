@@ -1850,11 +1850,12 @@ async def test_http_bridge_reader_receive_deadline_uses_injected_scheduler(
 async def test_http_bridge_reader_timeout_rechecks_receive_completed_during_timeout_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A receive that finishes with the scheduler timeout stays a receive.
+    """A receive that finishes in the deadline tick stays a receive.
 
-    ``Scheduler.wait_for`` can raise just as the transport receive completes.
-    In that case the reader must consume the completed message rather than
-    classifying it as an idle timeout and settling the live session as failed.
+    ``Scheduler.wait`` mirrors ``asyncio.wait``: a receive that completes in
+    the same tick as the receive deadline is reported done rather than timed
+    out. The reader must consume that message instead of classifying it as an
+    idle timeout and settling the live session as failed.
     """
 
     class _ReceiveAtTimeoutUpstream:
@@ -1878,17 +1879,13 @@ async def test_http_bridge_reader_timeout_rechecks_receive_completed_during_time
     clock = VirtualClock()
     scheduler = VirtualScheduler(clock)
     release_receive = asyncio.Event()
-    original_wait_for = scheduler.wait_for
 
-    async def finish_receive_while_timeout_unwinds(awaitable: Any, timeout: float | None) -> Any:
-        try:
-            return await original_wait_for(awaitable, timeout)
-        except asyncio.TimeoutError:
-            release_receive.set()
-            await scheduler.drain()
-            raise
+    async def release_receive_at_deadline() -> None:
+        # Armed after the reader is already waiting, so the reader's deadline
+        # timer fires first and the receive completes in that same tick.
+        await scheduler.sleep(5.0)
+        release_receive.set()
 
-    monkeypatch.setattr(scheduler, "wait_for", finish_receive_while_timeout_unwinds)
     service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock, scheduler=scheduler)
     upstream = _ReceiveAtTimeoutUpstream(release_receive)
     session = _make_bridge_session(key_value="virtual-reader-timeout-recheck")
@@ -1912,6 +1909,7 @@ async def test_http_bridge_reader_timeout_rechecks_receive_completed_during_time
     reader_task = scheduler.create_task(service._relay_http_bridge_upstream_messages(session))
     await scheduler.drain()
     assert upstream.receive_started.is_set()
+    scheduler.create_task(release_receive_at_deadline())
 
     await scheduler.advance(5.0)
     await reader_task

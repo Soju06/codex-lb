@@ -15,27 +15,6 @@ from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 pytestmark = pytest.mark.unit
 
 
-@pytest.mark.asyncio
-async def test_virtual_wait_for_prefers_result_when_timeout_completes_same_tick() -> None:
-    clock = VirtualClock()
-    scheduler = VirtualScheduler(clock)
-    semaphore = asyncio.Semaphore(0)
-
-    waiter = scheduler.create_task(scheduler.wait_for(semaphore.acquire(), timeout=0.1))
-
-    async def release_at_deadline() -> None:
-        await scheduler.sleep(0.1)
-        semaphore.release()
-
-    scheduler.create_task(release_at_deadline())
-    await scheduler.drain()
-    await scheduler.advance(0.1)
-
-    assert await waiter is True
-    assert semaphore.locked()
-    await scheduler.cancel_owned_tasks()
-
-
 async def _one_event_stream() -> AsyncIterator[str]:
     yield 'event: response.created\ndata: {"type":"response.created"}\n\n'
 

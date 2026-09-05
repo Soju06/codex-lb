@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
+from math import isfinite
 from typing import cast
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from app.core.openai.requests import extract_input_file_ids
 from app.core.types import JsonValue
@@ -100,9 +102,13 @@ _ACCOUNT_NEUTRAL_APPLY_PATCH_OPERATION_FIELDS = {
     "delete_file": frozenset({"path", "type"}),
     "update_file": frozenset({"diff", "path", "type"}),
 }
-_ACCOUNT_NEUTRAL_REASONING_CONFIG_FIELDS = frozenset({"effort", "summary"})
+_ACCOUNT_NEUTRAL_REASONING_CONFIG_FIELDS = frozenset({"effort", "summary", "context"})
 _ACCOUNT_NEUTRAL_CLIENT_METADATA_FIELDS = frozenset(
     {
+        "session_id",
+        "thread_id",
+        "turn_id",
+        "root_turn_id",
         "ws_request_header_x_openai_internal_codex_responses_lite",
         "x-codex-installation-id",
         "x-codex-parent-thread-id",
@@ -699,6 +705,13 @@ def _is_nonblank_string(value: JsonValue | None) -> bool:
 def responses_payload_is_account_neutral_fresh_replay(payload: Mapping[str, JsonValue]) -> bool:
     """Return whether a full request can move accounts without stored upstream state."""
 
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, dict) and reasoning.get("context") == "all_turns":
+        projected = _codex_context_replay_projection(payload)
+        if projected is None:
+            return False
+        payload = projected
+
     if payload.get("conversation") not in (None, ""):
         return False
     if payload.get("previous_response_id") not in (None, ""):
@@ -752,7 +765,85 @@ def _reasoning_config_is_account_neutral(reasoning: JsonValue | None) -> bool:
         isinstance(reasoning, dict)
         and all(key in _ACCOUNT_NEUTRAL_REASONING_CONFIG_FIELDS for key in reasoning)
         and all(value is None or isinstance(value, str) for value in reasoning.values())
+        and reasoning.get("context") in (None, "all_turns")
     )
+
+
+def _codex_context_replay_projection(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    """Classify inline client labels without removing anything from the wire body."""
+
+    projected = dict(payload)
+    input_value = payload.get("input")
+    if not isinstance(input_value, list):
+        return projected
+    items: list[JsonValue] = []
+    for item in input_value:
+        if not isinstance(item, dict):
+            return None
+        candidate = dict(item)
+        item_type = item.get("type")
+        prefixes = {
+            "function_call": "fc_",
+            "function_call_output": "fco_",
+            "custom_tool_call": "ctc_",
+            "custom_tool_call_output": "ctco_",
+        }
+        if item_type in (None, "message", "additional_tools") or item_type in prefixes:
+            identifier = item.get("id")
+            if identifier not in (None, ""):
+                prefix = prefixes.get(item_type, "at_" if item_type == "additional_tools" else "msg_")
+                server_label = item_type in {"function_call", "custom_tool_call"} or (
+                    item_type == "message" and item.get("role") == "assistant"
+                )
+                if not _is_codex_local_item_id(identifier, prefix) and not (
+                    server_label
+                    and isinstance(identifier, str)
+                    and identifier.startswith(prefix)
+                    and len(identifier[len(prefix) :]) == 50
+                    and all(character in "0123456789abcdef" for character in identifier[len(prefix) :])
+                ):
+                    return None
+                candidate.pop("id")
+            metadata = item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD)
+            if metadata is not None:
+                if item_type == "additional_tools" or not _codex_transcript_metadata_is_account_neutral(metadata):
+                    return None
+                candidate.pop(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD)
+            if item_type in {"function_call", "custom_tool_call"} and "namespace" in item:
+                if not _is_nonblank_string(item["namespace"]):
+                    return None
+                candidate.pop("namespace")
+        items.append(candidate)
+    projected["input"] = items
+    return projected
+
+
+def _is_codex_local_item_id(value: JsonValue, prefix: str) -> bool:
+    if not isinstance(value, str) or not value.startswith(prefix):
+        return False
+    suffix = value[len(prefix) :]
+    try:
+        return str(UUID(suffix)) == suffix
+    except ValueError:
+        return False
+
+
+def _codex_transcript_metadata_is_account_neutral(value: JsonValue) -> bool:
+    if not isinstance(value, dict) or not set(value) <= {"turn_id", "create_time", "content_item_kinds"}:
+        return False
+    if "turn_id" in value and not _is_nonblank_string(value["turn_id"]):
+        return False
+    if "create_time" in value:
+        timestamp = value["create_time"]
+        if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+            return False
+        if timestamp < 0 or (isinstance(timestamp, float) and not isfinite(timestamp)):
+            return False
+    if "content_item_kinds" in value:
+        kinds = value["content_item_kinds"]
+        if not isinstance(kinds, list) or not kinds or not all(_is_nonblank_string(kind) for kind in kinds):
+            return False
+    return True
 
 
 def _text_controls_are_account_neutral(text: JsonValue | None) -> bool:
@@ -810,6 +901,21 @@ def _tools_are_account_neutral(tools: JsonValue) -> bool:
 
 def _tool_declaration_is_account_neutral(tool: Mapping[str, JsonValue]) -> bool:
     tool_type = tool.get("type")
+    if tool_type == "namespace":
+        children = tool.get("tools")
+        return (
+            set(tool) <= {"type", "name", "description", "tools"}
+            and _is_nonblank_string(tool.get("name"))
+            and (tool.get("description") is None or isinstance(tool.get("description"), str))
+            and isinstance(children, list)
+            and bool(children)
+            and all(
+                isinstance(child, dict)
+                and child.get("type") in ("function", "custom")
+                and _tool_declaration_is_account_neutral(child)
+                for child in children
+            )
+        )
     if not isinstance(tool_type, str) or tool_type not in _ACCOUNT_NEUTRAL_TOOL_TYPES:
         return False
     if any(key not in _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS[tool_type] for key in tool):

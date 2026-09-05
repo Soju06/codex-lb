@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 
 import aiohttp
 import pytest
@@ -733,6 +734,44 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
     assert len(completed) == 1
     assert len(failed) == 0
     assert seen_account_ids[:2] == ["acc_stream_429_a", "acc_stream_429_b"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retained_encrypted_state", [False, True])
+async def test_context_envelope_429_preserves_replay_boundary(async_client, monkeypatch, retained_encrypted_state):
+    await _import_account(async_client, "acc_context_a", "context-a@example.com")
+    await _import_account(async_client, "acc_context_b", "context-b@example.com")
+    payload = json.loads((Path(__file__).parents[1] / "fixtures/codex_context_replay.json").read_text())
+    payload["model"] = "gpt-5.1"
+    if retained_encrypted_state:
+        payload["input"].append({"type": "reasoning", "encrypted_content": "opaque-owner-state"})
+    seen_accounts: list[str | None] = []
+
+    async def fake_stream(request, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_accounts.append(account_id)
+        # Classification must not strip the inline labels or metadata upstream.
+        assert request.to_replay_safety_payload()["input"] == payload["input"]
+        if account_id == "acc_context_a":
+            raise ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "usage limit reached"),
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_context_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as response:
+        assert response.status_code == (429 if retained_encrypted_state else 200)
+        lines = [line async for line in response.aiter_lines() if line]
+    if retained_encrypted_state:
+        assert set(seen_accounts) == {"acc_context_a"}
+        assert json.loads("".join(lines))["error"]["code"] == "usage_limit_reached"
+        return
+    events = _extract_events(lines)
+    completed = [event for event in events if event.get("type") == "response.completed"]
+    assert seen_accounts == ["acc_context_a", "acc_context_b"]
+    assert len(completed) == 1
+    assert not any(event.get("type") == "response.failed" for event in events)
 
 
 @pytest.mark.asyncio

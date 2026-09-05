@@ -698,10 +698,11 @@ class CodexControlResponse:
 class CodexControlRequestPrivacyPolicy(Enum):
     STANDARD = "standard"
     PRIVATE_REALTIME = "private_realtime"
+    PRIVATE_CONTEXT = "private_context"
 
     @property
     def redacts_sensitive_details(self) -> bool:
-        return self is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME
+        return self is not CodexControlRequestPrivacyPolicy.STANDARD
 
 
 def _should_drop_inbound_header(name: str) -> bool:

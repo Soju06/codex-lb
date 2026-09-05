@@ -400,6 +400,7 @@ from app.modules.proxy.affinity import (
     _owner_lookup_session_id_from_headers,
     _sticky_key_from_session_header,  # noqa: F401
 )
+from app.modules.proxy.context_dispatch import record_context_dispatch
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
@@ -581,6 +582,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             }
             if upstream_stream_transport is not None:
                 stream_optional_kwargs["upstream_stream_transport_override"] = upstream_stream_transport
+            await record_context_dispatch(payload.to_payload(), api_key, account.id)
             stream = _facade()._call_stream_with_supported_optional_kwargs(
                 _facade().core_stream_responses,
                 payload,

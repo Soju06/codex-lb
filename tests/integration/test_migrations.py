@@ -1946,6 +1946,45 @@ async def test_conversation_presence_rollup_migration_upgrade_and_downgrade(tmp_
 
 
 @pytest.mark.asyncio
+async def test_codex_context_migration_preserves_rows_and_round_trips(db_setup):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    parent = "20260830_000000_add_quota_warmup_claim_expiry"
+    tables = {"codex_context_sessions", "codex_context_participants"}
+    await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("context-preserved", "test@example.com", "plus"))
+        await session.execute(
+            text("INSERT INTO codex_context_sessions VALUES ('00000000-0000-4000-8000-000000000011', 'key', 'owner')")
+        )
+        await session.execute(
+            text("INSERT INTO codex_context_participants VALUES ('00000000-0000-4000-8000-000000000011', 'owner')")
+        )
+        await session.commit()
+    await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+    async with SessionLocal() as session:
+        assert await session.scalar(text("SELECT count(*) FROM codex_context_participants")) == 1
+        assert await session.scalar(text("SELECT owner_account_id FROM codex_context_sessions")) == "owner"
+    await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(_DATABASE_URL), parent))
+    engine = create_async_engine(_DATABASE_URL)
+    try:
+        async with engine.connect() as conn:
+            assert not tables & set(await conn.run_sync(lambda c: sa_inspect(c).get_table_names()))
+        await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+        async with engine.connect() as conn:
+            assert tables <= set(await conn.run_sync(lambda c: sa_inspect(c).get_table_names()))
+        assert not check_schema_drift(_DATABASE_URL)
+        async with SessionLocal() as session:
+            assert await session.get(Account, "context-preserved") is not None
+            assert await session.scalar(text("SELECT count(*) FROM codex_context_sessions")) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_file_account_pins_migration_upgrade_and_downgrade(tmp_path):
     from alembic import command
     from sqlalchemy import inspect as sa_inspect

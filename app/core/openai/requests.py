@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
@@ -670,6 +671,7 @@ class ResponsesTextControls(BaseModel):
 class ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
+    _codex_lb_context_ciphertexts: set[str] = PrivateAttr(default_factory=set)
     _codex_lb_provider_reasoning_effort_materialized: bool = PrivateAttr(default=False)
 
     @model_validator(mode="before")
@@ -797,12 +799,35 @@ class ResponsesRequest(BaseModel):
         return payload
 
     def to_replay_safety_payload(self) -> JsonObject:
-        return _strip_unsupported_fields(self.model_dump_for_forwarding(), strip_replayed_tool_call_namespaces=False)
+        payload = _strip_unsupported_fields(self.model_dump_for_forwarding(), strip_replayed_tool_call_namespaces=False)
+        return project_verified_context_outputs(payload, self._codex_lb_context_ciphertexts)
+
+
+def project_verified_context_outputs(payload: JsonObject, trusted_ciphertexts: set[str]) -> JsonObject:
+    # Only authenticated context-tool outputs issued by this proxy are
+    # transferable. Native reasoning and all unknown ciphertext stay fenced.
+    input_value = payload.get("input")
+    if trusted_ciphertexts and isinstance(input_value, list):
+        for item in input_value:
+            if not isinstance(item, dict) or item.get("type") != "function_call_output":
+                continue
+            output = item.get("output")
+            if not isinstance(output, list):
+                continue
+            for index, part in enumerate(output):
+                if not isinstance(part, dict) or set(part) != {"type", "encrypted_content"}:
+                    continue
+                ciphertext = part.get("encrypted_content")
+                if part.get("type") == "encrypted_content" and isinstance(ciphertext, str):
+                    if hashlib.sha256(ciphertext.encode()).hexdigest() in trusted_ciphertexts:
+                        output[index] = {"type": "input_text", "text": "Verified context tool output"}
+    return payload
 
 
 class ResponsesCompactRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
+    _codex_lb_context_ciphertexts: set[str] = PrivateAttr(default_factory=set)
 
     @model_validator(mode="before")
     @classmethod

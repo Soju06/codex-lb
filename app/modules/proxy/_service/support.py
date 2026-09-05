@@ -1143,6 +1143,7 @@ class _WebSocketRequestState:
     fresh_upstream_request_responses_lite_model: str | None = None
     request_stage: str = "first_turn"
     preferred_account_id: str | None = None
+    context_ciphertexts: set[str] = field(default_factory=set)
     # Once an account-bound body has been dispatched, retries remain pinned to
     # that owner even when stale-anchor recovery removes previous_response_id.
     replay_required_account_id: str | None = None
@@ -1784,6 +1785,7 @@ def _is_account_neutral_error_code(code: str | None) -> bool:
         "proxy_unavailable",
         "responses_compact_input_too_large",
         "stream_idle_timeout",
+        "context_scope_mismatch",
     }
 
 

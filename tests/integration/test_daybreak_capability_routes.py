@@ -33,8 +33,25 @@ _IMAGE_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 _IMAGE_DATA_URL = f"data:image/png;base64,{base64.b64encode(_IMAGE_BYTES).decode('ascii')}"
 
 _RouteKey = tuple[str, str, str]
+_CONTEXT_HTTP_PATHS = tuple(
+    f"/backend-api/codex/alpha/{path}{suffix}"
+    for path in (
+        "history/v2/list_windows",
+        "history/v2/list_items",
+        "history/v2/read_item",
+        "history/v2/search_contents",
+        "notes/v2/thread_hint",
+        "notes/v2/list_files_by_prefix",
+        "notes/v2/read_file",
+        "notes/v2/search_contents",
+        "notes/v2/append_to_file",
+        "notes/v2/write_file",
+    )
+    for suffix in ("", "/")
+)
 _FAIL_CLOSED_HTTP_ROUTES: frozenset[_RouteKey] = frozenset(
     {
+        *(("HTTP", "POST", path) for path in _CONTEXT_HTTP_PATHS),
         ("HTTP", "POST", "/backend-api/codex/realtime/calls"),
         ("HTTP", "POST", "/backend-api/codex/thread/goal/get"),
         ("HTTP", "GET", "/backend-api/codex/thread/goal/get"),
@@ -145,6 +162,7 @@ async def _request(
 
 
 _PROVIDER_ROUTING_CASES = [
+    *(pytest.param("POST", path, {"json": {}}, id=path) for path in _CONTEXT_HTTP_PATHS),
     pytest.param("GET", "/backend-api/codex/thread/goal/get", {}, id="thread-goal-get"),
     pytest.param("POST", "/backend-api/codex/thread/goal/get", {"json": {}}, id="thread-goal-get-post"),
     pytest.param("POST", "/backend-api/codex/thread/goal/set", {"json": {}}, id="thread-goal-set"),

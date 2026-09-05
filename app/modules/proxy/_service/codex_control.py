@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any, NoReturn, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, TypeVar, cast
 
 import aiohttp
 
@@ -28,15 +29,29 @@ from app.core.clients.proxy import codex_control_request as core_codex_control_r
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
+from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
-from app.db.models import Account
+from app.db.models import Account, AccountStatus
+from app.db.session import SessionLocal, sqlite_writer_section
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
 from app.modules.proxy.affinity import _AffinityPolicy, _sticky_key_for_codex_control_request
+from app.modules.proxy.context_codec import (
+    MAX_CONTEXT_BYTES,
+    MAX_HISTORY_ACCOUNTS,
+    HistoryPartition,
+    context_error,
+    context_session_id,
+    pack_history,
+)
+from app.modules.proxy.context_repository import ContextRepository
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import AccountSelection, effective_account_concurrency_caps
 from app.modules.proxy.selection_errors import selection_failure_response
+
+if TYPE_CHECKING:
+    from app.modules.proxy.service import ProxyService
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
@@ -199,7 +214,189 @@ _FAILED_ACCOUNT_ATTR = "_codex_lb_failed_account"
 _REQUEST_TRANSPORT_HTTP = "http"
 
 
-class _CodexControlMixin:
+class _ContextManagementMixin:
+    async def codex_context_request(
+        self,
+        path: str,
+        *,
+        payload: bytes,
+        headers: Mapping[str, str],
+        query_params: Sequence[tuple[str, str]],
+        api_key: ApiKeyData,
+    ) -> CodexControlResponse:
+        proxy = cast("ProxyService", self)
+        started = time.monotonic()
+        status = "error"
+        try:
+            response = await self._codex_context_request(
+                path,
+                payload=payload,
+                headers=headers,
+                query_params=query_params,
+                api_key=api_key,
+            )
+            status = "success"
+            return response
+        finally:
+            await proxy._write_request_log(
+                account_id=None,
+                api_key=api_key,
+                request_id=get_request_id() or ensure_request_id(None),
+                model=None,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                status=status,
+                transport="http",
+                request_kind="codex_context",
+            )
+
+    async def _codex_context_request(
+        self,
+        path: str,
+        *,
+        payload: bytes,
+        headers: Mapping[str, str],
+        query_params: Sequence[tuple[str, str]],
+        api_key: ApiKeyData,
+    ) -> CodexControlResponse:
+        proxy = cast("ProxyService", self)
+        if len(payload) > MAX_CONTEXT_BYTES:
+            raise context_error("context_request_too_large", 413)
+        try:
+            body: JsonValue = json.loads(payload)
+        except (ValueError, UnicodeError):
+            raise context_error("context_identity_invalid", 400) from None
+        context = body.get("context") if isinstance(body, dict) else None
+        sid = context_session_id(context.get("session_id")) if isinstance(context, dict) else None
+        agent = context.get("current_agent_name") if isinstance(context, dict) else None
+        if (
+            sid is None
+            or not isinstance(agent, str)
+            or not (agent == "/root" or agent.startswith("/root/"))
+            or len(agent) > 1024
+        ):
+            raise context_error("context_identity_invalid", 400)
+        if not (await get_settings_cache().get()).api_key_auth_enabled:
+            raise context_error("context_proxy_auth_required", 409)
+        deadline = time.monotonic() + 30
+        async with SessionLocal() as session:
+            row = await ContextRepository(session).get(sid, api_key.id)
+            owner_id = row.owner_account_id if row else None
+        if owner_id is None:
+            affinity = _sticky_key_for_codex_control_request(
+                {**headers, "session_id": sid, "thread-id": sid},
+                codex_session_affinity=True,
+            )
+            account = await proxy._select_codex_control_account_without_budget(
+                affinity=affinity,
+                api_key=api_key,
+                privacy_policy=CodexControlRequestPrivacyPolicy.PRIVATE_CONTEXT,
+            )
+            if account is None:
+                raise context_error("context_owner_unavailable", 503)
+            async with sqlite_writer_section(), SessionLocal() as session:
+                row = await ContextRepository(session).bind(sid, api_key.id, account.id)
+                owner_id = row.owner_account_id
+                await session.commit()
+        async with SessionLocal() as session:
+            account_ids = (
+                await ContextRepository(session).participants(sid) if path.startswith("alpha/history/") else []
+            )
+        account_ids = account_ids or [owner_id]
+        if len(account_ids) > MAX_HISTORY_ACCOUNTS:
+            raise context_error("context_history_too_many_accounts", 503)
+        if api_key.account_assignment_scope_enabled and not set(account_ids) <= set(api_key.assigned_account_ids):
+            raise context_error("context_scope_mismatch", 403)
+
+        # Every task gets its own DB scope; nothing is held across network I/O.
+        async def call(account_id: str) -> CodexControlResponse:
+            async with SessionLocal() as session:
+                stored = await session.get(Account, account_id)
+                if stored is None or stored.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
+                    raise context_error("context_owner_unavailable", 503)
+                account = _detached_account_copy(stored)
+            account = await proxy._ensure_fresh_with_budget_or_auth_error(
+                account,
+                timeout_seconds=max(0.01, deadline - time.monotonic()),
+                privacy_policy=CodexControlRequestPrivacyPolicy.PRIVATE_CONTEXT,
+            )
+            route = await proxy._resolve_upstream_route_for_account(account, operation="codex_context")
+
+            async def send() -> CodexControlResponse:
+                return await _service_core_codex_control_request()(
+                    path,
+                    method="POST",
+                    payload=payload,
+                    query_params=query_params,
+                    headers=filter_inbound_headers(headers),
+                    access_token=proxy._encryptor.decrypt(account.access_token_encrypted),
+                    account_id=_header_account_id(account.chatgpt_account_id),
+                    timeout_seconds=max(0.01, deadline - time.monotonic()),
+                    route=route,
+                    allow_direct_egress=route is None,
+                    privacy_policy=CodexControlRequestPrivacyPolicy.PRIVATE_CONTEXT,
+                )
+
+            try:
+                response = await send()
+            except ProxyResponseError as exc:
+                if exc.status_code != 401:
+                    raise
+                # A rejected authentication attempt may refresh once on its owner.
+                # Never retry an ambiguous write or select a replacement owner.
+                account = await proxy._ensure_fresh_with_budget(
+                    account,
+                    force=True,
+                    timeout_seconds=max(0.01, deadline - time.monotonic()),
+                    privacy_policy=CodexControlRequestPrivacyPolicy.PRIVATE_CONTEXT,
+                )
+                response = await send()
+            if not 200 <= response.status_code < 300:
+                raise context_error("context_backend_unavailable", response.status_code)
+            # Successful notes access says nothing about the model's quota.
+            return response
+
+        async with asyncio.timeout(max(0.01, deadline - time.monotonic())):
+            if len(account_ids) == 1:
+                response = await call(account_ids[0])
+                if path == "alpha/notes/v2/thread_hint":
+                    return response
+                if len(response.body) > MAX_CONTEXT_BYTES:
+                    raise context_error("context_result_too_large", 502)
+                result = json.loads(response.body)
+                if not isinstance(result, dict):
+                    raise context_error("context_result_invalid", 502)
+                return CodexControlResponse(
+                    status_code=response.status_code,
+                    body=pack_history(
+                        api_key.id,
+                        sid,
+                        [HistoryPartition(account_id=account_ids[0], result=result)],
+                        kind="history" if path.startswith("alpha/history/") else "notes",
+                    ),
+                    headers=response.headers,
+                )
+            semaphore = asyncio.Semaphore(4)
+
+            async def partition(account_id: str) -> HistoryPartition:
+                async with semaphore:
+                    response = await call(account_id)
+                if len(response.body) > MAX_CONTEXT_BYTES:
+                    raise context_error("context_result_too_large", 502)
+                result = json.loads(response.body)
+                if not isinstance(result, dict):
+                    raise context_error("context_result_invalid", 502)
+                return HistoryPartition(account_id=account_id, result=result)
+
+            async with asyncio.TaskGroup() as group:
+                tasks = [group.create_task(partition(account_id)) for account_id in account_ids]
+            return CodexControlResponse(
+                status_code=200,
+                body=pack_history(api_key.id, sid, [task.result() for task in tasks]),
+                headers={"content-type": "application/json"},
+            )
+
+
+class _CodexControlMixin(_ContextManagementMixin):
     async def _select_codex_control_account_without_budget(
         self,
         *,

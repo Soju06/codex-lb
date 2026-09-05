@@ -6,8 +6,9 @@ from typing import NamedTuple
 
 from pydantic import ValidationError
 
+from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import OpenAIErrorEnvelope, openai_error
-from app.core.exceptions import ProxyModelNotAllowed, ProxyReasoningEffortNotAllowed
+from app.core.exceptions import ProxyModelNotAllowed, ProxyReasoningEffortNotAllowed, ProxyUpstreamError
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import ModelRegistry, canonical_service_tier_value, get_model_registry
 from app.core.openai.requests import (
@@ -29,6 +30,7 @@ from app.core.utils.request_id import get_request_id
 from app.db.models import ModelSource
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.model_sources.catalog import source_model_reasoning_levels
+from app.modules.proxy.context_codec import expand_history_input
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +280,19 @@ def apply_api_key_enforcement(
     equal the enforced value (including after ``fast`` canonicalizes to
     ``priority``).
     """
+    try:
+        payload.input = expand_history_input(
+            payload.input,
+            (payload.model_extra or {}).get("client_metadata"),
+            api_key,
+            trusted=payload._codex_lb_context_ciphertexts,
+        )
+    except ProxyResponseError as exc:
+        error = ProxyUpstreamError(
+            "Codex context result is invalid or outside this key's scope", code="context_result_invalid"
+        )
+        error.status_code = exc.status_code
+        raise error from None
     client_reasoning_effort = payload._codex_lb_client_reasoning_effort or _client_reasoning_effort(payload)
     payload._codex_lb_client_reasoning_effort = client_reasoning_effort
     provider_reasoning_effort = _client_reasoning_effort_from_provider_aliases(payload)

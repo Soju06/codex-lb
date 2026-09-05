@@ -1403,6 +1403,17 @@
         "bug",
         "doc"
       ]
+    },
+    {
+      "login": "MIlhamDedi",
+      "name": "Muhammad Ilham Dedi",
+      "avatar_url": "https://avatars.githubusercontent.com/u/29776899?v=4",
+      "profile": "https://github.com/MIlhamDedi",
+      "contributions": [
+        "code",
+        "bug",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

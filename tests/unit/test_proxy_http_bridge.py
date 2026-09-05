@@ -18987,6 +18987,127 @@ async def test_get_or_create_http_bridge_session_returns_owner_forward_for_hard_
     assert resolved.owner_instance == "instance-b"
     assert resolved.owner_endpoint == "http://instance-b"
     assert resolved.key == key
+    assert service._http_bridge_inflight_sessions == {}
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_forwards_canonical_prompt_cache_hard_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "canonical-cache-key", None)
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-canonical-cache",
+        canonical_kind="prompt_cache",
+        canonical_key="canonical-cache-key",
+        api_key_scope="__anonymous__",
+        account_id="acc-owner",
+        owner_instance_id="instance-b",
+        owner_epoch=2,
+        lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="http_turn_canonical_cache",
+        latest_response_id="resp_canonical_cache",
+    )
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a", "instance-b"])),
+    )
+    service._ring_membership = cast(Any, SimpleNamespace(resolve_endpoint=AsyncMock(return_value="http://instance-b")))
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget",
+        AsyncMock(side_effect=AssertionError("hard continuation must forward before local account selection")),
+    )
+
+    resolved = await service._get_or_create_http_bridge_session(
+        key,
+        headers={"x-codex-turn-state": "http_turn_canonical_cache"},
+        affinity=proxy_service._AffinityPolicy(
+            key="http_turn_canonical_cache",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model="gpt-5.4",
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+        previous_response_id="resp_canonical_cache",
+        allow_forward_to_owner=True,
+        durable_lookup=durable_lookup,
+        request_stage="follow_up",
+        preferred_account_id="acc-owner",
+    )
+
+    assert isinstance(resolved, proxy_service._HTTPBridgeOwnerForward)
+    assert resolved.owner_instance == "instance-b"
+    assert resolved.owner_endpoint == "http://instance-b"
+    assert resolved.key == key
+    # Forwarding hands the turn to the owner replica; the origin must not keep a
+    # local inflight creation reservation that only unrelated capacity waiters
+    # would evict after the full admission timeout.
+    assert service._http_bridge_inflight_sessions == {}
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_forward_to_owner_leaves_no_local_inflight_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("thread_header", "thread_hard_forward", None)
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-thread-hard-forward",
+        canonical_kind="thread_header",
+        canonical_key="thread_hard_forward",
+        api_key_scope="__anonymous__",
+        account_id="acc-owner",
+        owner_instance_id="instance-b",
+        owner_epoch=2,
+        lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="http_turn_thread_hard_forward",
+        latest_response_id="resp_thread_hard_forward",
+    )
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a", "instance-b"])),
+    )
+    service._ring_membership = cast(Any, SimpleNamespace(resolve_endpoint=AsyncMock(return_value="http://instance-b")))
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget",
+        AsyncMock(side_effect=AssertionError("owner forward must not select a local account")),
+    )
+
+    resolved = await service._get_or_create_http_bridge_session(
+        key,
+        headers={"x-codex-turn-state": "http_turn_thread_hard_forward"},
+        affinity=proxy_service._AffinityPolicy(
+            key="http_turn_thread_hard_forward",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model="gpt-5.4",
+        idle_ttl_seconds=120.0,
+        max_sessions=1,
+        previous_response_id="resp_thread_hard_forward",
+        allow_forward_to_owner=True,
+        durable_lookup=durable_lookup,
+        request_stage="follow_up",
+        preferred_account_id="acc-owner",
+    )
+
+    assert isinstance(resolved, proxy_service._HTTPBridgeOwnerForward)
+    assert resolved.owner_instance == "instance-b"
+    assert resolved.key == key
+    # With max_sessions=1 a leaked reservation would count as the whole local
+    # capacity and stall the next unrelated admission for the wait timeout.
+    assert service._http_bridge_inflight_sessions == {}
 
 
 @pytest.mark.asyncio
@@ -26499,7 +26620,6 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    await service._pin_file_account("file_from_other_account", "acc-file")
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.4",
@@ -26517,6 +26637,7 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
         }
     )
     get_or_create = AsyncMock()
+    resolve_file_account = AsyncMock(return_value="acc-file")
 
     monkeypatch.setattr(
         proxy_service,
@@ -26539,6 +26660,7 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_http_bridge_local_owner_account_id", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_forwarded_file_account_for_responses", resolve_file_account)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
 
     with pytest.raises(ProxyResponseError) as exc_info:
@@ -26560,6 +26682,7 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
 
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    resolve_file_account.assert_not_awaited()
     get_or_create.assert_not_awaited()
 
 

@@ -169,32 +169,6 @@ async def test_capacity_signal_discovery_timeout_uses_virtual_scheduler() -> Non
 
 
 @pytest.mark.asyncio
-async def test_capacity_recovery_wait_ends_at_signal_timeout() -> None:
-    clock = VirtualClock()
-    scheduler = VirtualScheduler(clock)
-    first_task = scheduler.create_task(scheduler.sleep(1.0, result="response.created"))
-    capacity_wait_event = asyncio.Event()
-    capacity_wait_event.set()
-    probe_task = scheduler.create_task(
-        proxy_api._wait_for_first_stream_probe(
-            first_task,
-            timeout_seconds=0.01,
-            capacity_wait_event=capacity_wait_event,
-            scheduler=scheduler,
-            clock=clock,
-        )
-    )
-
-    await scheduler.drain()
-    await scheduler.advance(0.01)
-    assert probe_task.done() is False
-    await scheduler.advance(proxy_api._CAPACITY_WAIT_MARKER_GRACE_SECONDS)
-
-    assert await probe_task is False
-    await scheduler.cancel_owned_tasks()
-
-
-@pytest.mark.asyncio
 async def test_capacity_recovery_ready_preserves_first_item_probe() -> None:
     clock = VirtualClock()
     scheduler = VirtualScheduler(clock)
@@ -205,6 +179,11 @@ async def test_capacity_recovery_ready_preserves_first_item_probe() -> None:
 
     async def mark_capacity_ready() -> None:
         await scheduler.sleep(0.02)
+        # The producer owns the paired level state: readiness clears the wait
+        # marker and sets the ready event (see
+        # ``_signal_http_bridge_model_capacity_retry_ready``). The probe only
+        # observes both signals.
+        capacity_wait_event.clear()
         capacity_ready_event.set()
 
     scheduler.create_task(mark_capacity_ready())
@@ -232,19 +211,56 @@ async def test_capacity_recovery_ready_preserves_first_item_probe() -> None:
 
 
 @pytest.mark.asyncio
-async def test_capacity_recovery_ready_starts_post_ready_timeout() -> None:
+async def test_capacity_recovery_wait_is_unbounded_under_virtual_time() -> None:
+    """A set wait marker keeps the probe waiting for the first item indefinitely.
+
+    Main leaves the recovery wait unbounded on purpose: the marker proves the
+    request is queued for capacity, so the startup window must not expire it.
+    The signal-discovery deadline only bounds the *absence* of a marker.
+    """
+
     clock = VirtualClock()
     scheduler = VirtualScheduler(clock)
-    first_task = scheduler.create_task(scheduler.sleep(3.0, result="response.created"))
+    first_task = scheduler.create_task(scheduler.sleep(10_000.0, result="response.created"))
+    capacity_wait_event = asyncio.Event()
+    capacity_wait_event.set()
+    probe_task = scheduler.create_task(
+        proxy_api._wait_for_first_stream_probe(
+            first_task,
+            timeout_seconds=0.01,
+            capacity_wait_event=capacity_wait_event,
+            scheduler=scheduler,
+            clock=clock,
+        )
+    )
+
+    await scheduler.drain()
+    await scheduler.advance(0.01)
+    await scheduler.advance(10 * proxy_api._CAPACITY_WAIT_MARKER_GRACE_SECONDS)
+    await scheduler.advance(10 * proxy_api._CAPACITY_STARTUP_SIGNAL_DISCOVERY_SECONDS)
+
+    assert probe_task.done() is False
+    assert capacity_wait_event.is_set() is True
+    await scheduler.cancel_owned_tasks()
+    assert probe_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_recovery_ready_rereads_level_state() -> None:
+    """Readiness that is immediately superseded by a newer wait keeps the probe waiting.
+
+    The probe never clears the wait marker itself; after the ready signal it
+    re-reads the paired level state and, when a newer wait already replaced
+    the ready, arms the recovery wait again instead of starting the bounded
+    post-ready window or returning.
+    """
+
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    first_task = scheduler.create_task(scheduler.sleep(10_000.0, result="response.created"))
     capacity_wait_event = asyncio.Event()
     capacity_wait_event.set()
     capacity_ready_event = proxy_api._CapacityStartupReadyEvent(clock=clock)
-
-    async def mark_capacity_ready() -> None:
-        await scheduler.sleep(0.02)
-        capacity_ready_event.set()
-
-    scheduler.create_task(mark_capacity_ready())
     probe_task = scheduler.create_task(
         proxy_api._wait_for_first_stream_probe(
             first_task,
@@ -255,14 +271,22 @@ async def test_capacity_recovery_ready_starts_post_ready_timeout() -> None:
             clock=clock,
         )
     )
-
     await scheduler.drain()
     await scheduler.advance(0.01)
-    await scheduler.advance(0.01)
-    assert capacity_wait_event.is_set() is False
-    await scheduler.advance(0.01)
+    assert probe_task.done() is False
 
-    assert await probe_task is False
+    # Producer: ready, then a newer wait before the probe task resumes.
+    capacity_wait_event.clear()
+    capacity_ready_event.set()
+    capacity_ready_event.clear()
+    capacity_wait_event.set()
+    await scheduler.drain()
+
+    assert probe_task.done() is False
+    assert capacity_wait_event.is_set() is True
+    assert capacity_ready_event.is_set() is False
+    await scheduler.advance(10 * proxy_api._CAPACITY_STARTUP_SIGNAL_DISCOVERY_SECONDS)
+    assert probe_task.done() is False
     await scheduler.cancel_owned_tasks()
 
 

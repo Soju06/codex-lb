@@ -7252,7 +7252,7 @@ def _create_first_stream_probe_task(
 
 
 async def _wait_for_first_stream_probe(
-    first_task: asyncio.Task[str | None],
+    first_task: asyncio.Task[str],
     *,
     timeout_seconds: float,
     capacity_wait_event: asyncio.Event | None,
@@ -7261,14 +7261,8 @@ async def _wait_for_first_stream_probe(
     clock: Clock = REAL_CLOCK,
 ) -> bool:
     try:
-        timeout_task = scheduler.create_task(scheduler.sleep(timeout_seconds))
-        try:
-            done, _pending = await asyncio.wait({first_task, timeout_task}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            if not timeout_task.done():
-                timeout_task.cancel()
-                await asyncio.gather(timeout_task, return_exceptions=True)
-        if first_task in done:
+        done, _pending = await scheduler.wait({first_task}, timeout=timeout_seconds)
+        if done:
             if capacity_wait_event is not None and capacity_wait_event.is_set():
                 capacity_wait_event.clear()
             return True
@@ -7285,86 +7279,87 @@ async def _wait_for_first_stream_probe(
             if capacity_ready_event is not None
             else _CAPACITY_WAIT_MARKER_GRACE_SECONDS
         )
-        signal_timeout_task = scheduler.create_task(scheduler.sleep(signal_discovery_seconds))
-        try:
-            while True:
-                if first_task.done():
-                    if capacity_wait_event.is_set():
-                        capacity_wait_event.clear()
-                    return True
+        signal_discovery_deadline = clock.monotonic() + signal_discovery_seconds
+        while True:
+            if first_task.done():
                 if capacity_wait_event.is_set():
-                    recovery_ready_task = (
-                        scheduler.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
-                    )
-                    try:
-                        recovery_waiters = {first_task, signal_timeout_task}
-                        if recovery_ready_task is not None:
-                            recovery_waiters.add(recovery_ready_task)
-                        recovery_done, _pending = await asyncio.wait(
-                            recovery_waiters,
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        if first_task not in recovery_done and signal_timeout_task in recovery_done:
-                            return False
-                        if recovery_ready_task is not None and recovery_ready_task in recovery_done:
-                            capacity_wait_event.clear()
-                    finally:
-                        if recovery_ready_task is not None and not recovery_ready_task.done():
-                            recovery_ready_task.cancel()
-                        if recovery_ready_task is not None:
-                            await asyncio.gather(recovery_ready_task, return_exceptions=True)
-                    continue
-                if capacity_ready_event is not None and capacity_ready_event.is_set():
-                    # Admission recovery only proves that local capacity is ready;
-                    # the resumed upstream can still fail before its first item.
-                    # Preserve the route's normal bounded startup-error window so
-                    # an immediate 4xx / response.failed remains an HTTP startup
-                    # error, while a slow healthy upstream is still handed off.
-                    post_ready_timeout = timeout_seconds
-                    if isinstance(capacity_ready_event, _CapacityStartupReadyEvent):
-                        ready_set_at = capacity_ready_event.set_at
-                        if ready_set_at is not None:
-                            post_ready_timeout = max(0.0, timeout_seconds - (clock.monotonic() - ready_set_at))
-                    if post_ready_timeout <= 0:
-                        return False
-                    post_ready_timeout_task = scheduler.create_task(scheduler.sleep(post_ready_timeout))
-                    try:
-                        post_ready_done, _pending = await asyncio.wait(
-                            {first_task, post_ready_timeout_task},
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                    finally:
-                        if not post_ready_timeout_task.done():
-                            post_ready_timeout_task.cancel()
-                            await asyncio.gather(post_ready_timeout_task, return_exceptions=True)
-                    return first_task in post_ready_done
-
-                marker_task = scheduler.create_task(capacity_wait_event.wait())
-                ready_task = (
+                    capacity_wait_event.clear()
+                return True
+            if capacity_wait_event.is_set():
+                recovery_ready_task = (
                     scheduler.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
                 )
                 try:
-                    signal_waiters = {first_task, marker_task, signal_timeout_task}
-                    if ready_task is not None:
-                        signal_waiters.add(ready_task)
-                    signal_done, _pending = await asyncio.wait(signal_waiters, return_when=asyncio.FIRST_COMPLETED)
-                    if signal_timeout_task in signal_done:
-                        return False
-                finally:
-                    pending_signal_tasks = [
-                        task for task in (marker_task, ready_task) if task is not None and not task.done()
-                    ]
-                    for task in pending_signal_tasks:
-                        task.cancel()
-                    await asyncio.gather(
-                        marker_task,
-                        *(task for task in (ready_task,) if task is not None),
-                        return_exceptions=True,
+                    recovery_waiters = {first_task}
+                    if recovery_ready_task is not None:
+                        recovery_waiters.add(recovery_ready_task)
+                    recovery_done, _pending = await asyncio.wait(
+                        recovery_waiters,
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
-        finally:
-            if not signal_timeout_task.done():
-                signal_timeout_task.cancel()
-                await asyncio.gather(signal_timeout_task, return_exceptions=True)
+                    if first_task not in recovery_done:
+                        # Re-read the paired level state. The ready signal has
+                        # cleared the wait that recovered, but a newer wait may
+                        # already have superseded that ready before this task
+                        # resumes.
+                        continue
+                finally:
+                    if recovery_ready_task is not None and not recovery_ready_task.done():
+                        recovery_ready_task.cancel()
+                    if recovery_ready_task is not None:
+                        await asyncio.gather(recovery_ready_task, return_exceptions=True)
+                continue
+            if capacity_ready_event is not None and capacity_ready_event.is_set():
+                # Admission recovery only proves that local capacity is ready;
+                # the resumed upstream can still fail before its first item.
+                # Preserve the route's normal bounded startup-error window so
+                # an immediate 4xx / response.failed remains an HTTP startup
+                # error, while a slow healthy upstream is still handed off.
+                post_ready_timeout = timeout_seconds
+                if isinstance(capacity_ready_event, _CapacityStartupReadyEvent):
+                    ready_set_at = capacity_ready_event.set_at
+                    if ready_set_at is not None:
+                        post_ready_timeout = max(0.0, timeout_seconds - (clock.monotonic() - ready_set_at))
+                if post_ready_timeout <= 0:
+                    return False
+                post_ready_done, _pending = await scheduler.wait(
+                    {first_task},
+                    timeout=post_ready_timeout,
+                )
+                return bool(post_ready_done)
+
+            marker_task = scheduler.create_task(capacity_wait_event.wait())
+            ready_task = (
+                scheduler.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
+            )
+            try:
+                signal_discovery_remaining = max(
+                    0.0,
+                    signal_discovery_deadline - clock.monotonic(),
+                )
+                if signal_discovery_remaining <= 0:
+                    return False
+                signal_waiters = {first_task, marker_task}
+                if ready_task is not None:
+                    signal_waiters.add(ready_task)
+                signal_done, _pending = await scheduler.wait(
+                    signal_waiters,
+                    timeout=signal_discovery_remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not signal_done:
+                    return False
+            finally:
+                pending_signal_tasks = [
+                    task for task in (marker_task, ready_task) if task is not None and not task.done()
+                ]
+                for task in pending_signal_tasks:
+                    task.cancel()
+                await asyncio.gather(
+                    marker_task,
+                    *(task for task in (ready_task,) if task is not None),
+                    return_exceptions=True,
+                )
     except asyncio.CancelledError:
         with anyio.CancelScope(shield=True):
             first_task.cancel()
@@ -7382,6 +7377,7 @@ async def _probe_stream_startup_error(
     handoff_task_sink: list[asyncio.Task[str]] | None = None,
     service_cleanup_ready_event: asyncio.Event | None = None,
     scheduler: Scheduler = REAL_SCHEDULER,
+    clock: Clock = REAL_CLOCK,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     if timeout_seconds is None:
         timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
@@ -7392,12 +7388,13 @@ async def _probe_stream_startup_error(
         capacity_wait_event=capacity_wait_event,
         capacity_ready_event=capacity_ready_event,
         scheduler=scheduler,
+        clock=clock,
     )
     if service_cleanup_ready_event is not None:
         buffered_before_cleanup_ready: list[str] = []
-        handoff_deadline = asyncio.get_running_loop().time() + timeout_seconds
+        handoff_deadline = clock.monotonic() + timeout_seconds
         while not service_cleanup_ready_event.is_set():
-            remaining = handoff_deadline - asyncio.get_running_loop().time()
+            remaining = handoff_deadline - clock.monotonic()
             if remaining <= 0:
                 with anyio.CancelScope(shield=True):
                     if not first_task.done():
@@ -7417,9 +7414,9 @@ async def _probe_stream_startup_error(
                     ),
                 )
             if not first_task.done():
-                cleanup_ready_task = asyncio.create_task(service_cleanup_ready_event.wait())
+                cleanup_ready_task = scheduler.create_task(service_cleanup_ready_event.wait())
                 try:
-                    await asyncio.wait(
+                    await scheduler.wait(
                         {first_task, cleanup_ready_task},
                         timeout=remaining,
                         return_when=asyncio.FIRST_COMPLETED,
@@ -7462,7 +7459,7 @@ async def _probe_stream_startup_error(
                         await aclose()
                     return _prepend_first(None, stream), first_error
             buffered_before_cleanup_ready.append(first)
-            first_task = _create_first_stream_probe_task(stream)
+            first_task = _create_first_stream_probe_task(stream, scheduler=scheduler)
 
         if handoff_task_sink is not None:
             handoff_task_sink.append(first_task)

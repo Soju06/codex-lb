@@ -167,6 +167,100 @@ async def test_load_balancer_reactivates_after_secondary_reset(db_setup):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("has_reset_metadata", [True, False])
+@pytest.mark.parametrize("has_block_marker", [True, False])
+async def test_load_balancer_does_not_reactivate_explicit_quota_from_fresh_exhausted_secondary_usage(
+    db_setup, has_reset_metadata, has_block_marker
+):
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    fallback_reset = now_epoch - 1
+    secondary_reset = now_epoch + 5 * 24 * 3600 if has_reset_metadata else None
+
+    exhausted = Account(
+        id="acc_explicit_quota_still_full",
+        email="explicit_quota_still_full@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-full"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-full"),
+        id_token_encrypted=encryptor.encrypt("id-full"),
+        last_refresh=now,
+        status=AccountStatus.QUOTA_EXCEEDED,
+        deactivation_reason=None,
+        reset_at=fallback_reset,
+        blocked_at=now_epoch - 3601 if has_block_marker else None,
+    )
+    available = Account(
+        id="acc_explicit_quota_replacement",
+        email="explicit_quota_replacement@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-ok"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-ok"),
+        id_token_encrypted=encryptor.encrypt("id-ok"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(exhausted)
+        await accounts_repo.upsert(available)
+
+        for account, primary_used, secondary_used in (
+            (exhausted, 15.0, 100.0),
+            (available, 20.0, 50.0),
+        ):
+            await usage_repo.add_entry(
+                account_id=account.id,
+                used_percent=primary_used,
+                window="primary",
+                reset_at=now_epoch + 300,
+                window_minutes=300,
+                recorded_at=now,
+                credits_has=False,
+                credits_unlimited=False,
+                credits_balance=0.0,
+            )
+            await usage_repo.add_entry(
+                account_id=account.id,
+                used_percent=secondary_used,
+                window="secondary",
+                reset_at=secondary_reset,
+                window_minutes=10080,
+                recorded_at=now,
+            )
+
+        for _ in range(2):
+            selection = await LoadBalancer(_repo_factory).select_account()
+            assert selection.account is not None
+            assert selection.account.id == available.id
+
+        refreshed = await session.get(Account, exhausted.id)
+        assert refreshed is not None
+        await session.refresh(refreshed)
+        assert refreshed.status == AccountStatus.QUOTA_EXCEEDED
+        assert refreshed.reset_at == secondary_reset
+
+        await usage_repo.add_entry(
+            account_id=exhausted.id,
+            used_percent=25.0,
+            window="secondary",
+            reset_at=secondary_reset + 1 if secondary_reset is not None else None,
+            window_minutes=10080,
+            recorded_at=utcnow(),
+        )
+        recovered = await LoadBalancer(_repo_factory).select_account(account_ids={exhausted.id})
+        assert recovered.account is not None
+        assert recovered.account.id == exhausted.id
+        await session.refresh(refreshed)
+        assert refreshed.status == AccountStatus.ACTIVE
+        assert refreshed.blocked_at is None
+
+
+@pytest.mark.asyncio
 async def test_load_balancer_treats_weekly_only_primary_as_advisory_quota_window(db_setup):
     encryptor = TokenEncryptor()
     now = utcnow()

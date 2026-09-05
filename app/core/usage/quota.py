@@ -39,9 +39,13 @@ def apply_usage_quota(
                     reset_at = None
             else:
                 used_percent = 100.0
-                if infer_status_from_usage:
+                if status == AccountStatus.QUOTA_EXCEEDED or infer_status_from_usage:
                     if secondary_reset is not None:
                         reset_at = secondary_reset
+                    elif reset_at is not None and reset_at <= time.time():
+                        # Exhaustion without a reset cannot expire through an
+                        # older fallback deadline in foreground selection.
+                        reset_at = None
                     status = AccountStatus.QUOTA_EXCEEDED
                     return status, used_percent, reset_at
         if status == AccountStatus.QUOTA_EXCEEDED:

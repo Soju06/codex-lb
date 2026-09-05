@@ -2272,10 +2272,12 @@ def _state_from_account(
     effective_secondary_entry = normalized_usage.effective_secondary_entry
     secondary_used = normalized_usage.secondary_used
     secondary_reset = normalized_usage.secondary_reset
+    effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
     credits_has, credits_unlimited, credits_balance = _extract_credit_status(
         primary_entry,
         effective_secondary_entry,
         secondary_entry,
+        recorded_after=effective_blocked_at if account.status == AccountStatus.QUOTA_EXCEEDED else None,
     )
 
     # If the usage window has reset (reset_at is in the past), the last
@@ -2317,8 +2319,6 @@ def _state_from_account(
         and effective_secondary_entry.used_percent is not None
         and float(effective_secondary_entry.used_percent) < 100.0
     )
-    effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
-
     # An account marked RATE_LIMITED by an actual 429 always carries a
     # blocked_at marker (stale window-derived RATE_LIMITED rows do not).
     # Evaluate the persisted cooldown against the ORIGINAL persisted
@@ -2460,7 +2460,9 @@ def _state_from_account(
 
     if cooldown_ready and effective_blocked_at is not None:
         if account.status == AccountStatus.QUOTA_EXCEEDED:
-            freshness_entry = effective_secondary_entry
+            freshness_entry = (
+                effective_secondary_entry if secondary_used is not None and secondary_used < 100.0 else None
+            )
         elif account.status == AccountStatus.RATE_LIMITED:
             freshness_entry = _rate_limited_freshness_entry(
                 account=account,
@@ -2812,26 +2814,32 @@ def _rate_limited_freshness_entry(
     if (
         long_window_entry is not None
         and long_window_entry.window == "monthly"
-        and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None
+        and usage_core.capacity_for_plan(account.plan_type, "monthly") is None
     ):
+        long_window_entry = None
+    # Freshness cannot prove recovery while an applicable long window is
+    # still exhausted, even if the primary sample reports available quota.
+    if long_window_entry is not None and not (
+        long_window_entry.used_percent is not None and float(long_window_entry.used_percent) < 100.0
+    ):
+        return None
+    if long_window_entry is not None and long_window_entry.window == "monthly":
         return long_window_entry
     if primary_entry is None:
         return long_window_entry
-    if long_window_entry is None:
-        return primary_entry
-    # A post-block refresh that no longer reports the short primary window
-    # writes only long-window rows, so a strictly newer long-window row is
-    # the recovery evidence — but only once the last primary sample's own
-    # reset deadline has provably elapsed, and only when that long window
-    # still has capacity. An exhausted long-window row must not clear the
-    # block: recovery would route traffic to an account whose long quota is
-    # still at 100%. While the primary sample still claims an active window,
-    # or omits reset metadata entirely, its freshness keeps gating recovery.
+    # A newer long-window row can replace primary evidence only after the
+    # primary reset expires. Otherwise the primary sample must itself
+    # report available quota.
     primary_window_expired = primary_entry.reset_at is not None and float(primary_entry.reset_at) <= time.time()
-    long_window_available = long_window_entry.used_percent is not None and float(long_window_entry.used_percent) < 100.0
-    if primary_window_expired and long_window_available and long_window_entry.recorded_at > primary_entry.recorded_at:
+    if (
+        primary_window_expired
+        and long_window_entry is not None
+        and long_window_entry.recorded_at > primary_entry.recorded_at
+    ):
         return long_window_entry
-    return primary_entry
+    if primary_entry.used_percent is not None and float(primary_entry.used_percent) < 100.0:
+        return primary_entry
+    return None
 
 
 def _usage_entry_is_recent_available(entry: _UsageWindowEntry | None) -> bool:
@@ -2854,11 +2862,13 @@ def _usage_entry_recorded_after_block(entry: _UsageWindowEntry | None, blocked_a
 
 def _extract_credit_status(
     *entries: _UsageWindowEntry | None,
+    recorded_after: float | None = None,
 ) -> tuple[bool | None, bool | None, float | None]:
     credit_entries: list[UsageHistory] = [
         entry
         for entry in entries
         if isinstance(entry, UsageHistory)
+        and (recorded_after is None or _usage_entry_recorded_after_block(entry, recorded_after))
         and not (entry.credits_has is None and entry.credits_unlimited is None and entry.credits_balance is None)
     ]
     if not credit_entries:

@@ -41834,6 +41834,9 @@ async def test_compact_permanent_refresh_preserves_file_owner(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_compact_permanent_refresh_pinned")
+    replacement = _make_account("acc_compact_permanent_refresh_replacement")
+    seen_excluded_account_ids: list[set[str]] = []
+    compact_account_ids: list[str | None] = []
     call_order: list[str] = []
     api_key = _make_api_key_data("key_compact_permanent_refresh_pinned")
     reservation = proxy_service.ApiKeyUsageReservationData(
@@ -41851,26 +41854,25 @@ async def test_compact_permanent_refresh_preserves_file_owner(monkeypatch):
         call_order.append("settle_compact_api_key_usage")
 
     async def ensure_fresh(target: Account, **kwargs: object) -> Account:
-        if kwargs.get("force"):
+        if target.id == account.id and kwargs.get("force"):
             raise RefreshError("invalid_grant", "refresh rejected", True)
         return target
 
     async def fake_compact(payload, headers, access_token, account_id):
-        del payload, headers, access_token, account_id
-        raise proxy_module.ProxyResponseError(
-            401,
-            openai_error("token_revoked", "token revoked", error_type="authentication_error"),
-            failure_phase="status",
-        )
+        del payload, headers, access_token
+        compact_account_ids.append(account_id)
+        if account_id == account.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                401,
+                openai_error("token_revoked", "token revoked", error_type="authentication_error"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
-    monkeypatch.setattr(
-        service,
-        "_select_account_with_budget_compatible",
-        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
-    )
+    _install_two_account_selection(monkeypatch, service, account, replacement, seen_excluded_account_ids)
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=account.id))
     monkeypatch.setattr(service._load_balancer, "mark_permanent_failure", AsyncMock(side_effect=mark_permanent_failure))
     monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
@@ -41892,6 +41894,8 @@ async def test_compact_permanent_refresh_preserves_file_owner(monkeypatch):
         )
 
     assert exc_info.value.status_code == 401
+    assert compact_account_ids == [account.chatgpt_account_id]
+    assert seen_excluded_account_ids == [set()]
     assert call_order == ["settle_compact_api_key_usage", "mark_permanent_failure"]
 
 

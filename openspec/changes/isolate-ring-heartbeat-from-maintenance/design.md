@@ -34,7 +34,7 @@ After bridge registration succeeds, the lifespan coordinator will start four sep
 3. idle bridge-session sweep;
 4. cap-partition membership refresh.
 
-The two durable reconciliation passes remain sequential within one owner, but each is attempted even if the other fails; a failure is then surfaced to the owner as one bounded `durable_ownership` outcome. This preserves the merged stale-operation cleanup without adding another worker or metric label. Each owner uses the existing ten-second cadence, but no owner awaits another. Registration still performs the initial ring write and readiness transition; the cap-partition owner runs its first refresh immediately after registration while the other owners wait for their first cadence boundary, so a blocked initial refresh cannot delay renewal. A supervisor catches ordinary phase failures, consumes task exceptions, records the outcome, and schedules the next eligible cycle. If the periodic worker itself exits unexpectedly while lifespan remains active, its supervisor logs the exit and restarts it after a small fixed backoff.
+The two durable reconciliation passes remain sequential within one owner, but each is attempted even if the other fails; a failure is then surfaced to the owner as one bounded `durable_ownership` outcome. This preserves the merged stale-operation cleanup without adding another worker or metric label. Heartbeat registration, renewal, and stale-marking use the already initialized background database factory, while cap refresh and durable bridge maintenance retain the request factory. This existing two-pool split reserves local pool admission for heartbeat when both production-sized request-pool connections are occupied by optional bridge work without adding a PostgreSQL engine or changing connection-budget math. Each owner uses the existing ten-second cadence, but no owner awaits another. Registration still performs the initial ring write and readiness transition; the cap-partition owner runs its first refresh immediately after registration while the other owners wait for their first cadence boundary, so a blocked initial refresh cannot delay renewal. A supervisor catches ordinary phase failures, consumes task exceptions, records the outcome, and schedules the next eligible cycle. If the periodic worker itself exits unexpectedly while lifespan remains active, its supervisor logs the exit and restarts it after a small fixed backoff.
 
 Alternatives rejected:
 
@@ -88,7 +88,7 @@ Failure logs include consecutive failure count and last-success age; the first s
 
 The registration/periodic coordinator remains rooted by lifespan. Shutdown cancels the coordinator, which stops all supervisors and their owned phase tasks under the existing drain deadline. Only after that cleanup does lifespan call `mark_stale()`. This preserves the current rule that no successful local renewal races after shutdown deliberately ages the row.
 
-Partial startup is handled explicitly: shutdown may cancel registration before any periodic owner exists. All cleanup paths are idempotent, and no phase shares an `AsyncSession` with another task.
+Partial startup is handled explicitly: shutdown may cancel registration before any periodic owner exists. All cleanup paths are idempotent, and no phase shares an `AsyncSession` with another task. A registration or periodic owner that does not settle inside the shutdown bound suppresses the SQLite clean-shutdown marker, so the next startup does not trust a teardown that raced live database work.
 
 ## Risks / Trade-offs
 
@@ -98,7 +98,7 @@ Partial startup is handled explicitly: shutdown may cancel registration before a
 - **[A maintenance timeout may be normal on an unusually large local registry]** → The timeout is diagnostic, not abandonment; work continues under the same owner and later completion is recorded.
 - **[Clock skew can produce a negative database age]** → Clamp health age to zero; staleness still uses the existing database timestamp comparison.
 - **[A completely starved event loop still misses all periodic work]** → Retain event-loop lag monitoring and land the cancellation-spin fix first; task separation only solves cooperative phase coupling.
-- **[Concurrent database phases increase short-lived session concurrency]** → Each phase owns its own session, fan-out is fixed at four, and no phase is duplicated while pending.
+- **[Concurrent database phases increase short-lived session concurrency]** → Each phase owns its own session, fan-out is fixed at four, heartbeat uses the existing background pool while optional bridge database phases use the request pool, and no phase is duplicated while pending.
 
 ## Migration Plan
 

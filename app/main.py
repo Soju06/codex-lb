@@ -18,7 +18,6 @@ from typing import Any, Protocol, cast
 from urllib.parse import urlparse
 
 import aiohttp
-import anyio
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from starlette.staticfiles import StaticFiles
@@ -83,6 +82,7 @@ from app.db.session import (
     SessionLocal,
     close_db,
     close_session,
+    get_background_session_factory,
     init_background_db,
     init_db,
     mark_sqlite_shutdown_clean,
@@ -265,12 +265,11 @@ async def _run_owned_lifespan_shutdown(
 ) -> asyncio.CancelledError | None:
     """Run the complete ordered lifespan cleanup before propagating cancellation."""
 
-    with anyio.CancelScope(shield=True):
-        shutdown_task = asyncio.create_task(
-            shutdown(),
-            name="application-lifespan-shutdown",
-        )
-        _, cancellation = await _await_task_deferring_cancellation(shutdown_task)
+    shutdown_task = asyncio.create_task(
+        shutdown(),
+        name="application-lifespan-shutdown",
+    )
+    _, cancellation = await _await_task_deferring_cancellation(shutdown_task)
     return cancellation
 
 
@@ -899,7 +898,7 @@ async def lifespan(app: FastAPI):
             await run_http_bridge_idle_sweep_maintenance(getattr(app.state, "proxy_service", None))
 
         async def _cap_partition() -> None:
-            await run_cap_partition_maintenance(svc, iid)
+            await run_cap_partition_maintenance(cap_partition_ring_service, iid)
 
         bridge_periodic_lifecycle = BridgeRingPeriodicLifecycle(
             heartbeat=_heartbeat,
@@ -919,7 +918,12 @@ async def lifespan(app: FastAPI):
     ring_service: RingMembershipService | None = None
     instance_id: str | None = None
     bridge_registration_task: asyncio.Task[None] | None = None
-    ring_service = RingMembershipService(SessionLocal)
+    # Heartbeat renewal uses the separately initialized background pool while
+    # cap refresh and durable bridge maintenance stay on the request pool. A
+    # blocked optional bridge phase therefore cannot consume heartbeat's local
+    # pool admission capacity.
+    ring_service = RingMembershipService(get_background_session_factory())
+    cap_partition_ring_service = RingMembershipService(SessionLocal)
     instance_id = settings.http_responses_session_bridge_instance_id
     bridge_registration_task = asyncio.create_task(
         _register_and_start_periodic_work(ring_service, instance_id),
@@ -978,12 +982,13 @@ async def lifespan(app: FastAPI):
         # Stop registration and every periodic owner before aging the shared
         # row. If any owner cannot drain, leave the row to expire naturally so
         # a late heartbeat cannot race after an intentional stale mark.
-        _, bridge_shutdown_cancellation = await _shutdown_bridge_ring_membership(
+        bridge_periodic_drained, bridge_shutdown_cancellation = await _shutdown_bridge_ring_membership(
             registration_task=bridge_registration_task,
             periodic_lifecycle=bridge_periodic_lifecycle,
             ring_service=ring_service,
             instance_id=instance_id,
         )
+        database_tasks_drained = database_tasks_drained and bridge_periodic_drained
 
         if loop_lag_task is not None:
             loop_lag_task.cancel()

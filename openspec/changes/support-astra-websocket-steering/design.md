@@ -31,4 +31,16 @@ replace a successor that already owns a response ID. For example, a final
 `response.steer.failed` during admission must not leave an explicit create with
 a steering parent but no matching control-map entry.
 
-Rejected: landing the full #2089 branch.
+A replaced placeholder stays in a socket-owned release collection until its
+release succeeds. Register this cleanup obligation inside the atomic swap,
+before the release can yield or be cancelled. If release fails, continue the
+explicit response and unrelated work; the existing tracked socket finalizer
+retries that release once at teardown. A repeated failure is logged without
+skipping the other socket cleanup. This is bounded cleanup, not a background
+retry loop; a persistent database outage still requires stale-reservation
+reclamation. For example, a transient failure releasing the old reservation
+must leave it reserved until teardown refunds it, not settle it against the
+explicit continuation usage.
+
+Rejected: landing the full #2089 branch or introducing a new retry daemon for
+this concrete post-swap ownership gap.

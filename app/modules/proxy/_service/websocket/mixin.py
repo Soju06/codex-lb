@@ -1412,6 +1412,7 @@ class _WebSocketMixin:
         prohibit_fast_mode = bool(getattr(settings, "prohibit_fast_mode", False))
         routing_strategy = _facade()._routing_strategy(settings)
         pending_requests: deque[_WebSocketRequestState] = deque()
+        retired_steering_requests: list[_WebSocketRequestState] = []
         pending_lock = anyio.Lock()
         client_send_lock = anyio.Lock()
         response_create_gate = asyncio.Semaphore(1)
@@ -2437,6 +2438,8 @@ class _WebSocketMixin:
                             else:
                                 if pending_steering_continuation is not None and steering_placeholder is not None:
                                     pending_requests.remove(steering_placeholder)
+                                    # Transfer cleanup ownership before release can yield.
+                                    retired_steering_requests.append(steering_placeholder)
                                     pending_steering_continuation.request_state = response_create_request_state
                                     pending_steering_continuation.explicit_request_prepared = True
                                 request_state_registered = True
@@ -2452,6 +2455,8 @@ class _WebSocketMixin:
                                     "Failed to release steering placeholder reservation request_id=%s",
                                     steering_placeholder.request_id,
                                 )
+                            else:
+                                retired_steering_requests.remove(steering_placeholder)
                         if not request_state_registered:
                             await proxy._release_websocket_request_state_reservation(response_create_request_state)
                             await proxy._emit_websocket_terminal_error(
@@ -3083,6 +3088,18 @@ class _WebSocketMixin:
                         status="cancelled",
                         penalize_account=False,
                     )
+                cleanup_phase = "retired_steering_requests"
+                for retired_request in retired_steering_requests:
+                    try:
+                        await release_steering_request(proxy, retired_request)
+                    except Exception:
+                        # Retry once within the owned scope, not an unbounded
+                        # task per failed refund. Other cleanup must still run.
+                        _facade().logger.warning(
+                            "Failed to release retired steering reservation during socket cleanup request_id=%s",
+                            retired_request.request_id,
+                            exc_info=True,
+                        )
                 client_disconnected = downstream_activity.disconnected
                 cleanup_phase = "pending_requests"
                 await proxy._fail_pending_websocket_requests(

@@ -687,10 +687,11 @@ async def test_failed_explicit_placeholder_refund_does_not_abort_continuation(mo
 
         monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release)
 
-    _, reservations, settled, _, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
+    _, reservations, settled, released, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
     assert len(reservations) == 3
     assert [value[0] for value in settled] == ["res_0", "res_2"]
     assert saw("response.completed", "r2")(socket.sent)
+    assert [call.args[0].reservation_id for call in released.await_args_list if call.args[0]] == ["res_1"]
     assert "Failed to release steering placeholder reservation" in caplog.text
 
 

@@ -105,6 +105,9 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 - **GIVEN** an explicit continuation has been prepared and registered
 - **WHEN** releasing the replaced placeholder reservation fails
 - **THEN** the continuation remains pending and the socket continues
+- **AND** the socket SHALL retain ownership of the failed release and retry it during its tracked teardown cleanup
+- **AND** a successful retry SHALL refund only the placeholder without settling or releasing the explicit continuation twice
+- **AND** teardown SHALL await its owned cleanup within the existing cleanup budget and report a repeated release failure without skipping unrelated cleanup
 
 #### Scenario: Steering ownership changes while an explicit continuation awaits registration
 - **GIVEN** a matching explicit response.create is awaiting preparation, owner resolution, or admission

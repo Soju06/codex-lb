@@ -11325,7 +11325,7 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
         image_inline_fetch_enabled = False
-        trace_channels = frozenset()
+        trace_channels = frozenset({"upstream_payload"})
         proxy_request_budget_seconds = 75.0
 
     registry = SimpleNamespace(
@@ -11341,7 +11341,8 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "get_model_registry", lambda: registry)
     monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
-    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    log_request_start = MagicMock()
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", log_request_start)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
 
     session = _SseSession(_SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_http"}}\n\n']))
@@ -11379,6 +11380,10 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
     assert proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY not in cast(
         Mapping[str, JsonValue], upstream_payload.get("client_metadata", {})
     )
+    traced_payloads = [json.loads(call.kwargs["payload_json"]) for call in log_request_start.call_args_list]
+    assert len(traced_payloads) == 2
+    assert traced_payloads[0]["client_metadata"][proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY] == "true"
+    assert traced_payloads[1] == upstream_payload
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_http"}}\n\n']
 
 

@@ -10,6 +10,7 @@
 - [x] 2.1 Subscription HTTP stream/collect/compact/chat-completions
 - [x] 2.2 Source Responses: key policy without Astra schema restrictions
 - [x] 2.3 HTTP-bridge prepare uses payload.input after preparation
+- [x] 2.4 Select the WebSocket Astra schema after recorded subscription ownership resolves, before admission
 
 ## 3. Verification
 
@@ -17,3 +18,4 @@
 - [x] 3.2 Strict OpenSpec validation of this change
 - [x] 3.3 Refresh stored client-plane update efforts after each injected-anchor continuation
 - [x] 3.4 Preserve original HTTP full-resend bookkeeping while validating the trimmed continuation; prove streaming and collect routes retain durable prefix matching on a later resend
+- [x] 3.5 Real-route subscription-owner regression and source/subscription/key-policy compatibility controls on canonical and equivalent sockets

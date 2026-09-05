@@ -29,6 +29,20 @@ emits these items (`core/src/session/input_queue.rs`).
   update; repeated preparation is idempotent.
 - Mapping Ultra to Max during policy would let a Max-only key accept
   Ultra. Policy compares client-plane values.
+- A source claiming Astra does not own a recorded subscription response.
+  Resolve that ownership before choosing the WebSocket schema, so source-only
+  controls such as top_logprobs cannot reach the subscription backend. Invalid
+  requests fail before reservation; genuine source continuations still receive
+  the existing HTTP-transport fallback.
+
+## Owner-precedence baseline
+
+Upstream main at 5ad638b6 already routes recorded subscription anchors ahead of
+model sources, but has no Astra schema policy on either transport. The new
+schema requirement belongs to this change. At a67ffa4d HTTP correctly rejects
+the owner-bound source-only control while WebSocket still connects upstream;
+the earlier source-schema exemption left this new policy incomplete. This
+repair closes that contract gap rather than redesigning source ownership.
 
 ## Example
 

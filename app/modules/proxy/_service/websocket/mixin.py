@@ -1783,15 +1783,16 @@ class _WebSocketMixin:
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
                                 if request_state.previous_response_id is not None:
-                                    request_state.previous_response_owner_account_id = (
-                                        await proxy._resolve_websocket_previous_response_owner(
-                                            previous_response_id=request_state.previous_response_id,
-                                            api_key=request_state.api_key or api_key,
-                                            session_id=request_state.session_id,
-                                            surface="websocket_source_route",
-                                            request_state=request_state,
+                                    if request_state.previous_response_owner_account_id is None:
+                                        request_state.previous_response_owner_account_id = (
+                                            await proxy._resolve_websocket_previous_response_owner(
+                                                previous_response_id=request_state.previous_response_id,
+                                                api_key=request_state.api_key or api_key,
+                                                session_id=request_state.session_id,
+                                                surface="websocket_source_route",
+                                                request_state=request_state,
+                                            )
                                         )
-                                    )
                                     request_state.preferred_account_id = resolve_required_account_id(
                                         ("existing bridge or file", request_state.preferred_account_id),
                                         (
@@ -3159,9 +3160,7 @@ class _WebSocketMixin:
                 refreshed_api_key,
                 raw_model=raw_source_model,
             )
-        if source_owned:
-            validate_configuration_update_policy(responses_payload, refreshed_api_key, subscription=False)
-        else:
+        if not source_owned:
             validate_astra_request(responses_payload, refreshed_api_key)
         full_resend_client_metadata = client_metadata
         if client_full_resend_retry_safe and client_full_resend_input_items is not None:
@@ -3246,6 +3245,23 @@ class _WebSocketMixin:
             headers,
             synthesized_turn_state=synthesized_turn_state,
         )
+        previous_response_owner_account_id = None
+        if source_owned:
+            # A recorded subscription anchor overrides the model source, as on
+            # HTTP. Resolve after anchor injection, before schema selection and
+            # reservation, while invalid client-plane updates are still intact.
+            if responses_payload.previous_response_id is not None:
+                previous_response_owner_account_id = await proxy._resolve_websocket_previous_response_owner(
+                    previous_response_id=responses_payload.previous_response_id,
+                    api_key=refreshed_api_key,
+                    session_id=session_id,
+                    surface="websocket_source_route",
+                )
+                source_owned = previous_response_owner_account_id is None
+            if source_owned:
+                validate_configuration_update_policy(responses_payload, refreshed_api_key, subscription=False)
+            else:
+                validate_astra_request(responses_payload, refreshed_api_key)
         capability_route = await proxy._capability_router.route(
             capability_intent,
             api_key_id=refreshed_api_key.id if refreshed_api_key is not None else None,
@@ -3286,6 +3302,7 @@ class _WebSocketMixin:
         request_state.conversation_id = conversation_id
         request_state.client_ip = client_ip
         request_state.raw_source_model = raw_source_model
+        request_state.previous_response_owner_account_id = previous_response_owner_account_id
         request_state.source_route_excluded = source_route_excluded
         request_state.responses_lite_model = next_responses_lite_model
         request_state.expose_stale_previous_response_classifier = codex_session_affinity

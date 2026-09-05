@@ -40,3 +40,10 @@ Bridge preparation also uses a copy so a late injected reset cannot shift
 the client prefix before the subsequent stored-context comparison.
 
 Rejected: landing the full #2089 branch. Maintainer required a split.
+
+For a WebSocket Astra source candidate, resolve previous-response ownership
+after continuity anchor injection and before choosing its schema or reserving
+usage. Carry a resolved subscription owner into routing; do not reclassify it
+as source-owned at connect time. Keep ordinary subscription preparation and
+original-history bookkeeping unchanged. This matches HTTP owner precedence
+without changing model-source routing or validating reconstructed wire values.

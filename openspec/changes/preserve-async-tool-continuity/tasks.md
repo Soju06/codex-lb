@@ -18,3 +18,4 @@
 - [x] 3.4 Account-neutral replay and durable suffix matching accept settled async pairs
 - [x] 3.5 Reject malformed async suffix items before manifest comparison, with failing-first unit and HTTP-route regressions and focused validation
 - [x] 3.6 Preserve no-manifest async retained-output proofs with failing-first durable HTTP recovery coverage, typed delayed outputs, ownership and fail-closed regressions, and scoped static/spec checks
+- [x] 3.7 Reject present non-boolean async markers in root validation and both durable replay proofs, with failing-first prefix/suffix unit and real HTTP owner-loss regressions and scoped validation

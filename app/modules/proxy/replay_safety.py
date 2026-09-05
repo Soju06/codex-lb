@@ -375,7 +375,7 @@ def responses_input_suffix_retains_prior_output(
             return False
         item_type = item_type_value if isinstance(item_type_value, str) else None
         if item_type in _TOOL_CALL_TYPES:
-            if item.get("status") not in (None, "completed"):
+            if item.get("status") not in (None, "completed") or not _tool_call_has_valid_async_marker(item):
                 return False
             call_id = item.get("call_id")
             if not isinstance(call_id, str) or not call_id or call_id in seen_suffix_call_ids:
@@ -567,7 +567,7 @@ def _direct_tool_call_prefix_state(
                 continue
             return None
         if item_type in _TOOL_CALL_TYPES:
-            if item.get("status") not in (None, "completed"):
+            if item.get("status") not in (None, "completed") or not _tool_call_has_valid_async_marker(item):
                 return None
             call_id = item.get("call_id")
             if not isinstance(call_id, str) or not call_id or call_id in seen_call_ids:
@@ -707,8 +707,12 @@ def _is_fresh_followup_input(item: Mapping[str, JsonValue]) -> bool:
     )
 
 
+def _tool_call_has_valid_async_marker(item: Mapping[str, JsonValue]) -> bool:
+    return "async" not in item or isinstance(item["async"], bool)
+
+
 def _tool_call_is_self_contained(item_type: str, item: Mapping[str, JsonValue]) -> bool:
-    if item.get("status") not in (None, "completed"):
+    if item.get("status") not in (None, "completed") or not _tool_call_has_valid_async_marker(item):
         return False
     if item_type == "function_call":
         return _is_nonblank_string(item.get("name")) and isinstance(item.get("arguments"), str)

@@ -49,3 +49,12 @@ remain the baseline. A focused shared-proof repair is preferable to a new
 persisted async manifest or transcript reconstruction: neither is needed
 to distinguish non-blocking async work in client-supplied full history.
 Complete transcript persistence (#1900) remains separate scope.
+
+Validate the optional async marker before classifying calls in all replay
+proofs. Presence requires a boolean: for example, `"async": "true"` with
+a matching output is malformed, not a synchronous pair. Share only this
+field check across root call validation, stored-prefix ordering, and
+retained-suffix ordering; their existing call-body validation contracts
+are different. Omitted and false markers remain synchronous, and true
+remains asynchronous. No recovery, boundary, or persistence policy changes
+are needed for this explicit malformed-field finding.

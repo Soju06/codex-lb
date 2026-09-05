@@ -62,3 +62,12 @@ calls.
 - **AND** malformed, duplicate, or mismatched async items MUST fail closed
 - **AND** async calls or their outputs alone MUST NOT replace the completed-assistant boundary or settle pending synchronous calls
 - **AND** existing account-ownership and account-neutral replay checks MUST remain required
+
+#### Scenario: Non-boolean async markers reject durable replay
+
+- **GIVEN** a durable full resend contains a function or custom tool call in its stored prefix or suffix
+- **WHEN** the call contains an `async` field
+- **THEN** its value MUST be a boolean before synchronous or asynchronous classification
+- **AND** string, list, null, integer, and object values MUST reject both synchronous-manifest and retained-output recovery proofs without raising an internal error
+- **AND** an unavailable continuity owner MUST return the existing fail-closed compatibility error without an upstream replay
+- **AND** an omitted marker or `false` MUST retain synchronous settlement requirements, while `true` MUST retain asynchronous settlement semantics

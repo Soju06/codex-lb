@@ -1,6 +1,6 @@
 ## Why
 
-The Python HTTP preparation path serializes the complete request for consumers that are inactive even after HTTP is selected. A controlled exact-body ablation saved about3 ms at1.06MB and27 ms at8.55MB; these are preparation costs, not an explanation of minute-scale waits.
+The Python HTTP preparation path serializes the complete request for consumers that are inactive even after HTTP is selected. A controlled exact-body ablation saved about 3 ms at 1.06 MB and 27 ms at 8.55 MB; these are preparation costs, not an explanation of minute-scale waits.
 
 ## What Changes
 

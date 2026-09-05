@@ -380,6 +380,46 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             ],
         )
 
+    async def get_usage_reservation_for_update(self, reservation_id: str) -> UsageReservationData | None:
+        return await self.get_usage_reservation(reservation_id)
+
+    async def set_usage_reservation_item_reserved_delta(
+        self,
+        reservation_id: str,
+        *,
+        limit_id: int,
+        reserved_delta: int,
+    ) -> bool:
+        reservation = self._reservations.get(reservation_id)
+        if reservation is None or reservation.status != "reserved":
+            return False
+        updated_items: list[UsageReservationItemData] = []
+        found = False
+        for item in reservation.items:
+            if item.limit_id == limit_id:
+                updated_items.append(
+                    UsageReservationItemData(
+                        limit_id=item.limit_id,
+                        limit_type=item.limit_type,
+                        reserved_delta=reserved_delta,
+                        expected_reset_at=item.expected_reset_at,
+                        actual_delta=item.actual_delta,
+                    )
+                )
+                found = True
+            else:
+                updated_items.append(item)
+        if not found:
+            return False
+        self._reservations[reservation_id] = UsageReservationData(
+            reservation_id=reservation.reservation_id,
+            api_key_id=reservation.api_key_id,
+            model=reservation.model,
+            status=reservation.status,
+            items=updated_items,
+        )
+        return True
+
     async def transition_usage_reservation_status(
         self,
         reservation_id: str,
@@ -2709,6 +2749,151 @@ async def test_update_key_usage_sections() -> None:
         ),
     )
     assert updated.usage_sections == "account_pool_usage"
+
+
+@pytest.mark.asyncio
+async def test_extend_and_reduce_usage_reservation_keep_one_settlement_lifecycle() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="reservation-steering-extension-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="input_tokens", limit_window="weekly", max_value=10_000),
+                LimitRuleInput(limit_type="output_tokens", limit_window="weekly", max_value=10_000),
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=20_000),
+                LimitRuleInput(limit_type="cost_usd", limit_window="weekly", max_value=100_000_000),
+            ],
+        )
+    )
+    reservation = await service.enforce_limits_for_request(
+        created.id,
+        request_model="gpt-5.1",
+        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=100, output_tokens=50),
+    )
+    assert reservation is not None
+    before = await repo.get_usage_reservation(reservation.reservation_id)
+    assert before is not None
+    before_by_type = {item.limit_type: item.reserved_delta for item in before.items}
+
+    assert await service.extend_usage_reservation(
+        reservation.reservation_id,
+        request_service_tier=None,
+        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=200),
+    )
+    extended = await repo.get_usage_reservation(reservation.reservation_id)
+    assert extended is not None
+    extended_by_type = {item.limit_type: item.reserved_delta for item in extended.items}
+    assert extended_by_type[LimitType.OUTPUT_TOKENS] == before_by_type[LimitType.OUTPUT_TOKENS] == 50
+    assert extended_by_type[LimitType.INPUT_TOKENS] == 300
+    assert extended_by_type[LimitType.TOTAL_TOKENS] == 350
+    assert extended_by_type[LimitType.COST_USD] > before_by_type[LimitType.COST_USD]
+
+    assert await service.reduce_usage_reservation(
+        reservation.reservation_id,
+        request_service_tier=None,
+        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=100),
+    )
+    reduced = await repo.get_usage_reservation(reservation.reservation_id)
+    assert reduced is not None
+    reduced_by_type = {item.limit_type: item.reserved_delta for item in reduced.items}
+    assert reduced_by_type[LimitType.OUTPUT_TOKENS] == 50
+    assert reduced_by_type[LimitType.INPUT_TOKENS] == 200
+    assert reduced_by_type[LimitType.TOTAL_TOKENS] == 250
+    assert reduced_by_type[LimitType.COST_USD] < extended_by_type[LimitType.COST_USD]
+
+    await service.finalize_usage_reservation(
+        reservation.reservation_id,
+        model="gpt-5.1",
+        input_tokens=150,
+        output_tokens=20,
+    )
+    finalized = await repo.get_usage_reservation(reservation.reservation_id)
+    assert finalized is not None
+    assert finalized.status == "finalized"
+    assert {limit.limit_type: limit.current_value for limit in await repo.get_limits_by_key(created.id)} == {
+        LimitType.INPUT_TOKENS: 150,
+        LimitType.OUTPUT_TOKENS: 20,
+        LimitType.TOTAL_TOKENS: 170,
+        LimitType.COST_USD: next(
+            item.actual_delta for item in finalized.items if item.limit_type == LimitType.COST_USD
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_extend_usage_reservation_rolls_back_all_limit_deltas_on_rejection() -> None:
+    class _TransactionalReservationRepo(_FakeApiKeysRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self._reservation_snapshot: tuple[dict[int, int], dict[str, UsageReservationData]] | None = None
+
+        async def try_reserve_usage(
+            self,
+            limit_id: int,
+            *,
+            delta: int,
+            expected_reset_at: datetime,
+        ) -> ReservationResult:
+            if self._reservation_snapshot is None:
+                self._reservation_snapshot = (
+                    {limit.id: limit.current_value for limits in self._limits.values() for limit in limits},
+                    dict(self._reservations),
+                )
+            return await super().try_reserve_usage(
+                limit_id,
+                delta=delta,
+                expected_reset_at=expected_reset_at,
+            )
+
+        async def commit(self) -> None:
+            self._reservation_snapshot = None
+            await super().commit()
+
+        async def rollback(self) -> None:
+            if self._reservation_snapshot is not None:
+                limit_values, self._reservations = self._reservation_snapshot
+                for limits in self._limits.values():
+                    for limit in limits:
+                        limit.current_value = limit_values[limit.id]
+                self._reservation_snapshot = None
+            await super().rollback()
+
+    repo = _TransactionalReservationRepo()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="reservation-steering-rollback-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="input_tokens", limit_window="weekly", max_value=1_000),
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=349),
+            ],
+        )
+    )
+    reservation = await service.enforce_limits_for_request(
+        created.id,
+        request_model="gpt-5.1",
+        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=100, output_tokens=50),
+    )
+    assert reservation is not None
+    before_limits = {limit.limit_type: limit.current_value for limit in await repo.get_limits_by_key(created.id)}
+    before_reservation = await repo.get_usage_reservation(reservation.reservation_id)
+
+    with pytest.raises(ApiKeyRateLimitExceededError):
+        await service.extend_usage_reservation(
+            reservation.reservation_id,
+            request_service_tier=None,
+            request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=200),
+        )
+
+    assert {
+        limit.limit_type: limit.current_value for limit in await repo.get_limits_by_key(created.id)
+    } == before_limits
+    assert await repo.get_usage_reservation(reservation.reservation_id) == before_reservation
 
 
 async def test_create_key_rejects_invalid_usage_sections() -> None:

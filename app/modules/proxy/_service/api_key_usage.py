@@ -149,6 +149,59 @@ class _ApiKeyUsageMixin:
                 except ApiKeyInvalidError as exc:
                     raise ProxyAuthError(str(exc)) from exc
 
+    async def _extend_websocket_api_key_usage(
+        self,
+        reservation: ApiKeyUsageReservationData | None,
+        *,
+        request_service_tier: str | None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None,
+    ) -> bool:
+        if reservation is None:
+            return True
+        proxy = cast(_ApiKeyUsageServiceProtocol, self)
+        with anyio.CancelScope(shield=True):
+            async with proxy._repo_factory() as repos:
+                service = _service_api_keys_service()(repos.api_keys)
+                try:
+                    return await service.extend_usage_reservation(
+                        reservation.reservation_id,
+                        request_service_tier=request_service_tier,
+                        request_usage_budget=request_usage_budget,
+                    )
+                except ApiKeyRateLimitExceededError as exc:
+                    message = f"{exc}. Usage resets at {exc.reset_at.isoformat()}Z."
+                    raise ProxyRateLimitError(message) from exc
+        raise RuntimeError("unreachable")
+
+    async def _reduce_websocket_api_key_usage(
+        self,
+        reservation: ApiKeyUsageReservationData | None,
+        *,
+        request_service_tier: str | None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None,
+    ) -> bool:
+        if reservation is None:
+            return True
+        proxy = cast(_ApiKeyUsageServiceProtocol, self)
+        with anyio.CancelScope(shield=True):
+            try:
+                async with proxy._repo_factory() as repos:
+                    service = _service_api_keys_service()(repos.api_keys)
+                    return await service.reduce_usage_reservation(
+                        reservation.reservation_id,
+                        request_service_tier=request_service_tier,
+                        request_usage_budget=request_usage_budget,
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to reduce websocket API key reservation reservation_id=%s request_id=%s",
+                    reservation.reservation_id,
+                    get_request_id(),
+                    exc_info=True,
+                )
+                return False
+        raise RuntimeError("unreachable")
+
     async def _release_websocket_reservation(
         self,
         reservation: ApiKeyUsageReservationData | None,

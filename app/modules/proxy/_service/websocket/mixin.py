@@ -5374,6 +5374,7 @@ class _WebSocketMixin:
             elif response_id is None:
                 request_state = _match_websocket_request_state_for_anonymous_event(
                     pending_requests,
+                    event_type=event_type,
                     prefer_previous_response_not_found=is_previous_response_not_found_matching_event
                     or is_missing_tool_output_event,
                     previous_response_id_hint=previous_response_id_hint,

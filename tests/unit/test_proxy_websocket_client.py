@@ -61,12 +61,11 @@ class _UnexpectedHttpClient:
 
 
 class _FakeConnection:
-    connection_lost_waiter: asyncio.Future[object]
-
     def __init__(self, *, subprotocol: str | None = None) -> None:
         self.sent: list[str | bytes] = []
         self.closed = False
         self.subprotocol = subprotocol
+        self.connection_lost_waiter: asyncio.Future[object] | None = None
 
     async def send(self, data: str | bytes) -> None:
         self.sent.append(data)
@@ -524,6 +523,43 @@ async def test_connect_responses_websocket_prefers_native_direct_transport(monke
     assert message.kind == "text"
     assert websocket.response_header("sec-websocket-protocol") == "openai"
     python_connect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_can_bypass_native_direct_transport(monkeypatch) -> None:
+    native_client = SimpleNamespace(
+        websocket=AsyncMock(side_effect=AssertionError("native transport must be bypassed"))
+    )
+    python_connection = _FakeConnection()
+    python_connect = AsyncMock(return_value=python_connection)
+    monkeypatch.setattr(proxy_websocket_module, "discover_native_egress_client", lambda: native_client)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", python_connect)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    websocket = await connect_responses_websocket(
+        {},
+        "access-token",
+        "account-123",
+        allow_direct_egress=True,
+        use_native_egress=False,
+    )
+    await websocket.send_text("python-fallback")
+
+    native_client.websocket.assert_not_awaited()
+    python_connect.assert_awaited_once()
+    assert python_connection.sent == ["python-fallback"]
+    await websocket.close()
+    assert python_connection.closed is True
 
 
 @pytest.mark.asyncio

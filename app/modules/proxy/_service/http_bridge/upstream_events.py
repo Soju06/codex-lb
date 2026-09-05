@@ -166,6 +166,7 @@ from app.modules.proxy._service.support import (
     _mark_response_create_attempt_observed,
     _pop_websocket_deferred_reasoning_downstream_texts,
     _record_response_event,
+    _revoke_http_bridge_event_queue,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _websocket_request_can_replay_before_visible_output,
@@ -361,6 +362,129 @@ def _http_bridge_operation_state_for_event(event_type: str | None) -> str | None
     }.get(event_type)
 
 
+def _enqueue_http_bridge_abort_eos(
+    request_state: "_WebSocketRequestState",
+    event_queue: asyncio.Queue[str | None],
+) -> bool:
+    """Publish an abort end marker without dropping buffered live events.
+
+    Terminal bookkeeping has lost the normal downstream producer path when it
+    aborts, so the stream must still receive an end marker.  A live queue keeps
+    the marker as a bounded out-of-band terminal state when its event deque is
+    full; the consumer observes it only after draining every buffered event.
+    """
+    if request_state.event_queue is not event_queue:
+        return False
+    enqueue_terminal = getattr(event_queue, "enqueue_terminal_nowait", None)
+    if callable(enqueue_terminal):
+        return bool(enqueue_terminal())
+    if event_queue.maxsize > 0 and event_queue.qsize() >= event_queue.maxsize:
+        return False
+    try:
+        event_queue.put_nowait(None)
+    except asyncio.QueueFull:
+        return False
+    return True
+
+
+def _enqueue_http_bridge_terminal_event(
+    request_state: Any,
+    event_queue: asyncio.Queue[str | None],
+    event_block: str,
+) -> bool:
+    """Publish terminal event+EOS without waiting for live queue capacity."""
+    if request_state.event_queue is not event_queue:
+        return False
+    enqueue_terminal = getattr(event_queue, "enqueue_terminal_event_nowait", None)
+    if callable(enqueue_terminal):
+        return bool(enqueue_terminal(event_block))
+    if event_queue.maxsize > 0 and event_queue.qsize() + 2 > event_queue.maxsize:
+        return False
+    try:
+        event_queue.put_nowait(event_block)
+        event_queue.put_nowait(None)
+        return True
+    except asyncio.QueueFull:
+        # The public queue API cannot append an ordered terminal sequence to a
+        # full plain queue without evicting data. Live queues provide the
+        # out-of-band terminal API above; plain queues fail closed here.
+        return False
+
+
+async def _enqueue_http_bridge_event(
+    request_state: Any,
+    event_queue: asyncio.Queue[str | None],
+    event_block: str,
+    *,
+    terminal: bool = False,
+    nonblocking_preconsumer: bool = False,
+) -> bool:
+    """Deliver a bridge event with bounded pre-consumer terminal handling."""
+    event_queue_revoked = getattr(request_state, "event_queue_revoked", None)
+    if terminal and (
+        not getattr(request_state, "event_queue_consumer_started", False)
+        or (event_queue_revoked is not None and event_queue_revoked.is_set())
+    ):
+        return _enqueue_http_bridge_terminal_event(request_state, event_queue, event_block)
+    if event_queue_revoked is not None and event_queue_revoked.is_set():
+        return False
+    if nonblocking_preconsumer and not getattr(request_state, "event_queue_consumer_started", False):
+        enqueue_best_effort = getattr(event_queue, "enqueue_best_effort_nowait", None)
+        if callable(enqueue_best_effort):
+            return bool(enqueue_best_effort(event_block))
+        try:
+            event_queue.put_nowait(event_block)
+        except asyncio.QueueFull:
+            logger.info("Dropping best-effort HTTP bridge advisory before downstream consumer attachment")
+            return False
+        return True
+
+    async def put_with_request_deadline(item: str | None) -> bool:
+        deadline = getattr(request_state, "bridge_request_deadline", None)
+        has_deadline = deadline is not None
+        remaining_seconds = deadline - _service_time().monotonic() if has_deadline else 0.0
+        if has_deadline and remaining_seconds <= 0:
+            _revoke_http_bridge_event_queue(request_state)
+            return False
+
+        try:
+            event_queue.put_nowait(item)
+        except asyncio.QueueFull:
+            if not has_deadline:
+                await event_queue.put(item)
+            else:
+                try:
+                    await asyncio.wait_for(event_queue.put(item), timeout=remaining_seconds)
+                except asyncio.TimeoutError:
+                    # The shared upstream reader must not remain parked behind
+                    # one paused downstream queue after this request's own
+                    # budget expires. Revocation stops this producer and lets
+                    # the reader settle sibling requests normally.
+                    _revoke_http_bridge_event_queue(request_state)
+                    return False
+        return event_queue_revoked is None or not event_queue_revoked.is_set()
+
+    if not await put_with_request_deadline(event_block):
+        return False
+    if terminal and not await put_with_request_deadline(None):
+        # If the terminal payload itself was accepted but its EOS marker could
+        # not fit before the deadline, preserve ordering with the queue's
+        # out-of-band abort marker where available.
+        _enqueue_http_bridge_abort_eos(request_state, event_queue)
+        return False
+    return True
+
+
+async def _enqueue_http_bridge_deferred_event(
+    request_state: Any,
+    event_queue: asyncio.Queue[str | None],
+    event_block: str,
+) -> None:
+    """Deliver one deferred event until capacity returns or ownership ends."""
+
+    await _enqueue_http_bridge_event(request_state, event_queue, event_block)
+
+
 async def _persist_http_bridge_operation_event(
     service: Any,
     session: "_HTTPBridgeSession",
@@ -425,8 +549,15 @@ async def _persist_http_bridge_operation_event(
     async def enqueue_terminal_delivery() -> bool:
         if terminal_event_queue is None:
             return False
-        await terminal_event_queue.put(event_block)
-        await terminal_event_queue.put(None)
+        delivery_queue = cast(asyncio.Queue[str | None], terminal_event_queue)
+        delivered = await _enqueue_http_bridge_event(
+            request_state,
+            delivery_queue,
+            event_block,
+            terminal=True,
+        )
+        if not delivered:
+            return False
         if terminal_delivery_scope is not None:
             async with session.pending_lock:
                 terminal_delivery_scope.terminal_enqueued = True
@@ -1028,7 +1159,9 @@ async def _wait_before_http_bridge_model_capacity_retry(
             if cancel_when_detached and request_state.event_queue is None:
                 return False
             if emit_keepalives and keepalive_countdown_seconds <= 0 and request_state.event_queue is not None:
-                await request_state.event_queue.put(
+                await _enqueue_http_bridge_event(
+                    request_state,
+                    request_state.event_queue,
                     format_sse_event(
                         _account_capacity_wait_payload(
                             request_state,
@@ -1036,7 +1169,8 @@ async def _wait_before_http_bridge_model_capacity_retry(
                             reason=error_message,
                             retry_after_seconds=remaining_sleep_seconds,
                         )
-                    )
+                    ),
+                    nonblocking_preconsumer=True,
                 )
                 keepalive_countdown_seconds = _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS
             chunk_seconds = min(
@@ -2448,7 +2582,53 @@ class _HTTPBridgeUpstreamEventsMixin:
                 claimed_request_state.terminal_settlement_phase = None
         finally:
             if completed_delivery_scope is not None:
-                completed_delivery_scope.active = False
+
+                async def cleanup_completed_delivery_scope() -> None:
+                    async with session.pending_lock:
+                        completed_delivery_scope.active = False
+                        if completed_delivery_scope.detach_requested:
+                            # A downstream detach that raced terminal delivery
+                            # leaves the producer's claim intact until this
+                            # continuation finishes.  Once the scope is no
+                            # longer active, release the queue and its byte
+                            # reservations; no consumer can still own it.
+                            for request_state in claimed_terminal_request_states:
+                                if request_state.completed_delivery_scope is not completed_delivery_scope:
+                                    continue
+                                event_queue = request_state.event_queue
+                                # If terminal persistence aborted before the
+                                # terminal event was published, an attached
+                                # consumer still owns this queue. Leave it live
+                                # so the stream's normal idle-timeout path can
+                                # emit a failure event; revoking it here would
+                                # turn the abort into a silent EOS. A visible
+                                # delayed consumer may still attach to a
+                                # terminal-enqueued queue; only an explicit
+                                # detach or missing terminal makes it orphaned.
+                                consumer_started = getattr(
+                                    request_state,
+                                    "event_queue_consumer_started",
+                                    False,
+                                )
+                                consumer_detached = consumer_started and request_state.event_queue_revoked.is_set()
+                                detached_before_consumer = not consumer_started
+                                terminal_missing_without_consumer = (
+                                    not completed_delivery_scope.terminal_enqueued and not consumer_started
+                                )
+                                if consumer_detached or detached_before_consumer or terminal_missing_without_consumer:
+                                    request_state.event_queue = None
+                                    request_state.event_queue_revoked.set()
+                                    discard = getattr(event_queue, "discard", None)
+                                    if callable(discard):
+                                        discard()
+
+                cleanup_task = asyncio.create_task(
+                    cleanup_completed_delivery_scope(),
+                    name="http-bridge-completed-delivery-cleanup",
+                )
+                _, deferred_cancellation = await _await_task_deferring_cancellation(cleanup_task)
+                if deferred_cancellation is not None:
+                    raise deferred_cancellation
 
     async def _settle_aborted_http_bridge_terminal_states(
         self: Any,
@@ -2494,14 +2674,28 @@ class _HTTPBridgeUpstreamEventsMixin:
                         session.account.id,
                         exc_info=True,
                     )
-                # Best effort: unblock the downstream waiter so it observes
-                # end-of-stream instead of waiting for its idle timeout.
+                # Revocation stops late producers, but does not release the
+                # queue: a delayed consumer still owns buffered events until
+                # it receives the abort marker or actually detaches.
                 event_queue = request_state.event_queue
                 if event_queue is not None:
-                    try:
-                        event_queue.put_nowait(None)
-                    except asyncio.QueueFull:
-                        pass
+                    if not getattr(request_state, "event_queue_consumer_started", False):
+                        _revoke_http_bridge_event_queue(request_state)
+                        _enqueue_http_bridge_abort_eos(request_state, event_queue)
+                    else:
+                        # A completed response can be claimed after the
+                        # consumer attaches.  If terminal bookkeeping aborts
+                        # before publishing its event, the active consumer
+                        # normally gets the explicit stream-idle failure from
+                        # its timeout path.  Keep that path when keepalives
+                        # are enabled so an aborted terminal delivery is not
+                        # turned into a silent EOS.  With keepalives disabled
+                        # there is no timeout wakeup, so publish the bare EOS
+                        # marker to finish the attached stream.
+                        completed_scope = request_state.completed_delivery_scope
+                        keepalive_interval = getattr(_service_get_settings(), "sse_keepalive_interval_seconds", 10.0)
+                        if completed_scope is None or completed_scope.terminal_enqueued or keepalive_interval <= 0:
+                            _enqueue_http_bridge_abort_eos(request_state, event_queue)
 
     async def _handle_or_defer_precreated_stream_health(
         self: Any,
@@ -2985,8 +3179,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                 else:
                     await append_ready.wait()
                     if grouped_request_state.event_queue is not None:
-                        await grouped_request_state.event_queue.put(grouped_event_block)
-                        await grouped_request_state.event_queue.put(None)
+                        await _enqueue_http_bridge_event(
+                            grouped_request_state,
+                            grouped_request_state.event_queue,
+                            grouped_event_block,
+                            terminal=True,
+                        )
                     await await_all_grouped_deliveries()
                     await _persist_http_bridge_operation_event(
                         self,
@@ -4059,7 +4257,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                 )
                 _clear_websocket_deferred_reasoning_downstream_texts(terminal_request_state)
                 if terminal_request_state.event_queue is not None:
-                    await terminal_request_state.event_queue.put(
+                    await _enqueue_http_bridge_event(
+                        terminal_request_state,
+                        terminal_request_state.event_queue,
                         format_sse_event(
                             _security_work_advisory_event(
                                 code=_SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
@@ -4078,7 +4278,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 ),
                                 account_id=session.account.id,
                             )
-                        )
+                        ),
+                        nonblocking_preconsumer=True,
                     )
                 if can_retry_security_work:
                     retried = await self._retry_http_bridge_security_work_request(session, terminal_request_state)
@@ -4193,7 +4394,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                     )
             if matched_request_state is not None and matched_event_queue is not None and not suppress_downstream_event:
                 for deferred_text in matched_deferred_texts:
-                    await matched_event_queue.put(deferred_text)
+                    await _enqueue_http_bridge_deferred_event(
+                        matched_request_state,
+                        matched_event_queue,
+                        deferred_text,
+                    )
             if matched_request_state is not None and not suppress_downstream_event:
                 matched_terminal_enqueued = await _persist_http_bridge_operation_event(
                     self,
@@ -4211,7 +4416,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                 and not suppress_downstream_event
                 and matched_terminal_enqueued is not True
             ):
-                await matched_event_queue.put(event_block)
+                if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                    matched_terminal_enqueued = await _enqueue_http_bridge_event(
+                        matched_request_state,
+                        matched_event_queue,
+                        event_block,
+                        terminal=True,
+                    )
+                else:
+                    await _enqueue_http_bridge_event(matched_request_state, matched_event_queue, event_block)
 
             if terminal_request_state is None:
                 return
@@ -4232,7 +4445,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                             terminal=False,
                         )
                     if terminal_event_queue is not None:
-                        await terminal_event_queue.put(deferred_text)
+                        await _enqueue_http_bridge_deferred_event(
+                            terminal_request_state,
+                            terminal_event_queue,
+                            deferred_text,
+                        )
                 if not suppress_downstream_event:
                     terminal_enqueued = await _persist_http_bridge_operation_event(
                         self,
@@ -4250,10 +4467,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                         terminal_delivery_scope=(completed_delivery_scope if completed_event_queue_claimed else None),
                     )
                 if terminal_event_queue is not None and terminal_enqueued is not True:
-                    await terminal_event_queue.put(event_block)
+                    terminal_enqueued = await _enqueue_http_bridge_event(
+                        terminal_request_state,
+                        terminal_event_queue,
+                        event_block,
+                        terminal=True,
+                    )
             if terminal_event_queue is not None:
-                if terminal_enqueued is not True:
-                    await terminal_event_queue.put(None)
                 if completed_event_queue_claimed and completed_delivery_scope is not None:
                     async with session.pending_lock:
                         # Keep the completed claim authoritative after its producer

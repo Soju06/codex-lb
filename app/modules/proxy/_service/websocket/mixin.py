@@ -289,6 +289,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.request_submit import (
     _text_with_account_installation_id as _text_with_account_installation_id,
 )
+from app.modules.proxy._service.http_bridge.upstream_events import (
+    _enqueue_http_bridge_event,
+    _enqueue_http_bridge_terminal_event,
+)
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
 )
@@ -4574,6 +4578,7 @@ class _WebSocketMixin:
         *,
         timeout_seconds: float,
         request_state: "_WebSocketRequestState | None" = None,
+        use_native_egress: bool = True,
     ) -> UpstreamWebSocket:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -4595,6 +4600,7 @@ class _WebSocketMixin:
                         account,
                         headers,
                         request_state=request_state,
+                        use_native_egress=use_native_egress,
                         connect_progress=connect_progress,
                     )
                 recovery.log_recovered()
@@ -4649,6 +4655,7 @@ class _WebSocketMixin:
         headers: dict[str, str],
         *,
         request_state: "_WebSocketRequestState | None" = None,
+        use_native_egress: bool = True,
         connect_progress: _WebSocketConnectProgress | None = None,
     ) -> UpstreamWebSocket:
         proxy = cast(_WebSocketServiceProtocol, self)
@@ -4685,6 +4692,7 @@ class _WebSocketMixin:
                 optional_kwargs={
                     "route": route,
                     "allow_direct_egress": route is None,
+                    "use_native_egress": use_native_egress,
                 },
             )
             if request_state is not None:
@@ -6612,6 +6620,7 @@ class _WebSocketMixin:
                         account=account,
                         account_id_value=account_id_value,
                         remaining=remaining,
+                        pending_lock=pending_lock,
                         error_code=error_code,
                         error_message=error_message,
                         api_key=api_key,
@@ -6657,6 +6666,7 @@ class _WebSocketMixin:
         account: Account | None,
         account_id_value: str | None,
         remaining: list[_WebSocketRequestState],
+        pending_lock: anyio.Lock,
         error_code: str,
         error_message: str,
         api_key: ApiKeyData | None,
@@ -6760,20 +6770,70 @@ class _WebSocketMixin:
                         request_state.request_log_id or request_state.request_id,
                         exc_info=True,
                     )
-            if request_state.event_queue is not None:
-                try:
-                    await request_state.event_queue.put(
-                        format_sse_event(
-                            response_failed_event(
-                                request_error_code,
-                                request_error_message,
-                                error_type=request_error_type,
-                                response_id=_websocket_downstream_response_id(request_state),
-                                error_param=request_error_param,
-                            )
+            terminal_event = format_sse_event(
+                response_failed_event(
+                    request_error_code,
+                    request_error_message,
+                    error_type=request_error_type,
+                    response_id=_websocket_downstream_response_id(request_state),
+                    error_param=request_error_param,
+                )
+            )
+            # A liveness claimant revokes pre-consumer sibling queues while it
+            # still owns the pending lock.  Their terminal publication is
+            # non-blocking, so keep that publication and the discard decision
+            # in the same critical section.  This prevents a sibling revoke
+            # from landing between the snapshot and a second lock acquisition,
+            # where ``terminal_pending`` would otherwise hide the revocation
+            # and leak the queue's unread byte reservation.
+            async with pending_lock:
+                event_queue = request_state.event_queue
+                event_queue_consumer_started = getattr(request_state, "event_queue_consumer_started", False)
+                revoked_before_terminal = request_state.event_queue_revoked.is_set()
+                if event_queue is not None and not event_queue_consumer_started:
+                    try:
+                        await _enqueue_http_bridge_event(
+                            request_state,
+                            event_queue,
+                            terminal_event,
+                            terminal=True,
+                        )
+                    except Exception:
+                        _facade().logger.warning(
+                            "Failed to publish websocket terminal queue event during cleanup request_id=%s",
+                            request_state.request_log_id or request_state.request_id,
+                            exc_info=True,
+                        )
+                    queue_budget_exceeded = getattr(event_queue, "budget_exceeded", None)
+                    terminal_budget_exceeded = bool(getattr(event_queue, "terminal_budget_exceeded", False))
+                    discard_revoked_preconsumer = (
+                        request_state.event_queue is event_queue
+                        and not getattr(request_state, "event_queue_consumer_started", False)
+                        and not getattr(request_state, "event_queue_consumer_attaching", False)
+                        and not terminal_budget_exceeded
+                        and (
+                            revoked_before_terminal
+                            or (queue_budget_exceeded is not None and queue_budget_exceeded.is_set())
                         )
                     )
-                    await request_state.event_queue.put(None)
+                    if discard_revoked_preconsumer:
+                        request_state.event_queue = None
+                        request_state.event_queue_revoked.set()
+                        discard = getattr(event_queue, "discard", None)
+                        if callable(discard):
+                            discard()
+
+            # Attached queues retain their buffered events for the active
+            # consumer. Publish terminal failure out of band so a full queue
+            # cannot hold lifecycle ownership until that consumer reads. The
+            # live queue drains before its terminal sequence, preserving order.
+            if event_queue is not None and event_queue_consumer_started:
+                try:
+                    _enqueue_http_bridge_terminal_event(
+                        request_state,
+                        event_queue,
+                        terminal_event,
+                    )
                 except Exception:
                     _facade().logger.warning(
                         "Failed to publish websocket terminal queue event during cleanup request_id=%s",

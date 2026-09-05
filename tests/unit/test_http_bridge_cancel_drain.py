@@ -64,7 +64,10 @@ def _make_request_state(
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=1.0,
+        # Keep the synthetic request inside the bounded delivery window used
+        # by the production enqueue path. A fixed historical timestamp makes
+        # terminal delivery look expired before the stream is even attached.
+        started_at=http_bridge_helpers._service_time().monotonic(),
         response_id=response_id,
         awaiting_response_created=awaiting_response_created,
         event_queue=event_queue,
@@ -492,7 +495,10 @@ async def test_http_bridge_stream_waits_only_while_completed_delivery_is_active(
     assert request_state.completed_delivery_scope is not None
     assert request_state.completed_delivery_scope.active is True
     assert await service._detach_http_bridge_request(session, request_state=request_state) is False
-    assert request_state.event_queue is None
+    # A terminal delivery that already claimed the request retains its queue
+    # until the producer's continuation finishes; detaching must not revoke
+    # the consumer's only path to the terminal event.
+    assert request_state.event_queue is event_queue
     await asyncio.sleep(0.02)
     assert not stream_task.done()
 
@@ -503,6 +509,8 @@ async def test_http_bridge_stream_waits_only_while_completed_delivery_is_active(
         with pytest.raises(RuntimeError, match="terminal persistence failed"):
             await asyncio.wait_for(terminal_task, timeout=1.0)
     event_blocks = await asyncio.wait_for(stream_task, timeout=1.0)
+
+    assert request_state.event_queue is None
 
     event_types = [
         payload["type"]

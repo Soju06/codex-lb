@@ -351,6 +351,7 @@ class CodexClient:
         route: ResolvedUpstreamRoute,
         retry_handshake_status: bool = True,
         retry_network_errors: bool = True,
+        use_native_egress: bool = True,
         **kwargs: Any,
     ) -> CodexWebSocketResult:
         if route is None:
@@ -369,7 +370,7 @@ class CodexClient:
                     endpoint.proxy_url,
                     kwargs,
                 )
-                if self._native_egress_client is not None and native_request is not None:
+                if use_native_egress and self._native_egress_client is not None and native_request is not None:
                     try:
                         websocket = await self._native_egress_client.websocket(native_request)
                     except NativeEgressUnavailable:

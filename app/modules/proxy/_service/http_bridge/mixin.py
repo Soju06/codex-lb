@@ -1800,7 +1800,7 @@ class _HTTPBridgeMixin(
                     self._open_upstream_websocket_with_budget,
                     account,
                     connect_headers,
-                    optional_kwargs={"request_state": request_state},
+                    optional_kwargs={"request_state": request_state, "use_native_egress": False},
                     timeout_seconds=_remaining_budget_seconds(deadline),
                 )
                 _record_same_account_takeover(
@@ -1837,7 +1837,7 @@ class _HTTPBridgeMixin(
                         account,
                         connect_headers,
                         timeout_seconds=_remaining_budget_seconds(deadline),
-                        request_state=request_state,
+                        **{"request_state": request_state, "use_native_egress": False},
                     )
                     _record_same_account_takeover(
                         preferred_account_id=preferred_account_id,
@@ -2126,7 +2126,7 @@ class _HTTPBridgeMixin(
                     selected_account,
                     selected_headers,
                     timeout_seconds=_remaining_budget_seconds(deadline),
-                    request_state=request_state,
+                    **{"request_state": request_state, "use_native_egress": False},
                 )
             except Exception:
                 session.closed = True

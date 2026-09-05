@@ -4668,6 +4668,82 @@ client-disconnect and drain behavior MUST remain unchanged.
 - **THEN** existing client-disconnect and upstream-drain behavior is preserved
 - **AND** no completed event is delivered to another request
 
+### Requirement: Live queue reads do not spawn per-event tasks
+
+Buffered and waiting HTTP-bridge live event reads MUST use the consumer task
+without creating child tasks for item, terminal, revocation, or timeout signals.
+Cancellation before consumption MUST leave an arriving event in the queue.
+If a read deadline races an already-buffered event, the reader MUST return
+that event before reporting the timeout.
+
+#### Scenario: Waiting consumer receives an event
+
+- **GIVEN** a live queue is empty and its consumer awaits the next event
+- **WHEN** a producer publishes a live event or ordered terminal sequence
+- **THEN** the consumer wakes without per-event child tasks
+- **AND** cancellation before consumption leaves the payload and byte credit owned by the queue
+
+### Requirement: HTTP bridge live event delivery is bounded and deadline-aware
+
+For a streamed HTTP bridge Responses request, the proxy MUST retain live
+downstream events in a finite per-request queue and MUST apply backpressure to
+the shared upstream reader when that queue is full. The queue MUST use the
+existing process-wide retained-byte budget without adding an operator setting.
+When a full-queue enqueue reaches the request's existing bridge deadline, the
+proxy MUST revoke only that request's queue, return control to the shared
+reader without raising the enqueue timeout through the reader failure handler,
+and allow sibling request lifecycle and deadline settlement to continue.
+
+If liveness or another terminal path revokes a queue while its live stream
+generator is still attaching or consuming, the proxy MUST retain that queue
+until the selected terminal failure and end-of-stream marker are delivered.
+Only explicit downstream detachment or another proven absence of a downstream
+owner MAY discard the queue and release unread-byte reservations.
+HTTP-bridge upstream WebSockets MUST bypass native egress until native
+per-stream flow control and cancellation can be proven; this constraint MUST
+NOT disable native egress for unrelated WebSocket transports.
+
+#### Scenario: Paused queue reaches its request deadline
+
+- **GIVEN** an HTTP bridge request has a full live event queue and a paused
+  downstream consumer
+- **WHEN** the next upstream event cannot enqueue before that request's bridge
+  deadline
+- **THEN** the proxy revokes that request's queue and returns from the enqueue
+  without raising through the shared reader
+- **AND** a sibling pending request can settle its lifecycle or deadline while
+  the paused request remains bounded
+
+#### Scenario: Delayed generator receives a liveness terminal
+
+- **GIVEN** liveness settlement revokes a request queue before its live stream
+  generator enters the consumer loop
+- **WHEN** terminal bookkeeping selects the liveness failure
+- **THEN** the delayed generator receives that exact failure event followed by
+  the end-of-stream marker
+- **AND** the queue's unread-byte reservations remain accounted until delivery
+
+#### Scenario: Explicitly abandoned queue may be discarded
+
+- **GIVEN** downstream detachment proves that no generator can consume a
+  revoked request queue
+- **WHEN** terminal bookkeeping finishes
+- **THEN** the proxy may discard the queue and release its unread-byte
+  reservations
+- **AND** no later upstream event is delivered to that queue
+
+#### Scenario: HTTP bridge bypasses native egress
+
+- **WHEN** the bridge opens a direct or routed upstream Responses WebSocket
+- **THEN** it selects the existing non-native adapter
+- **AND** native egress is not selected for that bridge socket
+
+#### Scenario: Unrelated native WebSockets retain their default
+
+- **WHEN** a non-bridge direct or routed Responses WebSocket opens without an
+  explicit transport override
+- **THEN** native egress remains eligible under its existing selection rules
+
 ### Requirement: Replayed tool-call namespace metadata is local-only on upstream input
 
 For standard and compact Responses requests, the proxy MUST omit `namespace` from every replayed `input` item whose `type` is `function_call`, `custom_tool_call`, or `apply_patch_call` before forwarding the request upstream. The proxy MUST preserve all other fields on that item, MUST retain the original namespace metadata for local call-identity and replay-deduplication processing, and MUST NOT alter client-provided top-level tool entries as part of this normalization.
@@ -5592,7 +5668,7 @@ Before an HTTP/SSE Responses request enters the upstream WebSocket session bridg
 
 ### Requirement: Responses WebSocket preserves bidirectional transport semantics
 
-The Responses WebSocket relay MUST preserve ordered text and binary messages, selected subprotocol response metadata, close codes, and terminal error delivery across its downstream and upstream boundaries. Direct and account-routed upstream connections MUST use native Codex-family WebSocket egress when the fixed helper is available before dispatch, while Python MUST retain route-aware endpoint selection, fallback safety, metadata, and cleanup. Ping and pong control frames MUST remain transport-owned and MUST NOT surface as application events. A frame whose native send acknowledgement is ambiguous or failed MUST NOT be replayed.
+The Responses WebSocket relay MUST preserve ordered text and binary messages, selected subprotocol response metadata, close codes, and terminal error delivery across its downstream and upstream boundaries. Except for HTTP-bridge upstream WebSockets, which MUST use the bounded-delivery compatibility fallback until native per-stream flow control and cancellation are proven, direct and account-routed upstream connections MUST use native Codex-family WebSocket egress when the fixed helper is available before dispatch, while Python MUST retain route-aware endpoint selection, fallback safety, metadata, and cleanup. Ping and pong control frames MUST remain transport-owned and MUST NOT surface as application events. A frame whose native send acknowledgement is ambiguous or failed MUST NOT be replayed.
 
 #### Scenario: Native direct relay preserves frames
 

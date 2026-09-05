@@ -112,12 +112,14 @@ async def test_direct_websocket_connect_egress_uses_selected_installation_metada
         *,
         route: object,
         allow_direct_egress: bool,
+        use_native_egress: bool,
     ) -> object:
         captured["headers"] = dict(headers)
         captured["access_token"] = access_token
         captured["account_id"] = account_id
         captured["route"] = route
         captured["allow_direct_egress"] = allow_direct_egress
+        captured["use_native_egress"] = use_native_egress
         return expected_upstream
 
     class _DirectWebSocketFacade(_DummyFacade):
@@ -155,6 +157,7 @@ async def test_direct_websocket_connect_egress_uses_selected_installation_metada
     assert captured["account_id"] == "account-123"
     assert captured["route"] is None
     assert captured["allow_direct_egress"] is True
+    assert captured["use_native_egress"] is True
     upstream_headers = cast(dict[str, str], captured["headers"])
     assert "x-codex-installation-id" not in upstream_headers
     assert json.loads(upstream_headers["x-codex-turn-metadata"]) == {

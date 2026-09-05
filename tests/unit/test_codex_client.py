@@ -852,9 +852,29 @@ async def test_websocket_success_returns_caller_owned_entered_context(
     assert result.websocket is session.context.websocket
     assert result.context is session.context
 
-    await result.context.__aexit__(None, None, None)
+    context = result.context
+    assert context is not None
+    await context.__aexit__(None, None, None)
 
     assert session.context.exited is True
+
+
+@pytest.mark.asyncio
+async def test_routed_websocket_can_bypass_native_egress(route: ResolvedUpstreamRoute) -> None:
+    session = _Session()
+    native = _NativeClient()
+    client = CodexClient(session, native_egress_client=cast(Any, native))
+
+    result = await client.open_ws_with_route_metadata(
+        "wss://upstream.test",
+        route=route,
+        use_native_egress=False,
+    )
+
+    assert result.native is False
+    assert native.websocket_calls == []
+    assert len(session.calls) == 1
+    assert result.context is None
 
 
 @pytest.mark.asyncio
@@ -911,7 +931,9 @@ async def test_socks_websocket_uses_proxy_connector_and_closes_session(
     assert "proxy" not in session.calls[0]
     assert result.websocket is session.context.websocket
 
-    await result.context.__aexit__(None, None, None)
+    context = result.context
+    assert context is not None
+    await context.__aexit__(None, None, None)
 
     assert session.context.exited is True
     assert session.closed is True

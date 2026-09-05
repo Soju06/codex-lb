@@ -21,7 +21,10 @@ from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
 from app.modules.api_keys.service import ApiKeyUsageReservationData
-from app.modules.proxy._service.http_bridge.helpers import _http_bridge_request_budget_seconds
+from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_payload_looks_like_full_resend,
+    _http_bridge_request_budget_seconds,
+)
 
 # HTTP-only and hop-by-hop headers that must not be forwarded through the
 # internal bridge. These headers are either illegal in WebSocket handshakes or
@@ -62,7 +65,7 @@ HTTP_BRIDGE_CLIENT_IP_HEADER = "x-codex-bridge-client-ip"
 HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER = "x-codex-bridge-client-ip-signature"
 HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
 # Additive tamper-proofing header (#1203): a second signature bound to the
-# exact forwarding body (``model_dump_for_forwarding``) that is posted, so an
+# exact forwarding body (``model_dump_for_http_bridge_owner_forwarding``) that is posted, so an
 # in-transit rewrite injecting ``"tools": []`` is detected even though the
 # primary signature hashes a plain ``model_dump`` that synthesizes the same
 # empty list. Orthogonal to ``x-codex-bridge-signature-version`` below (which
@@ -73,6 +76,12 @@ HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
 # ``parse_forwarded_request``.
 HTTP_BRIDGE_SIGNATURE_V2_HEADER = "x-codex-bridge-signature-v2"
 _HTTP_BRIDGE_SIGNATURE_VERSION_V2 = "2"
+# Additive input-shape capability marker. Unlike the primary signature
+# version, this header describes the classifier used for the request body.
+# It is trusted only when the exact-body signature below authenticates the
+# same value; an absent or unauthenticated marker keeps the legacy fallback.
+HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER = "x-codex-bridge-input-shape-version"
+_HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2 = "2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,11 +180,29 @@ class HTTPBridgeOwnerClient:
         headers: Mapping[str, str],
         context: HTTPBridgeForwardContext,
         request_started_at: float,
+        owner_supports_input_shape_classifier: bool = False,
         on_request_dispatched: Callable[[], None] | None = None,
         on_response_rejected: Callable[[], None] | None = None,
         on_response_wait: Callable[[], None] | None = None,
         on_response_ready: Callable[[], None] | None = None,
     ) -> AsyncIterator[str]:
+        if _http_bridge_owner_forward_requires_shape_upgrade(payload) and not owner_supports_input_shape_classifier:
+            # A pre-change owner normalizes a raw string into an array and uses
+            # its older array heuristic. It can therefore turn these delta-only
+            # inputs into full resends and suppress the durable anchor. Without
+            # a current-process capability proof from the ring, fail
+            # before dispatch and let the caller's existing local-recovery
+            # gates decide.
+            raise ProxyResponseError(
+                503,
+                openai_error(
+                    "bridge_owner_forward_failed",
+                    "HTTP bridge owner cannot safely classify this continuation during a rolling upgrade",
+                    error_type="server_error",
+                ),
+                failure_phase="owner_forward",
+                failure_detail="owner_input_shape_upgrade_required",
+            )
         settings = get_settings()
         timeout = _owner_forward_timeout(
             connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
@@ -185,7 +212,7 @@ class HTTPBridgeOwnerClient:
             on_response_wait()
         async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
             request_url = f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}"
-            request_payload = payload.model_dump_for_forwarding()
+            request_payload = payload.model_dump_for_http_bridge_owner_forwarding()
             request_headers = build_owner_forward_headers(headers=headers, payload=payload, context=context)
             request_context = session.post(
                 request_url,
@@ -257,6 +284,29 @@ class HTTPBridgeOwnerClient:
                     # the owner; origin must not release or replay.
                     on_request_dispatched()
                 raise
+
+
+def _http_bridge_owner_forward_requires_shape_upgrade(payload: ResponsesRequest) -> bool:
+    """Keep delta-only input away from owners that may run the old classifier."""
+    if _http_bridge_payload_looks_like_full_resend(payload):
+        return False
+    input_value = payload.input
+    if not isinstance(input_value, list):
+        return False
+    if len(input_value) > 1:
+        # The current classifier reaches this delta-only result only when every
+        # item is a tool output. The legacy owner classified every multi-item
+        # array as a full resend.
+        return True
+    if len(input_value) != 1:
+        return False
+    try:
+        # Request validation normalizes a raw string into this one-item array.
+        # If its compact form crosses the legacy boundary while the preserved
+        # raw shape remains below it, the two owner versions disagree.
+        return len(json.dumps(input_value, ensure_ascii=True, separators=(",", ":"))) >= 4096
+    except (OverflowError, TypeError, ValueError):
+        return False
 
 
 def build_owner_forward_headers(
@@ -348,10 +398,16 @@ def build_owner_forward_headers(
     # body; covers the full authenticated context (including the unanchored /
     # signature-version domain) so it cannot be replayed against a different
     # forward.
+    input_shape_version = (
+        None if payload._codex_lb_legacy_owner_forwarding_input_shape else _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2
+    )
+    if input_shape_version is not None:
+        forwarded[HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER] = input_shape_version
     forwarded[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = _bridge_forward_tools_bound_signature(
         payload=payload,
         context=context,
         signature_version=signature_version,
+        input_shape_version=input_shape_version,
     )
     return forwarded
 
@@ -383,6 +439,9 @@ def parse_forwarded_request(
         )
     client_ip = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_HEADER))
     signature_version = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_VERSION_HEADER))
+    input_shape_version = _optional_header(headers.get(HTTP_BRIDGE_INPUT_SHAPE_VERSION_HEADER))
+    if input_shape_version not in {None, _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2}:
+        return None, _invalid_bridge_forward_signature_error()
     original_unanchored_value = _optional_header(headers.get(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER))
     if signature_version == _HTTP_BRIDGE_SIGNATURE_VERSION_V2:
         if original_unanchored_value not in {"0", "1"}:
@@ -422,9 +481,14 @@ def parse_forwarded_request(
             payload=payload,
             context=context,
             signature_version=signature_version,
+            input_shape_version=input_shape_version,
         ),
     )
     if tools_bound_valid:
+        payload._codex_lb_input_shape_wire_version = input_shape_version
+        payload._codex_lb_legacy_owner_forwarding_input_shape = (
+            input_shape_version != _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2
+        )
         return HTTPBridgeForwardedRequest(context=context), None
     if context.file_owner_account_id is not None or extract_input_file_ids(payload.input):
         # The rolling-upgrade primary signature does not bind the additive
@@ -471,6 +535,19 @@ def parse_forwarded_request(
     )
     if not signature_valid:
         return None, _invalid_bridge_forward_signature_error()
+    # A pre-change origin posts the normalized one-item array for a client
+    # string and has no body-bound signature that can prove the original wire
+    # shape. Keep that array out of the size-based full-resend heuristic on
+    # the new owner: treating its JSON overhead as client content can cross
+    # the 4096-byte boundary and drop otherwise-valid prior context during a
+    # rolling upgrade. Current origins send the body-bound signature and
+    # preserve raw strings on the owner wire, so their classification remains
+    # exact.
+    # The additive marker is only authenticated by the exact-body signature.
+    # A primary-signature fallback therefore remains legacy even when an
+    # unauthenticated ``...-input-shape-version: 2`` header was supplied.
+    payload._codex_lb_input_shape_wire_version = None
+    payload._codex_lb_legacy_owner_forwarding_input_shape = True
     return HTTPBridgeForwardedRequest(context=context), None
 
 
@@ -601,11 +678,13 @@ def _bridge_forward_tools_bound_signature(
     payload: ResponsesRequest,
     context: HTTPBridgeForwardContext,
     signature_version: str | None = None,
+    input_shape_version: str | None = _HTTP_BRIDGE_INPUT_SHAPE_VERSION_V2,
 ) -> str:
     """Tamper-proofing signature bound to the exact posted forwarding body.
 
     Signs the same forwarding dump that is actually posted
-    (``model_dump_for_forwarding``), not a plain ``model_dump`` that
+    (``model_dump_for_http_bridge_owner_forwarding``), not a plain
+    ``model_dump`` that
     synthesizes ``"tools": []`` for clients that omitted the field. A plain
     dump would make the omitted-tools and explicit-``tools: []`` bodies sign
     identically, so a body rewritten in transit to inject ``"tools": []``
@@ -616,13 +695,14 @@ def _bridge_forward_tools_bound_signature(
     including the unanchored / signature-version domain) so the binding also
     carries #1169's isolation guarantees. Always authenticates ``client_ip``.
     """
-    body_digest = _bridge_forward_body_digest(payload.model_dump_for_forwarding())
+    body_digest = _bridge_forward_body_digest(payload.model_dump_for_http_bridge_owner_forwarding())
     signing_payload = _structured_bridge_signing_payload(
         body_digest=body_digest,
         context=context,
         include_client_ip=True,
         signature_version=signature_version,
         protocol="codex-lb-http-bridge-forward-tools-bound",
+        input_shape_version=input_shape_version,
     )
     return _sign_bridge_payload(signing_payload)
 
@@ -639,36 +719,40 @@ def _structured_bridge_signing_payload(
     include_client_ip: bool,
     signature_version: str | None,
     protocol: str,
+    input_shape_version: str | None = None,
 ) -> str:
     # Canonical structured encoding: object boundaries make field re-packing
     # impossible, the client-IP mode is itself authenticated, and ``protocol``
     # domain-separates the primary and tamper-proofing signatures.
+    signing_fields = {
+        "body_digest": body_digest,
+        "client_ip": context.client_ip if include_client_ip else None,
+        "client_ip_present": context.client_ip is not None,
+        "codex_session_affinity": context.codex_session_affinity,
+        "downstream_turn_state": context.downstream_turn_state,
+        "file_owner_account_id": context.file_owner_account_id,
+        "include_client_ip": include_client_ip,
+        "origin_instance": context.origin_instance,
+        "original_affinity_key": context.original_affinity_key,
+        "original_affinity_kind": context.original_affinity_kind,
+        "original_request_unanchored": context.original_request_unanchored,
+        "protocol": protocol,
+        "reservation": (
+            {
+                "id": context.reservation.reservation_id,
+                "key_id": context.reservation.key_id,
+                "model": context.reservation.model,
+            }
+            if context.reservation is not None
+            else None
+        ),
+        "signature_version": signature_version,
+        "target_instance": context.target_instance,
+    }
+    if input_shape_version is not None:
+        signing_fields["input_shape_version"] = input_shape_version
     return json.dumps(
-        {
-            "body_digest": body_digest,
-            "client_ip": context.client_ip if include_client_ip else None,
-            "client_ip_present": context.client_ip is not None,
-            "codex_session_affinity": context.codex_session_affinity,
-            "downstream_turn_state": context.downstream_turn_state,
-            "file_owner_account_id": context.file_owner_account_id,
-            "include_client_ip": include_client_ip,
-            "origin_instance": context.origin_instance,
-            "original_affinity_key": context.original_affinity_key,
-            "original_affinity_kind": context.original_affinity_kind,
-            "original_request_unanchored": context.original_request_unanchored,
-            "protocol": protocol,
-            "reservation": (
-                {
-                    "id": context.reservation.reservation_id,
-                    "key_id": context.reservation.key_id,
-                    "model": context.reservation.model,
-                }
-                if context.reservation is not None
-                else None
-            ),
-            "signature_version": signature_version,
-            "target_instance": context.target_instance,
-        },
+        signing_fields,
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),

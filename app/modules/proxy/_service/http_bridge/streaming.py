@@ -127,7 +127,7 @@ from app.modules.proxy._service.http_bridge.owner_forwarding import (
     _owner_forward_failure_allows_local_recovery,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
-    _http_bridge_quarantine_clear_fence,
+    _http_bridge_quarantine_clear_fence_details,
     _http_bridge_session_key_poison_quarantined,
     _http_bridge_session_key_quarantined,
 )
@@ -377,17 +377,22 @@ class _VerifiedDurableFullResend:
         cls,
         payload: ResponsesRequest,
         durable_lookup: DurableBridgeLookup,
+        *,
+        payload_looks_like_full_resend: bool | None = None,
     ) -> "_VerifiedDurableFullResend | None":
         owner_account_id = durable_lookup.account_id
         latest_response_id = durable_lookup.latest_response_id
         stored_count = durable_lookup.latest_input_item_count
         stored_fingerprint = durable_lookup.latest_input_full_fingerprint
+        if owner_account_id is None or latest_response_id is None or stored_count is None or stored_fingerprint is None:
+            return None
+        full_resend_shape = (
+            _http_bridge_payload_looks_like_full_resend(payload)
+            if payload_looks_like_full_resend is None
+            else payload_looks_like_full_resend
+        )
         if (
-            owner_account_id is None
-            or latest_response_id is None
-            or stored_count is None
-            or stored_fingerprint is None
-            or not _http_bridge_payload_looks_like_full_resend(payload)
+            not full_resend_shape
             or not isinstance(payload.input, list)
             or not _input_prefix_matches_stored_context(
                 payload.input,
@@ -444,10 +449,16 @@ def _pending_tool_calls_identity(
 def _verify_durable_full_resend(
     payload: ResponsesRequest,
     durable_lookup: DurableBridgeLookup | None,
+    *,
+    payload_looks_like_full_resend: bool | None = None,
 ) -> _VerifiedDurableFullResend | None:
     if durable_lookup is None or durable_lookup.account_id is None or durable_lookup.latest_response_id is None:
         return None
-    return _VerifiedDurableFullResend._verify(payload, durable_lookup)
+    return _VerifiedDurableFullResend._verify(
+        payload,
+        durable_lookup,
+        payload_looks_like_full_resend=payload_looks_like_full_resend,
+    )
 
 
 def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketRequestState) -> bool:
@@ -1248,6 +1259,11 @@ class _HTTPBridgeStreamingMixin:
         _denied_anchor_request_id: str | None = None,
     ) -> AsyncIterator[str]:
         del suppress_text_done_events
+        # This is a pure payload-shape signal. Capture it before the first
+        # await and before any legacy or durable continuity lookup so those
+        # paths cannot change which input shape the request presented at the
+        # bridge boundary.
+        payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
         dead_owner_anchor = False
         dead_owner_process_epoch_mismatch = False
         request_id = _denied_anchor_request_id or ensure_request_id()
@@ -1510,10 +1526,13 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_is_account_neutral: bool | None = None
         durable_full_resend_has_safe_fresh_context = False
         durable_full_resend_retains_required_context_cache: bool | None = None
-        durable_full_resend_proof = _verify_durable_full_resend(payload, durable_lookup)
+        durable_full_resend_proof = _verify_durable_full_resend(
+            payload,
+            durable_lookup,
+            payload_looks_like_full_resend=payload_looks_like_full_resend,
+        )
         durable_full_resend_fresh_bridge_proof: _VerifiedDurableFullResend | None = None
         force_local_recovery_creation = False
-        payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
         # First-touch circuit load before any anchor planning: an expired
         # at-threshold poison row recorded by another replica arms this
         # worker's quarantine here, so the suppression checks below see it
@@ -2021,6 +2040,8 @@ class _HTTPBridgeStreamingMixin:
         verified_stale_anchor_circuit_key: _HTTPBridgeSessionKey | None = None
         verified_stale_anchor_generation: tuple[int, float, int, float, int, float, float] | None = None
         verified_stale_anchor_quarantine_generation: int | None = None
+        verified_stale_anchor_quarantine_raw_generation: int | None = None
+        verified_stale_anchor_quarantine_eventless_timeout_count = 0
 
         def durable_full_resend_retains_required_context() -> bool:
             nonlocal durable_full_resend_retains_required_context_cache
@@ -3235,16 +3256,16 @@ class _HTTPBridgeStreamingMixin:
                 recovery_session: "_HTTPBridgeSession",
             ) -> None:
                 nonlocal verified_stale_anchor_quarantine_generation
+                nonlocal verified_stale_anchor_quarantine_raw_generation
+                nonlocal verified_stale_anchor_quarantine_eventless_timeout_count
 
-                # Provenance-aware capture: the completion's clear fences a
-                # poison entry on its poison provenance, so capturing the raw
-                # generation here would mismatch whenever a weaker fence
-                # bumped it before this replay began, refusing the clear for
-                # a source the replay just recovered.
-                verified_stale_anchor_quarantine_generation = _http_bridge_quarantine_clear_fence(
+                quarantine_fence = _http_bridge_quarantine_clear_fence_details(
                     self,
                     recovery_session.key,
                 )
+                verified_stale_anchor_quarantine_generation = quarantine_fence.generation
+                verified_stale_anchor_quarantine_raw_generation = quarantine_fence.raw_generation
+                verified_stale_anchor_quarantine_eventless_timeout_count = quarantine_fence.eventless_timeout_count
 
             async for event_block in session_events:
                 yield event_block
@@ -3616,8 +3637,13 @@ class _HTTPBridgeStreamingMixin:
                 )
                 raise
             elif previous_response_rejected_full_resend:
-                await capture_verified_stale_anchor_circuit_generation(session)
+                # Capture the quarantine generation at rejection/authorization
+                # time, before the durable circuit lookup can yield to a
+                # concurrent retirement that arms a newer quarantine. An
+                # observed absence must remain an absence fence; otherwise
+                # completion of this recovery could clear that raced entry.
                 capture_verified_stale_anchor_quarantine_generation(session)
+                await capture_verified_stale_anchor_circuit_generation(session)
                 await reset_previous_response_recovery_operation_spool(session, request_state)
                 await self._reset_http_bridge_session_after_local_terminal_error(
                     session,
@@ -3894,6 +3920,12 @@ class _HTTPBridgeStreamingMixin:
                     )
                     retry_request_state.verified_stale_anchor_quarantine_generation = (
                         verified_stale_anchor_quarantine_generation
+                    )
+                    retry_request_state.verified_stale_anchor_quarantine_raw_generation = (
+                        verified_stale_anchor_quarantine_raw_generation
+                    )
+                    retry_request_state.verified_stale_anchor_quarantine_eventless_timeout_count = (
+                        verified_stale_anchor_quarantine_eventless_timeout_count
                     )
                 # Keep the durable operation identity attached to the
                 # server-owned recovery attempt. Re-registering the same

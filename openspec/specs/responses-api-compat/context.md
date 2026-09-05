@@ -38,6 +38,15 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - HTTP bridge settlement ownership is explicit: `closed` rejects new work but does not imply that a submitter owns existing siblings. Only a liveness-failed send claims whole-deque settlement under the lifecycle lock; otherwise the reader remains responsible for settling pending requests when the transport dies.
 - A DRAINING durable row with a live lease is still owned. Foreign `claim_live_session` and local session create must not steal it, including when forced recovery would otherwise run because the owner endpoint is missing; expired or ownerless DRAINING rows remain recoverable.
 - Hard-affinity retry-circuit evidence is request-lifecycle evidence: retirement counts only while the bridge still owns an eventless pending request. Idle no-pending retirement remains observable but neutral, so routine socket churn cannot manufacture the first strike for a later real timeout.
+- Rolling upgrades keep ambiguous HTTP bridge input fail-closed unless the
+  selected owner's live ring advertisement proves the current classifier for
+  the exact process epoch recorded in durable ownership. For example, a raw
+  4095-character string is delta-only at the upgraded origin even when its
+  normalized one-item array reaches the legacy 4096-byte serialization
+  boundary. The origin may forward that request only when the selected owner
+  advertises the classifier capability for the same durable process epoch; an
+  advertisement from a replaced process using the same instance id is not
+  sufficient.
 
 ## Fast Mode and Service Tiers
 

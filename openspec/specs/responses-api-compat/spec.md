@@ -4949,9 +4949,158 @@ ordinary selection, and MUST NOT reclassify local capacity or overload codes
 
 When an HTTP bridge session proves silent/wedged, the proxy MUST quarantine its session key for a bounded window so later requests stop attaching to it. A session proves silent/wedged when either (a) a pending request being failed or retired carried a proxy-injected `previous_response_id`, had sent `response.create`, observed upstream response events, and never had `response.created` assigned, or (b) the session key hits two consecutive eventless `missing_response_created_timeout` retires. This holds for every path that fails or retires the request — partial stale-holder cleanup, the reader-failure funnel, and direct all-stale session retirement alike. The quarantine MUST be evaluated only when a request is already being failed or its session retired — never against a live owned turn — so a stream whose `response.created` was observed (including deferred-reasoning streams with long event gaps) MUST NOT be quarantined, and mere event silence during an owned live turn MUST NOT trigger quarantine by itself.
 
-While a session key is quarantined: an existing session under that key MUST NOT be selected for reuse (a new request detaches it and proceeds on a fresh session), and for durable-anchor selection a quarantined session that is still open MUST count as absent, exactly as if it were already gone. The quarantine registry verdict is authoritative for the key: any session under the key while the quarantine window is active — including a freshly created replacement whose own completion has not yet cleared the quarantine — is equally excluded from reuse and equally absent for anchor selection. A fresh reattach whose incoming payload already looks like a full conversation resend MUST NOT receive a proxy-injected durable anchor through any injection point — the fresh-reattach injection, session-state hydration of the durable anchor, or the session-level injection — so the dispatch goes upstream genuinely unanchored with the client's own untrimmed payload. A payload that does not look like a full resend (a genuine delta-only continuation) MUST still receive the durable anchor, because it has no other way to convey prior conversation state.
+While a session key is quarantined: an existing session under that key MUST NOT be selected for reuse (a new request detaches it and proceeds on a fresh session). For local session lookup and full-resend anchor injection, a quarantined live session MUST count as absent, exactly as if it were already gone. The quarantine registry verdict is authoritative for the key: any session under the key while the quarantine window is active — including a freshly created replacement whose own completion has not yet cleared the quarantine — is equally excluded from reuse and equally absent as a local session candidate.
 
-Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), is cleared when a response completes on the same session key, and MUST NOT write account health or alter account selection.
+For this requirement, the canonical full-resend-shape predicate MUST inspect the
+decoded Responses request's `input` before durable lookup or replay projection. It
+is true when `input` is a string with at least 4096 characters, a JSON array with
+more than one item unless every item is a `function_call_output`,
+`custom_tool_call_output`, or `apply_patch_call_output`, or a one-item JSON array whose compact serialization of the
+entire array (`ensure_ascii=true` and no separator whitespace) is at least 4096
+characters. A
+string shorter than 4096 characters, an empty or one-item array whose compact
+serialization is shorter than 4096 characters, a missing or null value, and any
+other input shape MUST be classified as delta-only. A multi-item array containing
+only those tool output items MUST be classified as delta-only because their
+corresponding calls exist only behind the continuation anchor. Exactly 4096 characters is
+included; 4095 is not. A serialization failure MUST classify the one-item array
+as delta-only. This shape classification is only a payload-shape signal and does
+not by itself establish durable full-resend proof, prefix identity, or
+account-neutral replay safety. Request validation MUST preserve a client-supplied
+string's original shape and character length for this decision; normalizing that
+string into a one-item array MUST NOT add the array envelope to its boundary
+calculation. An internal HTTP bridge owner-forward hop MUST preserve that
+original string shape so the owner's request validation reaches the same
+classification as the origin.
+
+During a rolling upgrade, when an older origin forwards only a normalized
+one-item array and the owner cannot validate the additive exact-body signature,
+the owner MUST use conservative canonical-shape precedence. An exact canonical
+normalized raw-string shape (`role=user` with one `input_text` part) MUST be
+classified by its contained text length, not by its array or item serialization.
+That wire shape is byte-identical to a genuine client array of the same form, so
+the owner cannot recover the original provenance; the contained-text rule
+therefore applies to both origins. A noncanonical one-item array MUST retain the
+legacy compact-item predicate. Neither path may count a normalization envelope
+as client text. In the inverse rolling-upgrade direction, an upgraded origin
+without positive proof that the selected owner implements this classifier MUST
+NOT dispatch a delta-only shape that the legacy owner would classify as a full
+resend. This guard MUST cover a client string below 4096 characters whose
+normalized one-item array reaches 4096 compact-serialization characters, and a
+multi-item array containing only the allowed tool-output item types. The origin
+MUST fail closed or enter an already-authorized local recovery path before owner
+I/O.
+Positive proof MUST come from a live bridge-ring advertisement containing the
+exact input-shape-classifier capability and a process epoch equal to the
+durable owner's recorded `owner_process_epoch`. When that proof matches, the
+origin MAY dispatch the ambiguous delta-only shape to the upgraded owner.
+Missing, malformed, stale, or epoch-mismatched advertisements MUST NOT
+authorize dispatch, including an advertisement left by an earlier process
+that reused the same instance id.
+
+A fresh reattach whose incoming payload is classified as full-resend-shaped MUST
+NOT receive a proxy-injected durable anchor through any injection point — the
+fresh-reattach injection, session-state hydration of the durable anchor, or the
+session-level injection — so the dispatch goes upstream genuinely unanchored
+with the client's own untrimmed payload. Full-resend-shape quarantine
+suppression takes precedence over anchor availability, trimmability, and replay
+proof. A payload classified as delta-only MUST still resolve and receive its
+durable anchor independently, because it has no other way to convey prior
+conversation state; quarantining the live session MUST NOT erase or rewrite that
+durable context.
+
+#### Scenario: Legacy owner forwarding uses canonical normalized text length
+
+- **GIVEN** an older origin normalized a below-boundary client string into a
+  one-item array before forwarding it to a newer owner
+- **AND** the forward validates only through the rolling-upgrade legacy
+  signature fallback
+- **WHEN** the newer owner classifies the request shape
+- **THEN** it MUST classify the exact canonical normalized shape by its
+  contained text length, not by its normalization envelope
+- **AND** it MUST retain the durable previous-response anchor
+
+#### Scenario: Legacy fallback uses the compact-item predicate for noncanonical arrays
+
+- **GIVEN** an older origin forwards a genuinely noncanonical one-item array
+  such as `["x" * 4094]`
+- **AND** the forward validates only through the rolling-upgrade legacy
+  signature fallback
+- **WHEN** the newer owner classifies the request shape
+- **THEN** it MUST use the compact serialization of that item for the 4096-byte
+  boundary
+- **AND** it MUST classify the item as full-resend-shaped at exactly 4096
+  characters
+
+#### Scenario: Current origin does not expose a delta to a legacy owner
+
+- **GIVEN** an upgraded origin selects a remote owner whose current classifier
+  capability is not positively known
+- **AND** the request is delta-only under the current classifier but full-resend
+  shaped after legacy normalization
+- **WHEN** the origin reaches the owner-forward boundary
+- **THEN** it MUST NOT dispatch the request to that owner
+- **AND** it MUST fail closed or use an already-authorized local recovery path
+  before the legacy owner can suppress the durable anchor
+
+#### Scenario: Proven upgraded owner receives an ambiguous delta
+
+- **GIVEN** an upgraded origin selects a live remote owner
+- **AND** the ring advertises the exact input-shape-classifier capability with
+  a process epoch equal to the durable owner's recorded process epoch
+- **AND** the request is delta-only under the current classifier but
+  full-resend shaped after legacy normalization
+- **WHEN** the origin reaches the owner-forward boundary
+- **THEN** it MAY dispatch the request to that owner
+- **AND** the owner MUST retain the durable previous-response anchor
+
+#### Scenario: Replaced owner process cannot inherit capability proof
+
+- **GIVEN** an instance id has a classifier-capable ring advertisement from an
+  earlier owner process
+- **AND** the durable owner record names a different current process epoch
+- **WHEN** an upgraded origin evaluates an ambiguous delta-only owner forward
+- **THEN** the stale advertisement MUST NOT authorize dispatch
+- **AND** the origin MUST fail closed or use an already-authorized local
+  recovery path before owner I/O
+
+Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), and is cleared when a response completes with the applicable session-identity or exact recovery-generation fence. Each HTTP bridge session lifetime has an immutable, unique session-identity token represented by that session object's object identity and held by quarantine entries only through a weak owner reference; the token MUST be distinct from reusable bridge keys, account IDs, and session headers. Every quarantine generation MUST come from a service-lifetime monotonic allocator and MUST never be reused, including after per-key removal, TTL/size-cap pruning, registry reinitialization, or an allocator reset; any allocator reset MUST resume above every generation already observed in that service lifetime. Quarantine cleanup MUST NOT write account health, alter routing or account selection, or mutate durable bridge ownership. For a registered primary key, only the current canonical session MAY clear its quarantine; the canonical registry wins over a detached session's weak owner token. The weak owner MAY authorize a clear only when no canonical primary is registered, and an ownerless entry MUST remain uncleared through that fallback. A primary completion MUST capture its immutable session-identity token and the key's quarantine generation, including an observed absence, before taking its first await that can arm a replacement; cleanup and equality checks MUST use only those captured identity and generation/absence values, so a completion cannot remove a newer entry or first-strike evidence armed while settlement is in flight. A stale-anchor recovery-origin key MUST be fenced by the exact quarantine generation observed when recovery was authorized; an observed absence or generation mismatch MUST leave a raced quarantine active. The registry MUST prune expired entries before size eviction. An active poison fence whose poison-specific deadline has not expired MUST never be evictable. Inactive first-strike entries and active non-poison quarantine entries MUST share one eviction tier ordered by ascending last-touch time, then ascending generation, then the key tuple (affinity kind, affinity key, API-key id with null ordered as the empty string, and strength). If every slot holds an active poison fence, a new arm MUST be rejected rather than evicting poison evidence or growing beyond the hard size cap; the rejected session MUST remain unquarantined and no new quarantine generation MUST be allocated. Re-arming an existing key MAY refresh its entry in place. When a poison arm is rejected because every slot is an active poison fence, the service MUST maintain one bounded poison-overflow deadline covering the rejected arm's required window and every active retained poison deadline; while that deadline is active, anchor checks for an unknown rejected key MUST fail closed as poison evidence.
+
+Quarantine admission wrappers MUST return whether the requested fence was
+installed, and direct callers MUST consume a rejected result without treating
+the session as quarantined.
+
+Because this overflow state is one bounded service-level fallback rather than a
+per-key map, while its deadline is active, anchor checks for any key whose
+retained entry does not itself carry active poison evidence MUST also fail closed
+as poison evidence. This deliberate conservative fallback MAY affect unrelated
+unknown keys and retained inactive or non-poison entries; it prevents the
+service from growing unbounded overflow state while preserving the anchor-dead
+invariant.
+
+The same poison-overflow verdict MUST govern a later retained entry for the
+rejected key whenever that entry does not itself carry active poison evidence,
+including an inactive first-strike entry admitted after a slot opens.
+
+#### Scenario: Overflow poison survives later inactive admission
+
+- **GIVEN** a full registry rejected a poison arm for a key and recorded an
+  active service-level overflow deadline
+- **WHEN** a slot opens and the key records a first eventless timeout as an
+  inactive entry
+- **THEN** an anchor check for the key still fails closed under the overflow
+  deadline
+- **AND** the inactive entry does not report the poisoned anchor safe
+
+For a poison quarantine, the cleanup fence MUST capture the poison provenance
+generation, the entry's raw generation, and its eventless-timeout count at the
+same observation. Clearing matched poison provenance MUST retain an inactive
+first-strike counter only when both the raw generation and eventless-timeout
+count advanced after that capture; a strike already present at capture MUST be
+reset with the poison arm. An expired suppressed weaker fence MUST be discarded
+before cleanup decides whether a post-capture first strike survives. The same
+captured-count rule MUST apply when a durable retry-circuit merge revokes a
+speculative poison arm.
 
 #### Scenario: Reattach streams events but response.created is never assigned (#1534)
 
@@ -5011,16 +5160,53 @@ Quarantine state MUST be bounded and self-recovering: it is in-memory and sessio
 
 - **GIVEN** a quarantined session key — including one whose quarantined session is still open with other active requests
 - **WHEN** a later request arrives whose payload does not look like a full conversation resend
-- **THEN** the still-open quarantined session counts as absent for durable-anchor selection
+- **THEN** the still-open quarantined session counts as absent as a local session candidate
 - **AND** the durable anchor is still injected for that request, preserving the client's only way to convey prior context
 
 #### Scenario: Quarantine is bounded and self-clearing
 
 - **GIVEN** a quarantined session key
-- **WHEN** a response completes on that session key, or the quarantine TTL elapses
+- **WHEN** a response completes on that session key with its applicable session-identity or exact recovery-generation fence, or the quarantine TTL elapses
 - **THEN** the quarantine (and its eventless strike counter) is cleared
 - **AND** a session that survived the quarantine window is reusable again instead of staying rejected forever
 - **AND** no durable row, janitor work, or account-health write was involved at any point
+
+#### Scenario: The hard cap rejects a new key when poison fences fill it
+
+- **GIVEN** the quarantine registry already holds its maximum number of
+  active poison fences
+- **WHEN** a different session key attempts to arm a quarantine
+- **THEN** the new arm is rejected without evicting any poison fence
+- **AND** the registry remains at its maximum size with the existing
+  generations unchanged
+- **AND** the rejected session is not marked quarantined
+- **AND** an anchor check for the rejected key fails closed while the bounded
+  poison-overflow deadline is active
+
+#### Scenario: Detached predecessor cannot clear a replacement quarantine
+
+- **GIVEN** a predecessor session quarantined a primary bridge key
+- **AND** a replacement session reused that key and received a newer quarantine generation
+- **WHEN** the detached predecessor completes and runs quarantine cleanup
+- **THEN** the replacement's primary-key quarantine remains active
+- **AND** the replacement generation remains authoritative
+
+#### Scenario: Primary completion preserves a first strike recorded during settlement
+
+- **GIVEN** a primary completion observes no active quarantine for its key
+- **WHEN** retry-circuit settlement yields and another request records the first
+  eventless strike for that key before completion cleanup resumes
+- **THEN** the completion leaves that inactive first-strike evidence in the
+  registry
+- **AND** the next eventless timeout can still observe it as the prior strike
+
+#### Scenario: A recovery that observed no quarantine cannot clear a raced one
+
+- **GIVEN** a stale-anchor recovery observed no active quarantine on its recovery-origin key when it was authorized
+- **AND** that key is quarantined while the retry is in flight
+- **WHEN** the recovery completes and runs quarantine cleanup
+- **THEN** the raced quarantine remains active
+- **AND** this holds whether the recovery-origin key is a distinct key or the completing session's own key
 
 ### Requirement: Scoped operation identity
 

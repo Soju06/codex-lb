@@ -448,7 +448,7 @@ async def test_daybreak_capability_cannot_be_appended_to_signed_internal_bridge(
     response = await async_client.post(
         "/internal/bridge/responses",
         headers=headers,
-        json=payload.model_dump_for_forwarding(),
+        json=payload.model_dump_for_http_bridge_owner_forwarding(),
     )
 
     if auth_state == "valid":
@@ -909,7 +909,7 @@ async def test_metadata_only_capability_signal_is_rejected_on_signed_internal_br
     response = await async_client.post(
         "/internal/bridge/responses",
         headers=headers,
-        json=payload.model_dump_for_forwarding(),
+        json=payload.model_dump_for_http_bridge_owner_forwarding(),
     )
 
     assert response.status_code == 400

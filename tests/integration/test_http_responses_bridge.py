@@ -5142,7 +5142,7 @@ async def test_forwarded_priority_prompt_cache_mismatch_forks_on_canonical_owner
 
         priority_response = await async_client.post(
             "/internal/bridge/responses",
-            json=priority_payload.model_dump_for_forwarding(),
+            json=priority_payload.model_dump_for_http_bridge_owner_forwarding(),
             headers=forward_headers,
         )
 
@@ -5302,7 +5302,7 @@ async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
     response = await asyncio.wait_for(
         async_client.post(
             "/internal/bridge/responses",
-            json=payload.model_dump_for_forwarding(),
+            json=payload.model_dump_for_http_bridge_owner_forwarding(),
             headers=forward_headers,
         ),
         timeout=_TEST_SYNC_TIMEOUT_SECONDS,
@@ -13374,13 +13374,13 @@ async def test_v1_responses_http_bridge_idle_recovery_hands_reader_to_replacemen
 ):
     app_settings = _make_app_settings(enabled=True)
     app_settings.sse_keepalive_interval_seconds = 0.01
+    app_settings.stream_idle_timeout_seconds = 0.1
     _install_proxy_settings(
         monkeypatch,
         app_settings=app_settings,
         dashboard_settings=_make_dashboard_settings(),
     )
     monkeypatch.setattr(proxy_module, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.01)
-    monkeypatch.setattr(proxy_module, "_STREAM_KEEPALIVE_MAX_COUNT", 1)
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_reader_handoff",

@@ -83,7 +83,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _clear_http_bridge_quarantine,
-    _http_bridge_quarantine_clear_fence,
+    _http_bridge_quarantine_clear_fence_details,
+    _http_bridge_request_state_wedged_reattach,
+    _log_http_bridge_quarantine_admission_rejected,
     _record_http_bridge_quarantine_eventless_timeout,
     _record_http_bridge_quarantine_wedged_pending,
 )
@@ -1703,7 +1705,13 @@ class _HTTPBridgeUpstreamEventsMixin:
         # watchdog and the durable-anchor clear both key on
         # ``response_event_count == 0`` and never trip on it, so quarantine
         # the session here so later requests stop re-attaching to it.
-        _record_http_bridge_quarantine_wedged_pending(self, session, pending_request_states)
+        wedge_proven = any(_http_bridge_request_state_wedged_reattach(state) for state in pending_request_states)
+        quarantined = _record_http_bridge_quarantine_wedged_pending(self, session, pending_request_states)
+        if wedge_proven and not quarantined:
+            _log_http_bridge_quarantine_admission_rejected(
+                session,
+                reason="reattach_missing_response_created",
+            )
         observed_close_code = (
             upstream_close_code if upstream_close_code is not None else session.last_upstream_close_code
         )
@@ -2150,7 +2158,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 # generic reader-crash account penalty path.
                                 if expired_proxy_injected_anchor:
                                     await _clear_durable_http_bridge_response_anchor(self, session)
-                                _record_http_bridge_quarantine_eventless_timeout(self, session)
+                                recorded = _record_http_bridge_quarantine_eventless_timeout(self, session)
+                                if not recorded:
+                                    _log_http_bridge_quarantine_admission_rejected(
+                                        session,
+                                        reason="repeated_eventless_timeout",
+                                    )
                                 session.closed = True
                                 await self._fail_http_bridge_reader_and_maybe_retire(
                                     session,
@@ -2170,7 +2183,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                             # Count the eventless retire toward the repeated-
                             # wedge quarantine; the first strike still goes
                             # through the bounded pre-created recovery below.
-                            _record_http_bridge_quarantine_eventless_timeout(self, session)
+                            recorded = _record_http_bridge_quarantine_eventless_timeout(self, session)
+                            if not recorded:
+                                _log_http_bridge_quarantine_admission_rejected(
+                                    session,
+                                    reason="repeated_eventless_timeout",
+                                )
                             _record_http_bridge_stuck_retire(
                                 reason=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
                                 session=session,
@@ -2576,6 +2594,18 @@ class _HTTPBridgeUpstreamEventsMixin:
             event=event,
         )
 
+        # Capture before taking the pending-lock or entering any await below.
+        # Alias persistence, operation updates, and recovery settlement can
+        # yield while a concurrent failure arms a newer same-key quarantine;
+        # that completion must not capture and clear evidence it did not see.
+        completion_quarantine_clear_fence: int | None = None
+        completion_quarantine_clear_raw_generation: int | None = None
+        completion_quarantine_clear_eventless_timeout_count = 0
+        if event_type == "response.completed":
+            completion_fence = _http_bridge_quarantine_clear_fence_details(self, session.key)
+            completion_quarantine_clear_fence = completion_fence.generation
+            completion_quarantine_clear_raw_generation = completion_fence.raw_generation
+            completion_quarantine_clear_eventless_timeout_count = completion_fence.eventless_timeout_count
         completed_event_queue: asyncio.Queue[str | None] | None = None
         completed_event_queue_claimed = False
         async with session.pending_lock:
@@ -3575,7 +3605,6 @@ class _HTTPBridgeUpstreamEventsMixin:
         # and any abandonment authorized before it fences on the old anchor
         # and cannot touch the one registered below.
         completion_circuit_settlement_failed = False
-        completion_quarantine_clear_fence: int | None = None
         completion_pre_settle_poison_detail: str | None = None
         completion_settles_onto_tombstone = False
         if (
@@ -3591,14 +3620,11 @@ class _HTTPBridgeUpstreamEventsMixin:
             # disprove, and the clear at the bottom must fence on what was
             # armed when this response proved the session healthy, not on
             # whatever owns the key by then.
-            # Adopt any durable-only poison row BEFORE the fences are
-            # captured: the settle's internal load would otherwise arm the
-            # quarantine after the fence read (leaving a healthy key
-            # suppressed for the TTL because the clear cannot match), and a
-            # failed registration would find no pre-settle poison detail to
-            # re-seed.
-            completion_pre_settle_load_succeeded = await self._load_http_bridge_retry_circuit(session)
-            completion_quarantine_clear_fence = _http_bridge_quarantine_clear_fence(self, session.key)
+            # Adopt any durable-only poison row for settlement bookkeeping.
+            # The quarantine fence was captured before this await and remains
+            # immutable: a row loaded here may arm a new quarantine, but this
+            # completion did not observe that evidence and cannot clear it.
+            await self._load_http_bridge_retry_circuit(session)
             async with self._http_bridge_retry_circuit_lock:
                 pre_settle_state = self._http_bridge_retry_circuits.get(session.key)
                 if pre_settle_state is not None:
@@ -3648,17 +3674,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                         else None
                     ),
                 )
-                if not completion_pre_settle_load_succeeded:
-                    # The fence above was captured off a failed durable read;
-                    # the settle's own successful inner load may have armed
-                    # the poison quarantine AFTER that capture, and the final
-                    # fenced clear would then refuse to remove it — a healthy
-                    # key stuck for the whole poison window despite the fresh
-                    # anchor about to register. Recapture after the settle:
-                    # this still precedes the registration awaits, so a
-                    # quarantine armed by a genuinely concurrent strike
-                    # during those awaits stays outside the fence.
-                    completion_quarantine_clear_fence = _http_bridge_quarantine_clear_fence(self, session.key)
                 if not circuit_settled:
                     # The old poison episode was restored. Its owed clear is
                     # suppressed only once the fresh anchor actually
@@ -3788,8 +3803,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                 self,
                 session,
                 key_generation=completion_quarantine_clear_fence,
+                key_raw_generation=completion_quarantine_clear_raw_generation,
+                key_eventless_timeout_count=completion_quarantine_clear_eventless_timeout_count,
+                key_generation_captured=True,
                 additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
                 additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
+                additional_key_raw_generation=terminal_request_state.verified_stale_anchor_quarantine_raw_generation,
+                additional_key_eventless_timeout_count=(
+                    terminal_request_state.verified_stale_anchor_quarantine_eventless_timeout_count
+                ),
             )
 
         operation_state = _http_bridge_operation_state_for_event(event_type)

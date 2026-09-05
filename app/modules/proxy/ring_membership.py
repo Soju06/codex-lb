@@ -4,6 +4,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, cast
@@ -16,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.utils.time import utcnow
 from app.db.models import BridgeRingMember
 from app.db.session import close_session
+from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -25,6 +27,15 @@ RING_HEARTBEAT_INTERVAL_SECONDS = 10
 RING_STALE_THRESHOLD_SECONDS = 30
 RING_STALE_GRACE_SECONDS = RING_HEARTBEAT_INTERVAL_SECONDS + 5
 RING_MEMBER_RETENTION_SECONDS = 24 * 60 * 60
+HTTP_BRIDGE_INPUT_SHAPE_CLASSIFIER_CAPABILITY = "responses-input-shape-classifier-v2"
+_CURRENT_HTTP_BRIDGE_RING_CAPABILITIES = (HTTP_BRIDGE_INPUT_SHAPE_CLASSIFIER_CAPABILITY,)
+
+
+@dataclass(frozen=True, slots=True)
+class _BridgeRingAdvertisement:
+    endpoint_base_url: str | None
+    owner_process_epoch: str | None
+    capabilities: frozenset[str]
 
 
 class RingMembershipService:
@@ -214,6 +225,36 @@ class RingMembershipService:
             metadata_json = result.scalar_one_or_none()
         return _bridge_ring_endpoint_from_metadata(metadata_json)
 
+    async def owner_supports_capability(
+        self,
+        instance_id: str,
+        *,
+        owner_process_epoch: str,
+        capability: str,
+        stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS,
+    ) -> bool:
+        """Return capability proof for the exact live owner process."""
+        from datetime import timedelta
+
+        cutoff = utcnow() - timedelta(seconds=stale_threshold_seconds)
+        async with self._session() as session:
+            result = await session.execute(
+                select(BridgeRingMember.metadata_json)
+                .where(
+                    BridgeRingMember.instance_id == instance_id,
+                    BridgeRingMember.last_heartbeat_at >= cutoff,
+                )
+                .limit(1)
+            )
+            metadata_json = result.scalar_one_or_none()
+        advertisement = _bridge_ring_advertisement_from_metadata(metadata_json)
+        return bool(
+            advertisement is not None
+            and advertisement.endpoint_base_url is not None
+            and advertisement.owner_process_epoch == owner_process_epoch
+            and capability in advertisement.capabilities
+        )
+
     async def ring_fingerprint(self, stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS) -> str:
         """sha256 of sorted active member list. Same for all pods with same membership."""
         members = await self.list_active(stale_threshold_seconds)
@@ -232,10 +273,23 @@ class RingMembershipService:
 def _bridge_ring_metadata_json(endpoint_base_url: str | None) -> str | None:
     if endpoint_base_url is None:
         return None
-    return json.dumps({"endpoint_base_url": endpoint_base_url}, ensure_ascii=True, separators=(",", ":"))
+    return json.dumps(
+        {
+            "endpoint_base_url": endpoint_base_url,
+            "owner_process_epoch": http_bridge_owner_process_epoch(),
+            "capabilities": list(_CURRENT_HTTP_BRIDGE_RING_CAPABILITIES),
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
 
 
 def _bridge_ring_endpoint_from_metadata(metadata_json: str | None) -> str | None:
+    advertisement = _bridge_ring_advertisement_from_metadata(metadata_json)
+    return advertisement.endpoint_base_url if advertisement is not None else None
+
+
+def _bridge_ring_advertisement_from_metadata(metadata_json: str | None) -> _BridgeRingAdvertisement | None:
     if metadata_json is None:
         return None
     try:
@@ -245,7 +299,18 @@ def _bridge_ring_endpoint_from_metadata(metadata_json: str | None) -> str | None
     if not isinstance(payload, dict):
         return None
     endpoint = payload.get("endpoint_base_url")
-    if not isinstance(endpoint, str):
-        return None
-    stripped = endpoint.strip().rstrip("/")
-    return stripped or None
+    stripped_endpoint = endpoint.strip().rstrip("/") if isinstance(endpoint, str) else ""
+    owner_process_epoch = payload.get("owner_process_epoch")
+    if not isinstance(owner_process_epoch, str) or not owner_process_epoch:
+        owner_process_epoch = None
+    raw_capabilities = payload.get("capabilities")
+    capabilities = (
+        frozenset(raw_capabilities)
+        if isinstance(raw_capabilities, list) and all(isinstance(item, str) for item in raw_capabilities)
+        else frozenset()
+    )
+    return _BridgeRingAdvertisement(
+        endpoint_base_url=stripped_endpoint or None,
+        owner_process_epoch=owner_process_epoch,
+        capabilities=capabilities,
+    )

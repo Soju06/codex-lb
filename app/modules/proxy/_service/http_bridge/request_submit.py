@@ -101,7 +101,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _release_http_bridge_unanchored_handoff,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
+    _http_bridge_request_state_wedged_reattach,
     _http_bridge_session_key_poison_quarantined,
+    _log_http_bridge_quarantine_admission_rejected,
     _record_http_bridge_quarantine_wedged_pending,
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
@@ -3186,7 +3188,13 @@ class _HTTPBridgeRequestSubmitMixin:
         # A stale gate holder that streamed response events without ever
         # receiving ``response.created`` proves the reattach wedge (#1534)
         # even when the session itself survives with other active requests.
-        _record_http_bridge_quarantine_wedged_pending(self, session, stale_requests)
+        wedge_proven = any(_http_bridge_request_state_wedged_reattach(state) for state in stale_requests)
+        quarantined = _record_http_bridge_quarantine_wedged_pending(self, session, stale_requests)
+        if wedge_proven and not quarantined:
+            _log_http_bridge_quarantine_admission_rejected(
+                session,
+                reason="reattach_missing_response_created",
+            )
         partial_strike_detail = detail
         # ``_fail_pending_websocket_requests`` empties the deque it is handed
         # when it claims the states, so the settle predicate below must read
@@ -3536,7 +3544,13 @@ class _HTTPBridgeRequestSubmitMixin:
         # and fails the pendings without passing the partial-cleanup hook or
         # the reader-failure funnel, so evaluate the wedge shape (#1534) here
         # too; recording is idempotent for callers that already quarantined.
-        _record_http_bridge_quarantine_wedged_pending(self, session, retired_request_states)
+        wedge_proven = any(_http_bridge_request_state_wedged_reattach(state) for state in retired_request_states)
+        quarantined = _record_http_bridge_quarantine_wedged_pending(self, session, retired_request_states)
+        if wedge_proven and not quarantined:
+            _log_http_bridge_quarantine_admission_rejected(
+                session,
+                reason="reattach_missing_response_created",
+            )
         # This circuit measures failed request lifecycles, not upstream socket
         # churn. ``response_events_seen == 0`` is also true when an idle reader
         # closes with an empty pending deque. Charging that idle close creates a

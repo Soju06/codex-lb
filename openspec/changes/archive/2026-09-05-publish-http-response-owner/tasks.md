@@ -13,6 +13,6 @@
 - [x] 3.1 Run `uv run pytest tests/integration/test_proxy_responses.py tests/unit/test_proxy_utils.py -k "owner or previous_response or cancellation or persistence" -q`, extending the selection to include any new regression node outside the current names; run `make lint` and `make typecheck`.
 - [x] 3.2 Run `npx --yes @fission-ai/openspec@1.11.0 validate publish-http-response-owner --strict --no-interactive` and `npx --yes @fission-ai/openspec@1.11.0 validate --specs --strict --no-interactive`; record the unchanged full-strict baseline warnings separately.
 - [x] 3.3 Refresh the exact-root GitNexus index/content witness, run `gitnexus detect-changes --scope all --repo /Users/dpearson/repos/codex-lb/.agents/worktrees/issue-2029-http-owner`, inspect the scoped diff and commit one cohesive implementation change locally.
-- [ ] 3.4 Supply this accepted branch head to the later combined integration build; run shared HTTP owner/timing interaction regressions and package one reviewable wheel without installing or restarting the user's service.
+- [x] 3.4 Supply this accepted input to the combined integration and complete HTTP owner publication and shared event/identity provenance acceptance. Final wheel packaging and isolated built-product launch remain separate phase-five delivery gates.
 
-- [ ] 3.5 After combined acceptance, verify this change, sync stable requirements/context and archive through the owning OpenSpec workflow.
+- [x] 3.5 After combined acceptance, verify this change, sync stable requirements/context and archive through the owning OpenSpec workflow.

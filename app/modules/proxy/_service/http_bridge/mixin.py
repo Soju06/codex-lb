@@ -2393,7 +2393,7 @@ class _HTTPBridgeMixin(
                 session.last_completed_response_account_id = None
                 session.last_completed_input_count = 0
                 session.last_completed_input_prefix_fingerprint = None
-                session.last_pending_tool_calls.clear()
+                session.last_pending_tool_calls.clear() or session.pending_async_tool_calls.clear()
                 session.affinity = _persistent_http_bridge_affinity(selection_affinity or session.affinity)
                 session.codex_session = session.key.affinity_kind == "thread_header"
                 session.upstream_turn_state = None

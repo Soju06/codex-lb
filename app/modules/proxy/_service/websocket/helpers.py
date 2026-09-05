@@ -292,6 +292,7 @@ from app.modules.proxy._service.support import (
     _WebSocketReceiveTimeout,
     _WebSocketRequestState,
     _WebSocketUpstreamControl,
+    update_pending_async_tools,
 )
 from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward as _HTTPBridgeOwnerForward,
@@ -634,6 +635,7 @@ def _record_websocket_continuity_completion(
         continuity_state.last_completed_input_prefix_fingerprint = None
         continuity_state.last_pending_function_call_ids = []
         continuity_state.last_pending_tool_call_types = {}
+        continuity_state.pending_async_tool_calls.clear()
         return
     # Record the completed response id and pending tool-call metadata
     # regardless of input shape (string inputs leave ``input_item_count`` at
@@ -642,6 +644,9 @@ def _record_websocket_continuity_completion(
     # meaningful for fingerprinted list inputs, so the count/fingerprint pair
     # is cleared rather than left stale when the completed turn cannot
     # provide one.
+    if request_state.previous_response_id != continuity_state.last_completed_response_id:
+        continuity_state.pending_async_tool_calls.clear()
+    update_pending_async_tools(continuity_state.pending_async_tool_calls, request_state)
     continuity_state.last_completed_response_id = response_id
     if request_state.input_item_count > 0 and request_state.input_full_fingerprint is not None:
         continuity_state.last_completed_input_count = request_state.input_item_count

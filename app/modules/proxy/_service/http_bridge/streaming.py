@@ -762,7 +762,9 @@ def _http_bridge_interrupted_tool_outputs_input(
     input_item_list = cast(list[JsonValue], input_items)
     missing_call_ids = _missing_function_call_outputs_for_previous_response(
         input_item_list,
-        pending_call_ids=list(session.last_pending_tool_calls),
+        pending_call_ids=[
+            call_id for call_id in session.last_pending_tool_calls if call_id not in session.pending_async_tool_calls
+        ],
     )
     if not missing_call_ids:
         return None
@@ -2675,6 +2677,7 @@ class _HTTPBridgeStreamingMixin:
                         )
                         if durable_lookup.latest_response_id != session.last_completed_response_id:
                             session.last_pending_tool_calls = {}
+                            session.pending_async_tool_calls.clear()
                         session.last_completed_response_id = durable_lookup.latest_response_id
                         session.last_completed_response_account_id = durable_lookup.account_id
                         session.last_completed_input_count = durable_full_resend_anchor_count
@@ -2822,6 +2825,7 @@ class _HTTPBridgeStreamingMixin:
                 # last completed response; a durable anchor pointing elsewhere
                 # must not trigger interrupted-output injection.
                 session.last_pending_tool_calls = {}
+                session.pending_async_tool_calls.clear()
             session.last_completed_response_id = durable_lookup.latest_response_id
             # The durable anchor is owned by the durable session's account, which
             # may differ from this session's account after a failover. Record the

@@ -31,3 +31,46 @@ See `openspec/specs/proxy-runtime-observability/spec.md` for normative requireme
   constant validation only. They intentionally avoid request-scoped overrides,
   runtime-derived effective timeout values, payloads, API keys, access tokens,
   raw affinity keys, account emails, and other high-cardinality identifiers.
+
+
+## Responses latency investigation (issue #2029)
+
+A 2026-09-05 controlled study compared PR2030 `9a01cb3` with main `aec4d7b`. It used the real app, normal routes/services and temporary file SQLite with two synthetic Pro accounts, unkeyed traffic, no account proxy and a local scripted TLS origin. Nine fixed events separated created from first tool output. Each ref had760 LB attempts across retained/churned WebSocket, native HTTP and HTTP bridge, small/roughly500KB payloads and concurrency1/4; direct-origin controls ran alongside each scenario. This measures local work, not model inference, real tokenization or WAN latency.
+
+On main, small retained-WS/concurrency4 first-content medians were about11 ms both direct and through LB. Large retained-WS medians were39.9 ms through LB versus14.5 ms direct. Large HTTP-bridge content/terminal medians were149.1/247.8 ms with connection reuse and substantial durable work; native HTTP and direct WS bypass that bridge. These values do not explain historical waits lasting seconds or minutes. Differences between refs include all intervening changes and scheduling variation; they are not isolated PR speedup estimates.
+
+A separate supported anchored-HTTP race was reproducible: after terminal/EOF, owner lookup could return no row before detached request-log persistence finished. Immediate follow-ups failed35/96 times; a100 ms delay or experimental existing-cache publication gave0/96. The publication experiment proves the missing same-process ownership seam, not a speedup or cross-replica guarantee. Installed CLI0.153.2 through real LB retained one upstream socket across prewarm, generation and a single incremental tool-output item (~1.8KB). Its direct-origin HTTP fallback instead sent full history without `previous_response_id`, so the anchored race cannot explain that normal fallback.
+
+Native HTTP fills queue and TTFT but leaves its existing first-upstream-event/created fields null. The [timing change](../../changes/observe-http-upstream-latency/proposal.md) fills those fields with the existing attempt origin. The interval before an upstream event can include local/network/provider work; created-to-content is not asserted to be pure model compute. Historical nulls remain null, and client receipt remains a distinct boundary.
+
+Current saved-store read checks (~277MB,96,732 request logs,83,060 usage rows) found indexed request-path reads around0.95–2.33 ms with fresh SQLite connections. This does not reconstruct the old5.4GB store, historical contention or upstream overload. Earlier every-turn bridge churn in the synthetic run was a fixture startup-order error and was corrected before the quoted baseline. No native-helper performance, multi-replica timing or long-duration saturation result is claimed.
+
+### Accepted scope links
+
+- [DB completion grace](#prevent-ssl-starvation-false-reclaim)
+- [Direct WSS trust-context reuse](#reuse-direct-wss-system-trust)
+- [Immediate HTTP response owner](#publish-http-response-owner)
+- [HTTP upstream timing](#observe-http-upstream-latency)
+- [HTTP preparation](#skip-unused-http-preparation-serialization)
+
+#### prevent-ssl-starvation-false-reclaim
+
+PR2030 keeps main's shipped aiohttp cache and prepares DB-only completion-grace simplification and real-worker coverage; [database-backends](../database-backends/spec.md) owns the domain.
+
+#### reuse-direct-wss-system-trust
+
+Python WSS connection churn can reuse its current system-default context without importing certifi roots. [Outbound HTTP clients](../outbound-http-clients/spec.md) owns trust/lifecycle policy; retained turns are not per-connection builds.
+
+#### publish-http-response-owner
+
+Publish authoritative observed HTTP response IDs through the existing bounded owner cache before delivery, retaining caller scope and durable miss fallback. [Responses compatibility](../responses-api-compat/spec.md) owns continuity behavior.
+
+#### observe-http-upstream-latency
+
+Fill existing upstream-first-event and created fields while preserving attempt clocks and the lazy/verbatim path; [this capability](spec.md) owns those meanings.
+
+#### skip-unused-http-preparation-serialization
+
+Defer unused whole-body dumps when their consumers are inactive. Exact-body ablation measured preparation5.40→2.36 ms at1.06MB and46.02→18.85 ms at8.55MB; these are preparation-only measurements. [Outbound HTTP clients](../outbound-http-clients/spec.md) owns the unchanged wire/transport contract.
+
+Bridge batching, global client pooling, replica readiness changes, scheduler tuning, native IPC and database rewrites are deferred. After individual acceptance, one local integration build will combine these scoped fixes, test interactions and produce a reviewable wheel without installing or restarting the user's service. It is a validation result, not another feature or PR scope.

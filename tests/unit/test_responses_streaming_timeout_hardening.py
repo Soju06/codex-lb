@@ -15,6 +15,16 @@ from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 pytestmark = pytest.mark.unit
 
 
+def _virtual_first_item_task(scheduler: VirtualScheduler, *, delay: float) -> asyncio.Task[str]:
+    """A probe task whose first item arrives after ``delay`` virtual seconds."""
+
+    async def first_item() -> str:
+        await scheduler.sleep(delay)
+        return "response.created"
+
+    return scheduler.create_task(first_item())
+
+
 async def _one_event_stream() -> AsyncIterator[str]:
     yield 'event: response.created\ndata: {"type":"response.created"}\n\n'
 
@@ -122,7 +132,7 @@ async def test_abandoned_startup_probe_task_does_not_warn() -> None:
 async def test_capacity_ready_probe_timeout_uses_virtual_scheduler() -> None:
     clock = VirtualClock()
     scheduler = VirtualScheduler(clock)
-    first_task = scheduler.create_task(scheduler.sleep(1.0, result="response.created"))
+    first_task = _virtual_first_item_task(scheduler, delay=1.0)
     capacity_ready_event = proxy_api._CapacityStartupReadyEvent(clock=clock)
     capacity_ready_event.set()
     assert capacity_ready_event.set_at == clock.monotonic()
@@ -149,7 +159,7 @@ async def test_capacity_ready_probe_timeout_uses_virtual_scheduler() -> None:
 async def test_capacity_signal_discovery_timeout_uses_virtual_scheduler() -> None:
     clock = VirtualClock()
     scheduler = VirtualScheduler(clock)
-    first_task = scheduler.create_task(scheduler.sleep(1.0, result="response.created"))
+    first_task = _virtual_first_item_task(scheduler, delay=1.0)
     probe_task = scheduler.create_task(
         proxy_api._wait_for_first_stream_probe(
             first_task,
@@ -172,7 +182,7 @@ async def test_capacity_signal_discovery_timeout_uses_virtual_scheduler() -> Non
 async def test_capacity_recovery_ready_preserves_first_item_probe() -> None:
     clock = VirtualClock()
     scheduler = VirtualScheduler(clock)
-    first_task = scheduler.create_task(scheduler.sleep(0.03, result="response.created"))
+    first_task = _virtual_first_item_task(scheduler, delay=0.03)
     capacity_wait_event = asyncio.Event()
     capacity_wait_event.set()
     capacity_ready_event = proxy_api._CapacityStartupReadyEvent(clock=clock)
@@ -221,7 +231,7 @@ async def test_capacity_recovery_wait_is_unbounded_under_virtual_time() -> None:
 
     clock = VirtualClock()
     scheduler = VirtualScheduler(clock)
-    first_task = scheduler.create_task(scheduler.sleep(10_000.0, result="response.created"))
+    first_task = _virtual_first_item_task(scheduler, delay=10_000.0)
     capacity_wait_event = asyncio.Event()
     capacity_wait_event.set()
     probe_task = scheduler.create_task(
@@ -257,7 +267,7 @@ async def test_recovery_ready_rereads_level_state() -> None:
 
     clock = VirtualClock()
     scheduler = VirtualScheduler(clock)
-    first_task = scheduler.create_task(scheduler.sleep(10_000.0, result="response.created"))
+    first_task = _virtual_first_item_task(scheduler, delay=10_000.0)
     capacity_wait_event = asyncio.Event()
     capacity_wait_event.set()
     capacity_ready_event = proxy_api._CapacityStartupReadyEvent(clock=clock)

@@ -173,7 +173,7 @@ async def test_bridge_and_websocket_budgets_follow_virtual_clock(monkeypatch: py
     # ProxyService mixins (http bridge / websocket / streaming retry) share this method.
     assert service._remaining_budget_seconds(deadline) == 30.0
     # The websocket receive deadline compares owner-clock started_at values with the owner clock.
-    pending = deque([SimpleNamespace(started_at=90.0, draining_until_terminal=False)])
+    pending = cast(Any, deque([SimpleNamespace(started_at=90.0, draining_until_terminal=False)]))
     receive_timeout = await service._next_websocket_receive_timeout(
         pending,
         pending_lock=anyio.Lock(),

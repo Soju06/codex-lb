@@ -16,6 +16,7 @@ import asyncio
 
 import pytest
 
+from app.core.clock import RealScheduler
 from app.core.utils.shared_future import _WAITERS_ATTR, wait_on_shared_future
 
 pytestmark = pytest.mark.unit
@@ -139,7 +140,7 @@ async def test_shared_task_keeps_running_when_all_waiters_cancel():
 async def test_timed_wait_runs_through_injected_scheduler_and_untimed_wait_does_not():
     recorded: list[tuple[object, float | None]] = []
 
-    class RecordingScheduler:
+    class RecordingScheduler(RealScheduler):
         async def wait_for(self, awaitable, timeout):
             recorded.append((awaitable, timeout))
             return await asyncio.wait_for(awaitable, timeout)

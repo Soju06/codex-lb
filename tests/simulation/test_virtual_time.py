@@ -9,7 +9,7 @@ move chronologically so sequential sleeps complete under one call.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 
 import pytest
 
@@ -333,7 +333,7 @@ async def test_wait_for_prefers_result_when_timeout_completes_same_tick() -> Non
 async def test_wait_for_accepts_non_coroutine_awaitables_and_owns_created_tasks() -> None:
     scheduler = _scheduler()
 
-    async def items() -> AsyncIterator[str]:
+    async def items() -> AsyncGenerator[str, None]:
         await scheduler.sleep(0.5)
         yield "first"
 

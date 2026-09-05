@@ -34,11 +34,14 @@ Fidelity notes (each pinned by ``tests/simulation/test_virtual_time.py``):
   clock that decides *when* the scope is cancelled is virtual.
 * ``drain`` runs a fixed number of loop turns (``drain_rounds``). Quiescence is
   asserted by callers, so too small a round count fails loudly rather than
-  silently reordering events. Each round also samples the done-callback count
-  of every pending owned task (``max_pending_owned_task_callbacks``): a wait
-  loop that re-shields a still-pending task grows that count per cancelled
-  attempt (the 2026-08-30 event-loop livelock), while the fan-out helper keeps
-  it constant.
+  silently reordering events. Each round also samples the done callbacks of
+  every pending owned task: ``max_pending_owned_task_callbacks`` is the raw
+  count, and ``max_abandoned_shield_callbacks`` counts ``asyncio.shield``
+  attempts whose outer future was cancelled while the inner task stayed
+  pending (Python 3.14 leaves their ``_clear_awaited_by_callback`` behind,
+  the growth behind the 2026-08-30 event-loop livelock). A live shield
+  carries both of its callbacks and counts as zero; the fan-out helper adds
+  none.
 """
 
 from __future__ import annotations
@@ -106,9 +109,31 @@ class _Timer:
     result: Any = field(compare=False)
 
 
-def _pending_callback_count(future: asyncio.Future[Any]) -> int:
+def _pending_callbacks(future: asyncio.Future[Any]) -> list[Any]:
     callbacks = getattr(future, "_callbacks", None)
-    return len(callbacks) if callbacks is not None else 0
+    return list(callbacks) if callbacks is not None else []
+
+
+def _pending_callback_count(future: asyncio.Future[Any]) -> int:
+    return len(_pending_callbacks(future))
+
+
+def _abandoned_shield_callbacks(future: asyncio.Future[Any]) -> int:
+    """Count ``shield`` attempts on ``future`` whose outer future went away.
+
+    ``asyncio.shield`` registers ``_clear_awaited_by_callback`` and
+    ``_inner_done_callback`` on the inner future; cancelling the outer removes
+    only the latter, so the surplus of the former is the number of abandoned
+    attempts still holding a callback slot on the pending task.
+    """
+
+    names = [
+        getattr(entry[0] if isinstance(entry, tuple) else entry, "__qualname__", "")
+        for entry in _pending_callbacks(future)
+    ]
+    clearing = sum(name.endswith("_clear_awaited_by_callback") for name in names)
+    live = sum(name.endswith("_inner_done_callback") for name in names)
+    return max(0, clearing - live)
 
 
 class _VirtualTimeout:
@@ -245,6 +270,7 @@ class VirtualScheduler:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._sequence = 0
         self.max_pending_owned_task_callbacks = 0
+        self.max_abandoned_shield_callbacks = 0
 
     # -- introspection -------------------------------------------------------
 
@@ -257,10 +283,13 @@ class VirtualScheduler:
         return sum(1 for timer in self._timers if not timer.future.done())
 
     def sample_owned_task_callbacks(self) -> int:
-        """Record and return the largest done-callback count on a pending owned task."""
+        """Record the callback shape of every pending owned task; return the largest raw count."""
 
-        count = max((_pending_callback_count(task) for task in self._tasks if not task.done()), default=0)
+        pending = [task for task in self._tasks if not task.done()]
+        count = max((_pending_callback_count(task) for task in pending), default=0)
+        abandoned = max((_abandoned_shield_callbacks(task) for task in pending), default=0)
         self.max_pending_owned_task_callbacks = max(self.max_pending_owned_task_callbacks, count)
+        self.max_abandoned_shield_callbacks = max(self.max_abandoned_shield_callbacks, abandoned)
         return count
 
     # -- timers ---------------------------------------------------------------

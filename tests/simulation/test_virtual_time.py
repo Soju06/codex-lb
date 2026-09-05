@@ -550,8 +550,30 @@ async def test_drain_samples_pending_owned_task_callbacks() -> None:
     await scheduler.drain()
 
     assert scheduler.max_pending_owned_task_callbacks == baseline + 3
+    assert scheduler.max_abandoned_shield_callbacks == 0
     blocked.set()
     await task
+
+
+@pytest.mark.asyncio
+async def test_drain_counts_abandoned_shield_attempts_on_pending_owned_tasks() -> None:
+    """A live shield counts as zero; every cancelled outer left behind counts as one."""
+
+    scheduler = _scheduler()
+    blocked = asyncio.Event()
+    task = scheduler.create_task(blocked.wait())
+    live = asyncio.shield(task)
+    await scheduler.drain()
+    assert scheduler.max_abandoned_shield_callbacks == 0
+
+    for _ in range(2):
+        asyncio.shield(task).cancel()
+    await scheduler.drain()
+
+    assert scheduler.max_abandoned_shield_callbacks == 2
+    blocked.set()
+    await task
+    await live
 
 
 @pytest.mark.asyncio

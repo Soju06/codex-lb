@@ -38229,6 +38229,38 @@ async def test_wait_for_aborted_owner_preserves_observer_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_wait_for_aborted_owner_accepts_owner_timeout_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inflight_future: asyncio.Future[proxy_service._HTTPBridgeSession] = asyncio.get_running_loop().create_future()
+
+    async def owner() -> None:
+        raise TimeoutError("owner creation timed out")
+
+    owner_task = asyncio.create_task(owner())
+    setattr(
+        inflight_future,
+        http_bridge_helpers_module._HTTP_BRIDGE_INFLIGHT_ABORT_ERROR_ATTR,
+        ProxyResponseError(429, openai_error("proxy_overloaded", "overloaded")),
+    )
+    setattr(inflight_future, http_bridge_helpers_module._HTTP_BRIDGE_INFLIGHT_OWNER_TASK_ATTR, owner_task)
+
+    async def owner_timeout_wait(shared: asyncio.Future[Any], *, timeout: float | None = None) -> Any:
+        assert shared is owner_task
+        await shared
+
+    monkeypatch.setattr(http_bridge_helpers_module, "wait_on_shared_future", owner_timeout_wait)
+
+    assert (
+        await http_bridge_helpers_module._wait_for_http_bridge_aborted_owner(
+            inflight_future,
+            timeout=1.0,
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
 async def test_superseded_creator_hands_its_claimed_epoch_to_the_registered_winner() -> None:
     """Eviction can land DURING the claim, so a creator may advance the shared
     row's epoch past the session that won the registry slot — fencing the

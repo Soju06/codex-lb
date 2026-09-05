@@ -921,6 +921,8 @@ async def _wait_for_http_bridge_retained_owner(
     try:
         await wait_on_shared_future(owner_task, timeout=timeout)
     except TimeoutError:
+        if owner_task.done():
+            return True
         return False
     except asyncio.CancelledError:
         current_task = asyncio.current_task()

@@ -660,6 +660,7 @@ def _text_with_previous_response_id(
     if not isinstance(payload, dict) or not response_id:
         return text_data
     payload["previous_response_id"] = response_id
+    payload.pop("conversation", None)
     model = payload.get("model")
     if api_key is not None and isinstance(model, str) and model.strip().lower() == "gpt-6-astra":
         request = ResponsesRequest.model_validate(payload)

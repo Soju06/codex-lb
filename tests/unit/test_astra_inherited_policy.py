@@ -255,9 +255,33 @@ def test_http_bridge_trims_full_resend_before_astra_reset() -> None:
     )
     request.input = _trim_http_bridge_previous_response_input_items(cast(list[JsonValue], request.input))
     validate_astra_request(request, _key(allowed=["high"]))
-    assert request.input[0] == {"type": "configuration_update", "reasoning": {"effort": "high"}}
-    assert request.input[1]["type"] == "function_call_output"
-    assert not any(isinstance(item, dict) and item.get("id") == "msg_1" for item in request.input)
+    prepared_input = cast(list[JsonValue], request.input)
+    assert prepared_input[0] == {"type": "configuration_update", "reasoning": {"effort": "high"}}
+    second = prepared_input[1]
+    assert isinstance(second, dict)
+    assert second.get("type") == "function_call_output"
+    assert not any(isinstance(item, dict) and item.get("id") == "msg_1" for item in prepared_input)
+
+
+def test_http_bridge_injected_anchor_clears_conversation() -> None:
+    text_data = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-6-astra",
+            "instructions": "",
+            "conversation": "conv_hard_turn",
+            "reasoning": {"effort": "high"},
+            "input": [{"role": "user", "content": "Continue"}],
+        }
+    )
+    updated_text = request_submit_module._text_with_previous_response_id(
+        text_data,
+        "resp_injected",
+        api_key=_key(allowed=["high"]),
+    )
+    wire_payload = json.loads(updated_text)
+    assert wire_payload["previous_response_id"] == "resp_injected"
+    assert "conversation" not in wire_payload
 
 
 def test_http_bridge_injected_anchor_resets_before_derived_state() -> None:

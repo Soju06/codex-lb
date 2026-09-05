@@ -39,6 +39,12 @@ preparation SHALL be idempotent.
 - **THEN** preparation retains exactly one leading configuration update selecting ultra and request-level ultra, without treating either value as max during API-key policy checks
 - **AND** only final subscription wire serialization maps both ultra values to max
 
+#### Scenario: Injected response anchors drop conversation
+
+- **GIVEN** an Astra HTTP-bridge request that still carries `conversation`
+- **WHEN** a completed identical turn supplies a `previous_response_id` anchor
+- **THEN** the reconstructed payload keeps that response anchor and omits `conversation`
+
 #### Scenario: HTTP-bridge full resend trims before the Astra reset
 
 - **GIVEN** a previous_response_id full resend that starts with stored assistant or reasoning output followed by a tool output

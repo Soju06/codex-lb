@@ -3153,7 +3153,7 @@ class _WebSocketMixin:
                 )
                 responses_payload = responses_payload.model_copy(update={"input": trimmed_input_items})
         source_owned = False
-        if not source_route_excluded:
+        if not source_route_excluded and responses_payload.model.strip().lower() == "gpt-6-astra":
             source_owned = await responses_model_is_source_owned(
                 responses_payload.model,
                 refreshed_api_key,

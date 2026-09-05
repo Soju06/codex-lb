@@ -4,7 +4,6 @@ import asyncio
 import inspect
 import json
 import logging
-import time
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -39,6 +38,7 @@ from app.core.balancer import (
     select_account as select_account,
 )
 from app.core.balancer.types import UpstreamError
+from app.core.clock import REAL_CLOCK, Clock
 from app.core.config import settings as config_settings
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -281,9 +281,16 @@ SelectionInputs = _SelectionInputs
 
 
 class LoadBalancer:
-    def __init__(self, repo_factory: ProxyRepoFactory, *, encryptor: TokenEncryptor | None = None) -> None:
+    def __init__(
+        self,
+        repo_factory: ProxyRepoFactory,
+        *,
+        encryptor: TokenEncryptor | None = None,
+        clock: Clock = REAL_CLOCK,
+    ) -> None:
         self._repo_factory = repo_factory
         self._encryptor = encryptor or TokenEncryptor()
+        self._clock = clock
         self._runtime: dict[str, RuntimeState] = {}
         self._runtime_lock = asyncio.Lock()
         self._account_locks: dict[str, asyncio.Lock] = {}
@@ -368,7 +375,7 @@ class LoadBalancer:
             lease_id=uuid4().hex,
             account_id=account_id,
             kind=kind,
-            acquired_at=time.monotonic(),
+            acquired_at=self._clock.monotonic(),
             estimated_tokens=max(0.0, estimated_tokens),
             api_key_id=api_key_id,
         )
@@ -385,7 +392,7 @@ class LoadBalancer:
                 runtime.stream_key_inflight[api_key_id] = runtime.stream_key_inflight.get(api_key_id, 0) + 1
         runtime.leased_tokens += lease.estimated_tokens
         if record_selection:
-            runtime.last_selected_at = time.time()
+            runtime.last_selected_at = self._clock.time()
             runtime.version += 1
         _record_account_lease_acquired(kind)
         _record_account_inflight_leases(account_id, runtime)
@@ -500,7 +507,7 @@ class LoadBalancer:
                 "Reclaimed stale account lease account_id=%s kind=%s age_seconds=%.3f",
                 "<redacted>" if redact_sensitive_details else current.account_id,
                 current.kind,
-                time.monotonic() - current.acquired_at,
+                self._clock.monotonic() - current.acquired_at,
             )
         return True
 
@@ -510,7 +517,7 @@ class LoadBalancer:
         redact_sensitive_details: bool = False,
     ) -> None:
         settings = get_settings()
-        now = time.monotonic()
+        now = self._clock.monotonic()
         for runtime in self._runtime.values():
             if not runtime.leases:
                 continue
@@ -1022,6 +1029,7 @@ class LoadBalancer:
             return None
         result = select_account(
             states,
+            now=self._clock.time(),
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -1045,7 +1053,7 @@ class LoadBalancer:
         # This is not a health observation, so it must not advance ``version``
         # and invalidate an operator Force Probe that is loading usage.
         previous_last_selected_at = runtime.last_selected_at
-        reserved_at = time.time()
+        reserved_at = self._clock.time()
         runtime.last_selected_at = reserved_at
         return ProbeReservation(
             account_id=result.account.account_id,
@@ -1084,7 +1092,7 @@ class LoadBalancer:
         # Only a selection that survived sticky persistence and final local
         # admission consumes the quiet interval. Unlike reserve/release, this
         # committed observation must invalidate older Force Probe settlement.
-        runtime.last_selected_at = time.time()
+        runtime.last_selected_at = self._clock.time()
         runtime.version += 1
         runtime.health_version += 1
         return True
@@ -1277,6 +1285,7 @@ class LoadBalancer:
                 if not accounts and all_accounts_require_reauthentication(
                     additional_quota_candidates,
                     self._encryptor,
+                    now=self._clock.time(),
                 ):
                     accounts = additional_quota_candidates
                 elif not accounts:
@@ -1408,6 +1417,7 @@ class LoadBalancer:
                 latest_secondary=selection_inputs.latest_secondary,
                 latest_monthly=selection_inputs.latest_monthly,
                 runtime=self._runtime,
+                now=self._clock.time(),
                 routing_policy_override=selection_inputs.routing_policy_override,
                 ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
                 encryptor=self._encryptor,
@@ -1513,6 +1523,7 @@ class LoadBalancer:
         eligible_accounts: list[Account] = []
         blocked_by_data = False
         blocked_by_exhaustion = False
+        now = self._clock.time()
         for account in accounts:
             eligibility = _additional_quota_eligibility(
                 account_id=account.id,
@@ -1524,6 +1535,7 @@ class LoadBalancer:
                 latest_secondary=latest_secondary,
                 fresh_primary=fresh_primary,
                 fresh_secondary=fresh_secondary,
+                now=now,
             )
             if eligibility == "eligible":
                 eligible_accounts.append(account)
@@ -1612,6 +1624,7 @@ class LoadBalancer:
             latest_secondary=selection_inputs.latest_secondary,
             latest_monthly=selection_inputs.latest_monthly,
             runtime=self._runtime,
+            now=self._clock.time(),
             routing_policy_override=selection_inputs.routing_policy_override,
             ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
             encryptor=self._encryptor,
@@ -1702,6 +1715,7 @@ class LoadBalancer:
             allow_usage_exhaustion_error=allow_usage_exhaustion_error,
             usage_exhaustion_states=usage_exhaustion_states,
             sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
+            clock=self._clock,
         )
 
     _persist_sticky_mutation = staticmethod(_persist_sticky_mutation)
@@ -1793,7 +1807,7 @@ class LoadBalancer:
             account_snapshot = _clone_account(account)
             state = self._state_for(account)
             state.error_count = max(state.error_count + count, minimum_error_count)
-            state.last_error_at = time.time()
+            state.last_error_at = self._clock.time()
             self._sync_runtime_state(account, state)
             runtime = self._runtime.get(account.id)
             if runtime and runtime.health_tier == HEALTH_TIER_PROBING:
@@ -1854,11 +1868,12 @@ class LoadBalancer:
                 monthly_entry=monthly_entry,
                 secondary_entry=secondary_entry,
             )
+            now = self._clock.time()
             normalized_usage = _normalize_usage_inputs(
                 account=account,
                 primary_entry=primary_entry,
                 secondary_entry=effective_secondary_entry,
-                now_epoch=int(time.time()),
+                now_epoch=int(now),
             )
             health_primary_used = _health_tier_primary_used(
                 plan_type=account.plan_type,
@@ -1879,13 +1894,13 @@ class LoadBalancer:
                 primary_entry=primary_entry,
                 secondary_entry=effective_secondary_entry,
                 runtime=replace(runtime),
+                now=now,
             )
             account_status = normalized_state.status
             if account_status not in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED):
                 return
 
             settings = get_settings()
-            now = time.time()
             was_probe_eligible = runtime.health_tier == HEALTH_TIER_PROBING
             if was_probe_eligible and (runtime.error_count > 0 or runtime.last_error_at is not None):
                 runtime.error_count = 0
@@ -1959,7 +1974,7 @@ class LoadBalancer:
         runtime = self._runtime.setdefault(account.id, RuntimeState())
         if expected_version is not None and runtime.version != expected_version:
             if selected:
-                runtime.last_selected_at = time.time()
+                runtime.last_selected_at = self._clock.time()
                 runtime.version += 1
             return False
 
@@ -1985,7 +2000,7 @@ class LoadBalancer:
             dirty = True
         health_dirty = dirty
         if selected:
-            runtime.last_selected_at = time.time()
+            runtime.last_selected_at = self._clock.time()
             dirty = True
         if dirty:
             runtime.version += 1
@@ -2089,10 +2104,12 @@ def _build_states(
     latest_secondary: Mapping[str, UsageHistory | AdditionalUsageHistory],
     latest_monthly: Mapping[str, UsageHistory],
     runtime: dict[str, RuntimeState],
+    now: float | None = None,
     routing_policy_override: str | None = None,
     ignore_standard_quota_account_ids: frozenset[str] = frozenset(),
     encryptor: TokenEncryptor | None = None,
 ) -> tuple[list[AccountState], dict[str, Account]]:
+    now = REAL_CLOCK.time() if now is None else now
     states: list[AccountState] = []
     account_map: dict[str, Account] = {}
 
@@ -2114,6 +2131,7 @@ def _build_states(
                 if account.status == AccountStatus.REAUTH_REQUIRED and encryptor is not None
                 else None
             ),
+            now=now,
         )
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
             state.routing_policy = routing_policy_override
@@ -2258,13 +2276,15 @@ def _state_from_account(
     secondary_entry: UsageHistory | AdditionalUsageHistory | None,
     runtime: RuntimeState,
     access_token_expires_at: float | None = None,
+    now: float | None = None,
 ) -> AccountState:
+    now = REAL_CLOCK.time() if now is None else now
     routing_policy = _normalize_account_routing_policy(getattr(account, "routing_policy", None))
     normalized_usage = _normalize_usage_inputs(
         account=account,
         primary_entry=primary_entry,
         secondary_entry=secondary_entry,
-        now_epoch=int(time.time()),
+        now_epoch=int(now),
     )
     primary_used = normalized_usage.primary_used
     primary_reset = normalized_usage.primary_reset
@@ -2288,9 +2308,7 @@ def _state_from_account(
     # while waiting for the next usage refresh. Expired samples map to 0.0
     # rather than None because usage-derived status recovery only evaluates
     # non-None percentages.
-    now = time.time()
-    now_epoch = int(now)
-    if primary_used is not None and primary_reset is not None and primary_reset <= now_epoch:
+    if primary_used is not None and primary_reset is not None and primary_reset <= int(now):
         primary_used = 0.0
         primary_reset = None
     # A strictly newer long-window row proves a later fetch no longer
@@ -2306,14 +2324,14 @@ def _state_from_account(
         > _SIBLING_FETCH_MARGIN_SECONDS
     ):
         primary_window_minutes = None
-    if secondary_used is not None and secondary_reset is not None and secondary_reset <= now_epoch:
+    if secondary_used is not None and secondary_reset is not None and secondary_reset <= int(now):
         secondary_used = 0.0
         secondary_reset = None
     ignore_zero_capacity_primary_runtime_reset = False
     status_seed = account.status
     long_window_quota_available = (
         effective_secondary_entry is not None
-        and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
+        and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at, now=now)
         and effective_secondary_entry.used_percent is not None
         and float(effective_secondary_entry.used_percent) < 100.0
     )
@@ -2350,6 +2368,7 @@ def _state_from_account(
                 account=account,
                 primary_entry=primary_entry,
                 long_window_entry=effective_secondary_entry,
+                now=now,
             )
             if early_freshness_entry is not None and early_freshness_entry.recorded_at is not None:
                 recorded_epoch = early_freshness_entry.recorded_at.replace(tzinfo=timezone.utc).timestamp()
@@ -2422,10 +2441,10 @@ def _state_from_account(
     if (
         account.status == AccountStatus.QUOTA_EXCEEDED
         and effective_runtime_reset is not None
-        and effective_runtime_reset > time.time()
+        and effective_runtime_reset > now
         and effective_blocked_at is None
         and effective_secondary_entry is not None
-        and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
+        and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at, now=now)
         and effective_secondary_entry.used_percent is not None
         and float(effective_secondary_entry.used_percent) < 100.0
         and effective_secondary_entry.reset_at is not None
@@ -2447,11 +2466,11 @@ def _state_from_account(
     cooldown_ready = False
     if account.status == AccountStatus.QUOTA_EXCEEDED:
         cooldown_ready = (
-            effective_blocked_at is not None and time.time() >= effective_blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS
+            effective_blocked_at is not None and now >= effective_blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS
         )
     elif (
         runtime.cooldown_until is not None
-        and runtime.cooldown_until <= time.time()
+        and runtime.cooldown_until <= now
         and runtime.blocked_at is not None
         and effective_blocked_at is not None
         and runtime.blocked_at >= effective_blocked_at
@@ -2466,6 +2485,7 @@ def _state_from_account(
                 account=account,
                 primary_entry=primary_entry,
                 long_window_entry=effective_secondary_entry,
+                now=now,
             )
         else:
             freshness_entry = None
@@ -2480,6 +2500,7 @@ def _state_from_account(
             account=account,
             primary_entry=primary_entry,
             long_window_entry=effective_secondary_entry,
+            now=now,
         )
         # One healthy window must not conceal exhaustion in another applicable
         # window; at least one window must also have supplied actual evidence.
@@ -2489,7 +2510,7 @@ def _state_from_account(
             and (primary_used is not None or secondary_used is not None)
         )
         rejected_reset_recovery_evidence = all_quota_windows_available and _usage_entry_is_recent_available(
-            rejected_reset_freshness_entry
+            rejected_reset_freshness_entry, now=now
         )
         if effective_blocked_at is not None:
             # A sample predating the 429 cannot disprove the persisted block.
@@ -2520,6 +2541,7 @@ def _state_from_account(
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
         infer_status_from_usage=False,
+        now=now,
     )
     if resetless_rate_limit_without_evidence and primary_used is None and status == AccountStatus.ACTIVE:
         status = AccountStatus.RATE_LIMITED
@@ -2527,12 +2549,12 @@ def _state_from_account(
         status = AccountStatus.RATE_LIMITED
         reset_at = float(account.reset_at)
 
-    if status == AccountStatus.QUOTA_EXCEEDED:
-        next_blocked_at = effective_blocked_at
-    elif status == AccountStatus.RATE_LIMITED and account.status != AccountStatus.QUOTA_EXCEEDED:
-        next_blocked_at = effective_blocked_at
-    else:
-        next_blocked_at = None
+    next_blocked_at = (
+        effective_blocked_at
+        if status == AccountStatus.QUOTA_EXCEEDED
+        or (status == AccountStatus.RATE_LIMITED and account.status != AccountStatus.QUOTA_EXCEEDED)
+        else None
+    )
 
     settings = get_settings()
     new_tier = _sync_runtime_health_tier(
@@ -2542,7 +2564,7 @@ def _state_from_account(
         secondary_used_percent=secondary_used,
         routing_policy=routing_policy,
         runtime=runtime,
-        now=time.time(),
+        now=now,
         soft_drain_enabled=getattr(settings, "soft_drain_enabled", True),
     )
 
@@ -2726,37 +2748,36 @@ def background_recovery_state_from_account(
     primary_entry: UsageHistory | None,
     secondary_entry: UsageHistory | None,
 ) -> AccountState:
-    """Evaluate recovery for a persisted blocked account without live runtime state.
+    """Evaluate recovery without live runtime state.
 
-    The usage refresh scheduler only needs to know whether a persisted blocked
-    account can safely return to `active`. Seed a throwaway runtime snapshot
-    from the persisted block marker so fresh post-block usage rows can clear a
-    stale reset guard even when the original balancer process is gone.
+    Seed a throwaway runtime from the persisted block marker so post-block usage
+    can clear stale reset guards after a balancer restart.
     """
 
     runtime = RuntimeState()
     blocked_at = float(account.blocked_at) if account.blocked_at is not None else None
-    now = time.time()
+    now = REAL_CLOCK.time()
     reset_at = float(account.reset_at) if account.reset_at is not None else None
     valid_reset_at = plausible_rate_limit_reset_at(reset_at, now=now)
 
     if blocked_at is not None:
         runtime.blocked_at = blocked_at
 
-    if account.status == AccountStatus.RATE_LIMITED and blocked_at is not None:
-        if valid_reset_at is not None:
-            runtime.cooldown_until = valid_reset_at
+    if account.status == AccountStatus.RATE_LIMITED and blocked_at is not None and valid_reset_at is not None:
+        runtime.cooldown_until = valid_reset_at
     state = _state_from_account(
         account=account,
         primary_entry=primary_entry,
         secondary_entry=secondary_entry,
         runtime=runtime,
+        now=now,
     )
     if account.status == AccountStatus.RATE_LIMITED:
         freshness_entry = _rate_limited_freshness_entry(
             account=account,
             primary_entry=primary_entry,
             long_window_entry=secondary_entry,
+            now=now,
         )
         # Keep elapsed resets intact until _state_from_account evaluates the
         # selector's normal expiry path; only freshness gates the final repair.
@@ -2773,7 +2794,7 @@ def background_recovery_state_from_account(
                     cooldown_until=max(reset_at, minimum_floor_deadline),
                 )
         elif blocked_at is None and reset_at is not None and reset_at <= now:
-            if not _usage_entry_is_recent_available(freshness_entry):
+            if not _usage_entry_is_recent_available(freshness_entry, now=now):
                 return replace(
                     state,
                     status=AccountStatus.RATE_LIMITED,
@@ -2808,6 +2829,7 @@ def _rate_limited_freshness_entry(
     account: Account,
     primary_entry: _UsageWindowEntry | None,
     long_window_entry: _UsageWindowEntry | None,
+    now: float,
 ) -> _UsageWindowEntry | None:
     if (
         long_window_entry is not None
@@ -2827,17 +2849,17 @@ def _rate_limited_freshness_entry(
     # block: recovery would route traffic to an account whose long quota is
     # still at 100%. While the primary sample still claims an active window,
     # or omits reset metadata entirely, its freshness keeps gating recovery.
-    primary_window_expired = primary_entry.reset_at is not None and float(primary_entry.reset_at) <= time.time()
+    primary_window_expired = primary_entry.reset_at is not None and float(primary_entry.reset_at) <= now
     long_window_available = long_window_entry.used_percent is not None and float(long_window_entry.used_percent) < 100.0
     if primary_window_expired and long_window_available and long_window_entry.recorded_at > primary_entry.recorded_at:
         return long_window_entry
     return primary_entry
 
 
-def _usage_entry_is_recent_available(entry: _UsageWindowEntry | None) -> bool:
+def _usage_entry_is_recent_available(entry: _UsageWindowEntry | None, *, now: float) -> bool:
     return (
         entry is not None
-        and _usage_entry_is_recent_enough(entry.recorded_at)
+        and _usage_entry_is_recent_enough(entry.recorded_at, now=now)
         and entry.used_percent is not None
         and float(entry.used_percent) < 100.0
     )
@@ -2872,12 +2894,10 @@ def _extract_credit_status(
     return None, None, None
 
 
-def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:
+def _usage_entry_is_recent_enough(recorded_at: datetime | None, *, now: float) -> bool:
     if recorded_at is None:
         return False
-    current_time = utcnow()
-    if current_time.tzinfo is None:
-        current_time = current_time.replace(tzinfo=timezone.utc)
+    current_time = datetime.fromtimestamp(now, tz=timezone.utc)
     interval_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
     recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
     return recorded_time >= current_time - timedelta(seconds=interval_seconds)

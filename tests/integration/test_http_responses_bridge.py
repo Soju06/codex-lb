@@ -4197,8 +4197,9 @@ async def test_v1_responses_http_bridge_reconnect_fails_when_reader_cancel_times
     blocking_reader = asyncio.create_task(blocking_reader_task())
     bridge_session.upstream_reader = blocking_reader
 
-    async def fake_await_cancelled_task(task, *, timeout_seconds=1.0, label, cleanup_tasks=None):
+    async def fake_await_cancelled_task(task, *, timeout_seconds=1.0, label, cleanup_tasks=None, scheduler):
         del task, timeout_seconds, label, cleanup_tasks
+        assert scheduler is service._scheduler
         return False
 
     monkeypatch.setattr(proxy_module, "_await_cancelled_task", fake_await_cancelled_task)

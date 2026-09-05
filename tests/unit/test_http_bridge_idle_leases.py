@@ -21,8 +21,21 @@ from app.modules.api_keys.service import ApiKeyRequestUsageBudget
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy.load_balancer import LoadBalancer
+from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.unit
+
+
+class _RecordingVirtualScheduler(VirtualScheduler):
+    def __init__(self, clock: VirtualClock) -> None:
+        super().__init__(clock)
+        self.task_names: list[str | None] = []
+        self.task_coroutines: list[str] = []
+
+    def create_task(self, coroutine: Any, *, name: str | None = None) -> asyncio.Task[Any]:
+        self.task_names.append(name)
+        self.task_coroutines.append(coroutine.cr_code.co_name)
+        return super().create_task(coroutine, name=name)
 
 
 def _make_bridge_session(
@@ -616,7 +629,8 @@ async def test_response_create_admission_failure_releases_reacquired_stream_leas
 async def test_final_lease_check_failure_removes_admission_waiter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    scheduler = _RecordingVirtualScheduler(VirtualClock())
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), scheduler=scheduler)
     session = _make_bridge_session()
     lease = _make_lease("l-final-check")
     release_account_lease = AsyncMock()
@@ -668,6 +682,7 @@ async def test_final_lease_check_failure_removes_admission_waiter(
     assert session.queued_request_count == 0
     assert session.account_lease is None
     release_account_lease.assert_awaited_once_with(lease)
+    assert "_cleanup_http_bridge_submit_interruption" in scheduler.task_coroutines
 
 
 @pytest.mark.asyncio

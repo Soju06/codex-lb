@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import sys
-import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -64,6 +63,7 @@ from app.core.clients.proxy_websocket import (
     filter_inbound_websocket_headers,
     is_account_neutral_websocket_error_code,
 )
+from app.core.clock import Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_NOT_FOUND_CODE,
@@ -601,7 +601,11 @@ async def _reject_websocket_owner_switch_blocked(
         error_message=error_message,
         downstream_activity=downstream_activity,
     )
-    await _release_websocket_response_create_gate(request_state, response_create_gate)
+    await _release_websocket_response_create_gate(
+        request_state,
+        response_create_gate,
+        scheduler=scheduler_for(proxy),
+    )
 
 
 async def _reject_websocket_capability_switch_blocked(
@@ -635,7 +639,11 @@ async def _reject_websocket_capability_switch_blocked(
         error_message=error_message,
         downstream_activity=downstream_activity,
     )
-    await _release_websocket_response_create_gate(request_state, response_create_gate)
+    await _release_websocket_response_create_gate(
+        request_state,
+        response_create_gate,
+        scheduler=scheduler_for(proxy),
+    )
 
 
 async def _close_downstream_after_sequenced_replay_refusal(
@@ -876,7 +884,8 @@ async def _close_websocket_upstream_for_cleanup(
     request ownership and leases within its bounded cleanup budget.
     """
 
-    close_task = asyncio.create_task(
+    scheduler = scheduler_for(proxy)
+    close_task = scheduler.create_task(
         upstream.close(),
         name="proxy-websocket-upstream-close",
     )
@@ -893,6 +902,7 @@ async def _close_websocket_upstream_for_cleanup(
                 timeout_seconds=effective_timeout,
                 label="proxy websocket upstream close",
                 cleanup_tasks=proxy._background_cleanup_tasks,
+                scheduler=scheduler,
             )
         except Exception:
             _facade().logger.debug("Failed to cancel upstream websocket close task", exc_info=True)
@@ -901,7 +911,7 @@ async def _close_websocket_upstream_for_cleanup(
         await cancel_close_task()
         return
     try:
-        await asyncio.wait_for(asyncio.shield(close_task), timeout=effective_timeout)
+        await scheduler.wait_for(asyncio.shield(close_task), timeout=effective_timeout)
     except TimeoutError:
         _facade().logger.debug(
             "Upstream websocket close continued after cleanup budget timeout_seconds=%.3f",
@@ -916,6 +926,7 @@ async def _await_owned_websocket_task_after_reader_cancellation(
     task: asyncio.Task[Any],
     *,
     failure_message: str,
+    scheduler: Scheduler,
 ) -> None:
     """Observe owned child completion without replacing reader cancellation."""
 
@@ -923,7 +934,7 @@ async def _await_owned_websocket_task_after_reader_cancellation(
     timeout_seconds = _facade()._TASK_CANCEL_TIMEOUT_SECONDS if remaining is None else max(float(remaining), 0.0)
 
     try:
-        done, _ = await asyncio.wait(
+        done, _ = await scheduler.wait(
             {task},
             timeout=timeout_seconds,
         )
@@ -998,6 +1009,7 @@ async def _process_and_forward_upstream_websocket_text(
     downstream_activity: _DownstreamWebSocketActivity,
     continuity_state: _WebSocketContinuityState | None,
     codex_session_affinity: bool,
+    clock: Clock | None = None,
 ) -> bool:
     parsed_frame = _parse_upstream_websocket_text_frame(text)
     archive_request_id = await _websocket_archive_request_id_for_message(
@@ -1023,6 +1035,7 @@ async def _process_and_forward_upstream_websocket_text(
         response_create_gate=response_create_gate,
         continuity_state=continuity_state,
         codex_session_affinity=codex_session_affinity,
+        clock=clock,
     )
     suppress_downstream_event = upstream_control.suppress_downstream_event
     downstream_texts = upstream_control.downstream_texts
@@ -1304,7 +1317,7 @@ class _WebSocketMixin:
             or policy.max_age_seconds is None
         ):
             return
-        now = time.monotonic()
+        now = clock_for(proxy).monotonic()
         touch_interval = max(1.0, min(float(policy.max_age_seconds) / 2.0, 60.0))
         if now - request_state.thread_affinity_last_touch_at < touch_interval:
             return
@@ -1389,7 +1402,7 @@ class _WebSocketMixin:
         capability_header_values: tuple[str, ...] | None = None,
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
-        _ = proxy
+        clock = clock_for(proxy)
         filtered_headers = filter_inbound_websocket_headers(dict(headers))
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         runtime_settings = _facade().get_settings()
@@ -1423,7 +1436,7 @@ class _WebSocketMixin:
             _sticky_key_from_turn_state_header(filtered_headers) if synthesized_turn_state is None else None
         )
         upstream_account_id: str | None = None
-        downstream_activity = _DownstreamWebSocketActivity()
+        downstream_activity = _DownstreamWebSocketActivity(clock=clock)
         replay_request_state: _WebSocketRequestState | None = None
         request_state_to_fail: _WebSocketRequestState | None = None
         request_state_failure_task: asyncio.Task[None] | None = None
@@ -1439,7 +1452,7 @@ class _WebSocketMixin:
                 account_lease = None
                 if lease_to_release is None:
                     return
-                account_lease_release_task = asyncio.create_task(
+                account_lease_release_task = scheduler_for(proxy).create_task(
                     proxy._load_balancer.release_account_lease(lease_to_release),
                     name="proxy-websocket-finalization-connection-lease",
                 )
@@ -1461,6 +1474,7 @@ class _WebSocketMixin:
                     upstream_reader,
                     label="proxy websocket upstream reader",
                     cleanup_tasks=proxy._background_cleanup_tasks,
+                    scheduler=scheduler_for(proxy),
                 )
                 upstream_reader = None
             upstream_control = None
@@ -1504,6 +1518,7 @@ class _WebSocketMixin:
                     reader_to_await,
                     label="proxy websocket upstream reader",
                     cancel=False,
+                    scheduler=scheduler_for(proxy),
                 )
             except Exception:
                 # A completed reader failure must not hide an ownership
@@ -1576,7 +1591,11 @@ class _WebSocketMixin:
                             error_type="server_error",
                             downstream_activity=downstream_activity,
                         )
-                        await _release_websocket_response_create_gate(request_state, response_create_gate)
+                        await _release_websocket_response_create_gate(
+                            request_state,
+                            response_create_gate,
+                            scheduler=scheduler_for(proxy),
+                        )
                         continue
                     payload = _parse_websocket_payload(text_data)
                     if payload is None:
@@ -1590,7 +1609,11 @@ class _WebSocketMixin:
                             error_type="server_error",
                             downstream_activity=downstream_activity,
                         )
-                        await _release_websocket_response_create_gate(request_state, response_create_gate)
+                        await _release_websocket_response_create_gate(
+                            request_state,
+                            response_create_gate,
+                            scheduler=scheduler_for(proxy),
+                        )
                         continue
                     if request_state.response_create_gate_acquired:
                         # Ordinary pre-created replay retains its create gate.
@@ -1630,7 +1653,7 @@ class _WebSocketMixin:
                                 break
                     message: Any | None = None
                     try:
-                        message = await asyncio.wait_for(
+                        message = await scheduler_for(proxy).wait_for(
                             websocket.receive(),
                             timeout=min(
                                 downstream_idle_timeout_seconds, _facade()._DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS
@@ -1660,7 +1683,7 @@ class _WebSocketMixin:
                                 idle_timeout_seconds=downstream_idle_timeout_seconds,
                             ):
                                 try:
-                                    message = await asyncio.wait_for(websocket.receive(), timeout=0.05)
+                                    message = await scheduler_for(proxy).wait_for(websocket.receive(), timeout=0.05)
                                 except asyncio.TimeoutError:
                                     try:
                                         await websocket.close(
@@ -1747,17 +1770,19 @@ class _WebSocketMixin:
                                     await proxy._release_websocket_request_state_reservation(
                                         prepared_request.request_state
                                     )
-                                    wait_started_at = time.monotonic()
+                                    wait_started_at = clock.monotonic()
                                     waited_for_anchor = await _wait_for_websocket_continuity_gap(
                                         pending_requests,
                                         pending_lock=pending_lock,
                                         timeout_seconds=runtime_settings.proxy_request_budget_seconds,
+                                        scheduler=scheduler_for(proxy),
+                                        clock=clock,
                                     )
                                     _facade().logger.info(
                                         "websocket_full_replay_waited_for_continuity waited=%s elapsed_ms=%s "
                                         "original_items=%s",
                                         waited_for_anchor,
-                                        int((time.monotonic() - wait_started_at) * 1000),
+                                        int((clock.monotonic() - wait_started_at) * 1000),
                                         prepared_request.request_state.input_item_count,
                                     )
                                     prepared_request = await proxy._prepare_websocket_response_create_request(
@@ -2385,6 +2410,7 @@ class _WebSocketMixin:
                         await _release_websocket_response_create_gate(
                             response_create_request_state,
                             response_create_gate,
+                            scheduler=scheduler_for(proxy),
                         )
                         continue
                     except asyncio.CancelledError:
@@ -2396,6 +2422,7 @@ class _WebSocketMixin:
                         await _release_websocket_response_create_gate(
                             response_create_request_state,
                             response_create_gate,
+                            scheduler=scheduler_for(proxy),
                         )
                         raise
                     except Exception:
@@ -2407,6 +2434,7 @@ class _WebSocketMixin:
                         await _release_websocket_response_create_gate(
                             response_create_request_state,
                             response_create_gate,
+                            scheduler=scheduler_for(proxy),
                         )
                         raise
 
@@ -2521,7 +2549,11 @@ class _WebSocketMixin:
                             async with pending_lock:
                                 if request_state in pending_requests:
                                     pending_requests.remove(request_state)
-                            await _release_websocket_response_create_gate(request_state, response_create_gate)
+                            await _release_websocket_response_create_gate(
+                                request_state,
+                                response_create_gate,
+                                scheduler=scheduler_for(proxy),
+                            )
                         continue
                     await release_current_account_lease()
                     account_lease = request_state.websocket_stream_lease
@@ -2535,7 +2567,7 @@ class _WebSocketMixin:
                     upstream_requires_security_work_authorized = request_state.require_security_work_authorized
                     upstream_turn_state = _facade()._upstream_turn_state_from_socket(upstream) or upstream_turn_state
                     upstream_control = _WebSocketUpstreamControl()
-                    upstream_reader = asyncio.create_task(
+                    upstream_reader = scheduler_for(proxy).create_task(
                         proxy._relay_upstream_websocket_messages(
                             websocket,
                             upstream,
@@ -2635,7 +2667,7 @@ class _WebSocketMixin:
                         # transport owner. A fresh connection re-acquires it
                         # for its selected account; the global turn admission
                         # remains attached to a claimed request state.
-                        retired_create_lease_release_task = asyncio.create_task(
+                        retired_create_lease_release_task = scheduler_for(proxy).create_task(
                             proxy._release_request_state_account_response_create_lease(request_state),
                             name="proxy-websocket-finalization-retired-create-lease",
                         )
@@ -2644,7 +2676,7 @@ class _WebSocketMixin:
                         retired_create_lease_release_task = None
                         if request_state_to_fail is not None:
                             owned_request_state = request_state_to_fail
-                            request_state_failure_task = asyncio.create_task(
+                            request_state_failure_task = scheduler_for(proxy).create_task(
                                 proxy._fail_pending_websocket_requests(
                                     account=None,
                                     account_id_value=account.id if account is not None else upstream_account_id,
@@ -2695,7 +2727,7 @@ class _WebSocketMixin:
                                         error_type="server_error",
                                     ),
                                 )
-                            request_state.response_create_sent_at = time.monotonic()
+                            request_state.response_create_sent_at = clock.monotonic()
                         with _websocket_archive_request_context(archive_request_id):
                             await upstream.send_text(text_data)
                 except ProxyResponseError as exc:
@@ -2709,7 +2741,11 @@ class _WebSocketMixin:
                             async with pending_lock:
                                 if request_state in pending_requests:
                                     pending_requests.remove(request_state)
-                            await _release_websocket_response_create_gate(request_state, response_create_gate)
+                            await _release_websocket_response_create_gate(
+                                request_state,
+                                response_create_gate,
+                                scheduler=scheduler_for(proxy),
+                            )
                         await proxy._emit_websocket_terminal_error(
                             websocket,
                             client_send_lock=client_send_lock,
@@ -2734,7 +2770,7 @@ class _WebSocketMixin:
                         # find either this slot or the registered child task.
                         request_state_to_fail = reader_replay
                         owned_request_state = request_state_to_fail
-                        request_state_failure_task = asyncio.create_task(
+                        request_state_failure_task = scheduler_for(proxy).create_task(
                             proxy._fail_pending_websocket_requests(
                                 account=account,
                                 account_id_value=account.id if account else None,
@@ -2802,7 +2838,7 @@ class _WebSocketMixin:
                             "Transparent websocket replay after upstream send failure request_id=%s",
                             replay_candidate.request_log_id or replay_candidate.request_id,
                         )
-                        retired_create_lease_release_task = asyncio.create_task(
+                        retired_create_lease_release_task = scheduler_for(proxy).create_task(
                             proxy._release_request_state_account_response_create_lease(replay_candidate),
                             name="proxy-websocket-finalization-retired-create-lease",
                         )
@@ -2893,6 +2929,7 @@ class _WebSocketMixin:
                             label="proxy websocket upstream reader",
                             cancel=False,
                             cleanup_tasks=proxy._background_cleanup_tasks,
+                            scheduler=scheduler_for(proxy),
                         )
                     except Exception:
                         # Reader failure must not skip lease release or the
@@ -2910,6 +2947,7 @@ class _WebSocketMixin:
                             timeout_seconds=current_cleanup_timeout(),
                             label="proxy websocket retired create lease release",
                             cancel=False,
+                            scheduler=scheduler_for(proxy),
                         )
                     except Exception:
                         _facade().logger.warning(
@@ -2925,6 +2963,7 @@ class _WebSocketMixin:
                             timeout_seconds=current_cleanup_timeout(),
                             label="proxy websocket unsent request finalization",
                             cancel=False,
+                            scheduler=scheduler_for(proxy),
                         )
                     except Exception:
                         _facade().logger.warning(
@@ -3007,7 +3046,8 @@ class _WebSocketMixin:
                     )
                 cleanup_phase = "complete"
 
-            cleanup_task = asyncio.create_task(
+            scheduler = scheduler_for(proxy)
+            cleanup_task = scheduler.create_task(
                 finalize_websocket_scope(),
                 name="proxy-websocket-finalization-scope-cleanup",
             )
@@ -3025,7 +3065,7 @@ class _WebSocketMixin:
 
             cleanup_task.add_done_callback(log_scope_cleanup_failure)
             scope_cleanup_timeout = current_scope_cleanup_timeout()
-            done, _ = await asyncio.wait(
+            done, _ = await scheduler.wait(
                 {cleanup_task},
                 timeout=scope_cleanup_timeout,
             )
@@ -3443,6 +3483,7 @@ class _WebSocketMixin:
         deadline = _websocket_connect_deadline(
             request_state,
             _facade().get_settings().proxy_request_budget_seconds,
+            now=clock_for(proxy).monotonic(),
         )
         selection = await proxy._select_account_with_budget_compatible(
             deadline,
@@ -3506,6 +3547,7 @@ class _WebSocketMixin:
                 base_settings,
                 request_transport="websocket",
             ),
+            now=clock_for(proxy).monotonic(),
         )
         # Model sources are only reachable from the HTTP request path. Fail the
         # WebSocket connect instead of dispatching a source-owned model to a
@@ -3625,7 +3667,7 @@ class _WebSocketMixin:
                 if (
                     last_failover_exc is not None
                     and not require_preferred_account
-                    and _facade()._remaining_budget_seconds(deadline) <= 0
+                    and proxy._remaining_budget_seconds(deadline) <= 0
                 ):
                     await proxy._emit_websocket_connect_timeout(
                         websocket=websocket,
@@ -3889,6 +3931,7 @@ class _WebSocketMixin:
                     request_id=request_state.request_log_id or request_state.request_id,
                     reason=selection.error_message,
                     retry_after_seconds=remaining_seconds,
+                    now=clock_for(proxy).monotonic(),
                 )
                 await proxy._send_downstream_websocket_text(
                     websocket,
@@ -3903,16 +3946,18 @@ class _WebSocketMixin:
                 kind="websocket",
                 request_stage=request_state.request_stage,
                 model=model,
-                max_sleep_seconds=_facade()._remaining_budget_seconds(deadline),
+                max_sleep_seconds=proxy._remaining_budget_seconds(deadline),
                 request_state=request_state,
                 heartbeat=_heartbeat,
+                scheduler=scheduler_for(proxy),
+                clock=clock_for(proxy),
             ):
                 break
             # A wait clipped to the remaining request budget is still a
             # completed wait. Preserve the selection error that caused it
             # instead of performing one more selection that can only replace
             # the original local-cap 429 with upstream_request_timeout.
-            if _facade()._remaining_budget_seconds(deadline) <= 0:
+            if proxy._remaining_budget_seconds(deadline) <= 0:
                 break
 
         account = selection.account
@@ -4181,7 +4226,7 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         try:
-            remaining_budget = _facade()._remaining_budget_seconds(deadline)
+            remaining_budget = proxy._remaining_budget_seconds(deadline)
             if remaining_budget <= 0:
                 await proxy._emit_websocket_connect_timeout(
                     websocket=websocket,
@@ -4199,7 +4244,7 @@ class _WebSocketMixin:
             if force_refresh and request_state.force_refresh_account_id == account.id:
                 request_state.force_refresh_account_id = None
 
-            remaining_budget = _facade()._remaining_budget_seconds(deadline)
+            remaining_budget = proxy._remaining_budget_seconds(deadline)
             if remaining_budget <= 0:
                 await proxy._emit_websocket_connect_timeout(
                     websocket=websocket,
@@ -4348,7 +4393,7 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         try:
-            remaining_budget = _facade()._remaining_budget_seconds(deadline)
+            remaining_budget = proxy._remaining_budget_seconds(deadline)
             if remaining_budget <= 0:
                 await proxy._emit_websocket_connect_timeout(
                     websocket=websocket,
@@ -4449,7 +4494,7 @@ class _WebSocketMixin:
             ) from refresh_transport_exc
 
         try:
-            remaining_budget = _facade()._remaining_budget_seconds(deadline)
+            remaining_budget = proxy._remaining_budget_seconds(deadline)
             if remaining_budget <= 0:
                 await proxy._emit_websocket_connect_timeout(
                     websocket=websocket,
@@ -4576,8 +4621,8 @@ class _WebSocketMixin:
         request_state: "_WebSocketRequestState | None" = None,
     ) -> UpstreamWebSocket:
         proxy = cast(_WebSocketServiceProtocol, self)
-        _ = proxy
-        started_at = time.monotonic()
+        clock = clock_for(proxy)
+        started_at = clock.monotonic()
         deadline = started_at + timeout_seconds
         recovery = ProcessNetworkRecovery(
             transport="websocket",
@@ -4585,12 +4630,12 @@ class _WebSocketMixin:
             account_id=account.id,
         )
         while True:
-            remaining_seconds = deadline - time.monotonic()
+            remaining_seconds = deadline - clock.monotonic()
             if remaining_seconds <= 0:
                 _raise_proxy_budget_exhausted()
             connect_progress = _WebSocketConnectProgress()
             try:
-                with anyio.fail_after(remaining_seconds):
+                with scheduler_for(proxy).fail_after(remaining_seconds):
                     upstream = await proxy._open_upstream_websocket(
                         account,
                         headers,
@@ -4626,7 +4671,7 @@ class _WebSocketMixin:
                     _raise_proxy_budget_exhausted()
                 raise
             except TimeoutError:
-                if time.monotonic() - started_at < timeout_seconds:
+                if clock.monotonic() - started_at < timeout_seconds:
                     raise
                 # The websocket open itself consumed the connect budget, which
                 # is the same transport evidence as a classified connect
@@ -4971,7 +5016,8 @@ class _WebSocketMixin:
         continuity_state: "_WebSocketContinuityState | None" = None,
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
-        _ = proxy
+        clock = clock_for(proxy)
+        scheduler = scheduler_for(proxy)
         try:
             while True:
                 receive_timeout = await proxy._next_websocket_receive_timeout(
@@ -4981,11 +5027,11 @@ class _WebSocketMixin:
                     stream_idle_timeout_seconds=stream_idle_timeout_seconds,
                 )
                 receive_deadline = (
-                    None if receive_timeout is None else time.monotonic() + receive_timeout.timeout_seconds
+                    None if receive_timeout is None else clock.monotonic() + receive_timeout.timeout_seconds
                 )
                 try:
                     while True:
-                        wait_timeout = None if receive_deadline is None else receive_deadline - time.monotonic()
+                        wait_timeout = None if receive_deadline is None else receive_deadline - clock.monotonic()
                         if wait_timeout is not None and wait_timeout <= 0:
                             raise asyncio.TimeoutError()
                         keepalive_interval = getattr(_facade().get_settings(), "sse_keepalive_interval_seconds", 10.0)
@@ -4993,7 +5039,7 @@ class _WebSocketMixin:
                             wait_timeout = (
                                 keepalive_interval if wait_timeout is None else min(wait_timeout, keepalive_interval)
                             )
-                        message = await asyncio.wait_for(
+                        message = await scheduler.wait_for(
                             upstream.receive(),
                             timeout=wait_timeout,
                         )
@@ -5016,7 +5062,7 @@ class _WebSocketMixin:
                             )
                         break
                 except asyncio.TimeoutError:
-                    if receive_deadline is None or time.monotonic() < receive_deadline:
+                    if receive_deadline is None or clock.monotonic() < receive_deadline:
                         try:
                             await proxy._emit_pending_websocket_keepalive(
                                 websocket,
@@ -5086,7 +5132,7 @@ class _WebSocketMixin:
                     continue
                 if message.kind == "text" and message.text is not None:
                     downstream_activity.mark()
-                    terminal_task = asyncio.create_task(
+                    terminal_task = scheduler.create_task(
                         _process_and_forward_upstream_websocket_text(
                             proxy,
                             websocket,
@@ -5104,6 +5150,7 @@ class _WebSocketMixin:
                             downstream_activity=downstream_activity,
                             continuity_state=continuity_state,
                             codex_session_affinity=codex_session_affinity,
+                            clock=clock,
                         ),
                         name=f"proxy-websocket-terminal-{account_id_value}",
                     )
@@ -5120,6 +5167,7 @@ class _WebSocketMixin:
                             await _await_owned_websocket_task_after_reader_cancellation(
                                 terminal_task,
                                 failure_message="Websocket terminal task failed during reader cancellation",
+                                scheduler=scheduler,
                             )
                             raise
                     finally:
@@ -5163,7 +5211,7 @@ class _WebSocketMixin:
                             )
                         break
                     continue
-                terminal_task = asyncio.create_task(
+                terminal_task = scheduler.create_task(
                     _process_upstream_websocket_transport_end(
                         proxy,
                         websocket,
@@ -5194,6 +5242,7 @@ class _WebSocketMixin:
                         await _await_owned_websocket_task_after_reader_cancellation(
                             terminal_task,
                             failure_message="Websocket transport-end task failed during reader cancellation",
+                            scheduler=scheduler,
                         )
                         raise
                 finally:
@@ -5302,9 +5351,13 @@ class _WebSocketMixin:
         continuity_state: "_WebSocketContinuityState | None" = None,
         codex_session_affinity: bool = False,
         parsed_frame: _ParsedUpstreamWebSocketFrame | None = None,
+        clock: Clock | None = None,
     ) -> str:
         proxy = cast(_WebSocketServiceProtocol, self)
-        _ = proxy
+        # The reader loop resolves the owner clock once per connection and
+        # passes it per frame; the fallback only serves direct callers (tests).
+        if clock is None:
+            clock = clock_for(proxy)
         if parsed_frame is None:
             parsed_frame = _parse_upstream_websocket_text_frame(text)
         payload = parsed_frame.payload
@@ -5401,15 +5454,15 @@ class _WebSocketMixin:
                         f"watermark={request_state.last_downstream_sequence_number} replay={sequence_number}"
                     )
                 if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                    _record_response_event(request_state, event_type)
-                elapsed_ms = int((time.monotonic() - request_state.started_at) * 1000)
+                    _record_response_event(request_state, event_type, now=clock.monotonic())
+                elapsed_ms = int((clock.monotonic() - request_state.started_at) * 1000)
                 if request_state.latency_first_upstream_event_ms is None:
                     request_state.latency_first_upstream_event_ms = elapsed_ms
                 if event_type == "response.created" and request_state.latency_response_created_ms is None:
                     request_state.latency_response_created_ms = elapsed_ms
                 if request_state.latency_first_token_ms is None:
                     ttft_visible_at = _facade()._ttft_event_visible_at(
-                        event_type, payload, request_state.ttft_reasoning_deltas
+                        event_type, payload, request_state.ttft_reasoning_deltas, now=clock.monotonic()
                     )
                     if ttft_visible_at is not None:
                         request_state.latency_first_token_ms = max(
@@ -5558,7 +5611,11 @@ class _WebSocketMixin:
             )
 
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
-            await _release_websocket_response_create_gate(created_request_state, response_create_gate)
+            await _release_websocket_response_create_gate(
+                created_request_state,
+                response_create_gate,
+                scheduler=scheduler_for(proxy),
+            )
 
         if request_state is not None:
             await proxy._touch_active_websocket_thread_affinity(request_state, account)
@@ -5622,7 +5679,7 @@ class _WebSocketMixin:
         if len(grouped_previous_response_request_states) == 1 and request_state is None:
             request_state = grouped_previous_response_request_states[0]
 
-        _record_response_event(request_state, event_type)
+        _record_response_event(request_state, event_type, now=clock.monotonic())
 
         if request_state is None:
             if is_previous_response_not_found_matching_event:
@@ -5919,7 +5976,11 @@ class _WebSocketMixin:
                         request_state.error_param_override = error.param_state if error else None
                         upstream_control.reconnect_requested = True
                         upstream_control.suppress_downstream_event = True
-                        await _release_websocket_response_create_gate(request_state, response_create_gate)
+                        await _release_websocket_response_create_gate(
+                            request_state,
+                            response_create_gate,
+                            scheduler=scheduler_for(proxy),
+                        )
                         upstream_control.downstream_texts = [
                             json.dumps(
                                 _facade()._security_work_advisory_event(
@@ -6015,7 +6076,6 @@ class _WebSocketMixin:
         stream_idle_timeout_seconds: float,
     ) -> _WebSocketReceiveTimeout | None:
         proxy = cast(_WebSocketServiceProtocol, self)
-        _ = proxy
         async with pending_lock:
             started_ats = [
                 request_state.started_at
@@ -6026,6 +6086,7 @@ class _WebSocketMixin:
             started_ats,
             proxy_request_budget_seconds=proxy_request_budget_seconds,
             stream_idle_timeout_seconds=stream_idle_timeout_seconds,
+            now=clock_for(proxy).monotonic(),
         )
 
     async def _emit_pending_websocket_keepalive(
@@ -6094,7 +6155,7 @@ class _WebSocketMixin:
         async with pending_lock:
             if pending_requests:
                 return False
-        return (time.monotonic() - downstream_activity.last_activity_at) >= idle_timeout_seconds
+        return (clock_for(proxy).monotonic() - downstream_activity.last_activity_at) >= idle_timeout_seconds
 
     async def _fail_expired_pending_websocket_requests(
         self,
@@ -6112,7 +6173,7 @@ class _WebSocketMixin:
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
-        now = time.monotonic()
+        now = clock_for(proxy).monotonic()
         async with pending_lock:
             expired_requests = [
                 request_state
@@ -6160,7 +6221,11 @@ class _WebSocketMixin:
         response_service_tier = request_state.service_tier
 
         if request_state.draining_until_terminal:
-            await _release_websocket_response_create_gate(request_state, response_create_gate)
+            await _release_websocket_response_create_gate(
+                request_state,
+                response_create_gate,
+                scheduler=scheduler_for(proxy),
+            )
             await proxy._release_websocket_request_state_reservation(request_state)
             # The reservation is settled; clear any terminal-bookkeeping
             # settlement claim so abort handling does not settle it again.
@@ -6168,7 +6233,9 @@ class _WebSocketMixin:
             return
 
         if request_state.latency_first_token_ms is None:
-            ttft_visible_at = _finalize_ttft_reasoning_deltas(request_state.ttft_reasoning_deltas)
+            ttft_visible_at = _finalize_ttft_reasoning_deltas(
+                request_state.ttft_reasoning_deltas, now=clock_for(proxy).monotonic()
+            )
             if ttft_visible_at is not None:
                 request_state.latency_first_token_ms = max(0, int((ttft_visible_at - request_state.started_at) * 1000))
 
@@ -6252,7 +6319,11 @@ class _WebSocketMixin:
         ):
             settlement.account_health_error = False
         proxy._cancel_request_state_api_key_reservation_heartbeat(request_state)
-        await _release_websocket_response_create_gate(request_state, response_create_gate)
+        await _release_websocket_response_create_gate(
+            request_state,
+            response_create_gate,
+            scheduler=scheduler_for(proxy),
+        )
         if settlement.account_health_error:
             # Connection safety must not wait on settlement or health
             # persistence. The health write remains ordered below.
@@ -6295,7 +6366,7 @@ class _WebSocketMixin:
                 # orphan the deferred health write.
                 if request_state.deferred_keyed_stream_health:
                     await proxy._drain_deferred_keyed_stream_health(request_state)
-        latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
+        latency_ms = int((clock_for(proxy).monotonic() - request_state.started_at) * 1000)
         cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
         reasoning_tokens = (
             usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
@@ -6455,7 +6526,7 @@ class _WebSocketMixin:
             request_id=request_state.request_log_id or request_state.request_id,
             archive_request_id=request_state.archive_request_id,
             model=request_state.model or "",
-            latency_ms=int((time.monotonic() - request_state.started_at) * 1000),
+            latency_ms=int((clock_for(proxy).monotonic() - request_state.started_at) * 1000),
             status="error",
             error_code=error_code,
             error_message=error_message,
@@ -6540,7 +6611,11 @@ class _WebSocketMixin:
         )
         response_create_gate = request_state.response_create_gate
         if response_create_gate is not None:
-            await _release_websocket_response_create_gate(request_state, response_create_gate)
+            await _release_websocket_response_create_gate(
+                request_state,
+                response_create_gate,
+                scheduler=scheduler_for(proxy),
+            )
         async with client_send_lock:
             await websocket.send_text(
                 _serialize_websocket_error_event(
@@ -6607,7 +6682,8 @@ class _WebSocketMixin:
             remaining = list(pending_requests)
             pending_requests.clear()
             if remaining:
-                finalization_task = asyncio.create_task(
+                scheduler = scheduler_for(proxy)
+                finalization_task = scheduler.create_task(
                     self._finalize_claimed_websocket_requests(
                         account=account,
                         account_id_value=account_id_value,
@@ -6647,7 +6723,7 @@ class _WebSocketMixin:
             if not finalization_task.done() and timeout_seconds > 0:
                 # Do not cancel the child at the bound: it is the sole owner of
                 # the claimed states and remains visible to lifespan draining.
-                await asyncio.wait({finalization_task}, timeout=timeout_seconds)
+                await scheduler.wait({finalization_task}, timeout=timeout_seconds)
             raise
         return settlement_succeeded
 
@@ -6808,9 +6884,11 @@ class _WebSocketMixin:
                     )
             if account_id_value is None or request_state.skip_request_log:
                 continue
-            latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
+            latency_ms = int((clock_for(proxy).monotonic() - request_state.started_at) * 1000)
             if request_state.latency_first_token_ms is None:
-                ttft_visible_at = _finalize_ttft_reasoning_deltas(request_state.ttft_reasoning_deltas)
+                ttft_visible_at = _finalize_ttft_reasoning_deltas(
+                    request_state.ttft_reasoning_deltas, now=clock_for(proxy).monotonic()
+                )
                 if ttft_visible_at is not None:
                     request_state.latency_first_token_ms = max(
                         0, int((ttft_visible_at - request_state.started_at) * 1000)

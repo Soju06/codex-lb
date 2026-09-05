@@ -29,6 +29,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clock import clock_for, scheduler_for
 from app.core.errors import (
     openai_error,
     response_failed_event,
@@ -77,7 +78,6 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _partial_output_proxy_error_event_block,
     _record_continuity_owner_resolution,
     _service_get_settings,
-    _service_time,
     _websocket_response_id,
 )
 from app.modules.proxy._service.observability import (
@@ -434,7 +434,8 @@ class _HTTPBridgeOwnerForwardingMixin:
             client_ip=client_ip,
         )
         forward_headers = _headers_with_authorization(headers, proxy_api_authorization)
-        start = _service_time().monotonic()
+        clock = clock_for(self)
+        start = clock.monotonic()
         _log_http_bridge_event(
             "owner_forward_start",
             owner_forward.key,
@@ -486,6 +487,8 @@ class _HTTPBridgeOwnerForwardingMixin:
                 on_response_rejected=owner_response_rejected,
                 on_response_wait=_signal_propagated_capacity_startup_wait,
                 on_response_ready=owner_response_ready,
+                scheduler=scheduler_for(self),
+                clock=clock,
             ):
                 forwarded_any = True
                 event_payload = parse_sse_data_json(event_block)
@@ -602,4 +605,4 @@ class _HTTPBridgeOwnerForwardingMixin:
             )
         finally:
             if PROMETHEUS_AVAILABLE and bridge_forward_latency_seconds is not None:
-                bridge_forward_latency_seconds.observe(max(_service_time().monotonic() - start, 0.0))
+                bridge_forward_latency_seconds.observe(max(clock.monotonic() - start, 0.0))

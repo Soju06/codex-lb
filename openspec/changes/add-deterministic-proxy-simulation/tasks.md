@@ -16,7 +16,7 @@
 - [x] 1.7 Add `Scheduler.wait` and `Scheduler.fail_after` so timed multi-future
       waits and the anyio selection budget stay verbatim instead of being
       rewritten around `wait_for`.
-- [ ] 1.8 Re-plumb the raw timing/task sites main added after the fork
+- [x] 1.8 Re-plumb the raw timing/task sites main added after the fork
       (#1891/#1902/#1958/#1977/#1986 spawns and waits across http_bridge,
       websocket, streaming, api_key_usage, request_log) through the seam.
 - [x] 1.9 Route every turn-path budget read (bridge admission, bridge/websocket/

@@ -76,3 +76,26 @@ Known virtual-scheduler divergences (all pinned by
 owned child task where real 3.12+ awaits it inline; a same-tick tie between
 an awaitable and its deadline prefers the result; `fail_after` cancels the
 entering task once where anyio re-delivers on every loop iteration.
+
+## Integration notes (WP2-WP4)
+
+Shared support helpers take the caller's clock sample as a required parameter
+(`now=` / `clock=`) rather than a `REAL_CLOCK` default idiom: every caller is
+in-repo, and a default would let a future caller silently compare an
+injected-clock timestamp against the wall clock again. The same rule makes
+`_sleep_for_account_selection_recovery` and `_wait_for_websocket_continuity_gap`
+require their `scheduler`/`clock`.
+
+Known limitations of this slice, all left raw on purpose and carried in the
+timing-seam allowance table: the durable operation-event batcher lazily starts
+a wall-clock flusher task that no scheduler owns (a durable-id session under
+`VirtualScheduler` would leak it; the property turn's fake session has no
+durable id), the realtime relay and the compact endpoint keep their own
+transport loops, the request-log shutdown drain stays on `loop.time()`, and
+the process-global TTL caches (stale previous-response, upstream transport
+failure, account and rate-limit caches) read the wall clock by design. The
+property turn stubs `_release_websocket_reservation`,
+`_reconnect_http_bridge_session`, `_release_retry_account_lease` and
+`_get_work_admission`, so ownership of the api-key settlement/heartbeat,
+reconnect, request-log and operation-event spawns is proven by the
+recording-scheduler unit tests rather than by the 200-seed run.

@@ -238,6 +238,7 @@ async def test_real_scheduler_timing_methods_return_the_asyncio_coroutine_itself
             assert asyncio.iscoroutine(coroutine)
             assert cast(CoroutineType[Any, Any, Any], coroutine).cr_code is primitive.__code__, primitive.__name__
         drain = scheduler.drain()
+        coroutines.pop(asyncio.sleep).close()
         coroutines[asyncio.sleep] = drain
         assert cast(CoroutineType[Any, Any, Any], drain).cr_code is asyncio.sleep.__code__
     finally:

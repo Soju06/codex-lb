@@ -104,7 +104,13 @@ from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_t
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.proxy_env import resolve_http_proxy_from_env
 from app.core.utils.request_id import get_request_id
-from app.core.utils.sse import format_sse_event, parse_sse_data_json, sse_event_type_from_block
+from app.core.utils.sse import (
+    ParsedSseBlock,
+    format_local_sse_event,
+    format_sse_event,
+    parse_sse_data_json,
+    sse_event_type_from_block,
+)
 
 CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
 CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
@@ -2131,6 +2137,14 @@ def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, 
     return payload
 
 
+def _format_normalized_stream_event(payload: dict[str, JsonValue], normalized: dict[str, JsonValue]) -> str:
+    block = format_sse_event(normalized)
+    # Error normalization creates a local response ID, but upstream activity occurred.
+    if normalized is not payload and normalized.get("type") == "response.failed":
+        return ParsedSseBlock(block, normalized, response_id_is_local=True)
+    return block
+
+
 def _normalize_stream_payload_for_http_block(
     event_block: str,
     *,
@@ -2167,7 +2181,7 @@ def _normalize_stream_payload_for_http_block(
         return event_block, event_type if isinstance(event_type, str) else None
     normalized_type = normalized.get("type")
     event_type = normalized_type if isinstance(normalized_type, str) else None
-    return format_sse_event(normalized), event_type
+    return _format_normalized_stream_event(payload, normalized), event_type
 
 
 def _non_streaming_response_event(payload: JsonValue) -> tuple[str, str]:
@@ -2684,7 +2698,7 @@ async def _stream_websocket_events(
         normalized = payload if not enforce_openai_sdk_contract else _normalize_stream_event_payload(payload)
         raw_event_type = normalized.get("type")
         event_type = raw_event_type if isinstance(raw_event_type, str) else None
-        yield format_sse_event(normalized), event_type
+        yield _format_normalized_stream_event(payload, normalized), event_type
         if event_type is not None and _is_response_stream_terminal_event_type(
             event_type,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -2752,7 +2766,7 @@ async def _stream_codex_websocket_events(
         normalized = payload if not enforce_openai_sdk_contract else _normalize_stream_event_payload(payload)
         raw_event_type = normalized.get("type")
         event_type = raw_event_type if isinstance(raw_event_type, str) else None
-        yield format_sse_event(normalized), event_type
+        yield _format_normalized_stream_event(payload, normalized), event_type
         if event_type is not None and _is_response_stream_terminal_event_type(
             event_type,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -4202,7 +4216,7 @@ async def _stream_responses_with_session(
                     response_error_message = cast(str, error_message)
                     if raise_for_status:
                         raise ProxyResponseError(exc.status, error_payload) from exc
-                    yield format_sse_event(
+                    yield format_local_sse_event(
                         synthetic_stream_failure_event(
                             response_error_code, response_error_message, response_id=get_request_id()
                         )
@@ -4242,7 +4256,7 @@ async def _stream_responses_with_session(
         failure_detail = "stream_idle_timeout"
         failure_exception_type = "StreamIdleTimeoutError"
         retryable_same_contract = False
-        yield format_sse_event(
+        yield format_local_sse_event(
             synthetic_stream_failure_event(
                 "stream_idle_timeout",
                 "Upstream stream idle timeout",
@@ -4253,7 +4267,7 @@ async def _stream_responses_with_session(
     except StreamEventTooLargeError as exc:
         error_code = "stream_event_too_large"
         error_message = str(exc)
-        yield format_sse_event(
+        yield format_local_sse_event(
             synthetic_stream_failure_event(
                 "stream_event_too_large",
                 str(exc),
@@ -4264,7 +4278,7 @@ async def _stream_responses_with_session(
     except CircuitBreakerOpenError:
         error_code = "upstream_unavailable"
         error_message = "Upstream circuit breaker is open"
-        yield format_sse_event(
+        yield format_local_sse_event(
             synthetic_stream_failure_event(
                 "upstream_unavailable",
                 "Upstream circuit breaker is open",
@@ -4306,7 +4320,7 @@ async def _stream_responses_with_session(
                 upstream_status_code=exc.status_code,
                 upstream_error_code=routed_error_code,
             ) from exc
-        yield format_sse_event(
+        yield format_local_sse_event(
             synthetic_stream_failure_event(routed_error_code, response_error_message, response_id=get_request_id()),
         )
         return
@@ -4334,7 +4348,7 @@ async def _stream_responses_with_session(
         # the native-Codex boundary can turn even ambiguous (non-retryable)
         # helper failures back into the direct-style missing-terminal
         # lifecycle instead of leaking a synthetic ``response.failed``.
-        yield format_sse_event(
+        yield format_local_sse_event(
             synthetic_transport_failure_event(
                 response_failed_event(
                     native_error_code,
@@ -4353,7 +4367,7 @@ async def _stream_responses_with_session(
         failure_detail = "native_protocol_error"
         failure_exception_type = type(exc).__name__
         retryable_same_contract = False
-        yield format_sse_event(
+        yield format_local_sse_event(
             synthetic_transport_failure_event(
                 response_failed_event(native_error_code, native_error_message, response_id=get_request_id())
             ),
@@ -4401,7 +4415,7 @@ async def _stream_responses_with_session(
                 failure_exception_type=failure_exception_type,
                 failed_session=client_session,
             ) from exc
-        yield format_sse_event(
+        yield format_local_sse_event(
             synthetic_stream_failure_event(
                 error_code or "upstream_unavailable", response_error_message, response_id=get_request_id()
             ),
@@ -4427,7 +4441,7 @@ async def _stream_responses_with_session(
             failure_detail = "transport_error"
             failure_exception_type = type(exc).__name__
             retryable_same_contract = is_pre_dispatch_connection_failure(exc)
-            yield format_sse_event(
+            yield format_local_sse_event(
                 synthetic_stream_failure_event(
                     "upstream_unavailable", response_error_message, response_id=get_request_id()
                 ),
@@ -4446,7 +4460,7 @@ async def _stream_responses_with_session(
             failure_detail = "stream_idle_timeout"
             failure_exception_type = type(exc).__name__
             retryable_same_contract = False
-            yield format_sse_event(
+            yield format_local_sse_event(
                 synthetic_stream_failure_event(
                     "stream_idle_timeout",
                     "Upstream stream idle timeout",
@@ -4472,7 +4486,7 @@ async def _stream_responses_with_session(
             failure_detail = "transport_error"
             failure_exception_type = type(exc).__name__
             retryable_same_contract = False
-            yield format_sse_event(
+            yield format_local_sse_event(
                 synthetic_stream_failure_event(
                     "upstream_unavailable",
                     response_error_message,
@@ -4486,7 +4500,7 @@ async def _stream_responses_with_session(
         failure_detail = "request_timeout"
         failure_exception_type = type(exc).__name__
         retryable_same_contract = False
-        yield format_sse_event(
+        yield format_local_sse_event(
             synthetic_stream_failure_event(
                 "upstream_request_timeout",
                 "Proxy request budget exhausted",
@@ -4526,7 +4540,7 @@ async def _stream_responses_with_session(
                 retryable_same_contract=retryable_same_contract,
                 failed_session=client_session,
             ) from exc
-        yield format_sse_event(
+        yield format_local_sse_event(
             synthetic_stream_failure_event(
                 error_code or "upstream_unavailable", response_error_message, response_id=get_request_id()
             ),
@@ -4541,7 +4555,7 @@ async def _stream_responses_with_session(
             exc=exc,
         )
         response_error_message = cast(str, error_message)
-        yield format_sse_event(
+        yield format_local_sse_event(
             synthetic_stream_failure_event("upstream_error", response_error_message, response_id=get_request_id())
         )
         return
@@ -4549,7 +4563,7 @@ async def _stream_responses_with_session(
         if not seen_terminal:
             error_code = "stream_incomplete"
             error_message = "Upstream closed stream without completion"
-            yield format_sse_event(
+            yield format_local_sse_event(
                 synthetic_stream_failure_event(
                     "stream_incomplete",
                     "Upstream closed stream without completion",

@@ -41,6 +41,7 @@ from app.core.errors import (
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     SYNTHETIC_TRANSPORT_FAILURE_CODES,
+    SYNTHETIC_TRANSPORT_FAILURE_MARKER,
     OpenAIErrorParam,
     openai_error,
     response_failed_event,
@@ -64,12 +65,13 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
-from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.sse import ParsedSseBlock, format_sse_event, parse_sse_data_json
 from app.core.utils.time import utcnow as utcnow
 from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
 )
+from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -280,6 +282,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_WEBSOCKET,  # noqa: F401
@@ -454,6 +457,29 @@ def _is_background_json_ack(
     event_type: str | None,
 ) -> bool:
     return stream is False and _canonical_background_ack_response_id(event_payload, event_type) is not None
+
+
+def _publish_http_response_owner(
+    proxy: _StreamingServiceProtocol,
+    event: OpenAIEvent | None,
+    event_payload: dict[str, JsonValue] | None,
+    block: str,
+    account_id: str,
+    api_key: ApiKeyData | None,
+    session_id: str | None,
+) -> None:
+    if event is None or event.response is None or not event.response.id or event_payload is None:
+        return
+    if isinstance(block, ParsedSseBlock) and (block.is_local or block.response_id_is_local):
+        return
+    if event_payload.get(SYNTHETIC_TRANSPORT_FAILURE_MARKER):
+        return
+    proxy._remember_websocket_previous_response_owner(
+        previous_response_id=event.response.id,
+        api_key_id=api_key.id if api_key is not None else None,
+        account_id=account_id,
+        session_id=session_id,
+    )
 
 
 def _settle_background_ack(

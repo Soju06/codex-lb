@@ -277,6 +277,7 @@ from app.modules.proxy._service.streaming.helpers import (
     _mark_downstream_stream_cancelled,
     _mark_upstream_stream_incomplete,
     _openai_error_fields,
+    _publish_http_response_owner,
     _raw_stream_error_code_or_upstream,
     _rewrite_malformed_stream_error_event,
     _stream_transport_failure_event_or_raise,
@@ -633,6 +634,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             first_payload = parse_sse_data_json(first)
             event_type = classify_event_type(first_payload)
             event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
+            _publish_http_response_owner(proxy, event, first_payload, first, account_id_value, api_key, session_id)
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
             malformed_error_rewrite = _rewrite_malformed_stream_error_event(
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -792,6 +794,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 event_payload = parse_sse_data_json(line)
                 event_type = classify_event_type(event_payload)
                 event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
+                _publish_http_response_owner(proxy, event, event_payload, line, account_id_value, api_key, session_id)
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
                 malformed_error_rewrite = _rewrite_malformed_stream_error_event(
                     enforce_openai_sdk_contract=enforce_openai_sdk_contract,

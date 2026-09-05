@@ -40,7 +40,17 @@ pytestmark = pytest.mark.integration
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "case", ["distinct_phases", "zero_created", "missing_created", "empty", "no_headers", "oversized", "upstream_error"]
+    "case",
+    [
+        "distinct_phases",
+        "zero_created",
+        "missing_created",
+        "empty",
+        "no_headers",
+        "oversized",
+        "upstream_error",
+        "normalized_upstream_error",
+    ],
 )
 async def test_http_phase_timings_use_observed_upstream_events_and_persist(
     async_client, app_instance, monkeypatch: pytest.MonkeyPatch, case: str
@@ -100,6 +110,11 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
         monkeypatch.setattr(proxy_client_module.get_settings(), "max_sse_event_bytes", 1024)
         blocks = [(0.75, 'data: {"type":"response.output_text.delta","delta":"' + "x" * 2048 + '"}\n\n')]
         expected_first = expected_ttft = None
+    elif case == "normalized_upstream_error":
+        blocks = [
+            (0.75, 'data: {"error":{"code":"server_error","message":"Upstream failure","type":"server_error"}}\n\n')
+        ]
+        expected_ttft = None
     else:
         blocks = [
             (
@@ -164,7 +179,9 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
 
     async def request():
         return await async_client.post(
-            "/v1/responses" if case in {"empty", "no_headers", "oversized"} else "/backend-api/codex/responses",
+            "/v1/responses"
+            if case in {"empty", "no_headers", "oversized", "normalized_upstream_error"}
+            else "/backend-api/codex/responses",
             json={"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True},
             headers={"user-agent": "codex_cli_rs/0.153.2", "x-request-id": "req_http_phase"},
         )

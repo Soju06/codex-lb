@@ -1,14 +1,14 @@
 ## Context
 
-All proxy transports feed upstream failures through `classify_upstream_failure` and `_handle_stream_error`. The classifier currently groups `usage_limit_reached` with `rate_limit_exceeded`, so `_handle_stream_error` calls `mark_rate_limit`. Without reset metadata, that path has a short process-local cooldown and permits early recovery from fresh usage data.
+All proxy transports feed upstream failures through `classify_upstream_failure` and `_handle_stream_error`. Upstream uses `usage_limit_reached` for both primary and long-window exhaustion, so the error code alone cannot justify switching from `RATE_LIMITED` to `QUOTA_EXCEEDED`.
 
-After quota classification, the load-balancer state builder has a second recovery defect: once the 120-second quota debounce expires, any fresh long-window sample clears the runtime reset guard. `apply_usage_quota(..., infer_status_from_usage=False)` then changes the explicit `QUOTA_EXCEEDED` state to `ACTIVE` even when that same sample still reports 100% long-window usage. Every account-selection pass persists the false recovery, so the exhausted account repeatedly returns to rotation.
+The state builder's early-recovery gate previously accepted any fresh primary sample, even at 100%, and did not reject an exhausted applicable long window unless the primary window had expired. Separately, explicit quota state could recover after its debounce while the long window remained exhausted, or use credits cached before the rejection.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Keep accounts that return `usage_limit_reached` out of routing until quota recovery rules admit them.
+- Preserve upstream reset deadlines until expiry or valid early-recovery evidence.
 - Require refreshed long-window usage to prove availability, rather than freshness alone, before an explicit quota state can recover.
 - Preserve existing pre-visible failover and downstream error contracts.
 - Leave ordinary transient rate-limit behavior unchanged.
@@ -21,16 +21,17 @@ After quota classification, the load-balancer state builder has a second recover
 
 ## Decisions
 
-- Classify `usage_limit_reached` as `quota` in the shared classifier. This makes every transport use the existing `mark_quota_exceeded` path without transport-specific branches.
-- Keep `rate_limit_exceeded` classified as `rate_limit`. A temporary throttle and an exhausted usage allowance have different recovery evidence and must not share the same health mutation.
+- Keep `usage_limit_reached` and `rate_limit_exceeded` classified as `rate_limit`, preserving existing deadlines and dashboard semantics.
+- Require available usage in the sample used for early recovery. An exhausted long window cannot be hidden by an available primary sample. Preserve the existing newer-long-window recovery path after the primary reset expires.
+- Preserve marking-replica versus peer behavior: only the replica with runtime evidence of the current rate-limit block can recover before its persisted deadline. Peers honor the deadline until a valid recovery is persisted.
 - Preserve the public upstream code and response body. The change affects account-health state only, so clients continue receiving the original error if failover is unsafe or no replacement can be selected.
 - Preserve an explicit quota state when fresh applicable long-window usage remains exhausted and no usable credit override exists. The observed long-window reset becomes the routing reset deadline, replacing a shorter fallback deadline when available.
 - Discard an elapsed fallback deadline when the exhausted sample has no reset metadata. Selection then waits for quota recovery evidence without inventing another reset time.
 - For explicit quota blocks with a persisted or runtime block timestamp, use only credit snapshots recorded strictly after that timestamp. Fresh quota-window data without credit fields cannot refresh the age of older credit evidence.
 
-The alternative was to lengthen the generic rate-limit cooldown. That would delay genuine short throttles and would still allow the account to recover without proving that its exhausted long window is available.
+For example, a `usage_limit_reached` response with `resets_in_seconds=7200` is followed by primary usage at 100% and weekly usage at 40%. At both 130 seconds and one hour, neither replica may clear the two-hour hold merely because the sample is newer. If the marking replica later sees post-block primary usage at 40% with weekly capacity available, its existing recovery path may persist ACTIVE; a peer then observes that recovery.
 
 ## Risks / Trade-offs
 
-- A `usage_limit_reached` response without reset metadata may hold an account conservatively until usage refresh proves recovery. Freshness alone is insufficient; the applicable long window must be below 100% or a usable credit override must exist. This is preferable to repeatedly routing work to an account that upstream has explicitly rejected for exhausted usage.
-- Existing tests that equate `usage_limit_reached` with a generic rate limit must be updated to assert quota-health handling while retaining failover coverage.
+- Stale exhausted samples can prevent early evidence-based recovery until a new available sample arrives. Ordinary deadline expiry remains unchanged; this change does not infer new blocks for active accounts from advisory usage alone.
+- Classifier and transport tests retain the existing rate-limit contract while full-flow tests cover both exhausted windows and cached credits.

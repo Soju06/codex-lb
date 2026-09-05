@@ -1,14 +1,15 @@
 ## Why
 
-An upstream `usage_limit_reached` response proves that the selected account has exhausted usable quota, but codex-lb currently applies only the short generic rate-limit cooldown. A fresh usage sample can then reactivate the same still-exhausted account almost immediately, causing repeated 429 responses even while other accounts remain usable.
+An upstream `usage_limit_reached` response can describe either the primary or long quota window. Fresh usage that still reports exhaustion can incorrectly clear the selected account's recovery hold, causing repeated 429 responses even while other accounts remain usable.
 
 ## What Changes
 
-- Classify `usage_limit_reached` as quota exhaustion for account-health handling.
+- Preserve `usage_limit_reached` rate-limit classification and its upstream reset deadline.
+- Require available primary and applicable long-window evidence before early rate-limit recovery.
 - Keep an explicitly quota-exhausted account out of routing while fresh long-window usage still reports 100%, including after the quota debounce expires.
 - Keep ordinary `rate_limit_exceeded` responses on the existing rate-limit cooldown path.
 - Preserve pre-visible failover while preventing the exhausted account from immediately re-entering selection.
-- Add regression coverage for the classification and account-health mutation.
+- Add full-flow regression coverage for classification, persisted health, and repeated selection on the marking replica and a peer.
 
 ## Capabilities
 
@@ -18,11 +19,11 @@ None.
 
 ### Modified Capabilities
 
-- `account-routing`: Distinguish upstream usage exhaustion from transient rate throttling when applying account-scoped health penalties.
+- `account-routing`: Require available quota evidence before clearing account-scoped health penalties.
 
 ## Impact
 
-- `app/modules/proxy/helpers.py`: upstream failure classification.
+- `app/modules/proxy/load_balancer.py`: recovery evidence and post-block credit freshness.
 - `app/core/usage/quota.py`: explicit quota-state recovery from refreshed usage.
 - Proxy HTTP, WebSocket, compact, and bridge paths that share `_handle_stream_error`.
 - Account-routing unit and integration tests.

@@ -37,7 +37,7 @@ class TestClassifyUpstreamFailure:
             http_status=429,
             phase="first_event",
         )
-        assert result["failure_class"] == "quota"
+        assert result["failure_class"] == "rate_limit"
 
     def test_insufficient_quota(self) -> None:
         result = classify_upstream_failure(

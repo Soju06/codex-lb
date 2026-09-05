@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -25,6 +25,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState
 from app.modules.proxy.repo_bundle import ProxyRepositories
+from app.modules.proxy.service import ProxyService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
@@ -101,6 +102,91 @@ async def _fetch_account(account_id: str) -> Account:
         assert account is not None
         await session.refresh(account)
         return account
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exhausted_window", ["primary", "secondary"])
+@pytest.mark.parametrize(
+    ("credits_has", "credits_unlimited", "credits_balance"),
+    [(None, None, None), (True, None, None), (None, True, None), (None, None, 25.0)],
+    ids=["no_credits", "has_credits", "unlimited", "positive_balance"],
+)
+async def test_usage_limit_requires_available_windows_before_early_recovery(
+    db_setup, monkeypatch, exhausted_window, credits_has, credits_unlimited, credits_balance
+):
+    blocked_at = int(time.time())
+    now = blocked_at
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    limited = _make_account("usage_limit")
+    healthy = _make_account("usage_available")
+    await _seed_accounts_with_usage((healthy, 20.0, 10.0))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(limited)
+        for window in ("primary", "secondary"):
+            await UsageRepository(session).add_entry(
+                account_id=limited.id,
+                used_percent=100.0 if window == exhausted_window else 40.0,
+                window=window,
+                reset_at=blocked_at + (7200 if window == "primary" else 7 * 24 * 3600),
+                window_minutes=300 if window == "primary" else 10080,
+                recorded_at=datetime.fromtimestamp(blocked_at - 1, timezone.utc).replace(tzinfo=None),
+                credits_has=credits_has,
+                credits_unlimited=credits_unlimited,
+                credits_balance=credits_balance,
+            )
+
+    service = ProxyService(_repo_factory)
+    classified = await service._handle_stream_error(
+        limited,
+        {"message": "You've hit your usage limit.", "resets_in_seconds": 7200},
+        "usage_limit_reached",
+        429,
+    )
+    assert classified["failure_class"] == "rate_limit"
+    row = await _fetch_account(limited.id)
+    assert row.status == AccountStatus.RATE_LIMITED
+    assert row.reset_at == blocked_at + 7200
+
+    for elapsed in (5, 130, 3600):
+        now = blocked_at + elapsed
+        if elapsed > 5:
+            async with SessionLocal() as session:
+                for window in ("primary", "secondary"):
+                    await UsageRepository(session).add_entry(
+                        account_id=limited.id,
+                        used_percent=100.0 if window == exhausted_window else 40.0,
+                        window=window,
+                        reset_at=blocked_at + (7200 if window == "primary" else 7 * 24 * 3600),
+                        window_minutes=300 if window == "primary" else 10080,
+                        recorded_at=datetime.fromtimestamp(now, timezone.utc).replace(tzinfo=None),
+                    )
+        for balancer in (LoadBalancer(_repo_factory), service._load_balancer):
+            selection = await balancer.select_account(routing_strategy="fill_first")
+            assert selection.account is not None
+            assert selection.account.id == healthy.id
+            row = await _fetch_account(limited.id)
+            assert row.status == AccountStatus.RATE_LIMITED
+            assert row.reset_at == blocked_at + 7200
+            assert row.blocked_at == blocked_at
+
+    now += 1
+    async with SessionLocal() as session:
+        for window in ("primary", "secondary"):
+            await UsageRepository(session).add_entry(
+                account_id=limited.id,
+                used_percent=40.0,
+                window=window,
+                reset_at=blocked_at + 7200,
+                window_minutes=300 if window == "primary" else 10080,
+                recorded_at=datetime.fromtimestamp(now, timezone.utc).replace(tzinfo=None),
+            )
+    for balancer in (service._load_balancer, LoadBalancer(_repo_factory)):
+        selection = await balancer.select_account(account_ids={limited.id})
+        assert selection.account is not None
+        assert selection.account.id == limited.id
+        row = await _fetch_account(limited.id)
+        assert row.status == AccountStatus.ACTIVE
+        assert row.blocked_at is None
 
 
 @pytest.mark.asyncio

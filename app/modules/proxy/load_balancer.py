@@ -2460,7 +2460,9 @@ def _state_from_account(
 
     if cooldown_ready and effective_blocked_at is not None:
         if account.status == AccountStatus.QUOTA_EXCEEDED:
-            freshness_entry = effective_secondary_entry
+            freshness_entry = (
+                effective_secondary_entry if secondary_used is not None and secondary_used < 100.0 else None
+            )
         elif account.status == AccountStatus.RATE_LIMITED:
             freshness_entry = _rate_limited_freshness_entry(
                 account=account,
@@ -2809,6 +2811,12 @@ def _rate_limited_freshness_entry(
     primary_entry: _UsageWindowEntry | None,
     long_window_entry: _UsageWindowEntry | None,
 ) -> _UsageWindowEntry | None:
+    # Freshness cannot prove recovery while an applicable long window is
+    # still exhausted, even if the primary sample reports available quota.
+    if long_window_entry is not None and not (
+        long_window_entry.used_percent is not None and float(long_window_entry.used_percent) < 100.0
+    ):
+        return None
     if (
         long_window_entry is not None
         and long_window_entry.window == "monthly"
@@ -2817,21 +2825,19 @@ def _rate_limited_freshness_entry(
         return long_window_entry
     if primary_entry is None:
         return long_window_entry
-    if long_window_entry is None:
-        return primary_entry
-    # A post-block refresh that no longer reports the short primary window
-    # writes only long-window rows, so a strictly newer long-window row is
-    # the recovery evidence — but only once the last primary sample's own
-    # reset deadline has provably elapsed, and only when that long window
-    # still has capacity. An exhausted long-window row must not clear the
-    # block: recovery would route traffic to an account whose long quota is
-    # still at 100%. While the primary sample still claims an active window,
-    # or omits reset metadata entirely, its freshness keeps gating recovery.
+    # A newer long-window row can replace primary evidence only after the
+    # primary reset expires. Otherwise the primary sample must itself
+    # report available quota.
     primary_window_expired = primary_entry.reset_at is not None and float(primary_entry.reset_at) <= time.time()
-    long_window_available = long_window_entry.used_percent is not None and float(long_window_entry.used_percent) < 100.0
-    if primary_window_expired and long_window_available and long_window_entry.recorded_at > primary_entry.recorded_at:
+    if (
+        primary_window_expired
+        and long_window_entry is not None
+        and long_window_entry.recorded_at > primary_entry.recorded_at
+    ):
         return long_window_entry
-    return primary_entry
+    if primary_entry.used_percent is not None and float(primary_entry.used_percent) < 100.0:
+        return primary_entry
+    return None
 
 
 def _usage_entry_is_recent_available(entry: _UsageWindowEntry | None) -> bool:

@@ -737,7 +737,7 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
     async with SessionLocal() as session:
         exhausted_account = await session.get(Account, account_a_id)
         assert exhausted_account is not None
-        assert exhausted_account.status == AccountStatus.QUOTA_EXCEEDED
+        assert exhausted_account.status == AccountStatus.RATE_LIMITED
 
 
 @pytest.mark.asyncio

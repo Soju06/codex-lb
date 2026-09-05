@@ -481,31 +481,9 @@ async def test_non_400_model_rejection_message_still_penalizes_account() -> None
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_still_marks_rate_limit() -> None:
-    """An ordinary short-lived throttle keeps rate-limit health handling."""
-    load_balancer = SimpleNamespace(
-        record_error=AsyncMock(),
-        mark_rate_limit=AsyncMock(),
-        mark_quota_exceeded=AsyncMock(),
-        mark_permanent_failure=AsyncMock(),
-    )
-    proxy = SimpleNamespace(_load_balancer=load_balancer)
-
-    await streaming_helpers_module._handle_stream_error(
-        proxy,
-        cast(Account, SimpleNamespace(id="acc-1")),
-        {"message": "Rate limit reached"},
-        "rate_limit_exceeded",
-        429,
-    )
-
-    load_balancer.mark_rate_limit.assert_awaited_once()
-    load_balancer.mark_quota_exceeded.assert_not_awaited()
-    load_balancer.record_error.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_usage_limit_marks_quota_exceeded() -> None:
+@pytest.mark.parametrize("code", ["rate_limit_exceeded", "usage_limit_reached"])
+async def test_rate_limit_still_marks_rate_limit(code: str) -> None:
+    """Both upstream codes retain the rate-limit health contract."""
     load_balancer = SimpleNamespace(
         record_error=AsyncMock(),
         mark_rate_limit=AsyncMock(),
@@ -516,15 +494,15 @@ async def test_usage_limit_marks_quota_exceeded() -> None:
 
     classified = await streaming_helpers_module._handle_stream_error(
         proxy,
-        cast(Account, SimpleNamespace(id="acc-usage-exhausted")),
-        {"message": "The usage limit has been reached"},
-        "usage_limit_reached",
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": "Rate limit reached"},
+        code,
         429,
     )
 
-    assert classified["failure_class"] == "quota"
-    load_balancer.mark_quota_exceeded.assert_awaited_once()
-    load_balancer.mark_rate_limit.assert_not_awaited()
+    assert classified["failure_class"] == "rate_limit"
+    load_balancer.mark_rate_limit.assert_awaited_once()
+    load_balancer.mark_quota_exceeded.assert_not_awaited()
     load_balancer.record_error.assert_not_awaited()
 
 
@@ -22782,14 +22760,14 @@ async def test_connect_proxy_websocket_fails_over_on_handshake_usage_limit_reach
             AccountSelection(account=account_b, error_message=None),
         ]
     )
-    mark_quota_exceeded = AsyncMock()
+    mark_rate_limit = AsyncMock()
     first_handshake_error = proxy_module.ProxyResponseError(
         429,
         openai_error("usage_limit_reached", "usage limit reached"),
     )
 
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(service._load_balancer, "mark_quota_exceeded", mark_quota_exceeded)
+    monkeypatch.setattr(service._load_balancer, "mark_rate_limit", mark_rate_limit)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_b]))
     monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(side_effect=[first_handshake_error, upstream]))
     monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
@@ -22825,8 +22803,8 @@ async def test_connect_proxy_websocket_fails_over_on_handshake_usage_limit_reach
     first_call, second_call = select_account.await_args_list
     assert first_call.kwargs["exclude_account_ids"] == set()
     assert second_call.kwargs["exclude_account_ids"] == {account_a.id}
-    mark_quota_exceeded.assert_awaited_once()
-    mark_call = mark_quota_exceeded.await_args
+    mark_rate_limit.assert_awaited_once()
+    mark_call = mark_rate_limit.await_args
     assert mark_call is not None
     assert mark_call.args[0] == account_a
     assert mark_call.args[1]["message"] == "usage limit reached"
@@ -22887,7 +22865,7 @@ async def test_connect_proxy_websocket_scopes_transient_exclusions_to_connect_lo
     ]
 
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(service._load_balancer, "mark_quota_exceeded", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "mark_rate_limit", AsyncMock())
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh_with_budget)
     monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_upstream_with_budget)
     monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
@@ -23130,14 +23108,14 @@ async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails
             return AccountSelection(account=account_owner, error_message=None)
         return AccountSelection(account=account_other, error_message=None)
 
-    mark_quota_exceeded = AsyncMock()
+    mark_rate_limit = AsyncMock()
     first_handshake_error = proxy_module.ProxyResponseError(
         429,
         openai_error("usage_limit_reached", "usage limit reached"),
     )
 
     monkeypatch.setattr(service, "_select_account_with_budget", select_account)
-    monkeypatch.setattr(service._load_balancer, "mark_quota_exceeded", mark_quota_exceeded)
+    monkeypatch.setattr(service._load_balancer, "mark_rate_limit", mark_rate_limit)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_owner))
     monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(side_effect=[first_handshake_error]))
     monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
@@ -23172,8 +23150,8 @@ async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails
     assert selected_account is None
     assert selected_upstream is None
     assert seen_excluded_account_ids == [set(), {account_owner.id}]
-    mark_quota_exceeded.assert_awaited_once()
-    mark_call = mark_quota_exceeded.await_args
+    mark_rate_limit.assert_awaited_once()
+    mark_call = mark_rate_limit.await_args
     assert mark_call is not None
     assert mark_call.args[0] == account_owner
     assert mark_call.args[1]["message"] == "usage limit reached"
@@ -23205,7 +23183,7 @@ async def test_connect_proxy_websocket_account_bound_replay_stays_on_owner(monke
         openai_error("usage_limit_reached", "usage limit reached"),
     )
     monkeypatch.setattr(service, "_select_account_with_budget", select_account)
-    monkeypatch.setattr(service._load_balancer, "mark_quota_exceeded", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "mark_rate_limit", AsyncMock())
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_owner))
     open_upstream = AsyncMock(side_effect=[handshake_error])
     monkeypatch.setattr(service, "_open_upstream_websocket", open_upstream)

@@ -36,10 +36,8 @@ PLAN_TYPE_PRIORITY = (
     "k12",
 )
 
-_RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded"})
-# This is exhaustion evidence, not a transient request throttle: recovery must
-# require usable quota instead of only waiting out rate-limit backoff.
-_QUOTA_CODES = frozenset({"insufficient_quota", "usage_not_included", "quota_exceeded", "usage_limit_reached"})
+_RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", "usage_limit_reached"})
+_QUOTA_CODES = frozenset({"insufficient_quota", "usage_not_included", "quota_exceeded"})
 _TRANSIENT_CODES = frozenset(
     {"server_error", "upstream_error", "stream_incomplete", "overloaded_error", "server_is_overloaded"}
 )

@@ -68,9 +68,22 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 
 #### Scenario: A suppressed successor's anonymous error does not settle unrelated work
 - **GIVEN** a late automatic successor was suppressed because its continuation was no longer pending
-- **WHEN** it emits an ID-less top-level error
-- **THEN** the error is not assigned to an unrelated pending request
-- **AND** that unrelated request still owns its later created event
+- **AND** an unrelated visible request already has a response id
+- **WHEN** an ID-less top-level error arrives
+- **THEN** the error is not assigned to the unrelated request
+- **AND** that unrelated request still owns its created event
+
+#### Scenario: A live request owns anonymous errors before a successor tombstone
+- **GIVEN** a suppressed late successor and an unresolved visible request
+- **WHEN** an ID-less top-level error arrives
+- **THEN** the visible request owns that error
+- **AND** the suppressed successor lifecycle remains available for a later identified terminal
+
+#### Scenario: An already-sent explicit create owns the next created event
+- **GIVEN** an explicit response.create for parent r1 is pending and a steering placeholder also exists for r1
+- **WHEN** upstream emits response.created naming r1
+- **THEN** the explicit create receives that response id
+- **AND** the steering placeholder is not bound to it
 
 #### Scenario: A rejected submission releases its queued byte budget
 - **GIVEN** multiple steering submissions share one continuation

@@ -1703,14 +1703,13 @@ def _match_websocket_request_state_for_anonymous_event(
         if not visible_requests:
             return draining_requests[0]
 
-    if len(visible_requests) == 1:
-        return visible_requests[0]
-
     unresolved_visible_requests = [
         request_state for request_state in visible_requests if request_state.response_id is None
     ]
     if len(unresolved_visible_requests) == 1:
         return unresolved_visible_requests[0]
+    if len(visible_requests) == 1:
+        return visible_requests[0]
 
     if not visible_requests and draining_requests:
         unresolved_draining_requests = [

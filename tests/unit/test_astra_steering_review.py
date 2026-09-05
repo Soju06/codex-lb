@@ -21,6 +21,7 @@ from app.modules.proxy._service.websocket import steering as steering_module
 from app.modules.proxy._service.websocket.steering import (
     assign_websocket_created_request_state,
     completed_steering_required_input,
+    pending_explicit_create_for_parent,
     steering_parent,
     validate_steering_input,
 )
@@ -154,6 +155,32 @@ def test_missing_steering_child_created_event_never_claims_unrelated_fifo_reques
         steering_parent("r1", pending_requests=pending_requests, control=control)
     assert exc_info.value.payload["error"]["code"] == "response_not_found"
     assert control.suppressed_steering_anonymous_terminals == 1
+
+
+def test_created_event_prefers_pending_explicit_create_over_steering_placeholder() -> None:
+    parent = _request_state("parent")
+    parent.response_id = "r1"
+    placeholder = _request_state("placeholder")
+    placeholder.steering_parent_response_id = "r1"
+    explicit = _request_state("explicit")
+    explicit.previous_response_id = "r1"
+    explicit.request_text = json.dumps({"type": "response.create", "model": "gpt-6-astra"})
+    continuation = _WebSocketSteeringContinuation(parent=parent, request_state=placeholder)
+    control = _WebSocketUpstreamControl(steering_continuations={"r1": continuation})
+    pending_requests = deque([placeholder, explicit])
+
+    assigned = assign_websocket_created_request_state(
+        {"type": "response.created", "response": {"id": "r-explicit", "previous_response_id": "r1"}},
+        response_id="r-explicit",
+        control=control,
+        pending_requests=pending_requests,
+    )
+
+    assert assigned is explicit
+    assert explicit.response_id == "r-explicit"
+    assert placeholder.response_id is None
+    assert control.steering_continuations["r1"] is continuation
+    assert pending_explicit_create_for_parent("r1", pending_requests) is None
 
 
 def test_completed_steering_required_input_includes_apply_patch_calls() -> None:

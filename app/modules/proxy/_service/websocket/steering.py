@@ -154,6 +154,21 @@ def continuation_for_created(
     return control.steering_continuations.get(parent_id) if isinstance(parent_id, str) else None
 
 
+def pending_explicit_create_for_parent(
+    parent_id: str,
+    pending_requests: deque[_WebSocketRequestState],
+) -> _WebSocketRequestState | None:
+    for state in pending_requests:
+        if (
+            state.previous_response_id == parent_id
+            and state.steering_parent_response_id is None
+            and state.response_id is None
+            and state.request_text is not None
+        ):
+            return state
+    return None
+
+
 def assign_websocket_created_request_state(
     payload: dict[str, JsonValue] | None,
     *,
@@ -161,6 +176,13 @@ def assign_websocket_created_request_state(
     control: _WebSocketUpstreamControl,
     pending_requests: deque[_WebSocketRequestState],
 ) -> _WebSocketRequestState | None:
+    response = payload.get("response") if payload is not None else None
+    parent_id = response.get("previous_response_id") if isinstance(response, dict) else None
+    if isinstance(parent_id, str):
+        explicit = pending_explicit_create_for_parent(parent_id, pending_requests)
+        if explicit is not None:
+            explicit.response_id = response_id
+            return explicit
     continuation = continuation_for_created(payload, control)
     if continuation is None:
         return _assign_websocket_response_id(pending_requests, response_id)
@@ -290,6 +312,11 @@ async def submit_websocket_steering(
         raise steering_error("payload_too_large", "Steering input exceeds the WebSocket payload limit.")
     async with pending_lock:
         parent = steering_parent(parent_id, pending_requests=pending_requests, control=control)
+        if pending_explicit_create_for_parent(parent_id, pending_requests) is not None:
+            raise steering_error(
+                "invalid_input",
+                "An explicit response.create is already pending for this response.",
+            )
         initial_continuation = control.steering_continuations.get(parent_id)
         if initial_continuation is not None and initial_continuation.queued_input_bytes + wire_bytes > max_input_bytes:
             raise steering_error("payload_too_large", "Queued steering input exceeds the WebSocket payload limit.")

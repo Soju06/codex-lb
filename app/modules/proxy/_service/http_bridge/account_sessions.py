@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from app.modules.proxy._service.http_bridge.helpers import _extract_model_class, _log_http_bridge_event
+from app.modules.proxy._service.http_bridge.helpers import (
+    _extract_model_class,
+    _http_bridge_session_has_account_lease_releases,
+    _log_http_bridge_event,
+)
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
 from app.modules.proxy._service.support import _HTTPBridgeSession
 
@@ -33,8 +37,10 @@ class _HTTPBridgeAccountSessionsMixin:
                 if session.account.id != account_id or id(session) in scheduled_session_ids:
                     continue
                 close_task = session.resource_close_task
-                if close_task is not None and (
-                    not close_task.done() or (not close_task.cancelled() and close_task.exception() is None)
+                if (
+                    close_task is not None
+                    and (not close_task.done() or (not close_task.cancelled() and close_task.exception() is None))
+                    and not _http_bridge_session_has_account_lease_releases(session)
                 ):
                     # ``closed`` only rejects admission. A live close task (or a
                     # successfully completed one awaiting registry finalization)

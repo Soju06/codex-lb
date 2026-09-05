@@ -201,6 +201,30 @@ failure count, cooldown deadline, last failure detail, and update time in the
 `http_bridge_retry_circuits` table and MUST merge conflict updates so concurrent
 replicas cannot shorten an existing cooldown.
 
+An absent, zero, negative, or already elapsed durable `cooldown_until_epoch`
+MUST merge into the in-memory `0.0` sentinel; a positive future deadline MUST
+remain an active monotonic cooldown. A newly adopted positive deadline that
+has elapsed MUST create one local transition, from which exactly one
+process-local half-open probe may be admitted. Reloading the same durable
+snapshot MUST NOT re-arm that transition. Equal-version or newer durable
+reloads, including a reset or lower failure count, MUST retain an active local
+half-open lease and its failure fence until that probe settles; a durable reset
+may clear stale local detail only when no local probe is active.
+
+After a real cooldown expires, the local half-open lease MUST record its
+owning bridge session, owner token, deadline, and process-local generation.
+Only that owner may return the probe; a return with a mismatched session,
+token, deadline, or generation MUST be a no-op. A returned probe MUST leave
+durable failure fields unchanged and install an elapsed local marker so the
+next local admission can acquire one fresh lease. If the owner request remains
+pending after the default lease window, has attempted `response.create`, and
+has not entered terminal settlement, the lease MUST remain exclusive and be
+renewed through its `bridge_request_deadline` when that deadline is later than
+the default window. Completion settlement MUST carry the captured durable
+episode and process-local generation so a late completion cannot clear a
+replacement probe. These leases are process-local; each replica may manage
+only its own owner after a shared durable deadline elapses.
+
 The clean-close retry jitter maximum MUST be read from the
 `http_responses_session_bridge_clean_close_retry_jitter_max_seconds` runtime
 setting and MUST be bounded to the inclusive range 0–30 seconds.
@@ -264,6 +288,25 @@ and durable circuit state.
 - **WHEN** the proxy evaluates or records a retry-circuit event
 - **THEN** the request continues using any available local circuit state
 - **AND** the failure is logged and exposed through retry-circuit observability
+
+#### Scenario: A live probe outlives the default lease window
+
+- **GIVEN** a local half-open probe has attempted `response.create` and remains
+  pending
+- **AND** its request `bridge_request_deadline` is later than the default
+  half-open lease window
+- **WHEN** the default local lease window elapses
+- **THEN** the owner remains exclusive and the lease is renewed through the
+  request deadline
+- **AND** sibling admissions remain suppressed
+
+#### Scenario: A stale completion cannot clear a replacement probe
+
+- **GIVEN** a local half-open probe is replaced after its default lease expires
+- **WHEN** the old completion settles with its captured durable episode and
+  process-local generation
+- **THEN** the settlement is ignored
+- **AND** the replacement probe remains active
 
 ### Requirement: Long Codex websocket turns tolerate extended upstream silence
 The default compact request budget MUST be at least 180 seconds, and the default upstream stream idle timeout MUST be at least 600 seconds, so long-running Codex turns can survive expensive compaction or tool execution without a local proxy watchdog ending the turn prematurely. Responses streams over both HTTP and WebSocket transports MUST use `http_responses_stream_request_budget_seconds` when it is configured; they MUST fall back to `proxy_request_budget_seconds` only when no stream-specific budget is available.
@@ -1302,6 +1345,13 @@ For Responses API requests, usage-based routing MUST include immediate in-proces
 
 Every account-local lease acquired for a Responses request MUST be idempotently released or settled on success, upstream error, local startup error, bridge submit failure, startup probe conversion, non-streaming collect completion, failover, downstream disconnect, cancellation, timeout, and retry. A bounded stale-lease watchdog MUST reclaim leases that survive unexpected task cancellation or exceptions, and stale reclamation MUST emit warning/metric evidence. Leases MUST NOT be persisted to the database.
 
+If a release fails during detached HTTP-bridge cleanup, the failed lease handle
+MUST remain attached to the detached session for a later explicit account
+cleanup pass. That pass MUST retry retained handles, and concurrent passes for
+the same session MUST share one in-flight retry so each handle is released at
+most once per attempt. A detached session with retained handles MUST remain
+discoverable until release succeeds.
+
 #### Scenario: Lease releases after downstream disconnect
 
 - **WHEN** a streaming `/v1/responses` client disconnects before a terminal upstream event
@@ -1330,6 +1380,16 @@ Every account-local lease acquired for a Responses request MUST be idempotently 
 - **WHEN** account lease stale reclamation runs
 - **THEN** the stream lease still counts against account-local stream pressure
 - **AND** the proxy does not admit extra streams over the account stream cap by age alone
+
+#### Scenario: Detached account-lease release is retried after close
+
+- **GIVEN** a detached bridge session's transport close succeeds but its
+  account-lease release fails
+- **WHEN** an explicit account cleanup pass runs
+- **THEN** the retained lease is retried
+- **AND** the detached session is removed only after all retained releases
+  succeed
+- **AND** concurrent cleanup passes do not duplicate the release call
 
 ### Requirement: Public Responses streaming is proxy-timeout friendly
 
@@ -2099,6 +2159,10 @@ session is retiring but still has visible in-flight requests and will release
 its durable ownership later after draining. After a detached retiring session
 finishes draining its visible requests, it MUST release its durable ownership
 and account lease instead of only closing the upstream websocket.
+If account-lease release fails, the detached session MUST retain the failed
+lease handle for an explicit account cleanup retry and MUST remain in the
+detached registry until that retry succeeds. Concurrent retries MUST share the
+session's in-flight close/release task.
 If that retirement is initiated by the upstream-reader task after processing
 the terminal upstream event, session close MUST NOT cancel or await the current
 upstream-reader task itself.

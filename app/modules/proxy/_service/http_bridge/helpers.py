@@ -7,12 +7,14 @@ import logging
 import math
 import sys
 import time
-from collections.abc import Callable, Coroutine, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
-from typing import Any, Literal, Mapping, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Protocol, TypeVar, cast
 from urllib.parse import urlparse
+
+import anyio
 
 from app.core import shutdown as shutdown_state
 from app.core.balancer.rendezvous_hash import select_node
@@ -131,6 +133,7 @@ from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_HTTP,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _disarm_pending_response_create_attempts,
     _http_bridge_session_supports_service_tier,
     _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeRetryCircuitAttemptSelection,
@@ -202,6 +205,9 @@ from app.modules.proxy.ring_membership import (
 )
 from app.modules.proxy.selection_errors import selection_failure_response
 
+if TYPE_CHECKING:
+    from app.modules.proxy.load_balancer import AccountLease
+
 logger = logging.getLogger("app.modules.proxy.service")
 _TASK_CANCEL_TIMEOUT_SECONDS = 1.0
 _TaskResultT = TypeVar("_TaskResultT")
@@ -231,6 +237,226 @@ class _HTTPBridgeDeniedAnchorFence:
     # positive denial tombstone must survive request-pin release until a
     # current owner confirms that durable anchor is gone.
     retain_until_durable_clear: bool = False
+
+
+class _ReleaseHTTPBridgeRetryCircuitProbe(Protocol):
+    def __call__(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        detail: str,
+        probe_owner: object | None = None,
+    ) -> Awaitable[bool]: ...
+
+
+async def _fail_http_bridge_owner_unavailable_after_probe(
+    service: _HTTPBridgeServiceProtocol,
+    session: "_HTTPBridgeSession",
+    *,
+    detail: str,
+    request_state: "_WebSocketRequestState",
+    release_account_lease: Callable[[], Awaitable[None]] | None,
+    complete_failed_handoff: Callable[[], None],
+    release_probe: _ReleaseHTTPBridgeRetryCircuitProbe,
+) -> None:
+    """Finish owner-loss cleanup before surfacing cancellation or failure."""
+    lifecycle_lock_held = session.lifecycle_lock.statistics().owner == anyio.get_current_task()
+
+    async def detach_session() -> None:
+        session.closed = True
+        async with service._http_bridge_lock:
+            service._detach_http_bridge_session_locked(session.key, expected_session=session)
+
+    async def run_step(label: str, operation: Awaitable[Any]) -> None:
+        """Keep best-effort cleanup moving when one step is interrupted."""
+        try:
+            await operation
+        except (asyncio.CancelledError, Exception):
+            logger.warning(
+                "HTTP bridge owner-loss cleanup step failed step=%s bridge_key=%s",
+                label,
+                _hash_identifier(session.key.affinity_key),
+                exc_info=True,
+            )
+
+    async def settle_pending_owner_unavailable() -> None:
+        # The reconnect failure is a proxy-owned continuity loss, not an
+        # upstream stream failure. Settle the detached requests with the
+        # stable owner-unavailable contract before the generic close path
+        # runs; otherwise close would pop them first and publish
+        # ``stream_incomplete`` (and potentially penalize the owner account),
+        # leaving the typed override assigned by the caller too late.
+        await run_step(
+            "owner_unavailable_pending_requests",
+            service._fail_pending_websocket_requests(
+                account=session.account,
+                account_id_value=session.account.id,
+                pending_requests=session.pending_requests,
+                pending_lock=session.pending_lock,
+                error_code="previous_response_owner_unavailable",
+                error_message="Previous response owner account is unavailable; retry later.",
+                api_key=None,
+                response_create_gate=session.response_create_gate,
+                penalize_account=False,
+            ),
+        )
+
+    async def cleanup() -> None:
+        # A submitter can append until it observes the same lifecycle state.
+        # Detach and disarm under one ownership interval so the probe cannot
+        # return while a late, still-eligible send remains routable.
+        transition_completed = False
+        try:
+            if lifecycle_lock_held:
+                await detach_session()
+                await _disarm_pending_response_create_attempts(session)
+            else:
+                async with session.lifecycle_lock:
+                    await detach_session()
+                    await _disarm_pending_response_create_attempts(session)
+            transition_completed = True
+        finally:
+            if release_account_lease is not None:
+                await run_step("selected_account_lease", release_account_lease())
+            try:
+                complete_failed_handoff()
+            except (asyncio.CancelledError, Exception):
+                logger.warning(
+                    "HTTP bridge owner-loss handoff completion failed bridge_key=%s",
+                    _hash_identifier(session.key.affinity_key),
+                    exc_info=True,
+                )
+            if transition_completed:
+                try:
+                    await run_step(
+                        "probe_release",
+                        release_probe(session, detail=detail, probe_owner=request_state),
+                    )
+                finally:
+                    await settle_pending_owner_unavailable()
+                    # This terminal path must finish the cancellation-
+                    # deferred resource owner before the caller receives its
+                    # stable typed continuity error.  The bounded wrapper
+                    # may return while the detached session is still tracked
+                    # in the background.
+                    await service._close_http_bridge_session(session)
+            else:
+                # Do not return a probe whose session was not safely detached
+                # and disarmed.  The close still runs so its resources remain
+                # owned and discoverable while the transition error bubbles
+                # to the caller.
+                await settle_pending_owner_unavailable()
+                await service._close_http_bridge_session(session)
+
+    cleanup_task = asyncio.create_task(cleanup())
+    _, cancellation = await _await_task_deferring_cancellation(cleanup_task)
+    if cancellation is not None:
+        raise cancellation
+
+
+async def _release_http_bridge_account_lease_deferring_cancellation(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    lease: Any,
+) -> asyncio.CancelledError | None:
+    """Release a selected lease after the caller's cancellation is deferred."""
+
+    async def release() -> None:
+        try:
+            await service._load_balancer.release_account_lease(lease)
+        except BaseException:
+            # Keep the handle on the detached session until the close owner
+            # confirms release. A selected replacement lease is not attached
+            # to ``session.account_lease`` yet, so losing it here would strand
+            # the balancer capacity when owner cleanup continues after this
+            # best-effort failure.
+            async with session.pending_lock:
+                if (session.account_lease is None or lease.lease_id != session.account_lease.lease_id) and all(
+                    item.lease_id != lease.lease_id for item in session.pending_account_lease_releases
+                ):
+                    session.pending_account_lease_releases.append(lease)
+            raise
+        else:
+            # Keep the lease attached until the balancer confirms release. A
+            # duplicate close can then safely retry the same idempotent handle
+            # without losing the only reference to it.
+            async with session.pending_lock:
+                if session.account_lease is not None and lease.lease_id == session.account_lease.lease_id:
+                    session.account_lease = None
+                session.pending_account_lease_releases[:] = [
+                    item for item in session.pending_account_lease_releases if item.lease_id != lease.lease_id
+                ]
+
+    release_task = asyncio.create_task(release(), name="http-bridge-account-lease-release")
+    _, cancellation = await _await_task_deferring_cancellation(release_task)
+    return cancellation
+
+
+async def _release_http_bridge_session_account_leases(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    release_none_when_empty: bool,
+) -> None:
+    """Release all session-owned account leases, retaining failed handles.
+
+    Resource close is single-flight, but a balancer can reject a release after
+    the socket has already closed. Keep those handles on the session so a
+    later close or explicit cleanup pass can retry them without repeating the
+    rest of transport teardown.
+    """
+    failed_account_leases: list[AccountLease] = []
+    attempted_lease_ids: set[str] = set()
+
+    # Release the current lease before taking ``pending_lock``. Existing close
+    # callers rely on this ordering: a wedged pending-settlement holder must
+    # not prevent account capacity from being returned. The session is already
+    # admission-closed before this helper runs, so no new current lease can be
+    # attached while the release awaits.
+    current_account_lease = session.account_lease
+    session.account_lease = None
+    if current_account_lease is not None:
+        attempted_lease_ids.add(current_account_lease.lease_id)
+        try:
+            await service._load_balancer.release_account_lease(current_account_lease)
+        except (asyncio.CancelledError, Exception):
+            failed_account_leases.append(current_account_lease)
+            logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
+
+    async with session.pending_lock:
+        pending_account_leases = list(session.pending_account_lease_releases)
+        session.pending_account_lease_releases.clear()
+
+    deduplicated_leases: list[AccountLease] = []
+    seen_lease_ids: set[str] = set(attempted_lease_ids)
+    for lease in pending_account_leases:
+        if lease.lease_id not in seen_lease_ids:
+            seen_lease_ids.add(lease.lease_id)
+            deduplicated_leases.append(lease)
+
+    if not current_account_lease and not deduplicated_leases and release_none_when_empty:
+        # Preserve the existing close-call contract for balancer doubles and
+        # implementations that use a None release as an explicit close hook.
+        try:
+            await service._load_balancer.release_account_lease(None)
+        except (asyncio.CancelledError, Exception):
+            logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
+    for account_lease in deduplicated_leases:
+        try:
+            await service._load_balancer.release_account_lease(account_lease)
+        except (asyncio.CancelledError, Exception):
+            failed_account_leases.append(account_lease)
+            logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
+    if failed_account_leases:
+        async with session.pending_lock:
+            existing_lease_ids = {lease.lease_id for lease in session.pending_account_lease_releases}
+            session.pending_account_lease_releases.extend(
+                lease for lease in failed_account_leases if lease.lease_id not in existing_lease_ids
+            )
+
+
+def _http_bridge_session_has_account_lease_releases(session: "_HTTPBridgeSession") -> bool:
+    return session.account_lease is not None or bool(session.pending_account_lease_releases)
 
 
 def _http_bridge_denied_anchor_fence_entry(
@@ -1539,13 +1765,15 @@ async def _close_http_bridge_session_resources(
     else:
         await service._unregister_http_bridge_turn_states(session)
         await service._unregister_http_bridge_previous_response_ids(session)
-    account_lease = getattr(session, "account_lease", None)
-    try:
-        await service._load_balancer.release_account_lease(account_lease)
-    except Exception:
-        logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
-    finally:
-        session.account_lease = None
+    # Release the current session lease before awaiting pending-request
+    # ownership. Existing close callers rely on this order when a pending
+    # cleanup lock is held. A later close retries any handle retained after a
+    # transient release failure.
+    await _release_http_bridge_session_account_leases(
+        service,
+        session,
+        release_none_when_empty=True,
+    )
     durable_release_succeeded = durable_owner_epoch is None
     if durable_release_allowed:
         try:
@@ -1559,7 +1787,7 @@ async def _close_http_bridge_session_resources(
             # missing row returns None. Only an ownerless snapshot (or a
             # missing row) means this generation no longer owns a durable lease.
             durable_release_succeeded = released is None or getattr(released, "owner_instance_id", None) is None
-        except Exception:
+        except (asyncio.CancelledError, Exception):
             logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
     # Closing a generation retires its process-local denial slot as well as
     # its routing aliases. Keep pinned requests fenced; the owner helper marks
@@ -1640,7 +1868,18 @@ async def _close_http_bridge_session(
         if existing is not None and (
             not existing.done() or (not existing.cancelled() and existing.exception() is None)
         ):
-            return existing
+            if not existing.done() or not _http_bridge_session_has_account_lease_releases(session):
+                return existing
+            created = asyncio.create_task(
+                _release_http_bridge_session_account_leases(
+                    service,
+                    session,
+                    release_none_when_empty=False,
+                ),
+                name=f"http-bridge-account-lease-retry-{_hash_identifier(session.key.affinity_key)}",
+            )
+            session.resource_close_task = created
+            return created
         created = asyncio.create_task(
             _close_http_bridge_session_resources(
                 service,
@@ -1669,11 +1908,15 @@ async def _close_http_bridge_session(
     # independently owned because cancellation can begin while its lock waits.
     async def finalize_detached_ownership() -> None:
         if turn_state_lock_held:
-            if service._http_bridge_detached_sessions.get(id(session)) is session:
+            if service._http_bridge_detached_sessions.get(
+                id(session)
+            ) is session and not _http_bridge_session_has_account_lease_releases(session):
                 service._http_bridge_detached_sessions.pop(id(session), None)
         else:
             async with service._http_bridge_lock:
-                if service._http_bridge_detached_sessions.get(id(session)) is session:
+                if service._http_bridge_detached_sessions.get(
+                    id(session)
+                ) is session and not _http_bridge_session_has_account_lease_releases(session):
                     service._http_bridge_detached_sessions.pop(id(session), None)
 
     ownership_task = asyncio.create_task(

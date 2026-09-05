@@ -1198,3 +1198,100 @@ async def test_response_created_does_not_promote_in_progress_durable_anchor() ->
     assert refreshed is not None
     assert refreshed.latest_response_id == "resp_B_completed"
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "output_event",
+    [
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "message", "id": "msg_A", "role": "assistant", "status": "in_progress", "content": []},
+        },
+        {
+            "type": "response.output_text.delta",
+            "item_id": "msg_A",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "answer A",
+        },
+        {
+            "type": "response.output_text.done",
+            "item_id": "msg_A",
+            "output_index": 0,
+            "content_index": 0,
+            "text": "answer A",
+        },
+        {
+            "type": "response.content_part.done",
+            "item_id": "msg_A",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "answer A", "annotations": []},
+        },
+        {"type": "response.function_call_arguments.delta", "item_id": "fc_A", "output_index": 0, "delta": "{}"},
+        {"type": "response.function_call_arguments.done", "item_id": "fc_A", "output_index": 0, "arguments": "{}"},
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_A",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "reason A",
+        },
+        {
+            "type": "response.refusal.delta",
+            "item_id": "msg_A",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "refusal A",
+        },
+    ],
+)
+async def test_anonymous_output_stays_with_started_response(output_event: dict[str, Any]) -> None:
+    import json
+
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    active = _make_request_state(
+        "req-A", response_id="resp_A", awaiting_response_created=False, event_queue=asyncio.Queue()
+    )
+    waiting = _make_request_state(
+        "req-B", response_id=None, awaiting_response_created=True, event_queue=asyncio.Queue()
+    )
+    session = _make_http_bridge_session(deque([active, waiting]), queued_request_count=2)
+    await service._process_http_bridge_upstream_text(session, json.dumps(output_event))
+    assert active.event_queue is not None
+    assert waiting.event_queue is not None
+    assert active.event_queue.qsize() == 1
+    assert waiting.event_queue.empty()
+    delivered = active.event_queue.get_nowait()
+    assert delivered is not None and output_event["type"] in delivered
+
+
+@pytest.mark.parametrize("draining", [False, True])
+def test_anonymous_output_owner_excludes_waiting_requests(draining: bool) -> None:
+    active = _make_request_state("req-A", response_id="resp_A", awaiting_response_created=False)
+    active.draining_until_terminal = draining
+    waiting = _make_request_state("req-B", response_id=None, awaiting_response_created=True)
+    assert (
+        proxy_service._match_websocket_request_state_for_anonymous_event(
+            deque([active, waiting]),
+            prefer_previous_response_not_found=False,
+            event_type="response.output_text.delta",
+        )
+        is active
+    )
+
+
+def test_anonymous_output_does_not_guess_with_multiple_started_responses() -> None:
+    active = _make_request_state("req-A", response_id="resp_A", awaiting_response_created=False)
+    other = _make_request_state("req-B", response_id="resp_B", awaiting_response_created=False)
+    waiting = _make_request_state("req-C", response_id=None, awaiting_response_created=True)
+    assert (
+        proxy_service._match_websocket_request_state_for_anonymous_event(
+            deque([active, other, waiting]),
+            prefer_previous_response_not_found=False,
+            event_type="response.output_text.delta",
+        )
+        is None
+    )

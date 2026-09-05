@@ -2,7 +2,9 @@
 
 ## Purpose
 Structural fitness gates for the proxy: ProxyService stays a stable façade and internal decomposition (selection orchestration, bridge mixins) cannot drift behavior or re-grow god-modules.
+
 ## Requirements
+
 ### Requirement: Proxy architecture fitness gates are enforced
 
 The repository SHALL enforce every accepted proxy architecture threshold during
@@ -119,3 +121,15 @@ remain outside reusable transport and domain libraries.
 - **WHEN** a future migration cutover makes Rust authoritative for a domain
 - **THEN** the prior Python owner is removed after contract verification
 - **AND** no permanent dual implementation independently makes that domain decision
+
+### Requirement: Anonymous output ownership
+When a started response exists, the proxy SHALL assign response output events without a response ID only to a uniquely identified started response, including a draining response, and SHALL NOT assign them to a request awaiting response.created. When no response has started, existing pre-created output handling SHALL remain supported. Pre-created metadata and error matching SHALL retain their existing semantics.
+
+#### Scenario: Active response with a younger pending request
+- **WHEN** response A has started and request B awaits response.created on the same upstream socket
+- **THEN** anonymous text, tool, content, and reasoning output events SHALL remain owned by A
+- **AND** B SHALL receive no output belonging to A
+
+#### Scenario: Multiple started responses
+- **WHEN** more than one response has started and an output event has no response ID
+- **THEN** the matcher SHALL leave ownership unresolved rather than assigning the event to a waiting request

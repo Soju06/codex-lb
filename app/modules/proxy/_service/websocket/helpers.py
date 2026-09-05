@@ -1661,6 +1661,7 @@ def _match_websocket_request_state_for_anonymous_event(
     pending_requests: deque[_WebSocketRequestState],
     *,
     prefer_previous_response_not_found: bool,
+    event_type: str | None = None,
     previous_response_id_hint: str | None = None,
     error_message: str | None = None,
     allow_unanchored_previous_response_error: bool = False,
@@ -1673,6 +1674,33 @@ def _match_websocket_request_state_for_anonymous_event(
             error_message=error_message,
             allow_unanchored_previous_response_error=allow_unanchored_previous_response_error,
         )
+
+    # Output belongs to an already-created response. A younger pipelined
+    # request may still lack its response ID while the active response emits
+    # item/text/tool events without a response_id field.
+    if (
+        event_type is not None
+        and event_type.startswith("response.")
+        and event_type
+        not in {
+            "response.created",
+            "response.queued",
+            "response.in_progress",
+            "response.completed",
+            "response.failed",
+            "response.incomplete",
+        }
+    ):
+        started_requests = [
+            request_state
+            for request_state in pending_requests
+            if request_state.response_id is not None
+            and (_http_bridge_request_counts_against_queue(request_state) or request_state.draining_until_terminal)
+        ]
+        if started_requests:
+            return started_requests[0] if len(started_requests) == 1 else None
+        # Preserve supported pre-created output/reasoning preludes when no
+        # started response can own the event.
 
     visible_requests = [
         request_state for request_state in pending_requests if _http_bridge_request_counts_against_queue(request_state)

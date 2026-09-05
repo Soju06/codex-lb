@@ -353,6 +353,7 @@ from app.modules.proxy._service.support import (
     _WebSocketUpstreamControl,
     clear_upstream_websocket_transport_failure,
     mark_upstream_websocket_transport_failure,
+    record_async_tool_call,
     websocket_connect_transport_failure_code,
 )
 from app.modules.proxy._service.support import (
@@ -3212,7 +3213,11 @@ class _WebSocketMixin:
             input_items = cast(list[JsonValue], responses_payload.input)
             missing_call_ids = _facade()._missing_function_call_outputs_for_previous_response(
                 input_items,
-                pending_call_ids=continuity_state.last_pending_function_call_ids,
+                pending_call_ids=[
+                    call_id
+                    for call_id in continuity_state.last_pending_function_call_ids
+                    if call_id not in continuity_state.pending_async_tool_calls
+                ],
             )
             if missing_call_ids:
                 responses_payload = responses_payload.model_copy(
@@ -5419,6 +5424,7 @@ class _WebSocketMixin:
                 if actual_service_tier is not None:
                     request_state.actual_service_tier = actual_service_tier
                     request_state.service_tier = actual_service_tier
+                record_async_tool_call(request_state, payload)
                 completed_tool_call = _facade()._response_output_item_done_tool_call(payload)
                 if completed_tool_call is not None:
                     completed_call_id, completed_call_type = completed_tool_call

@@ -52846,7 +52846,7 @@ async def test_stream_with_retry_relays_unmodified_canonical_delta_frames_verbat
     # relayed with upstream bytes (raw UTF-8, upstream spacing) and are never
     # JSON-parsed; usage settlement from the parsed terminal frame is
     # unchanged.
-    from app.modules.proxy._service.streaming import mixin as streaming_mixin_module
+    from app.modules.proxy._service.streaming import helpers as streaming_helpers_module
 
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
@@ -52861,8 +52861,8 @@ async def test_stream_with_retry_relays_unmodified_canonical_delta_frames_verbat
         AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
     )
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
-    mixin_parse = MagicMock(wraps=streaming_mixin_module.parse_sse_data_json)
-    monkeypatch.setattr(streaming_mixin_module, "parse_sse_data_json", mixin_parse)
+    stream_parse = MagicMock(wraps=streaming_helpers_module.parse_sse_data_json)
+    monkeypatch.setattr(streaming_helpers_module, "parse_sse_data_json", stream_parse)
 
     verbatim_delta = (
         'event: response.output_text.delta\ndata: {"type": "response.output_text.delta", "delta": "안녕 upstream"}\n\n'
@@ -52899,7 +52899,7 @@ async def test_stream_with_retry_relays_unmodified_canonical_delta_frames_verbat
     # created (lifecycle), the first delta (TTFT window still open), and
     # completed (lifecycle) are parsed; the settled second delta is relayed
     # without any JSON parse.
-    assert mixin_parse.call_count == 3
+    assert stream_parse.call_count == 3
     # Upstream bytes are preserved exactly: raw UTF-8 and upstream key
     # spacing, not the ensure_ascii canonical re-encode.
     assert chunks[2] == verbatim_delta

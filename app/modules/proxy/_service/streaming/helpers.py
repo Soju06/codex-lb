@@ -5,7 +5,8 @@ import json
 import sys
 from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, AsyncIterator, Literal, Mapping, cast
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Literal, Mapping, TypedDict, cast
 
 from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
@@ -408,6 +409,46 @@ from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
 from app.modules.proxy.load_balancer import AccountSelection
+
+
+class _HTTPPhaseLogFields(TypedDict):
+    latency_first_token_ms: int | None
+    latency_queue_ms: int
+    latency_first_upstream_event_ms: int | None
+    latency_response_created_ms: int | None
+
+
+@dataclass(slots=True)
+class _HTTPPhaseLatencies:
+    first_token_ms: int | None = None
+    first_upstream_event_ms: int | None = None
+    response_created_ms: int | None = None
+
+    def parse_event(
+        self, line: str, started_at: float, observed_at: float
+    ) -> tuple[dict[str, JsonValue] | None, str | None]:
+        payload = parse_sse_data_json(line)
+        event_type = classify_event_type(payload)
+        if (
+            payload is not None
+            and event_type != "codex.keepalive"
+            and not (isinstance(line, ParsedSseBlock) and line.is_local)
+            and payload.get(SYNTHETIC_TRANSPORT_FAILURE_MARKER) is not True
+        ):
+            elapsed_ms = max(0, int((observed_at - started_at) * 1000))
+            if self.first_upstream_event_ms is None:
+                self.first_upstream_event_ms = elapsed_ms
+            if self.response_created_ms is None and event_type == "response.created":
+                self.response_created_ms = elapsed_ms
+        return payload, event_type
+
+    def log_fields(self, queue_ms: int) -> _HTTPPhaseLogFields:
+        return {
+            "latency_first_token_ms": self.first_token_ms,
+            "latency_queue_ms": queue_ms,
+            "latency_first_upstream_event_ms": self.first_upstream_event_ms,
+            "latency_response_created_ms": self.response_created_ms,
+        }
 
 
 def _facade() -> Any:

@@ -93,8 +93,12 @@ class SqliteRunStateRecord:
 
 
 @contextmanager
-def sqlite_connection(path: str | Path) -> Iterator[sqlite3.Connection]:
-    connection = sqlite3.connect(str(path))
+def sqlite_connection(path: str | Path, *, require_existing: bool = False) -> Iterator[sqlite3.Connection]:
+    if require_existing:
+        encoded_path = urllib.parse.quote(str(path), safe="/:")
+        connection = sqlite3.connect(f"file:{encoded_path}?mode=rw&nofollow=1", uri=True)
+    else:
+        connection = sqlite3.connect(str(path))
     try:
         with connection:
             yield connection
@@ -281,12 +285,13 @@ def check_sqlite_integrity(
     path: Path,
     *,
     mode: SqliteIntegrityCheckMode = SqliteIntegrityCheckMode.FULL,
+    require_existing: bool = False,
 ) -> IntegrityCheck:
     if not path.exists():
         return IntegrityCheck(ok=True, details=None)
 
     try:
-        with sqlite_connection(path) as conn:
+        with sqlite_connection(path, require_existing=require_existing) as conn:
             cursor = conn.execute(_integrity_check_pragma(mode))
             rows = [row[0] for row in cursor.fetchall()]
     except sqlite3.DatabaseError as exc:

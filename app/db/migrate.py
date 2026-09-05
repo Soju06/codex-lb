@@ -911,6 +911,16 @@ def _parse_args() -> argparse.Namespace:
     stamp_parser = subparsers.add_parser("stamp", help="Set current revision without running migrations.")
     stamp_parser.add_argument("revision")
 
+    compact_parser = subparsers.add_parser("compact", help="Plan or execute safe file-backed SQLite compaction.")
+    compact_mode = compact_parser.add_mutually_exclusive_group(required=True)
+    compact_mode.add_argument("--dry-run", action="store_true", help="Report reclaimable space without mutation.")
+    compact_mode.add_argument("--execute", action="store_true", help="Build, verify, and install a compacted database.")
+    compact_parser.add_argument(
+        "--confirm-stopped",
+        action="store_true",
+        help="Acknowledge that every codex-lb replica using the database is stopped.",
+    )
+
     return parser.parse_args()
 
 
@@ -955,6 +965,30 @@ def main() -> None:
     if args.command == "stamp":
         stamp_revision(database_url, args.revision)
         print(f"stamped={args.revision}")
+        return
+
+    if args.command == "compact":
+        from app.db.compact import execute_sqlite_compaction, plan_sqlite_compaction
+
+        if args.dry_run:
+            plan = plan_sqlite_compaction(database_url)
+            print(f"source={plan.source}")
+            print(f"source_bytes={plan.source_bytes}")
+            print(f"page_size={plan.page_size}")
+            print(f"page_count={plan.page_count}")
+            print(f"freelist_pages={plan.freelist_pages}")
+            print(f"reclaimable_bytes={plan.reclaimable_bytes}")
+            print(f"auto_vacuum={plan.auto_vacuum}")
+            print(f"free_bytes={plan.free_bytes}")
+            print(f"required_free_bytes={plan.required_free_bytes}")
+            return
+        outcome = execute_sqlite_compaction(
+            database_url,
+            confirm_stopped=bool(args.confirm_stopped),
+        )
+        print(f"backup={outcome.backup}")
+        print(f"source_bytes_after={outcome.source_bytes_after}")
+        print(f"reclaimed_bytes={outcome.reclaimed_bytes}")
         return
 
     if args.command == "wait-for-head":

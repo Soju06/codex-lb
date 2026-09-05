@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterator, Sequence
 
 from app.core.config.settings import get_settings
+from app.db.compact import acquire_sqlite_maintenance_lock, release_sqlite_maintenance_lock
 from app.db.sqlite_utils import IntegrityCheck, check_sqlite_integrity, sqlite_connection, sqlite_db_path_from_url
 
 logger = logging.getLogger(__name__)
@@ -181,11 +182,17 @@ def recover_sqlite_db(options: RecoveryOptions) -> RecoveryOutcome:
         _write_dump(options.output, dump)
 
     if options.replace:
-        # Recovery-owned SQLite handles are closed before any sidecar unlink.
-        _remove_sqlite_sidecars(options.output)
-        _remove_sqlite_sidecars(options.source)
-        backup = options.source.with_name(f"{options.source.name}.corrupt-{_timestamp()}")
-        _replace_recovered_database(options.source, options.output, backup)
+        lock_path, lock_descriptor = acquire_sqlite_maintenance_lock(options.source)
+        try:
+            if not options.source.exists():
+                raise FileNotFoundError(f"sqlite database not found: {options.source}")
+            # Recovery-owned SQLite handles are closed before any sidecar unlink.
+            _remove_sqlite_sidecars(options.output)
+            _remove_sqlite_sidecars(options.source)
+            backup = options.source.with_name(f"{options.source.name}.corrupt-{_timestamp()}")
+            _replace_recovered_database(options.source, options.output, backup)
+        finally:
+            release_sqlite_maintenance_lock(lock_path, lock_descriptor)
         return RecoveryOutcome(
             source=backup,
             output=options.source,

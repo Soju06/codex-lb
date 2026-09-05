@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import importlib
+import threading
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
 import pytest
 from anyio import to_thread
@@ -1995,6 +2000,224 @@ async def test_file_account_pins_migration_upgrade_and_downgrade(tmp_path):
             assert await conn.run_sync(_schema_state) is not None
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgrade(tmp_path, monkeypatch):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy.exc import OperationalError
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    marker_revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
+
+    def _schema_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        columns = inspector.get_columns("http_bridge_retry_circuits")
+        marker = next(column for column in columns if column["name"] == "admission_claimed_at_epoch")
+        return {
+            "columns": {column["name"] for column in columns},
+            "marker_nullable": marker["nullable"],
+        }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    claim_until_epoch = time.time() + 3600.0
+    try:
+        async with engine.connect() as conn:
+            before_has_table = await conn.run_sync(
+                lambda sync_conn: sa_inspect(sync_conn).has_table("http_bridge_retry_circuits")
+            )
+            before_columns = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"] for column in sa_inspect(sync_conn).get_columns("http_bridge_retry_circuits")
+                }
+            )
+        assert before_has_table is True
+        assert "admission_claimed_at_epoch" not in before_columns
+        assert "admission_claimed_generation" not in before_columns
+        assert "admission_claimed_until_epoch" not in before_columns
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, marker_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert {
+            "admission_claimed_at_epoch",
+            "admission_claimed_generation",
+            "admission_claimed_until_epoch",
+        }.issubset(state["columns"])
+        assert state["marker_nullable"] is True
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_retry_circuits (
+                        session_key_kind, session_key_hash, api_key_scope,
+                        consecutive_failures, cooldown_until_epoch, last_detail,
+                        updated_at_epoch, admission_generation,
+                        admission_claimed_at_epoch, admission_claimed_generation,
+                        admission_claimed_until_epoch
+                    ) VALUES (
+                        'session_header', 'legacy-hash', '__anonymous__',
+                        2, 1300.0, 'stream_incomplete', 1200.0, 4, 1100.0, 4, :claim_until_epoch
+                    )
+                    """
+                ),
+                {"claim_until_epoch": claim_until_epoch},
+            )
+
+        with pytest.raises(
+            RuntimeError,
+            match="cannot downgrade retry-circuit admission claim marker migration",
+        ):
+            await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            after_downgrade = await conn.run_sync(_schema_state)
+            row = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT admission_generation, admission_claimed_at_epoch,
+                               admission_claimed_generation, admission_claimed_until_epoch
+                        FROM http_bridge_retry_circuits
+                        WHERE session_key_hash = 'legacy-hash'
+                        """
+                    )
+                )
+            ).one()
+            revision_after_refused_downgrade = (
+                await conn.execute(text("SELECT version_num FROM alembic_version"))
+            ).scalar_one()
+        assert {
+            "admission_claimed_at_epoch",
+            "admission_claimed_generation",
+            "admission_claimed_until_epoch",
+        }.issubset(after_downgrade["columns"])
+        assert tuple(row) == (4, 1100.0, 4, claim_until_epoch)
+        assert revision_after_refused_downgrade == marker_revision
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    UPDATE http_bridge_retry_circuits
+                    SET admission_claimed_at_epoch = NULL,
+                        admission_claimed_generation = NULL,
+                        admission_claimed_until_epoch = NULL
+                    WHERE session_key_hash = 'legacy-hash'
+                    """
+                )
+            )
+
+        migration_module = importlib.import_module(
+            "app.db.alembic.versions.20260829_000000_add_retry_circuit_admission_claim_marker"
+        )
+        batch_entered = threading.Event()
+        release_batch = threading.Event()
+        original_batch_alter_table = migration_module.op.batch_alter_table
+
+        @contextmanager
+        def _hold_batch_alter_table(*args, **kwargs):
+            batch_entered.set()
+            if not release_batch.wait(timeout=5):
+                raise AssertionError("timed out waiting to release migration DDL")
+            with original_batch_alter_table(*args, **kwargs) as batch_op:
+                yield batch_op
+
+        monkeypatch.setattr(migration_module.op, "batch_alter_table", _hold_batch_alter_table)
+
+        def _attempt_claim_during_downgrade() -> None:
+            from sqlalchemy import create_engine
+
+            claim_engine = create_engine(
+                f"sqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}",
+                future=True,
+                connect_args={"timeout": 0},
+            )
+            try:
+                with claim_engine.begin() as claim_conn:
+                    claim_conn.execute(
+                        text(
+                            """
+                            UPDATE http_bridge_retry_circuits
+                            SET admission_claimed_at_epoch = :claimed_at_epoch,
+                                admission_claimed_generation = 5,
+                                admission_claimed_until_epoch = :claimed_until_epoch
+                            WHERE session_key_hash = 'legacy-hash'
+                            """
+                        ),
+                        {
+                            "claimed_at_epoch": time.time(),
+                            "claimed_until_epoch": time.time() + 3600.0,
+                        },
+                    )
+            finally:
+                claim_engine.dispose()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            downgrade_future = pool.submit(command.downgrade, _build_alembic_config(db_url), parent_revision)
+            try:
+                assert batch_entered.wait(timeout=5), "downgrade did not reach the guarded DDL"
+                claim_future = pool.submit(_attempt_claim_during_downgrade)
+                with pytest.raises(OperationalError, match="database is locked"):
+                    claim_future.result(timeout=5)
+            finally:
+                release_batch.set()
+            downgrade_future.result(timeout=5)
+
+        async with engine.connect() as conn:
+            after_release_downgrade = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"] for column in sa_inspect(sync_conn).get_columns("http_bridge_retry_circuits")
+                }
+            )
+            revision_after_release_downgrade = (
+                await conn.execute(text("SELECT version_num FROM alembic_version"))
+            ).scalar_one()
+        assert "admission_claimed_at_epoch" not in after_release_downgrade
+        assert "admission_claimed_generation" not in after_release_downgrade
+        assert "admission_claimed_until_epoch" not in after_release_downgrade
+        assert revision_after_release_downgrade == parent_revision
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, marker_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+            row = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT admission_generation, admission_claimed_at_epoch,
+                               admission_claimed_generation, admission_claimed_until_epoch
+                        FROM http_bridge_retry_circuits
+                        WHERE session_key_hash = 'legacy-hash'
+                        """
+                    )
+                )
+            ).one()
+        assert state["marker_nullable"] is True
+        # A released receipt permits a complete downgrade; re-upgrade restores
+        # nullable marker columns without inventing a claim.
+        assert tuple(row) == (4, None, None, None)
+    finally:
+        await engine.dispose()
+
+
+def test_retry_circuit_admission_claim_marker_migration_uses_database_clock() -> None:
+    migration_module = importlib.import_module(
+        "app.db.alembic.versions.20260829_000000_add_retry_circuit_admission_claim_marker"
+    )
+
+    postgres_sql = str(migration_module._active_claim_statement("postgresql"))
+    sqlite_sql = str(migration_module._active_claim_statement("sqlite"))
+
+    assert "admission_claimed_until_epoch > EXTRACT(EPOCH FROM clock_timestamp())" in postgres_sql
+    assert "admission_claimed_until_epoch > ((julianday('now') - 2440587.5) * 86400.0)" in sqlite_sql
+    assert ":now_epoch" not in postgres_sql
+    assert ":now_epoch" not in sqlite_sql
 
 
 @pytest.mark.asyncio

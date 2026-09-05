@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -10,11 +9,28 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Any, cast
 
-from sqlalchemy import Row, and_, case, delete, exists, func, or_, select, text, true, update
+from sqlalchemy import (
+    Float,
+    Row,
+    and_,
+    bindparam,
+    case,
+    delete,
+    exists,
+    func,
+    literal_column,
+    or_,
+    select,
+    text,
+    true,
+    tuple_,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
@@ -58,8 +74,15 @@ DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
 # Mirrors the HTTP bridge retry circuit's abandonment tombstone detail; the
 # scheduled purge preserves such rows until the bridge-retention cutoff.
 _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL = "anchor_abandoned"
+# The default bridge request budget is two hours. Keep the marker through the
+# request budget plus the stream cleanup grace so an active replay cannot be
+# purged underneath it while a crashed owner remains reclaimable.
+DURABLE_BRIDGE_RETRY_CIRCUIT_CLAIM_LEASE_SECONDS = 7260.0
 DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE = 50
 _PURGE_CLOSED_BATCH_SIZE = 500
+# Keep the eight-column tuple predicate below under SQLite's 999 bind-variable
+# limit while retaining a single writer transaction for each selected batch.
+_PURGE_RETRY_CIRCUIT_KEY_CHUNK_SIZE = 120
 # Claim retry budget: insert races and epoch-CAS losses re-read and retry;
 # each round has a winner, so a small budget converges under any realistic
 # same-row claim contention.
@@ -75,6 +98,15 @@ _PROTECTED_OPERATION_ID_SAFE_LIMIT = _SESSION_ID_LOOKUP_CHUNK_SIZE
 # a large protected prefix cannot hold the SQLite writer section indefinitely.
 _PROTECTED_OPERATION_SCAN_BUDGET = 128
 _ABANDONMENT_LOG_AGE_CAP_SECONDS = 30 * 24 * 60 * 60
+
+
+def _retry_circuit_database_now_epoch(dialect_name: str) -> ColumnElement[float]:
+    """Return the database's statement-time Unix epoch."""
+    if dialect_name == "postgresql":
+        return literal_column("EXTRACT(EPOCH FROM clock_timestamp())", type_=Float())
+    if dialect_name == "sqlite":
+        return literal_column("((julianday('now') - 2440587.5) * 86400.0)", type_=Float())
+    raise RuntimeError(f"DurableBridgeRepository retry circuit clock unsupported for dialect={dialect_name!r}")
 
 
 # Sentinel: rebind continuity clears without an anchor fence (legacy callers).
@@ -190,6 +222,9 @@ class DurableBridgeRetryCircuitSnapshot:
     last_detail: str | None
     updated_at_epoch: float
     admission_generation: int
+    admission_claimed_at_epoch: float | None = None
+    admission_claimed_generation: int | None = None
+    admission_claimed_until_epoch: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -451,6 +486,32 @@ class DurableBridgeRepository:
                 HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
                 HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
                 HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+            )
+        )
+        return _to_retry_circuit_snapshot(result.scalar_one_or_none())
+
+    async def get_live_retry_circuit_admission_claim(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_scope: str,
+        claimed_generation: int,
+        claimed_at_epoch: float,
+    ) -> DurableBridgeRetryCircuitSnapshot | None:
+        """Return an exact claim receipt only while the database says it is live."""
+        dialect = self._session.get_bind().dialect.name
+        database_now_epoch = _retry_circuit_database_now_epoch(dialect)
+        result = await self._session.execute(
+            select(HttpBridgeRetryCircuit).where(
+                HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
+                HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
+                HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+                HttpBridgeRetryCircuit.admission_generation == claimed_generation,
+                HttpBridgeRetryCircuit.admission_claimed_generation == claimed_generation,
+                HttpBridgeRetryCircuit.admission_claimed_at_epoch == claimed_at_epoch,
+                HttpBridgeRetryCircuit.admission_claimed_until_epoch.is_not(None),
+                HttpBridgeRetryCircuit.admission_claimed_until_epoch > database_now_epoch,
             )
         )
         return _to_retry_circuit_snapshot(result.scalar_one_or_none())
@@ -748,6 +809,8 @@ class DurableBridgeRepository:
         expected_admission_generation: int,
         expected_consecutive_failures: int,
         expected_cooldown_until_epoch: float,
+        claim_lease_seconds: float | None = None,
+        claimed_at_epoch: float | None = None,
     ) -> DurableBridgeRetryCircuitSnapshot | None:
         """Linearize replay admission against a retry-circuit generation.
 
@@ -756,6 +819,22 @@ class DurableBridgeRepository:
         failure committed afterward still sees its original ``updated_at``
         baseline and is merged after the already-admitted dispatch.
         """
+        lease_seconds = (
+            DURABLE_BRIDGE_RETRY_CIRCUIT_CLAIM_LEASE_SECONDS
+            if claim_lease_seconds is None
+            else max(0.001, float(claim_lease_seconds))
+        )
+        dialect = self._session.get_bind().dialect.name
+        database_now_epoch = _retry_circuit_database_now_epoch(dialect)
+        lease_seconds_bind = bindparam(
+            "retry_circuit_claim_lease_seconds",
+            value=lease_seconds,
+            type_=Float(),
+        )
+        effective_claimed_at_epoch: float | ColumnElement[float] = (
+            database_now_epoch if claimed_at_epoch is None else float(claimed_at_epoch)
+        )
+        effective_claimed_until_epoch = database_now_epoch + lease_seconds_bind
         values = {
             "session_key_kind": session_key_kind,
             "session_key_hash": durable_bridge_hash(session_key_value),
@@ -763,22 +842,25 @@ class DurableBridgeRepository:
             "consecutive_failures": 0,
             "cooldown_until_epoch": 0.0,
             "last_detail": None,
-            "updated_at_epoch": time.time(),
+            # A claim advances only the admission generation.  In
+            # particular, it must not touch the failure observation epoch;
+            # delayed failure writes still merge against that baseline.
+            "updated_at_epoch": database_now_epoch,
             "admission_generation": 1,
+            "admission_claimed_at_epoch": effective_claimed_at_epoch,
+            "admission_claimed_generation": 1,
+            "admission_claimed_until_epoch": effective_claimed_until_epoch,
         }
-        dialect = self._session.get_bind().dialect.name
+        if dialect not in {"postgresql", "sqlite"}:
+            raise RuntimeError(f"DurableBridgeRepository retry circuit claim unsupported for dialect={dialect!r}")
+        if expected_updated_at_epoch is None and expected_admission_generation != 0:
+            return None
         async with sqlite_writer_section():
             if expected_updated_at_epoch is None:
-                if expected_admission_generation != 0:
-                    return None
                 if dialect == "postgresql":
                     statement = pg_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
-                elif dialect == "sqlite":
-                    statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
                 else:
-                    raise RuntimeError(
-                        f"DurableBridgeRepository retry circuit claim unsupported for dialect={dialect!r}"
-                    )
+                    statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
             else:
                 statement = (
                     update(HttpBridgeRetryCircuit)
@@ -787,22 +869,29 @@ class DurableBridgeRepository:
                         HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
                         HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
                         HttpBridgeRetryCircuit.admission_generation == expected_admission_generation,
+                        or_(
+                            HttpBridgeRetryCircuit.admission_claimed_generation.is_(None),
+                            HttpBridgeRetryCircuit.admission_claimed_until_epoch.is_(None),
+                            HttpBridgeRetryCircuit.admission_claimed_until_epoch <= database_now_epoch,
+                        ),
                         HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch,
                         HttpBridgeRetryCircuit.consecutive_failures == expected_consecutive_failures,
                         HttpBridgeRetryCircuit.cooldown_until_epoch == expected_cooldown_until_epoch,
                     )
-                    .values(admission_generation=expected_admission_generation + 1)
+                    .values(
+                        admission_generation=expected_admission_generation + 1,
+                        admission_claimed_at_epoch=effective_claimed_at_epoch,
+                        admission_claimed_generation=expected_admission_generation + 1,
+                        admission_claimed_until_epoch=effective_claimed_until_epoch,
+                    )
                 )
-            result = await self._session.execute(statement)
-            if getattr(result, "rowcount", 0) != 1:
+            result = await self._session.execute(statement.returning(HttpBridgeRetryCircuit))
+            row = result.scalar_one_or_none()
+            if row is None:
                 await self._session.rollback()
                 return None
             await self._session.commit()
-        return await self.get_retry_circuit(
-            session_key_kind=session_key_kind,
-            session_key_value=session_key_value,
-            api_key_scope=api_key_scope,
-        )
+        return _to_retry_circuit_snapshot(row)
 
     async def supersede_retry_circuit_detail(
         self,
@@ -859,6 +948,8 @@ class DurableBridgeRepository:
         expected_consecutive_failures: int | None = None,
         reset_detail: str | None = None,
     ) -> bool:
+        dialect = self._session.get_bind().dialect.name
+        database_now_epoch = _retry_circuit_database_now_epoch(dialect)
         conditions = [
             HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
@@ -871,12 +962,13 @@ class DurableBridgeRepository:
             conditions.append(HttpBridgeRetryCircuit.consecutive_failures == expected_consecutive_failures)
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
-            if expected_admission_generation is not None:
-                # A replay claim bumps only ``admission_generation``, leaving
-                # the failure-observation epoch untouched; without this fence
-                # a reset authorized before the claim would clear the circuit
-                # beneath the admitted replay that depends on it.
-                conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
+        if expected_admission_generation is not None:
+            conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
+        active_claim = and_(
+            HttpBridgeRetryCircuit.admission_claimed_generation.is_not(None),
+            HttpBridgeRetryCircuit.admission_claimed_until_epoch.is_not(None),
+            HttpBridgeRetryCircuit.admission_claimed_until_epoch > database_now_epoch,
+        )
         async with sqlite_writer_section():
             result = await self._session.execute(
                 update(HttpBridgeRetryCircuit)
@@ -889,13 +981,72 @@ class DurableBridgeRepository:
                     # delta-only follow-ups closed; a completion's settle
                     # writes None, erasing it on real recovery.
                     last_detail=reset_detail,
-                    updated_at_epoch=time.time(),
+                    updated_at_epoch=database_now_epoch,
+                    # An active stale-anchor replay owns its receipt even
+                    # when another same-key request resets the failure
+                    # observation. Expired or legacy markers are reclaimed
+                    # by clearing all receipt columns together.
+                    admission_claimed_at_epoch=case(
+                        (active_claim, HttpBridgeRetryCircuit.admission_claimed_at_epoch),
+                        else_=None,
+                    ),
+                    admission_claimed_generation=case(
+                        (active_claim, HttpBridgeRetryCircuit.admission_claimed_generation),
+                        else_=None,
+                    ),
+                    admission_claimed_until_epoch=case(
+                        (active_claim, HttpBridgeRetryCircuit.admission_claimed_until_epoch),
+                        else_=None,
+                    ),
                 )
             )
             await self._session.commit()
         # A fenced reset that matched no row is a CAS miss, not a settlement:
         # another writer moved the row after the caller's lookup.
         return bool(getattr(result, "rowcount", 0))
+
+    async def clear_retry_circuit_admission_claim(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_scope: str,
+        claimed_generation: int,
+        claimed_at_epoch: float | None = None,
+        claimed_until_epoch: float | None = None,
+    ) -> bool:
+        """Release one replay claim without changing retry-circuit state."""
+        key_hash = durable_bridge_hash(session_key_value)
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(HttpBridgeRetryCircuit)
+                .where(
+                    HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
+                    HttpBridgeRetryCircuit.session_key_hash == key_hash,
+                    HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+                    HttpBridgeRetryCircuit.admission_generation == claimed_generation,
+                    HttpBridgeRetryCircuit.admission_claimed_generation == claimed_generation,
+                    *(
+                        [HttpBridgeRetryCircuit.admission_claimed_at_epoch == claimed_at_epoch]
+                        if claimed_at_epoch is not None
+                        else []
+                    ),
+                    *(
+                        [HttpBridgeRetryCircuit.admission_claimed_until_epoch == claimed_until_epoch]
+                        if claimed_until_epoch is not None
+                        else []
+                    ),
+                )
+                .values(
+                    admission_claimed_at_epoch=None,
+                    admission_claimed_generation=None,
+                    admission_claimed_until_epoch=None,
+                )
+                .returning(HttpBridgeRetryCircuit.session_key_hash)
+            )
+            matched = result.scalar_one_or_none() is not None
+            await self._session.commit()
+        return matched
 
     async def purge_retry_circuit(
         self,
@@ -909,11 +1060,25 @@ class DurableBridgeRepository:
         fence_last_detail: bool = False,
         expected_last_detail: str | None = None,
         reset_detail: str | None = None,
+        expected_admission_claimed_at_epoch: float | None = None,
+        expected_admission_claimed_until_epoch: float | None = None,
     ) -> bool:
+        """Delete a stale retry row only when every captured fence matches."""
+        dialect = self._session.get_bind().dialect.name
+        database_now_epoch = _retry_circuit_database_now_epoch(dialect)
         conditions = [
             HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
             HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+            # A claimed generation remains durable until its replay reaches
+            # terminal settlement (or a proven pre-dispatch cleanup path).
+            # Purging it by the unchanged observation timestamp would strand
+            # that replay's marker and allow the row to be recreated at zero.
+            or_(
+                HttpBridgeRetryCircuit.admission_claimed_generation.is_(None),
+                HttpBridgeRetryCircuit.admission_claimed_until_epoch.is_(None),
+                HttpBridgeRetryCircuit.admission_claimed_until_epoch <= database_now_epoch,
+            ),
         ]
         if expected_consecutive_failures is not None:
             conditions.append(HttpBridgeRetryCircuit.consecutive_failures == expected_consecutive_failures)
@@ -929,20 +1094,21 @@ class DurableBridgeRepository:
             )
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
-            if expected_admission_generation is not None:
-                # A replay claim advances only the admission generation and
-                # leaves the timestamp untouched; without this fence a
-                # stale-row purge racing the claim would delete the active
-                # claimed generation and a later recovery could dispatch a
-                # second replay beside the first.
-                conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
+        if expected_admission_generation is not None:
+            conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
+        if expected_admission_claimed_at_epoch is not None:
+            conditions.append(HttpBridgeRetryCircuit.admission_claimed_at_epoch == expected_admission_claimed_at_epoch)
+        if expected_admission_claimed_until_epoch is not None:
+            conditions.append(
+                HttpBridgeRetryCircuit.admission_claimed_until_epoch == expected_admission_claimed_until_epoch
+            )
         async with sqlite_writer_section():
-            result = await self._session.execute(delete(HttpBridgeRetryCircuit).where(*conditions))
+            result = await self._session.execute(
+                delete(HttpBridgeRetryCircuit).where(*conditions).returning(HttpBridgeRetryCircuit.session_key_hash)
+            )
+            matched = result.scalar_one_or_none() is not None
             await self._session.commit()
-        # A fenced purge that matched nothing is a CAS miss: another replica
-        # moved the row after this worker's lookup, and the caller must
-        # reconcile against the surviving row instead of assuming deletion.
-        return bool(getattr(result, "rowcount", 0)) or expected_updated_at_epoch is None
+        return matched
 
     async def get_session_by_id(self, session_id: str) -> DurableBridgeSessionSnapshot | None:
         row = await self._session.get(HttpBridgeSessionRecord, session_id)
@@ -3576,11 +3742,26 @@ class DurableBridgeRepository:
             )
         deleted_count = 0
         while True:
+            dialect = self._session.get_bind().dialect.name
+            database_now_epoch = _retry_circuit_database_now_epoch(dialect)
             result = await self._session.execute(
                 select(
                     HttpBridgeRetryCircuit.session_key_kind,
                     HttpBridgeRetryCircuit.session_key_hash,
                     HttpBridgeRetryCircuit.api_key_scope,
+                    HttpBridgeRetryCircuit.updated_at_epoch,
+                    HttpBridgeRetryCircuit.admission_generation,
+                    func.coalesce(HttpBridgeRetryCircuit.admission_claimed_generation, -1),
+                    func.coalesce(HttpBridgeRetryCircuit.admission_claimed_at_epoch, -1.0),
+                    func.coalesce(HttpBridgeRetryCircuit.admission_claimed_until_epoch, 0.0),
+                )
+                .where(
+                    HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch,
+                    or_(
+                        HttpBridgeRetryCircuit.admission_claimed_generation.is_(None),
+                        HttpBridgeRetryCircuit.admission_claimed_until_epoch.is_(None),
+                        HttpBridgeRetryCircuit.admission_claimed_until_epoch <= database_now_epoch,
+                    ),
                 )
                 .where(stale_predicate)
                 .limit(batch_size)
@@ -3588,22 +3769,43 @@ class DurableBridgeRepository:
             keys = [tuple(row) for row in result.fetchall()]
             if not keys:
                 return deleted_count
-            batch_deleted_count = 0
             async with sqlite_writer_section():
-                for session_key_kind, session_key_hash, api_key_scope in keys:
+                batch_deleted_count = 0
+                for offset in range(0, len(keys), _PURGE_RETRY_CIRCUIT_KEY_CHUNK_SIZE):
+                    key_chunk = keys[offset : offset + _PURGE_RETRY_CIRCUIT_KEY_CHUNK_SIZE]
                     deleted = await self._session.execute(
                         delete(HttpBridgeRetryCircuit)
-                        .where(HttpBridgeRetryCircuit.session_key_kind == session_key_kind)
-                        .where(HttpBridgeRetryCircuit.session_key_hash == session_key_hash)
-                        .where(HttpBridgeRetryCircuit.api_key_scope == api_key_scope)
+                        .where(
+                            tuple_(
+                                HttpBridgeRetryCircuit.session_key_kind,
+                                HttpBridgeRetryCircuit.session_key_hash,
+                                HttpBridgeRetryCircuit.api_key_scope,
+                                HttpBridgeRetryCircuit.updated_at_epoch,
+                                HttpBridgeRetryCircuit.admission_generation,
+                                func.coalesce(HttpBridgeRetryCircuit.admission_claimed_generation, -1),
+                                func.coalesce(HttpBridgeRetryCircuit.admission_claimed_at_epoch, -1.0),
+                                func.coalesce(HttpBridgeRetryCircuit.admission_claimed_until_epoch, 0.0),
+                            ).in_(key_chunk)
+                        )
+                        .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
                         .where(stale_predicate)
+                        .where(
+                            or_(
+                                HttpBridgeRetryCircuit.admission_claimed_generation.is_(None),
+                                HttpBridgeRetryCircuit.admission_claimed_until_epoch.is_(None),
+                                HttpBridgeRetryCircuit.admission_claimed_until_epoch <= database_now_epoch,
+                            )
+                        )
                         .returning(HttpBridgeRetryCircuit.session_key_hash)
                     )
                     batch_deleted_count += len(deleted.scalars().all())
                 await self._session.commit()
-            if batch_deleted_count == 0:
-                return deleted_count
             deleted_count += batch_deleted_count
+            if batch_deleted_count != len(keys):
+                # A conditional delete miss means a concurrent claim or
+                # failure changed at least one selected row. Do not select it
+                # again with its new generation and delete that newer state.
+                return deleted_count
 
     async def upsert_alias(
         self,
@@ -4211,4 +4413,7 @@ def _to_retry_circuit_snapshot(row: HttpBridgeRetryCircuit | None) -> DurableBri
         last_detail=row.last_detail,
         updated_at_epoch=row.updated_at_epoch,
         admission_generation=row.admission_generation,
+        admission_claimed_at_epoch=row.admission_claimed_at_epoch,
+        admission_claimed_generation=row.admission_claimed_generation,
+        admission_claimed_until_epoch=row.admission_claimed_until_epoch,
     )

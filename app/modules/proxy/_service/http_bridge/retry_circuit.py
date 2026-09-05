@@ -3,14 +3,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import anyio
 
 from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_circuit_total
+from app.modules.proxy._service.http_bridge.helpers import (
+    _await_task_deferring_cancellation,
+    _schedule_http_bridge_background_cleanup,
+)
 from app.modules.proxy._service.http_bridge.quarantine import (
     _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
     _http_bridge_quarantine_clear_fence,
@@ -24,10 +29,14 @@ from app.modules.proxy._service.observability import _hash_identifier, _service_
 from app.modules.proxy._service.support import (
     _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeRetryCircuitAttemptSelection,
+    _HTTPBridgeRetryCircuitGeneration,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
 )
-from app.modules.proxy.durable_bridge_repository import DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+from app.modules.proxy.durable_bridge_repository import (
+    DURABLE_BRIDGE_RETRY_CIRCUIT_CLAIM_LEASE_SECONDS,
+    DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +47,20 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS = 30.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS = 600.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_PLANNING_MISS_CAP = 4096
+_HTTP_BRIDGE_RETRY_CIRCUIT_CANCEL_DRAIN_ITERATIONS = 4
+_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_CLEANUP_GRACE_SECONDS = 60.0
+_HTTP_BRIDGE_RETRY_CIRCUIT_CLEANUP_TASK_PREFIX = "http-bridge-retry-circuit-"
+_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_RELEASE_RETRY_DELAYS = (
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    4.0,
+    8.0,
+    15.0,
+    30.0,
+    60.0,
+)
 _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS = frozenset(
     {
         "stream_incomplete",
@@ -61,6 +84,10 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES = {
 # Sentinel: the consult could not capture the durable anchor; the
 # abandonment then clears continuity unfenced (degraded, logged).
 _POISON_ANCHOR_CAPTURE_UNAVAILABLE: object = object()
+# Sentinel: a timed-out claim could not be reconciled. A durable CAS result of
+# ``None`` is a confirmed compare-and-set loss and must remain distinct from
+# this infrastructure-unknown outcome.
+_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED: object = object()
 _HTTP_BRIDGE_ANCHOR_POISON_DETAILS = {
     "stream_idle_timeout": "repeated_zero_event_idle_timeout",
     "stream_incomplete": "repeated_zero_event_stream_incomplete",
@@ -70,6 +97,18 @@ _HTTP_BRIDGE_ANCHOR_POISON_DETAILS = {
     # signature, so at threshold it authorizes the same fenced abandonment.
     HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE: "repeated_zero_event_idle_timeout",
 }
+
+
+def _http_bridge_retry_circuit_claim_timeout_seconds(deadline: float | None) -> float | None:
+    """Clamp one durable claim attempt to the caller's remaining deadline."""
+    if deadline is None:
+        return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS
+    remaining_seconds = deadline - time.monotonic()
+    if remaining_seconds <= 0:
+        return None
+    return min(_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS, remaining_seconds)
+
+
 # Written over a surviving at-threshold row when a completion registered a
 # fresh anchor but its settlement failed. Deliberately outside the poison
 # detail map: a replica loading the row keeps the cooldown but neither arms
@@ -82,6 +121,18 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_SUPERSEDED_DETAIL = "anchor_superseded"
 # as a brand-new conversation and silently drop its context. A completion's
 # settle writes None instead, erasing the tombstone on real recovery.
 _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL = "anchor_abandoned"
+
+
+def _http_bridge_retry_circuit_claim_lease_seconds(
+    deadline: float | None,
+    *,
+    now_monotonic: float | None = None,
+) -> float:
+    """Translate a monotonic request deadline into a relative claim lease."""
+    now_monotonic = time.monotonic() if now_monotonic is None else now_monotonic
+    if deadline is None:
+        return DURABLE_BRIDGE_RETRY_CIRCUIT_CLAIM_LEASE_SECONDS
+    return max(0.0, deadline - now_monotonic) + _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_CLEANUP_GRACE_SECONDS
 
 
 def _http_bridge_anchor_poison_detail(detail: str | None) -> str | None:
@@ -155,6 +206,9 @@ class _HTTPBridgeRetryCircuitState:
     # claim bumps only this column, so the settle fence must carry it or a
     # reset can clear the circuit beneath a claim it never observed.
     persisted_admission_generation: int = 0
+    persisted_admission_claimed_at_epoch: float | None = None
+    persisted_admission_claimed_generation: int | None = None
+    persisted_admission_claimed_until_epoch: float | None = None
     last_failure_monotonic: float = 0.0
     last_durable_load_monotonic: float = 0.0
     half_open_until: float = 0.0
@@ -168,6 +222,286 @@ class _HTTPBridgeRetryCircuitState:
     # ``last_detail`` durably, and without this record the owed clear would
     # never be retried and other replicas would stop arming against it.
     owed_poison_detail: str | None = None
+
+
+def _http_bridge_retry_circuit_claim_marker_rank(
+    claimed_at_epoch: float | None,
+    claimed_generation: int | None,
+    claimed_until_epoch: float | None,
+) -> tuple[int, float, float]:
+    """Order claim receipts so a concurrent local generation can win a merge."""
+    return (
+        claimed_generation if claimed_generation is not None else -1,
+        claimed_until_epoch if claimed_until_epoch is not None else -1.0,
+        claimed_at_epoch if claimed_at_epoch is not None else -1.0,
+    )
+
+
+def _http_bridge_retry_circuit_claim_receipt_advanced(
+    previous_receipt: tuple[float | None, int | None, float | None],
+    current_receipt: tuple[float | None, int | None, float | None],
+) -> bool:
+    """Return whether a concurrent local claim installed a newer receipt.
+
+    A purge can remove a row and a new claim can recreate generation one, so
+    generation alone is not a unique claim identity. The database-clock expiry
+    breaks that tie without trusting either replica's claim-start clock. An
+    empty current receipt still means the prior marker was released and must
+    not outrank a durable cleared row.
+    """
+    if current_receipt[1] is None:
+        return False
+    current_rank = _http_bridge_retry_circuit_claim_marker_rank(*current_receipt)
+    previous_rank = _http_bridge_retry_circuit_claim_marker_rank(*previous_receipt)
+    return current_rank > previous_rank
+
+
+def _http_bridge_retry_circuit_admission_generation_for_load(
+    state: "_HTTPBridgeRetryCircuitState | None",
+    persisted: Any,
+    *,
+    local_claim_receipt: tuple[float | None, int | None, float | None],
+    current_claim_receipt: tuple[float | None, int | None, float | None],
+) -> int:
+    """Adopt a durable generation without carrying it across row recreation.
+
+    ``admission_generation`` is monotonic only within one durable row
+    lineage; purging and recreating a key legitimately restarts it at zero or
+    one. A local claim that advanced while this lookup was in flight still
+    needs its high-water fence, as does a snapshot from the same row lineage
+    (identified by its unchanged observation epoch). Otherwise the durable
+    row is authoritative and its generation must replace stale local state.
+    """
+    if persisted is None:
+        return max(0, state.persisted_admission_generation) if state is not None else 0
+    persisted_generation = max(0, getattr(persisted, "admission_generation", 0))
+    if state is None:
+        return persisted_generation
+    same_lineage = getattr(persisted, "updated_at_epoch", None) == state.persisted_updated_at_epoch
+    claim_advanced = _http_bridge_retry_circuit_claim_receipt_advanced(
+        local_claim_receipt,
+        current_claim_receipt,
+    )
+    if same_lineage:
+        return max(state.persisted_admission_generation, persisted_generation)
+    if claim_advanced:
+        # The row changed while a local claim advanced. That claim may belong
+        # to the recreated lineage, so carry the receipt's generation rather
+        # than the old lineage's high-water value.
+        return max(persisted_generation, max(0, current_claim_receipt[1] or 0))
+    return persisted_generation
+
+
+def _merge_http_bridge_retry_circuit_claim_marker(
+    local_claimed_at_epoch: float | None,
+    local_claimed_generation: int | None,
+    local_claimed_until_epoch: float | None,
+    persisted_claimed_at_epoch: float | None,
+    persisted_claimed_generation: int | None,
+    persisted_claimed_until_epoch: float | None,
+) -> tuple[float | None, int | None, float | None]:
+    """Keep the newest claim receipt when a durable lookup races local state.
+
+    Marker updates do not advance the failure-observation timestamp, so a
+    lookup can legitimately return an older row while a local CAS receipt is
+    already protecting a replay. Generation, then claim start/deadline, gives
+    a deterministic ordering; retaining a local marker on an ambiguous tie is
+    fail-closed and cannot clear a newer durable claim.
+    """
+
+    local_rank = _http_bridge_retry_circuit_claim_marker_rank(
+        local_claimed_at_epoch,
+        local_claimed_generation,
+        local_claimed_until_epoch,
+    )
+    persisted_rank = _http_bridge_retry_circuit_claim_marker_rank(
+        persisted_claimed_at_epoch,
+        persisted_claimed_generation,
+        persisted_claimed_until_epoch,
+    )
+    if local_rank >= persisted_rank:
+        return local_claimed_at_epoch, local_claimed_generation, local_claimed_until_epoch
+    return persisted_claimed_at_epoch, persisted_claimed_generation, persisted_claimed_until_epoch
+
+
+@dataclass(frozen=True, slots=True)
+class _HTTPBridgeRetryCircuitBoundedCall:
+    """Outcome of a deadline-bounded durable retry-circuit operation."""
+
+    completed: bool
+    cancellation_settled: bool
+    value: Any = None
+
+
+@dataclass(slots=True)
+class _HTTPBridgeRetryCircuitLoadOutcome:
+    """Per-call result details for a durable retry-circuit load."""
+
+    # A stale row was observed, but its conditional purge did not establish
+    # that the row was removed. Callers must fail closed because the durable
+    # cooldown/generation may have changed while the purge was in flight.
+    stale_purge_uncertain: bool = False
+
+
+def _consume_abandoned_http_bridge_retry_circuit_task(
+    service: Any,
+    task: asyncio.Task[Any],
+    *,
+    label: str,
+) -> None:
+    abandoned_tasks = getattr(service, "_http_bridge_retry_circuit_abandoned_tasks", None)
+    if abandoned_tasks is not None:
+        abandoned_tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        result = task.result()
+    except BaseException as exc:
+        logger.debug(
+            "Abandoned HTTP bridge retry-circuit operation finished with an error label=%s error=%r",
+            label,
+            exc,
+        )
+    else:
+        logger.info(
+            "Abandoned HTTP bridge retry-circuit operation completed after timeout label=%s result_present=%s",
+            label,
+            result is not None,
+        )
+
+
+def _track_abandoned_http_bridge_retry_circuit_task(
+    service: Any,
+    task: asyncio.Task[Any],
+    *,
+    label: str,
+    on_result: Callable[[Any], Awaitable[None]] | None = None,
+) -> None:
+    abandoned_tasks = getattr(service, "_http_bridge_retry_circuit_abandoned_tasks", None)
+    if abandoned_tasks is None:
+        abandoned_tasks = set()
+        service._http_bridge_retry_circuit_abandoned_tasks = abandoned_tasks
+    abandoned_tasks.add(task)
+
+    result_handler = on_result
+
+    def consume_completed_task(completed_task: asyncio.Task[Any]) -> None:
+        _consume_abandoned_http_bridge_retry_circuit_task(
+            service,
+            completed_task,
+            label=label,
+        )
+        if result_handler is None or completed_task.cancelled():
+            return
+        try:
+            result = completed_task.result()
+        except BaseException:
+            return
+        if result is None:
+            return
+        handler = result_handler
+
+        async def run_cleanup() -> None:
+            await handler(result)
+
+        _schedule_http_bridge_background_cleanup(
+            service,
+            run_cleanup(),
+            name=f"{_HTTP_BRIDGE_RETRY_CIRCUIT_CLEANUP_TASK_PREFIX}{label}-abandoned-result-cleanup",
+            error_message=f"Abandoned retry-circuit result cleanup failed label={label}",
+        )
+
+    task.add_done_callback(consume_completed_task)
+
+
+def _schedule_abandoned_http_bridge_retry_circuit_result_cleanup(
+    service: Any,
+    awaitable: Awaitable[None],
+    *,
+    label: str,
+) -> None:
+    async def run_cleanup() -> None:
+        await awaitable
+
+    _schedule_http_bridge_background_cleanup(
+        service,
+        run_cleanup(),
+        name=f"{_HTTP_BRIDGE_RETRY_CIRCUIT_CLEANUP_TASK_PREFIX}{label}-abandoned-result-cleanup",
+        error_message=f"Abandoned retry-circuit result cleanup failed label={label}",
+    )
+
+
+async def _retry_http_bridge_retry_circuit_admission_claim_release(
+    service: Any,
+    request_state: Any,
+) -> None:
+    """Retry a terminal claim release while its request-owned receipt is live."""
+    try:
+        for delay_seconds in _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_RELEASE_RETRY_DELAYS:
+            if delay_seconds:
+                await asyncio.sleep(delay_seconds)
+            if getattr(request_state, "verified_stale_anchor_retry_circuit_claimed_generation", None) is None:
+                return
+            try:
+                released = await service._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
+                    request_state
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Failed to retry HTTP bridge retry-circuit admission claim release request_id=%s",
+                    getattr(request_state, "request_id", None),
+                    exc_info=True,
+                )
+                continue
+            if released:
+                return
+    finally:
+        request_state.retry_circuit_claim_release_retry_scheduled = False
+    logger.error(
+        "HTTP bridge retry-circuit admission claim release retry budget exhausted request_id=%s",
+        getattr(request_state, "request_id", None),
+    )
+
+
+def _schedule_http_bridge_retry_circuit_admission_claim_release_retry(
+    service: Any,
+    request_state: Any,
+) -> None:
+    """Track a bounded terminal claim-release retry for the request owner."""
+    if getattr(request_state, "verified_stale_anchor_retry_circuit_claimed_generation", None) is None:
+        return
+    if getattr(request_state, "retry_circuit_claim_release_retry_scheduled", False):
+        return
+    request_state.retry_circuit_claim_release_retry_scheduled = True
+    task = _schedule_http_bridge_background_cleanup(
+        service,
+        _retry_http_bridge_retry_circuit_admission_claim_release(service, request_state),
+        name=f"{_HTTP_BRIDGE_RETRY_CIRCUIT_CLEANUP_TASK_PREFIX}terminal-claim-release",
+        error_message="HTTP bridge retry-circuit terminal claim release retry failed",
+    )
+    if task is None:
+        request_state.retry_circuit_claim_release_retry_scheduled = False
+
+
+def _http_bridge_retry_circuit_claim_release_request_state(
+    *,
+    key: _HTTPBridgeSessionKey,
+    claimed_generation: int,
+    claimed_at_epoch: float,
+    claimed_until_epoch: float | None,
+) -> SimpleNamespace:
+    """Build the minimal mutable state used by claim-release cleanup."""
+    return SimpleNamespace(
+        request_id=f"retry-circuit-claim-release-{_hash_identifier(key.affinity_key)}",
+        verified_stale_anchor_retry_circuit_key=key,
+        verified_stale_anchor_retry_circuit_claimed_generation=claimed_generation,
+        verified_stale_anchor_retry_circuit_claimed_at_epoch=claimed_at_epoch,
+        verified_stale_anchor_retry_circuit_claimed_until_epoch=claimed_until_epoch,
+        verified_stale_anchor_retry_circuit_claimed_attempt_count=0,
+        retry_circuit_claim_release_retry_scheduled=False,
+    )
 
 
 @dataclass(slots=True)
@@ -196,6 +530,7 @@ def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: A
     service._http_bridge_retry_circuits = {}
     service._http_bridge_retry_circuit_loaded_keys = set()
     service._http_bridge_retry_circuit_persisted_keys = set()
+    service._http_bridge_retry_circuit_abandoned_tasks = set()
     service._http_bridge_retry_circuit_lock = anyio.Lock()
     service._http_bridge_retry_circuit_key_locks = {}
     # A settlement pops the state object, taking its stale-load watermark
@@ -235,13 +570,32 @@ class _HTTPBridgeRetryCircuitMixin:
     async def _http_bridge_retry_circuit_generation(
         self: Any,
         session: _HTTPBridgeSession,
-    ) -> tuple[bool, tuple[int, float, int, float, int, float, float] | None]:
+    ) -> tuple[bool, _HTTPBridgeRetryCircuitGeneration | None]:
         return await self._http_bridge_retry_circuit_generation_for_key(session.key)
 
     async def _http_bridge_retry_circuit_generation_for_key(
         self: Any,
         key: _HTTPBridgeSessionKey,
-    ) -> tuple[bool, tuple[int, float, int, float, int, float, float] | None]:
+    ) -> tuple[bool, _HTTPBridgeRetryCircuitGeneration | None]:
+        async with self._http_bridge_retry_circuit_lock:
+            local_state_before_lookup = self._http_bridge_retry_circuits.get(key)
+            local_persisted_observation = (
+                (
+                    local_state_before_lookup.persisted_updated_at_epoch,
+                    local_state_before_lookup.persisted_admission_generation,
+                )
+                if local_state_before_lookup is not None
+                else None
+            )
+            local_claim_receipt = (
+                (
+                    local_state_before_lookup.persisted_admission_claimed_at_epoch,
+                    local_state_before_lookup.persisted_admission_claimed_generation,
+                    local_state_before_lookup.persisted_admission_claimed_until_epoch,
+                )
+                if local_state_before_lookup is not None
+                else (None, None, None)
+            )
         try:
             persisted = await self._durable_bridge.lookup_retry_circuit(
                 session_key_kind=key.affinity_kind,
@@ -260,23 +614,86 @@ class _HTTPBridgeRetryCircuitMixin:
             state = self._http_bridge_retry_circuits.get(key)
             if state is None and persisted is None:
                 return True, None
-            persisted_updated_at_epoch = max(
-                state.persisted_updated_at_epoch if state is not None else 0.0,
-                persisted.updated_at_epoch if persisted is not None else 0.0,
+            current_claim_receipt = (
+                (
+                    state.persisted_admission_claimed_at_epoch,
+                    state.persisted_admission_claimed_generation,
+                    state.persisted_admission_claimed_until_epoch,
+                )
+                if state is not None
+                else (None, None, None)
             )
+            persisted_claim_receipt = (
+                getattr(persisted, "admission_claimed_at_epoch", None) if persisted is not None else None,
+                getattr(persisted, "admission_claimed_generation", None) if persisted is not None else None,
+                getattr(persisted, "admission_claimed_until_epoch", None) if persisted is not None else None,
+            )
+            local_claim_advanced = _http_bridge_retry_circuit_claim_receipt_advanced(
+                local_claim_receipt,
+                current_claim_receipt,
+            )
+            if persisted_claim_receipt == (None, None, None) and not local_claim_advanced:
+                current_claim_receipt = (None, None, None)
+            (
+                persisted_admission_claimed_at_epoch,
+                persisted_admission_claimed_generation,
+                persisted_admission_claimed_until_epoch,
+            ) = _merge_http_bridge_retry_circuit_claim_marker(
+                *current_claim_receipt,
+                *persisted_claim_receipt,
+            )
+            if state is not None:
+                state.persisted_admission_claimed_at_epoch = persisted_admission_claimed_at_epoch
+                state.persisted_admission_claimed_generation = persisted_admission_claimed_generation
+                state.persisted_admission_claimed_until_epoch = persisted_admission_claimed_until_epoch
+            persisted_admission_generation = _http_bridge_retry_circuit_admission_generation_for_load(
+                state,
+                persisted,
+                local_claim_receipt=local_claim_receipt,
+                current_claim_receipt=current_claim_receipt,
+            )
+            persisted_updated_at_epoch = (
+                persisted.updated_at_epoch
+                if persisted is not None
+                else (state.persisted_updated_at_epoch if state is not None else 0.0)
+            )
+            if state is not None and persisted is not None:
+                current_persisted_observation = (
+                    state.persisted_updated_at_epoch,
+                    state.persisted_admission_generation,
+                )
+                concurrent_observation_advanced = (
+                    local_persisted_observation is not None
+                    and current_persisted_observation != local_persisted_observation
+                    and not local_claim_advanced
+                    and state.persisted_updated_at_epoch != persisted.updated_at_epoch
+                )
+                if concurrent_observation_advanced:
+                    # A same-key durable write completed while this lookup
+                    # was in flight. Keep its epoch and generation together;
+                    # pairing either half with the older lookup result would
+                    # manufacture a CAS fence that no durable row ever held.
+                    persisted_updated_at_epoch = state.persisted_updated_at_epoch
+                    persisted_admission_generation = state.persisted_admission_generation
+            if state is not None:
+                state.persisted_updated_at_epoch = persisted_updated_at_epoch
+                state.persisted_admission_generation = persisted_admission_generation
             persisted_consecutive_failures = persisted.consecutive_failures if persisted is not None else 0
             durable_cooldown_until_epoch = persisted.cooldown_until_epoch if persisted is not None else 0.0
             local_consecutive_failures = state.consecutive_failures if state is not None else 0
             last_failure_monotonic = state.last_failure_monotonic if state is not None else 0.0
             local_cooldown_until = state.cooldown_until if state is not None else 0.0
-            return True, (
-                getattr(persisted, "admission_generation", 0) if persisted is not None else 0,
-                persisted_updated_at_epoch,
-                persisted_consecutive_failures,
-                durable_cooldown_until_epoch,
-                local_consecutive_failures,
-                last_failure_monotonic,
-                local_cooldown_until,
+            return True, _HTTPBridgeRetryCircuitGeneration(
+                admission_generation=persisted_admission_generation,
+                admission_claimed_at_epoch=persisted_admission_claimed_at_epoch,
+                admission_claimed_generation=persisted_admission_claimed_generation,
+                admission_claimed_until_epoch=persisted_admission_claimed_until_epoch,
+                persisted_updated_at_epoch=persisted_updated_at_epoch,
+                persisted_consecutive_failures=persisted_consecutive_failures,
+                durable_cooldown_until_epoch=durable_cooldown_until_epoch,
+                local_consecutive_failures=local_consecutive_failures,
+                last_failure_monotonic=last_failure_monotonic,
+                local_cooldown_until=local_cooldown_until,
             )
 
     async def _http_bridge_retry_circuit_generation_is_not_newer(
@@ -284,7 +701,7 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         key: _HTTPBridgeSessionKey,
         captured: bool,
-        generation: tuple[int, float, int, float, int, float, float] | None,
+        generation: _HTTPBridgeRetryCircuitGeneration | None,
     ) -> bool:
         if not captured:
             return False
@@ -295,16 +712,200 @@ class _HTTPBridgeRetryCircuitMixin:
             return current_generation is None
         if current_generation is None:
             return True
-        return all(
-            current <= captured_value for current, captured_value in zip(current_generation, generation, strict=True)
+        return (
+            current_generation.admission_generation <= generation.admission_generation
+            and current_generation.persisted_updated_at_epoch <= generation.persisted_updated_at_epoch
+            and current_generation.persisted_consecutive_failures <= generation.persisted_consecutive_failures
+            and current_generation.durable_cooldown_until_epoch <= generation.durable_cooldown_until_epoch
+            and current_generation.local_consecutive_failures <= generation.local_consecutive_failures
+            and current_generation.last_failure_monotonic <= generation.last_failure_monotonic
+            and current_generation.local_cooldown_until <= generation.local_cooldown_until
         )
+
+    async def _clear_http_bridge_retry_circuit_admission_claim(
+        self: Any,
+        *,
+        key: _HTTPBridgeSessionKey,
+        claimed_generation: int,
+        claimed_at_epoch: float | None = None,
+        claimed_until_epoch: float | None = None,
+    ) -> bool:
+        """Release a replay marker without resetting failure observations."""
+        clear_claim = getattr(self._durable_bridge, "clear_retry_circuit_admission_claim", None)
+        if not callable(clear_claim):
+            return False
+        clear_claim_fn = cast(Callable[..., Awaitable[Any]], clear_claim)
+        try:
+            clear_kwargs: dict[str, Any] = {
+                "session_key_kind": key.affinity_kind,
+                "session_key_value": key.affinity_key,
+                "api_key_id": key.api_key_id,
+                "claimed_generation": claimed_generation,
+            }
+            if claimed_at_epoch is not None:
+                clear_kwargs["claimed_at_epoch"] = claimed_at_epoch
+            if claimed_until_epoch is not None:
+                clear_kwargs["claimed_until_epoch"] = claimed_until_epoch
+            cleared = await clear_claim_fn(
+                **clear_kwargs,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to release HTTP bridge retry-circuit admission claim bridge_kind=%s bridge_key=%s "
+                "generation=%s",
+                key.affinity_kind,
+                _hash_identifier(key.affinity_key),
+                claimed_generation,
+                exc_info=True,
+            )
+            return False
+        if cleared is True:
+            async with self._http_bridge_retry_circuit_lock:
+                state = self._http_bridge_retry_circuits.get(key)
+                if state is not None and state.persisted_admission_claimed_generation == claimed_generation:
+                    state.persisted_admission_claimed_at_epoch = None
+                    state.persisted_admission_claimed_generation = None
+                    state.persisted_admission_claimed_until_epoch = None
+        return cleared is True
+
+    async def _clear_http_bridge_retry_circuit_admission_claim_for_request(
+        self: Any,
+        request_state: Any,
+    ) -> bool:
+        """Release a stale-anchor claim after terminal request settlement.
+
+        The request state owns the marker from dispatch through terminal
+        settlement, including recovery retries.  Keep the marker when the
+        fenced write is unavailable so a later cleanup path can retry it; only
+        clear the in-memory receipt after the durable update confirms a match.
+        """
+        claimed_generation = getattr(request_state, "verified_stale_anchor_retry_circuit_claimed_generation", None)
+        claimed_at_epoch = getattr(request_state, "verified_stale_anchor_retry_circuit_claimed_at_epoch", None)
+        claimed_until_epoch = getattr(request_state, "verified_stale_anchor_retry_circuit_claimed_until_epoch", None)
+        claim_key = getattr(request_state, "verified_stale_anchor_retry_circuit_key", None)
+        if claimed_generation is None:
+            return True
+        if claim_key is None:
+            return False
+        clear_kwargs: dict[str, Any] = {
+            "key": claim_key,
+            "claimed_generation": claimed_generation,
+        }
+        if claimed_at_epoch is not None:
+            clear_kwargs["claimed_at_epoch"] = claimed_at_epoch
+        if claimed_until_epoch is not None:
+            clear_kwargs["claimed_until_epoch"] = claimed_until_epoch
+        cleared = await self._clear_http_bridge_retry_circuit_admission_claim(**clear_kwargs)
+        if cleared:
+            request_state.verified_stale_anchor_retry_circuit_claimed_generation = None
+            request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch = None
+            request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch = None
+            request_state.verified_stale_anchor_retry_circuit_claimed_attempt_count = 0
+        return cleared
+
+    async def _clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
+        self: Any,
+        request_state: Any,
+    ) -> bool:
+        """Release a pre-dispatch claim without pinning submit cleanup.
+
+        A durable driver can ignore cancellation after its bound.  Keep the
+        local submit ownership cleanup independent from that operation while
+        retaining the request receipt until the detached task settles.
+        """
+        bounded = await self._await_http_bridge_retry_circuit_call(
+            self._clear_http_bridge_retry_circuit_admission_claim_for_request(request_state),
+            timeout=_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS,
+            label="submit-interruption-claim-release",
+        )
+        if not bounded.completed:
+            logger.warning(
+                "Timed out releasing HTTP bridge retry-circuit admission claim during submit cleanup request_id=%s",
+                getattr(request_state, "request_id", None),
+            )
+            return False
+        return bounded.value is True
+
+    async def _await_http_bridge_retry_circuit_call(
+        self: Any,
+        awaitable: Awaitable[Any],
+        *,
+        timeout: float,
+        label: str,
+        on_abandoned_result: Callable[[Any], Awaitable[None]] | None = None,
+    ) -> _HTTPBridgeRetryCircuitBoundedCall:
+        """Run one durable operation without awaiting cancellation cleanup."""
+        task = asyncio.ensure_future(awaitable)
+
+        def consume_settled_task() -> None:
+            _consume_abandoned_http_bridge_retry_circuit_task(self, task, label=label)
+            if on_abandoned_result is None or task.cancelled():
+                return
+            try:
+                result = task.result()
+            except BaseException:
+                return
+            if result is not None:
+                _schedule_abandoned_http_bridge_retry_circuit_result_cleanup(
+                    self,
+                    on_abandoned_result(result),
+                    label=label,
+                )
+
+        try:
+            done, _ = await asyncio.wait({task}, timeout=max(0.0, timeout))
+        except asyncio.CancelledError:
+            if not task.done():
+                task.cancel()
+                if not task.done():
+                    _track_abandoned_http_bridge_retry_circuit_task(
+                        self,
+                        task,
+                        label=label,
+                        on_result=on_abandoned_result,
+                    )
+            else:
+                consume_settled_task()
+            raise
+        if task in done:
+            return _HTTPBridgeRetryCircuitBoundedCall(completed=True, cancellation_settled=True, value=task.result())
+
+        task.cancel()
+        for _ in range(_HTTP_BRIDGE_RETRY_CIRCUIT_CANCEL_DRAIN_ITERATIONS):
+            if task.done():
+                break
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                if task.done():
+                    consume_settled_task()
+                else:
+                    _track_abandoned_http_bridge_retry_circuit_task(
+                        self,
+                        task,
+                        label=label,
+                        on_result=on_abandoned_result,
+                    )
+                raise
+        if not task.done():
+            _track_abandoned_http_bridge_retry_circuit_task(
+                self,
+                task,
+                label=label,
+                on_result=on_abandoned_result,
+            )
+            return _HTTPBridgeRetryCircuitBoundedCall(completed=False, cancellation_settled=False)
+        consume_settled_task()
+        return _HTTPBridgeRetryCircuitBoundedCall(completed=False, cancellation_settled=True)
 
     async def _claim_http_bridge_retry_circuit_generation(
         self: Any,
         *,
         key: _HTTPBridgeSessionKey,
         captured: bool,
-        generation: tuple[int, float, int, float, int, float, float] | None,
+        generation: _HTTPBridgeRetryCircuitGeneration | None,
+        deadline: float | None = None,
+        claim_receipt: dict[str, Any] | None = None,
     ) -> bool | None:
         """Atomically linearize replay admission against the captured circuit.
 
@@ -317,63 +918,368 @@ class _HTTPBridgeRetryCircuitMixin:
         """
         if not captured:
             return False
-        expected_admission_generation = generation[0] if generation is not None else 0
-        expected_persisted_updated_at = generation[1] if generation is not None else 0.0
-        expected_persisted_failures = generation[2] if generation is not None else 0
-        expected_persisted_cooldown = generation[3] if generation is not None else 0.0
-        expected_local_failures = generation[4] if generation is not None else 0
-        expected_last_failure = generation[5] if generation is not None else 0.0
-        expected_local_cooldown = generation[6] if generation is not None else 0.0
+        expected_admission_generation = generation.admission_generation if generation is not None else 0
+        expected_persisted_updated_at = generation.persisted_updated_at_epoch if generation is not None else 0.0
+        expected_persisted_failures = generation.persisted_consecutive_failures if generation is not None else 0
+        expected_persisted_cooldown = generation.durable_cooldown_until_epoch if generation is not None else 0.0
+        expected_local_failures = generation.local_consecutive_failures if generation is not None else 0
+        expected_last_failure = generation.last_failure_monotonic if generation is not None else 0.0
+        expected_local_cooldown = generation.local_cooldown_until if generation is not None else 0.0
         claim_generation = getattr(self._durable_bridge, "claim_retry_circuit_generation", None)
         if not callable(claim_generation):
             return None
+        claim_generation_fn = cast(Callable[..., Awaitable[Any]], claim_generation)
 
-        # Local failure recording for this key serializes on the key lock,
-        # so holding it across the durable CAS keeps the claim linearized
-        # against local strikes without parking every unrelated hard key
-        # behind the global registry lock for up to the claim timeout. The
-        # global lock is held only for the short state checks.
-        key_lock = await self._acquire_http_bridge_retry_circuit_key_lock(key)
+        # Snapshot the local generation under the lock, then release it while
+        # the durable CAS performs I/O. Revalidate the local state after the
+        # CAS so a local failure that wins the race suppresses this replay.
+        # Cross-replica failures serialize at the durable row CAS while
+        # unrelated local keys remain able to record failures and admit work.
+        async with self._http_bridge_retry_circuit_lock:
+            state = self._http_bridge_retry_circuits.get(key)
+            if state is not None and (
+                state.consecutive_failures > expected_local_failures
+                or state.last_failure_monotonic > expected_last_failure
+                or state.cooldown_until > expected_local_cooldown
+            ):
+                return False
+
+        # Keep one receipt for every attempt, including a detached timeout
+        # reconciliation. A claim can commit after this request stops
+        # awaiting it, so eventual cleanup must fence the same marker
+        # generation and lease rather than recomputing an expiry.
+        claim_started_epoch = time.time()
+        claim_started_monotonic = time.monotonic()
+        claim_lease_seconds = _http_bridge_retry_circuit_claim_lease_seconds(
+            deadline,
+            now_monotonic=claim_started_monotonic,
+        )
+
+        async def run_durable_claim() -> Any:
+            return await claim_generation_fn(
+                session_key_kind=key.affinity_kind,
+                session_key_value=key.affinity_key,
+                api_key_id=key.api_key_id,
+                expected_updated_at_epoch=(
+                    expected_persisted_updated_at if expected_persisted_updated_at > 0 else None
+                ),
+                expected_admission_generation=expected_admission_generation,
+                expected_consecutive_failures=expected_persisted_failures,
+                expected_cooldown_until_epoch=expected_persisted_cooldown,
+                claim_lease_seconds=claim_lease_seconds,
+                claimed_at_epoch=claim_started_epoch,
+            )
+
+        claimed_generation = expected_admission_generation + 1
+        abandoned_claim_reconciliation_finished = asyncio.Event()
+        release_abandoned_claim_after_reconciliation = True
+
+        async def release_abandoned_claim(_result: Any) -> None:
+            nonlocal release_abandoned_claim_after_reconciliation
+
+            await abandoned_claim_reconciliation_finished.wait()
+            if not release_abandoned_claim_after_reconciliation:
+                return
+            result_generation = getattr(_result, "admission_claimed_generation", None)
+            if result_generation is not None and result_generation != claimed_generation:
+                logger.warning(
+                    "Ignoring abandoned retry-circuit claim receipt for unexpected generation "
+                    "bridge_kind=%s bridge_key=%s expected_generation=%s actual_generation=%s",
+                    key.affinity_kind,
+                    _hash_identifier(key.affinity_key),
+                    claimed_generation,
+                    result_generation,
+                )
+                return
+            result_claimed_at_epoch = getattr(_result, "admission_claimed_at_epoch", None) or claim_started_epoch
+            result_claimed_until_epoch = getattr(_result, "admission_claimed_until_epoch", None)
+            release_request_state = _http_bridge_retry_circuit_claim_release_request_state(
+                key=key,
+                claimed_generation=claimed_generation,
+                claimed_at_epoch=result_claimed_at_epoch,
+                claimed_until_epoch=result_claimed_until_epoch,
+            )
+            try:
+                claim_released = await self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
+                    release_request_state
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Failed to release abandoned HTTP bridge retry-circuit admission claim request_id=%s",
+                    release_request_state.request_id,
+                    exc_info=True,
+                )
+                claim_released = False
+            if not claim_released:
+                _schedule_http_bridge_retry_circuit_admission_claim_release_retry(
+                    self,
+                    release_request_state,
+                )
+
+        claim_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
+        if claim_timeout_seconds is None:
+            logger.warning(
+                "No request budget left to claim HTTP bridge retry circuit generation bridge_kind=%s bridge_key=%s",
+                key.affinity_kind,
+                _hash_identifier(key.affinity_key),
+            )
+            return None
+
         try:
+            first_claim = await self._await_http_bridge_retry_circuit_call(
+                run_durable_claim(),
+                timeout=claim_timeout_seconds,
+                label="claim",
+                on_abandoned_result=release_abandoned_claim,
+            )
+            if first_claim.completed:
+                claimed = first_claim.value
+            elif not first_claim.cancellation_settled:
+                # A cancellation-resistant durable operation is still
+                # running. It may commit after this request's budget expires,
+                # so do not issue a concurrent reconciliation write.
+                logger.warning(
+                    "Timed out claiming HTTP bridge retry circuit generation; durable operation still draining "
+                    "bridge_kind=%s bridge_key=%s",
+                    key.affinity_kind,
+                    _hash_identifier(key.affinity_key),
+                )
+                return None
+            else:
+                claimed = await self._reconcile_timed_out_retry_circuit_generation_claim(
+                    key=key,
+                    run_durable_claim=run_durable_claim,
+                    deadline=deadline,
+                    expected_claimed_generation=claimed_generation,
+                    expected_claimed_at_epoch=claim_started_epoch,
+                    on_abandoned_result=release_abandoned_claim,
+                )
+                release_abandoned_claim_after_reconciliation = (
+                    claimed is None or claimed is _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
+                )
+        except Exception:
+            logger.warning(
+                "Failed to claim HTTP bridge retry circuit generation bridge_kind=%s bridge_key=%s",
+                key.affinity_kind,
+                _hash_identifier(key.affinity_key),
+                exc_info=True,
+            )
+            return None
+        finally:
+            abandoned_claim_reconciliation_finished.set()
+        if claimed is _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED:
+            return None
+        if claimed is None:
+            return False
+
+        result_generation = getattr(claimed, "admission_claimed_generation", None)
+        if result_generation is not None and result_generation != claimed_generation:
+            logger.warning(
+                "Durable retry-circuit claim returned unexpected generation bridge_kind=%s bridge_key=%s "
+                "expected_generation=%s actual_generation=%s",
+                key.affinity_kind,
+                _hash_identifier(key.affinity_key),
+                claimed_generation,
+                result_generation,
+            )
+            if claim_receipt is not None:
+                claim_receipt.clear()
+            return False
+        result_claimed_at_epoch = getattr(claimed, "admission_claimed_at_epoch", None)
+        if result_claimed_at_epoch is None:
+            result_claimed_at_epoch = claim_started_epoch
+        result_claimed_until_epoch = getattr(claimed, "admission_claimed_until_epoch", None)
+        if claim_receipt is not None:
+            claim_receipt["generation"] = result_generation or claimed_generation
+            claim_receipt["claimed_at_epoch"] = result_claimed_at_epoch
+            claim_receipt["claimed_until_epoch"] = result_claimed_until_epoch
+
+        claim_released = False
+
+        async def release_claim_after_interruption() -> None:
+            nonlocal claim_released
+            # The claim is created before a request state owns it.  Keep a
+            # small service-owned stand-in so a failed or timed-out release
+            # can use the normal generation-fenced retry path instead of
+            # dropping the only durable receipt with this coroutine.
+            release_request_state = _http_bridge_retry_circuit_claim_release_request_state(
+                key=key,
+                claimed_generation=claimed_generation,
+                claimed_at_epoch=result_claimed_at_epoch,
+                claimed_until_epoch=result_claimed_until_epoch,
+            )
+            release_task = asyncio.create_task(
+                self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(release_request_state),
+                name=f"{_HTTP_BRIDGE_RETRY_CIRCUIT_CLEANUP_TASK_PREFIX}claim-cancelled-release",
+            )
+            try:
+                released, cleanup_cancellation = await _await_task_deferring_cancellation(release_task)
+                claim_released = released is True
+                if cleanup_cancellation is not None:
+                    logger.warning(
+                        "Cancellation interrupted HTTP bridge retry-circuit claim release; "
+                        "release completed before propagating the original cancellation bridge_kind=%s "
+                        "bridge_key=%s generation=%s",
+                        key.affinity_kind,
+                        _hash_identifier(key.affinity_key),
+                        claimed_generation,
+                    )
+            except BaseException:
+                logger.warning(
+                    "Failed to release HTTP bridge retry-circuit claim after interruption bridge_kind=%s "
+                    "bridge_key=%s generation=%s",
+                    key.affinity_kind,
+                    _hash_identifier(key.affinity_key),
+                    claimed_generation,
+                    exc_info=True,
+                )
+            finally:
+                if claim_released:
+                    # Keep the dictionary contract for callers that still own
+                    # it, but only erase it after the fenced durable clear
+                    # confirms this exact claim was released.
+                    if claim_receipt is not None:
+                        claim_receipt.clear()
+                else:
+                    _schedule_http_bridge_retry_circuit_admission_claim_release_retry(
+                        self,
+                        release_request_state,
+                    )
+
+        try:
+            local_state_changed = False
             async with self._http_bridge_retry_circuit_lock:
                 state = self._http_bridge_retry_circuits.get(key)
-                if state is not None and (
+                local_state_changed = state is not None and (
                     state.consecutive_failures > expected_local_failures
                     or state.last_failure_monotonic > expected_last_failure
                     or state.cooldown_until > expected_local_cooldown
-                ):
-                    return False
-            try:
-                claimed = await asyncio.wait_for(
-                    claim_generation(
-                        session_key_kind=key.affinity_kind,
-                        session_key_value=key.affinity_key,
-                        api_key_id=key.api_key_id,
-                        expected_updated_at_epoch=(
-                            expected_persisted_updated_at if expected_persisted_updated_at > 0 else None
-                        ),
-                        expected_admission_generation=expected_admission_generation,
-                        expected_consecutive_failures=expected_persisted_failures,
-                        expected_cooldown_until_epoch=expected_persisted_cooldown,
-                    ),
-                    timeout=_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS,
                 )
-            except Exception:
-                logger.warning(
-                    "Failed to claim HTTP bridge retry circuit generation bridge_kind=%s bridge_key=%s",
-                    key.affinity_kind,
-                    _hash_identifier(key.affinity_key),
-                    exc_info=True,
+                # A stateless claim can create a durable admission row without a
+                # local circuit state. Do not retain marker-only keys: pruning
+                # walks local states, so those markers would otherwise grow for
+                # every unique stale-anchor replay until process restart.
+                if state is not None and not local_state_changed:
+                    self._http_bridge_retry_circuit_loaded_keys.add(key)
+                    self._http_bridge_retry_circuit_persisted_keys.add(key)
+                    state.persisted_admission_generation = max(
+                        state.persisted_admission_generation,
+                        claimed_generation,
+                    )
+                    state.persisted_admission_claimed_at_epoch = result_claimed_at_epoch
+                    state.persisted_admission_claimed_generation = (
+                        getattr(
+                            claimed,
+                            "admission_claimed_generation",
+                            claimed_generation,
+                        )
+                        or claimed_generation
+                    )
+                    state.persisted_admission_claimed_until_epoch = result_claimed_until_epoch
+            if local_state_changed:
+                release_request_state = _http_bridge_retry_circuit_claim_release_request_state(
+                    key=key,
+                    claimed_generation=claimed_generation,
+                    claimed_at_epoch=result_claimed_at_epoch,
+                    claimed_until_epoch=result_claimed_until_epoch,
                 )
-                return None
-            if claimed is None:
+                claim_released = await self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
+                    release_request_state
+                )
+                if claim_released and claim_receipt is not None:
+                    claim_receipt.clear()
+                elif not claim_released:
+                    _schedule_http_bridge_retry_circuit_admission_claim_release_retry(
+                        self,
+                        release_request_state,
+                    )
                 return False
-            async with self._http_bridge_retry_circuit_lock:
-                self._http_bridge_retry_circuit_loaded_keys.add(key)
-                self._http_bridge_retry_circuit_persisted_keys.add(key)
             return True
-        finally:
-            key_lock.release()
+        except BaseException:
+            if not claim_released:
+                await release_claim_after_interruption()
+            raise
+
+    async def _reconcile_timed_out_retry_circuit_generation_claim(
+        self: Any,
+        *,
+        key: _HTTPBridgeSessionKey,
+        run_durable_claim: Callable[[], Awaitable[Any]],
+        deadline: float | None = None,
+        expected_claimed_generation: int,
+        expected_claimed_at_epoch: float,
+        on_abandoned_result: Callable[[Any], Awaitable[None]] | None = None,
+    ) -> Any:
+        """Re-run and reconcile a timed-out compare-and-set within the budget.
+
+        A first CAS can commit after its result is lost at the timeout
+        boundary.  If the identical reconciliation CAS then refuses, inspect
+        the durable receipt once before treating that refusal as a competing
+        claim. Only an exact generation/start match whose expiry is still live
+        on the database clock proves that this request owns the marker; an
+        outage or timeout remains undecidable.
+        """
+        reconcile_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
+        if reconcile_timeout_seconds is None:
+            return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
+        try:
+            reconciliation = await self._await_http_bridge_retry_circuit_call(
+                run_durable_claim(),
+                timeout=reconcile_timeout_seconds,
+                label="claim-reconciliation",
+                on_abandoned_result=on_abandoned_result,
+            )
+            if not reconciliation.completed:
+                if not reconciliation.cancellation_settled:
+                    logger.warning(
+                        "Timed out reconciling HTTP bridge retry circuit generation; durable operation still draining "
+                        "bridge_kind=%s bridge_key=%s",
+                        key.affinity_kind,
+                        _hash_identifier(key.affinity_key),
+                    )
+                return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
+            reconciled_claim = reconciliation.value
+            if reconciled_claim is not None:
+                return reconciled_claim
+
+            lookup_live_claim = getattr(self._durable_bridge, "lookup_live_retry_circuit_admission_claim", None)
+            if not callable(lookup_live_claim):
+                return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
+            lookup_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
+            if lookup_timeout_seconds is None:
+                return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
+            lookup = await self._await_http_bridge_retry_circuit_call(
+                lookup_live_claim(
+                    session_key_kind=key.affinity_kind,
+                    session_key_value=key.affinity_key,
+                    api_key_id=key.api_key_id,
+                    claimed_generation=expected_claimed_generation,
+                    claimed_at_epoch=expected_claimed_at_epoch,
+                ),
+                timeout=lookup_timeout_seconds,
+                label="claim-reconciliation",
+            )
+            if not lookup.completed:
+                if not lookup.cancellation_settled:
+                    logger.warning(
+                        "Timed out looking up HTTP bridge retry circuit claim receipt after reconciliation; "
+                        "durable state remains undecided bridge_kind=%s bridge_key=%s",
+                        key.affinity_kind,
+                        _hash_identifier(key.affinity_key),
+                    )
+                return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
+            durable_claim = lookup.value
+            return durable_claim
+        except Exception:
+            logger.warning(
+                "Failed to reconcile timed-out HTTP bridge retry circuit generation claim bridge_kind=%s bridge_key=%s",
+                key.affinity_kind,
+                _hash_identifier(key.affinity_key),
+                exc_info=True,
+            )
+            return _HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_UNDECIDED
 
     async def _ensure_http_bridge_retry_circuit_loaded_for_key(
         self: Any,
@@ -547,15 +1453,29 @@ class _HTTPBridgeRetryCircuitMixin:
                 raise
             key_lock.release()
 
-    async def _load_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> bool:
+    async def _load_http_bridge_retry_circuit(
+        self: Any,
+        session: _HTTPBridgeSession,
+        *,
+        outcome: _HTTPBridgeRetryCircuitLoadOutcome | None = None,
+    ) -> bool:
         key = session.key
-        if key.strength != "hard":
+        if session.key.strength != "hard":
             return True
 
         now_monotonic = time.monotonic()
         async with self._http_bridge_retry_circuit_lock:
             self._prune_http_bridge_retry_circuit_state(now_monotonic)
             local_state = self._http_bridge_retry_circuits.get(key)
+            local_claim_receipt = (
+                (
+                    local_state.persisted_admission_claimed_at_epoch,
+                    local_state.persisted_admission_claimed_generation,
+                    local_state.persisted_admission_claimed_until_epoch,
+                )
+                if local_state is not None
+                else (None, None, None)
+            )
             if local_state is not None:
                 local_state.last_touched_monotonic = now_monotonic
         try:
@@ -596,6 +1516,19 @@ class _HTTPBridgeRetryCircuitMixin:
                     local_state is not None
                     and local_state.last_failure_monotonic > local_state.last_durable_load_monotonic
                 )
+                current_claim_receipt = (
+                    (
+                        local_state.persisted_admission_claimed_at_epoch,
+                        local_state.persisted_admission_claimed_generation,
+                        local_state.persisted_admission_claimed_until_epoch,
+                    )
+                    if local_state is not None
+                    else (None, None, None)
+                )
+                local_claim_advanced = _http_bridge_retry_circuit_claim_receipt_advanced(
+                    local_claim_receipt,
+                    current_claim_receipt,
+                )
                 # A confirmed miss past the stale-lookup guards is durable
                 # knowledge worth caching for the planning window; stamped
                 # with the load's start so it expires conservatively, and
@@ -613,6 +1546,16 @@ class _HTTPBridgeRetryCircuitMixin:
                     del self._http_bridge_retry_circuit_planning_misses[
                         next(iter(self._http_bridge_retry_circuit_planning_misses))
                     ]
+                if (
+                    key in self._http_bridge_retry_circuit_persisted_keys
+                    and not locally_updated
+                    and local_claim_advanced
+                ):
+                    # A claim committed locally after this lookup began. The
+                    # miss predates that durable marker, so keep its receipt
+                    # and local circuit instead of resurrecting a released
+                    # marker or dropping an in-flight replay's protection.
+                    return True
                 if key in self._http_bridge_retry_circuit_persisted_keys and not locally_updated:
                     self._http_bridge_retry_circuits.pop(key, None)
                     self._http_bridge_retry_circuit_loaded_keys.discard(key)
@@ -646,22 +1589,30 @@ class _HTTPBridgeRetryCircuitMixin:
             async with self._http_bridge_retry_circuit_lock:
                 stale_local_state = self._http_bridge_retry_circuits.get(key)
             try:
-                stale_row_purged = await self._durable_bridge.purge_retry_circuit(
-                    session_key_kind=key.affinity_kind,
-                    session_key_value=key.affinity_key,
-                    api_key_id=key.api_key_id,
-                    expected_updated_at_epoch=persisted.updated_at_epoch,
-                    expected_admission_generation=getattr(persisted, "admission_generation", 0),
-                    # Detail-only transitions (the transitional tombstone
-                    # supersede) and lagging-clock merges move neither the
-                    # epoch nor the admission generation; fencing on the
-                    # observed count and detail keeps this purge from
-                    # deleting a row another replica just rewrote.
+                purge_kwargs: dict[str, Any] = {
+                    "session_key_kind": key.affinity_kind,
+                    "session_key_value": key.affinity_key,
+                    "api_key_id": session.key.api_key_id,
+                    "expected_updated_at_epoch": persisted.updated_at_epoch,
+                    "expected_admission_generation": getattr(persisted, "admission_generation", 0),
+                }
+                purge_kwargs.update(
                     expected_consecutive_failures=persisted.consecutive_failures,
                     fence_last_detail=True,
                     expected_last_detail=persisted.last_detail,
                 )
+                claimed_at_epoch = getattr(persisted, "admission_claimed_at_epoch", None)
+                claimed_until_epoch = getattr(persisted, "admission_claimed_until_epoch", None)
+                if claimed_at_epoch is not None:
+                    purge_kwargs["expected_admission_claimed_at_epoch"] = claimed_at_epoch
+                if claimed_until_epoch is not None:
+                    purge_kwargs["expected_admission_claimed_until_epoch"] = claimed_until_epoch
+                stale_row_purged = await self._durable_bridge.purge_retry_circuit(
+                    **purge_kwargs,
+                )
             except Exception:
+                if outcome is not None:
+                    outcome.stale_purge_uncertain = True
                 logger.warning(
                     "Failed to remove stale HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
                     key.affinity_kind,
@@ -672,7 +1623,9 @@ class _HTTPBridgeRetryCircuitMixin:
                 # unavailable. The next failure can still open the local
                 # circuit even though the expired durable row remains.
                 return False
-            if stale_row_purged is False:
+            if stale_row_purged is not True:
+                if outcome is not None:
+                    outcome.stale_purge_uncertain = True
                 # The fenced purge matched nothing: another replica moved
                 # the row after this worker's lookup — a fresh strike or
                 # opening — and proceeding as though it was deleted would
@@ -692,6 +1645,8 @@ class _HTTPBridgeRetryCircuitMixin:
                         _hash_identifier(key.affinity_key),
                         exc_info=True,
                     )
+                    if outcome is not None:
+                        outcome.stale_purge_uncertain = True
                     return False
                 if refreshed is not None and (
                     # A detail-only tombstone rewrite keeps the old epoch, so
@@ -712,8 +1667,10 @@ class _HTTPBridgeRetryCircuitMixin:
                     # The surviving row vanished again or is itself stale:
                     # nothing current to adopt, and nothing was deleted this
                     # worker can vouch for.
-                    return True
-            if stale_row_purged is not False:
+                    if outcome is not None:
+                        outcome.stale_purge_uncertain = True
+                    return False
+            if stale_row_purged is True:
                 async with self._http_bridge_retry_circuit_lock:
                     current_local_state = self._http_bridge_retry_circuits.get(key)
                     local_state_is_newer = bool(
@@ -821,7 +1778,49 @@ class _HTTPBridgeRetryCircuitMixin:
                 # merge reconcile clock-free against the returned row.
                 state.consecutive_failures = max(state.consecutive_failures, max(0, persisted.consecutive_failures))
                 state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
-                state.last_detail = state.last_detail or persisted.last_detail
+                if local_failure_is_newer:
+                    state.last_detail = state.last_detail or persisted.last_detail
+                else:
+                    state.last_detail = persisted.last_detail or state.last_detail
+            current_claim_receipt = (
+                state.persisted_admission_claimed_at_epoch,
+                state.persisted_admission_claimed_generation,
+                state.persisted_admission_claimed_until_epoch,
+            )
+            persisted_claim_receipt = (
+                getattr(persisted, "admission_claimed_at_epoch", None),
+                getattr(persisted, "admission_claimed_generation", None),
+                getattr(persisted, "admission_claimed_until_epoch", None),
+            )
+            # A durable release is represented by a row whose receipt is
+            # cleared.  Do not let an unchanged local cache resurrect that
+            # marker; only a local claim that advanced while this lookup was
+            # in flight may outrank the released durable state.
+            if persisted_claim_receipt == (None, None, None) and not _http_bridge_retry_circuit_claim_receipt_advanced(
+                local_claim_receipt,
+                current_claim_receipt,
+            ):
+                current_claim_receipt = (None, None, None)
+            # Claim-only durable writes advance the admission generation
+            # without changing the episode columns above. Preserve that
+            # high-water mark for the same row lineage or a claim that
+            # advanced while this lookup was in flight; a purged and
+            # recreated row is authoritative and may restart at generation
+            # zero or one.
+            state.persisted_admission_generation = _http_bridge_retry_circuit_admission_generation_for_load(
+                state,
+                persisted,
+                local_claim_receipt=local_claim_receipt,
+                current_claim_receipt=current_claim_receipt,
+            )
+            (
+                state.persisted_admission_claimed_at_epoch,
+                state.persisted_admission_claimed_generation,
+                state.persisted_admission_claimed_until_epoch,
+            ) = _merge_http_bridge_retry_circuit_claim_marker(
+                *current_claim_receipt,
+                *persisted_claim_receipt,
+            )
             if state.cooldown_until > now_monotonic:
                 # A cooling key is not probing. Without this, a merged
                 # persisted cooldown leaves a leftover half-open lease
@@ -837,7 +1836,6 @@ class _HTTPBridgeRetryCircuitMixin:
                 # window it never opened.
                 state.half_open_until = 0.0
             state.persisted_updated_at_epoch = persisted.updated_at_epoch
-            state.persisted_admission_generation = getattr(persisted, "admission_generation", 0)
             state.last_touched_monotonic = now_monotonic
             state.last_durable_load_monotonic = now_monotonic
             self._http_bridge_retry_circuit_loaded_keys.add(key)
@@ -1101,6 +2099,18 @@ class _HTTPBridgeRetryCircuitMixin:
                         # flight can carry a start stamp later than the entry
                         # time while its row snapshot predates the write, and
                         # the stale-load guard compares against this value.
+                        (
+                            state.persisted_admission_claimed_at_epoch,
+                            state.persisted_admission_claimed_generation,
+                            state.persisted_admission_claimed_until_epoch,
+                        ) = _merge_http_bridge_retry_circuit_claim_marker(
+                            state.persisted_admission_claimed_at_epoch,
+                            state.persisted_admission_claimed_generation,
+                            state.persisted_admission_claimed_until_epoch,
+                            getattr(persisted, "admission_claimed_at_epoch", None),
+                            getattr(persisted, "admission_claimed_generation", None),
+                            getattr(persisted, "admission_claimed_until_epoch", None),
+                        )
                         state.last_durable_load_monotonic = max(
                             state.last_durable_load_monotonic,
                             time.monotonic(),
@@ -1131,7 +2141,13 @@ class _HTTPBridgeRetryCircuitMixin:
         if session.key.strength != "hard":
             return True
 
-        await self._load_http_bridge_retry_circuit(session)
+        load_outcome = _HTTPBridgeRetryCircuitLoadOutcome()
+        await self._load_http_bridge_retry_circuit(session, outcome=load_outcome)
+        if load_outcome.stale_purge_uncertain:
+            # A stale purge could not establish removal, so durable state is
+            # unknown. Do not admit another pre-created request. Other lookup
+            # failures retain the existing local fallback behavior.
+            return False
         now = time.monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
@@ -1427,6 +2443,7 @@ class _HTTPBridgeRetryCircuitMixin:
         key: _HTTPBridgeSessionKey,
         *,
         assume_remote_half_open_lease: bool = False,
+        deadline: float | None = None,
     ) -> tuple[float, str]:
         """Return ``(seconds_blocked, reason)`` for a suppressed replacement.
 
@@ -1460,7 +2477,7 @@ class _HTTPBridgeRetryCircuitMixin:
             )
         cooldown_remaining = max(
             local_cooldown_remaining,
-            await self._http_bridge_retry_circuit_cooldown_seconds_for_key(key),
+            await self._http_bridge_retry_circuit_cooldown_seconds_for_key(key, deadline=deadline),
         )
         if cooldown_remaining <= 0.0 and half_open_remaining <= 0.0:
             if assume_remote_half_open_lease:
@@ -1474,7 +2491,10 @@ class _HTTPBridgeRetryCircuitMixin:
         if session.key.strength != "hard":
             return 0.0
 
-        await self._load_http_bridge_retry_circuit(session)
+        load_outcome = _HTTPBridgeRetryCircuitLoadOutcome()
+        await self._load_http_bridge_retry_circuit(session, outcome=load_outcome)
+        if load_outcome.stale_purge_uncertain:
+            return 0.0
         now = time.monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
@@ -1485,15 +2505,30 @@ class _HTTPBridgeRetryCircuitMixin:
     async def _http_bridge_retry_circuit_cooldown_seconds_for_key(
         self: Any,
         key: _HTTPBridgeSessionKey,
+        *,
+        deadline: float | None = None,
     ) -> float:
-        """Return the source-key cooldown used to suppress a replacement."""
-        load_succeeded, generation = await self._http_bridge_retry_circuit_generation_for_key(key)
+        """Return a deadline-bounded source-key cooldown hint."""
+        lookup_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
+        if lookup_timeout_seconds is None:
+            return 0.0
+        lookup = await self._await_http_bridge_retry_circuit_call(
+            self._http_bridge_retry_circuit_generation_for_key(key),
+            timeout=lookup_timeout_seconds,
+            label="cooldown-lookup",
+        )
+        if not lookup.completed:
+            return 0.0
+        load_succeeded, generation = cast(
+            tuple[bool, _HTTPBridgeRetryCircuitGeneration | None],
+            lookup.value,
+        )
         if not load_succeeded or generation is None:
             return 0.0
         return max(
             0.0,
-            generation[3] - time.time(),
-            generation[6] - time.monotonic(),
+            generation.durable_cooldown_until_epoch - time.time(),
+            generation.local_cooldown_until - time.monotonic(),
         )
 
     async def _record_http_bridge_retry_circuit_failure(
@@ -1581,6 +2616,7 @@ class _HTTPBridgeRetryCircuitMixin:
                         session.key,
                         _HTTPBridgeRetryCircuitState(last_touched_monotonic=now),
                     )
+                    assert state is not None
                     state.last_touched_monotonic = now
                     state.last_failure_monotonic = now
                     state.half_open_until = 0.0

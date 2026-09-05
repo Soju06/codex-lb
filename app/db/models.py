@@ -2149,6 +2149,19 @@ class HttpBridgeRetryCircuit(Base):
         default=0,
         server_default=text("0"),
     )
+    # A non-null timestamp reserves this generation for one stale-anchor
+    # replay.  The reservation is a lease rather than a generation-only
+    # marker so a crashed process can be recovered after the request budget
+    # and cleanup grace have elapsed.  Failure observation writes deliberately
+    # leave it untouched.
+    admission_claimed_at_epoch: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Keep the claimed generation with the lease so a terminal release can
+    # prove that it owns the exact replay admission it is settling.
+    admission_claimed_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Wall-clock deadline for the replay claim. A stale marker is reclaimable
+    # only after this lease expires, so a crashed worker cannot strand a row
+    # forever while an active replay remains protected from cleanup.
+    admission_claimed_until_epoch: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 _PRIMARY_WINDOW_INDEX_EXPR = func.coalesce(UsageHistory.window, literal_column("'primary'"))

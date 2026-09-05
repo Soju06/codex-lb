@@ -135,6 +135,7 @@ from app.modules.proxy._service.http_bridge.retry_circuit import (
     _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
     _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
     _http_bridge_retry_circuit_suppression_message,
+    _schedule_http_bridge_retry_circuit_admission_claim_release_retry,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _build_rewritten_stream_response_failed_event,
@@ -194,6 +195,7 @@ from app.modules.proxy._service.support import (
     _event_type_from_payload,
     _HTTPBridgeOwnerForward,
     _HTTPBridgeRetryCircuitAttemptSelection,
+    _HTTPBridgeRetryCircuitGeneration,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _is_local_account_cap_code,
@@ -2019,7 +2021,13 @@ class _HTTPBridgeStreamingMixin:
         unanchored_fork_spill_attempted = False
         verified_stale_anchor_generation_captured = False
         verified_stale_anchor_circuit_key: _HTTPBridgeSessionKey | None = None
-        verified_stale_anchor_generation: tuple[int, float, int, float, int, float, float] | None = None
+        verified_stale_anchor_generation: _HTTPBridgeRetryCircuitGeneration | None = None
+        verified_stale_anchor_claimed_generation: int | None = None
+        verified_stale_anchor_claimed_at_epoch: float | None = None
+        verified_stale_anchor_claimed_until_epoch: float | None = None
+        verified_stale_anchor_claimed_attempt_count = 0
+        verified_stale_anchor_claimed_key: _HTTPBridgeSessionKey | None = None
+        verified_stale_anchor_claim_transfer_pending = False
         verified_stale_anchor_quarantine_generation: int | None = None
 
         def durable_full_resend_retains_required_context() -> bool:
@@ -3231,6 +3239,102 @@ class _HTTPBridgeStreamingMixin:
                 verified_stale_anchor_generation_captured = True
                 verified_stale_anchor_circuit_key = recovery_session.key
 
+            def capture_and_detach_verified_stale_anchor_claim_receipt(
+                recovery_request_state: _WebSocketRequestState,
+            ) -> None:
+                nonlocal verified_stale_anchor_claimed_key
+                nonlocal verified_stale_anchor_claimed_generation
+                nonlocal verified_stale_anchor_claimed_at_epoch
+                nonlocal verified_stale_anchor_claimed_until_epoch
+                nonlocal verified_stale_anchor_claimed_attempt_count
+                nonlocal verified_stale_anchor_claim_transfer_pending
+
+                verified_stale_anchor_claimed_key = recovery_request_state.verified_stale_anchor_retry_circuit_key
+                verified_stale_anchor_claimed_generation = (
+                    recovery_request_state.verified_stale_anchor_retry_circuit_claimed_generation
+                )
+                verified_stale_anchor_claimed_at_epoch = (
+                    recovery_request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch
+                )
+                verified_stale_anchor_claimed_until_epoch = (
+                    recovery_request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch
+                )
+                verified_stale_anchor_claimed_attempt_count = (
+                    recovery_request_state.verified_stale_anchor_retry_circuit_claimed_attempt_count
+                )
+                # Session reset settles pending request states. Detach the
+                # receipt first so that terminal cleanup cannot release a
+                # marker whose ownership is being transferred to the retry.
+                recovery_request_state.verified_stale_anchor_retry_circuit_claimed_generation = None
+                recovery_request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch = None
+                recovery_request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch = None
+                recovery_request_state.verified_stale_anchor_retry_circuit_claimed_attempt_count = 0
+                verified_stale_anchor_claim_transfer_pending = verified_stale_anchor_claimed_generation is not None
+
+            async def restore_detached_verified_stale_anchor_claim_receipt() -> None:
+                """Restore and release a receipt when recovery setup aborts.
+
+                The source request is deliberately detached before session
+                reset so terminal cleanup cannot release a marker that should
+                move to the replay. If reset or replay setup fails before that
+                transfer completes, put the receipt back on the source and
+                use the normal bounded release/retry path instead of leaving a
+                durable lease stranded until expiry.
+                """
+                nonlocal verified_stale_anchor_claim_transfer_pending
+
+                if not verified_stale_anchor_claim_transfer_pending:
+                    return
+                verified_stale_anchor_claim_transfer_pending = False
+                if verified_stale_anchor_claimed_generation is None:
+                    return
+
+                request_state.verified_stale_anchor_retry_circuit_key = verified_stale_anchor_claimed_key
+                request_state.verified_stale_anchor_retry_circuit_claimed_generation = (
+                    verified_stale_anchor_claimed_generation
+                )
+                request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch = (
+                    verified_stale_anchor_claimed_at_epoch
+                )
+                request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch = (
+                    verified_stale_anchor_claimed_until_epoch
+                )
+                request_state.verified_stale_anchor_retry_circuit_claimed_attempt_count = (
+                    verified_stale_anchor_claimed_attempt_count
+                )
+                try:
+                    released = await self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(
+                        request_state
+                    )
+                except BaseException:
+                    logger.warning(
+                        "Failed to release restored HTTP bridge retry-circuit admission claim after recovery "
+                        "setup failure "
+                        "request_id=%s",
+                        request_state.request_id,
+                        exc_info=True,
+                    )
+                    released = False
+                if not released:
+                    _schedule_http_bridge_retry_circuit_admission_claim_release_retry(self, request_state)
+
+            async def reset_stale_anchor_session_for_replay(
+                recovery_session: "_HTTPBridgeSession",
+                recovery_request_state: _WebSocketRequestState,
+            ) -> None:
+                capture_and_detach_verified_stale_anchor_claim_receipt(recovery_request_state)
+                try:
+                    await reset_previous_response_recovery_operation_spool(recovery_session, recovery_request_state)
+                    await self._reset_http_bridge_session_after_local_terminal_error(
+                        recovery_session,
+                        error_code="stream_incomplete",
+                        error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
+                    )
+                except BaseException:
+                    with anyio.CancelScope(shield=True):
+                        await restore_detached_verified_stale_anchor_claim_receipt()
+                    raise
+
             def capture_verified_stale_anchor_quarantine_generation(
                 recovery_session: "_HTTPBridgeSession",
             ) -> None:
@@ -3618,12 +3722,7 @@ class _HTTPBridgeStreamingMixin:
             elif previous_response_rejected_full_resend:
                 await capture_verified_stale_anchor_circuit_generation(session)
                 capture_verified_stale_anchor_quarantine_generation(session)
-                await reset_previous_response_recovery_operation_spool(session, request_state)
-                await self._reset_http_bridge_session_after_local_terminal_error(
-                    session,
-                    error_code="stream_incomplete",
-                    error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
-                )
+                await reset_stale_anchor_session_for_replay(session, request_state)
                 switch_to_account_neutral_replay(
                     event="previous_response_recover_fresh_resend",
                     detail="outcome=stale_anchor_rejected_account_neutral_replay",
@@ -3667,12 +3766,7 @@ class _HTTPBridgeStreamingMixin:
                     f"stale-owner-replay:{uuid4().hex}",
                     bridge_session_key.api_key_id,
                 )
-                await reset_previous_response_recovery_operation_spool(session, request_state)
-                await self._reset_http_bridge_session_after_local_terminal_error(
-                    session,
-                    error_code="stream_incomplete",
-                    error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
-                )
+                await reset_stale_anchor_session_for_replay(session, request_state)
                 recovery_path = "local_previous_response_same_owner_fresh_replay"
                 retry_previous_response_id = None
                 retry_request_stage = "stale_anchor_recover"
@@ -3840,6 +3934,8 @@ class _HTTPBridgeStreamingMixin:
                         continue
                     break
             except BaseException:
+                with anyio.CancelScope(shield=True):
+                    await restore_detached_verified_stale_anchor_claim_receipt()
                 raise
             _record_bridge_reattach(path=recovery_path, outcome="success")
 
@@ -3895,6 +3991,21 @@ class _HTTPBridgeStreamingMixin:
                     retry_request_state.verified_stale_anchor_quarantine_generation = (
                         verified_stale_anchor_quarantine_generation
                     )
+                if verified_stale_anchor_claimed_generation is not None:
+                    retry_request_state.verified_stale_anchor_retry_circuit_key = verified_stale_anchor_claimed_key
+                    retry_request_state.verified_stale_anchor_retry_circuit_claimed_generation = (
+                        verified_stale_anchor_claimed_generation
+                    )
+                    retry_request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch = (
+                        verified_stale_anchor_claimed_at_epoch
+                    )
+                    retry_request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch = (
+                        verified_stale_anchor_claimed_until_epoch
+                    )
+                    retry_request_state.verified_stale_anchor_retry_circuit_claimed_attempt_count = (
+                        retry_request_state.response_create_attempt_count
+                    )
+                    verified_stale_anchor_claim_transfer_pending = False
                 # Keep the durable operation identity attached to the
                 # server-owned recovery attempt. Re-registering the same
                 # fingerprint would be interpreted as an already-dispatched
@@ -3980,6 +4091,8 @@ class _HTTPBridgeStreamingMixin:
                     except Exception:
                         pass
             except BaseException:
+                with anyio.CancelScope(shield=True):
+                    await restore_detached_verified_stale_anchor_claim_receipt()
                 if retry_reservation_reacquired and retry_api_key_reservation is not None:
                     retry_lifecycle = (
                         retry_request_state.deferred_account_backoff_lifecycle

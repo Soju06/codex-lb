@@ -9,6 +9,8 @@ class _WebSocketServiceProtocol(Protocol):
     _acquire_account_response_create_lease_or_overload: Any
     _acquire_request_state_response_create_admission: Any
     _cancel_request_state_api_key_reservation_heartbeat: Any
+    _clear_http_bridge_retry_circuit_admission_claim_for_request: Any
+    _clear_http_bridge_retry_circuit_admission_claim_for_request_bounded: Any
     _connect_proxy_websocket: Any
     _decide_websocket_failover_action: Any
     _downstream_websocket_is_idle: Any

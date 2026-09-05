@@ -358,9 +358,11 @@ def test_http_bridge_local_resets_do_not_blame_the_upstream() -> None:
 
     reset_call = "await self._reset_http_bridge_session_after_local_terminal_error("
     call_count = source.count(reset_call)
-    # Pinned to the number of local-reset call sites on current main so a new
-    # site that reintroduces upstream-blaming wording cannot slip in unnoticed.
-    assert call_count == 5
+    # The stale-anchor replay path delegates through a local helper, so only
+    # the helper body and the remaining direct paths contain the reset call.
+    # Keep both counts pinned so a new path cannot bypass the local message.
+    assert call_count == 4
+    assert source.count("await reset_stale_anchor_session_for_replay(") == 2
     for chunk in source.split(reset_call)[1:]:
         call_body = chunk.split(")\n", 1)[0]
         assert "_HTTP_BRIDGE_LOCAL_RESET_MESSAGE" in call_body

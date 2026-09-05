@@ -362,6 +362,26 @@ def _retire_http_bridge_denied_anchor_predecessors_after_durable_clear(
     _prune_http_bridge_denied_anchor_fences(service)
 
 
+def _http_bridge_background_cleanup_tasks(service: Any) -> set[asyncio.Task[Any]]:
+    tasks = {
+        task
+        for task in service._background_cleanup_tasks
+        if not task.done()
+        and task.get_name().startswith(
+            (
+                "proxy-http_bridge_session_close-",
+                "http-bridge-close-",
+                "cancelled-task-cleanup-",
+                "http-bridge-retry-circuit-",
+            )
+        )
+    }
+    abandoned_tasks = getattr(service, "_http_bridge_retry_circuit_abandoned_tasks", None)
+    if abandoned_tasks is not None:
+        tasks.update(task for task in abandoned_tasks if not task.done())
+    return tasks
+
+
 def _schedule_http_bridge_background_cleanup(
     service: Any,
     awaitable: Coroutine[Any, Any, Any],

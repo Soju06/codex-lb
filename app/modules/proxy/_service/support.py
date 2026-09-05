@@ -933,6 +933,22 @@ class _HTTPBridgeRetryCircuitAttemptSelection:
         return len(self.attempts) > 1
 
 
+@dataclass(frozen=True, slots=True)
+class _HTTPBridgeRetryCircuitGeneration:
+    """Immutable retry-circuit snapshot used to fence stale-anchor replay."""
+
+    admission_generation: int
+    persisted_updated_at_epoch: float
+    persisted_consecutive_failures: int
+    durable_cooldown_until_epoch: float
+    local_consecutive_failures: int
+    last_failure_monotonic: float
+    local_cooldown_until: float
+    admission_claimed_at_epoch: float | None = None
+    admission_claimed_generation: int | None = None
+    admission_claimed_until_epoch: float | None = None
+
+
 @dataclass
 class _WebSocketRequestState:
     request_id: str
@@ -1079,7 +1095,19 @@ class _WebSocketRequestState:
     # circuit existed; a newer local/durable failure must suppress submit.
     verified_stale_anchor_retry_circuit_generation_captured: bool = False
     verified_stale_anchor_retry_circuit_key: _HTTPBridgeSessionKey | None = None
-    verified_stale_anchor_retry_circuit_generation: tuple[int, float, int, float, int, float, float] | None = None
+    verified_stale_anchor_retry_circuit_generation: _HTTPBridgeRetryCircuitGeneration | None = None
+    # Durable generation written by the one-shot stale-anchor claim. The
+    # marker is released only after this request reaches terminal settlement
+    # (or a proven pre-dispatch cleanup path).
+    verified_stale_anchor_retry_circuit_claimed_generation: int | None = None
+    verified_stale_anchor_retry_circuit_claimed_at_epoch: float | None = None
+    verified_stale_anchor_retry_circuit_claimed_until_epoch: float | None = None
+    # ``response_create_attempt_count`` is the send fence for pre-dispatch
+    # cleanup.  Capture it when the claim is installed so an ambiguous send
+    # cannot be mistaken for a setup failure merely because no operation ID
+    # was available to mark dispatched.
+    verified_stale_anchor_retry_circuit_claimed_attempt_count: int = 0
+    retry_circuit_claim_release_retry_scheduled: bool = False
     verified_stale_anchor_quarantine_generation: int | None = None
     # The exact half-open lease this request's admission claimed (0.0 when
     # it claimed none); released by the submit finalizer whenever the probe

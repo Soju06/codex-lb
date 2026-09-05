@@ -108,7 +108,9 @@ from app.modules.proxy._service.http_bridge.retry_circuit import (
     _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
     _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
     _POISON_ANCHOR_CAPTURE_UNAVAILABLE,
+    _http_bridge_retry_circuit_claim_timeout_seconds,
     _http_bridge_retry_circuit_suppression_message,
+    _schedule_http_bridge_retry_circuit_admission_claim_release_retry,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _call_with_supported_optional_kwargs,
@@ -1149,8 +1151,9 @@ class _HTTPBridgeRequestSubmitMixin:
         # is cooling down.  Gate new submissions before any reconnect/send so
         # the circuit turns this into a bounded 503 instead of another
         # response.create attempt.  A proof-gated full resend remains allowed
-        # because it is the client's own replay-safe request, not an opaque
-        # continuation replay.
+        # when the retry-circuit state is known because it is the client's
+        # own replay-safe request, not an opaque continuation replay.  An
+        # uncertain stale purge still fails closed before any bypass applies.
         allow_proof_gated_continuity_replay = bool(
             request_state.previous_response_id is not None
             and request_state.fresh_upstream_request_is_retry_safe
@@ -2291,19 +2294,40 @@ class _HTTPBridgeRequestSubmitMixin:
                     ):
                         circuit_key = request_state.verified_stale_anchor_retry_circuit_key
                         claim_outcome: bool | None = False
+                        claim_receipt: dict[str, Any] = {}
                         if circuit_key is not None:
                             claim_outcome = await self._claim_http_bridge_retry_circuit_generation(
                                 key=circuit_key,
                                 captured=request_state.verified_stale_anchor_retry_circuit_generation_captured,
                                 generation=request_state.verified_stale_anchor_retry_circuit_generation,
+                                deadline=request_state.bridge_request_deadline,
+                                claim_receipt=claim_receipt,
                             )
                         generation_claimed = claim_outcome is True
+                        if generation_claimed:
+                            captured_generation = request_state.verified_stale_anchor_retry_circuit_generation
+                            claimed_generation = claim_receipt.get("generation")
+                            if claimed_generation is None:
+                                claimed_generation = (
+                                    captured_generation.admission_generation if captured_generation is not None else 0
+                                ) + 1
+                            request_state.verified_stale_anchor_retry_circuit_claimed_generation = claimed_generation
+                            request_state.verified_stale_anchor_retry_circuit_claimed_at_epoch = claim_receipt.get(
+                                "claimed_at_epoch"
+                            )
+                            request_state.verified_stale_anchor_retry_circuit_claimed_until_epoch = claim_receipt.get(
+                                "claimed_until_epoch"
+                            )
+                            request_state.verified_stale_anchor_retry_circuit_claimed_attempt_count = (
+                                request_state.response_create_attempt_count
+                            )
                         if not generation_claimed:
                             remote_probe_holds_lease = False
                             if claim_outcome is False and circuit_key is not None:
                                 remote_probe_holds_lease = await self._http_bridge_claim_miss_shows_remote_probe(
                                     circuit_key,
                                     request_state.verified_stale_anchor_retry_circuit_generation,
+                                    deadline=request_state.bridge_request_deadline,
                                 )
                             # The block lives on the source hard key: this
                             # replacement session's own unique key never has a
@@ -2315,6 +2339,7 @@ class _HTTPBridgeRequestSubmitMixin:
                             ) = await self._http_bridge_precreated_retry_block_for_key(
                                 circuit_key or session.key,
                                 assume_remote_half_open_lease=remote_probe_holds_lease,
+                                deadline=request_state.bridge_request_deadline,
                             )
                             suppressed_retry_after_seconds = max(1, math.ceil(suppressed_block_seconds))
                             _log_http_bridge_event(
@@ -2794,6 +2819,16 @@ class _HTTPBridgeRequestSubmitMixin:
         counted_in_queue: bool,
         admission_waiter_registered: bool = False,
     ) -> None:
+        claimed_generation = request_state.verified_stale_anchor_retry_circuit_claimed_generation
+        claim_key = request_state.verified_stale_anchor_retry_circuit_key
+        release_pre_dispatch_claim = (
+            claimed_generation is not None
+            and claim_key is not None
+            and not request_state.recovery_attempt_dispatched
+            and not request_state.operation_dispatched
+            and request_state.response_create_attempt_count
+            == request_state.verified_stale_anchor_retry_circuit_claimed_attempt_count
+        )
         retire_closed_session = False
         async with session.pending_lock:
             if request_enqueued and request_state in session.pending_requests:
@@ -2804,6 +2839,54 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
                 request_state.admission_waiter_preregistered = False
             retire_closed_session = session.closed and session.admission_waiter_count == 0
+        cleanup_error: BaseException | None = None
+        claim_release_cancellation: asyncio.CancelledError | None = None
+        try:
+            self._cancel_request_state_api_key_reservation_heartbeat(request_state)
+            if request_state.response_create_gate is not None:
+                if gate_acquired or request_state.response_create_gate_acquired:
+                    await _release_websocket_response_create_gate(request_state, session.response_create_gate)
+                else:
+                    account_response_create_lease = request_state.account_response_create_lease
+                    account_response_create_release = request_state.account_response_create_release
+                    request_state.account_response_create_lease = None
+                    request_state.account_response_create_release = None
+                    if account_response_create_lease is not None and account_response_create_release is not None:
+                        await account_response_create_release(account_response_create_lease)
+                    if request_state.response_create_admission is not None:
+                        request_state.response_create_admission.release()
+                        request_state.response_create_admission = None
+                    request_state.awaiting_response_created = False
+                    request_state.response_create_gate = None
+                    request_state.response_create_gate_acquired = False
+            elif gate_acquired:
+                await _release_websocket_response_create_gate(request_state, session.response_create_gate)
+        except BaseException as exc:
+            cleanup_error = exc
+            raise
+        finally:
+            if release_pre_dispatch_claim:
+                claim_released = False
+                release_task = asyncio.create_task(
+                    self._clear_http_bridge_retry_circuit_admission_claim_for_request_bounded(request_state),
+                    name=f"http-bridge-retry-circuit-submit-cleanup-{request_state.request_id}",
+                )
+                try:
+                    released, claim_release_cancellation = await _await_task_deferring_cancellation(release_task)
+                    claim_released = released is True
+                except BaseException as exc:
+                    if isinstance(exc, asyncio.CancelledError):
+                        claim_release_cancellation = exc
+                    logger.warning(
+                        "Failed to release HTTP bridge retry-circuit admission claim during submit cleanup "
+                        "request_id=%s",
+                        request_state.request_id,
+                        exc_info=True,
+                    )
+                if not claim_released:
+                    _schedule_http_bridge_retry_circuit_admission_claim_release_retry(self, request_state)
+            if claim_release_cancellation is not None and cleanup_error is None:
+                raise claim_release_cancellation
         if (
             request_state.recovery_attempt_fingerprint is not None
             and not request_state.recovery_attempt_claimed
@@ -2905,25 +2988,6 @@ class _HTTPBridgeRequestSubmitMixin:
                         request_state.operation_id = None
                         request_state.operation_fingerprint = None
                         request_state.operation_parent_response_id = None
-        self._cancel_request_state_api_key_reservation_heartbeat(request_state)
-        if request_state.response_create_gate is not None:
-            if gate_acquired or request_state.response_create_gate_acquired:
-                await _release_websocket_response_create_gate(request_state, session.response_create_gate)
-            else:
-                account_response_create_lease = request_state.account_response_create_lease
-                account_response_create_release = request_state.account_response_create_release
-                request_state.account_response_create_lease = None
-                request_state.account_response_create_release = None
-                if account_response_create_lease is not None and account_response_create_release is not None:
-                    await account_response_create_release(account_response_create_lease)
-                if request_state.response_create_admission is not None:
-                    request_state.response_create_admission.release()
-                    request_state.response_create_admission = None
-                request_state.awaiting_response_created = False
-                request_state.response_create_gate = None
-                request_state.response_create_gate_acquired = False
-        elif gate_acquired:
-            await _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if retire_closed_session:
             await self._retire_stale_pending_http_bridge_session(
                 session,
@@ -3428,6 +3492,8 @@ class _HTTPBridgeRequestSubmitMixin:
         self: Any,
         circuit_key: Any,
         captured_generation: Any,
+        *,
+        deadline: float | None = None,
     ) -> bool:
         """Whether a claim CAS miss actually means a probe holds the lease.
 
@@ -3438,14 +3504,28 @@ class _HTTPBridgeRequestSubmitMixin:
         timer the fresh row actually carries instead of a 600-second wait no
         probe owns.
         """
-        captured_admission_generation = captured_generation[0] if captured_generation else 0
-        captured_lineage_epoch = captured_generation[1] if captured_generation else 0.0
+        captured_admission_generation = (
+            captured_generation.admission_generation if captured_generation is not None else 0
+        )
+        captured_lineage_epoch = (
+            captured_generation.persisted_updated_at_epoch if captured_generation is not None else 0.0
+        )
+        lookup_timeout_seconds = _http_bridge_retry_circuit_claim_timeout_seconds(deadline)
+        if lookup_timeout_seconds is None:
+            return False
         try:
-            moved_row = await self._durable_bridge.lookup_retry_circuit(
-                session_key_kind=circuit_key.affinity_kind,
-                session_key_value=circuit_key.affinity_key,
-                api_key_id=circuit_key.api_key_id,
+            lookup = await self._await_http_bridge_retry_circuit_call(
+                self._durable_bridge.lookup_retry_circuit(
+                    session_key_kind=circuit_key.affinity_kind,
+                    session_key_value=circuit_key.affinity_key,
+                    api_key_id=circuit_key.api_key_id,
+                ),
+                timeout=lookup_timeout_seconds,
+                label="claim-miss-probe-lookup",
             )
+            if not lookup.completed:
+                return False
+            moved_row = lookup.value
         except Exception:
             return False
         return bool(

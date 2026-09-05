@@ -148,7 +148,8 @@ async def test_concurrent_dispatches_keep_one_durable_owner(async_client):
         assert set(owners) == {a, b}
 
 
-async def test_partial_history_failure_cancels_sibling_and_returns_no_partial_result(async_client, monkeypatch):
+@pytest.mark.parametrize("status", [None, 502, 503])
+async def test_partial_history_failure_cancels_sibling_and_returns_no_partial_result(async_client, monkeypatch, status):
     a, b, headers, key = await setup_pool(async_client)
     await record_context_dispatch(envelope(), key, a)
     await record_context_dispatch(envelope(), key, b)
@@ -158,6 +159,8 @@ async def test_partial_history_failure_cancels_sibling_and_returns_no_partial_re
     async def upstream(path, **kwargs):
         if kwargs["account_id"] == "context-a":
             await sibling_started.wait()
+            if status is not None:
+                raise ProxyResponseError(status, {"error": {"message": "private-history-error"}})
             raise RuntimeError("private-history-error")
         sibling_started.set()
         try:
@@ -169,7 +172,7 @@ async def test_partial_history_failure_cancels_sibling_and_returns_no_partial_re
     r = await async_client.post(
         "/backend-api/codex/alpha/history/v2/list_items", json={"context": CONTEXT}, headers=headers
     )
-    assert r.status_code == 503
+    assert r.status_code == (status or 503)
     assert sibling_finished.is_set()
     assert "private-history-error" not in r.text
 
@@ -194,6 +197,10 @@ async def test_http_responses_dispatch_is_recorded(async_client, monkeypatch):
 
     async def stream(*args, **kwargs):
         seen.append(args[0].to_payload())
+        async with SessionLocal() as session:
+            binding = await session.get(CodexContextSession, SID)
+            assert binding is not None and binding.api_key_id == key.id
+            assert await session.scalar(select(CodexContextParticipant.account_id)) is None
         yield 'data: {"type":"response.completed","response":{"id":"resp_ctx","status":"completed","output":[]}}\n\n'
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", stream)
@@ -205,6 +212,7 @@ async def test_http_responses_dispatch_is_recorded(async_client, monkeypatch):
         assert row is not None and row.api_key_id == key.id and row.owner_account_id in [a, b], [
             x.get("client_metadata") for x in seen
         ]
+        assert await session.scalar(select(CodexContextParticipant.account_id)) == row.owner_account_id
 
 
 async def test_history_envelope_rejects_tampering_and_cross_scope(async_client):
@@ -359,6 +367,7 @@ def test_context_dispatch_and_ciphertext_expansion_on_websocket_transports(
     from fastapi.testclient import TestClient
     from httpx import ASGITransport, AsyncClient
 
+    import app.modules.proxy._service.websocket.mixin as websocket_module
     from app.dependencies import get_proxy_service_for_app
     from app.modules.proxy.context_codec import HistoryPartition, pack_history
     from tests.integration.test_http_responses_bridge import (
@@ -371,10 +380,31 @@ def test_context_dispatch_and_ciphertext_expansion_on_websocket_transports(
         async with AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as client:
             return await setup_pool(client)
 
+    dispatch_states = []
+    bind_owner = websocket_module._bind_websocket_request_dispatch_owner
+
+    def track_owner(state, **kwargs):
+        result = bind_owner(state, **kwargs)
+        dispatch_states.append(state)
+        return result
+
+    async def persist_context(*args, **kwargs):
+        state = dispatch_states[-1]
+        assert state.response_create_sent_at is None
+        await asyncio.sleep(0)
+        assert state.response_create_sent_at is None
+        await record_context_dispatch(*args, **kwargs)
+
+    if transport == "websocket":
+        monkeypatch.setattr(websocket_module, "_bind_websocket_request_dispatch_owner", track_owner)
+        monkeypatch.setattr(websocket_module, "record_context_dispatch", persist_context)
+
     class Upstream(_FakeBridgeUpstreamWebSocket):
         reject = False
 
         async def send_text(self, text):
+            if transport == "websocket":
+                assert dispatch_states[-1].response_create_sent_at is not None
             async with SessionLocal() as session:
                 row = await session.get(CodexContextSession, SID)
                 assert row is not None and row.api_key_id == key.id
@@ -443,3 +473,39 @@ def test_context_dispatch_and_ciphertext_expansion_on_websocket_transports(
         if quota_rejection:
             assert len(second.sent_text) == 1
             assert connect.call_args_list[0].args[2] != connect.call_args_list[1].args[2]
+
+
+@pytest.mark.parametrize("startup_failure", ["error", "empty"])
+async def test_http_startup_failure_keeps_key_fence_without_history_participant(
+    async_client, monkeypatch, startup_failure
+):
+    _, _, headers, key = await setup_pool(async_client)
+    calls = []
+
+    async def stream(*args, **kwargs):
+        calls.append(args[3])
+        async with SessionLocal() as session:
+            binding = await session.get(CodexContextSession, SID)
+            assert binding is not None and binding.api_key_id == key.id
+        if startup_failure == "error":
+            raise ProxyResponseError(400, {"error": {"code": "invalid_request_error", "message": "startup failed"}})
+        return
+        yield  # This upstream starts but never yields an event.
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", stream)
+    response = await async_client.post("/backend-api/codex/responses", headers=headers, json=envelope())
+    if startup_failure == "error":
+        assert response.status_code == 400
+    else:
+        assert response.status_code == 200
+        assert "stream_incomplete" in response.text
+    assert calls
+    async with SessionLocal() as session:
+        binding = await session.get(CodexContextSession, SID)
+        assert binding is not None and binding.api_key_id == key.id
+        assert (await session.scalars(select(CodexContextParticipant))).all() == []
+    other = await _context_key(async_client, [])
+    count = len(calls)
+    response = await async_client.post("/backend-api/codex/responses", headers=other, json=envelope())
+    assert response.status_code == 403
+    assert len(calls) == count

@@ -2696,10 +2696,15 @@ class _WebSocketMixin:
                                         error_type="server_error",
                                     ),
                                 )
-                            request_state.response_create_sent_at = time.monotonic()
                         with _websocket_archive_request_context(archive_request_id):
                             if account is not None:
                                 await record_context_dispatch(text_data, api_key, account.id)
+                            if (
+                                request_state is not None
+                                and payload is not None
+                                and _is_websocket_response_create(payload)
+                            ):
+                                request_state.response_create_sent_at = time.monotonic()
                             await upstream.send_text(text_data)
                 except ProxyResponseError as exc:
                     error = _parse_openai_error(exc.payload)

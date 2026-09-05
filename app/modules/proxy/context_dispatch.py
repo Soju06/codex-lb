@@ -11,8 +11,13 @@ from app.modules.proxy.context_repository import ContextRepository
 
 
 async def record_context_dispatch(
-    payload: Mapping[str, JsonValue] | str, api_key: ApiKeyData | None, account_id: str
+    payload: Mapping[str, JsonValue] | str,
+    api_key: ApiKeyData | None,
+    account_id: str,
+    *,
+    record_participant: bool = True,
 ) -> None:
+    """Fence session ownership before dispatch, optionally recording participation."""
     if api_key is None:
         return
     if isinstance(payload, str):
@@ -30,5 +35,9 @@ async def record_context_dispatch(
             if await ContextRepository(session).get(session_id, api_key.id) is None:
                 return
     async with sqlite_writer_section(), SessionLocal() as session:
-        await ContextRepository(session).record(session_id, api_key.id, account_id)
+        repository = ContextRepository(session)
+        if record_participant:
+            await repository.record(session_id, api_key.id, account_id)
+        else:
+            await repository.bind(session_id, api_key.id, account_id)
         await session.commit()

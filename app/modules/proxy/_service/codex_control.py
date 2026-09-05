@@ -387,8 +387,15 @@ class _ContextManagementMixin:
                     raise context_error("context_result_invalid", 502)
                 return HistoryPartition(account_id=account_id, result=result)
 
-            async with asyncio.TaskGroup() as group:
-                tasks = [group.create_task(partition(account_id)) for account_id in account_ids]
+            try:
+                async with asyncio.TaskGroup() as group:
+                    tasks = [group.create_task(partition(account_id)) for account_id in account_ids]
+            except ExceptionGroup as exc:
+                # TaskGroup has already cancelled and awaited the other partitions.
+                for error in exc.exceptions:
+                    if isinstance(error, ProxyResponseError):
+                        raise error from None
+                raise
             return CodexControlResponse(
                 status_code=200,
                 body=pack_history(api_key.id, sid, [task.result() for task in tasks]),

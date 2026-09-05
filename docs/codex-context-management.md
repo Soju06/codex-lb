@@ -58,7 +58,7 @@ Automated tests cover opaque route dispatch, HTTP streaming, HTTP bridging, nati
 
 Preserve both the database and existing `encryption.key`. Startup migrations create the ownership tables automatically. Replicas must share both to read the same context. Transparent retries through cross-replica forwarding and restored durable request state remain unverified and may preserve account ownership rather than rotate. The live restart test resumed through the normal client request path.
 
-A missing or invalid key returns `401`. Context requests return `409` if global API-key authentication is disabled, `403` for identity/scope conflicts, and `503` for an unavailable owner or incomplete history query. Their error bodies use the generic code `context_backend_unavailable` to avoid exposing private upstream details. Invalid Responses containers produce `400` or `403` with `context_result_invalid`.
+A missing or invalid key returns `401`. Context requests return `409` if global API-key authentication is disabled, `403` for identity/scope conflicts, and `503` for an unavailable owner or unexpected transport failure. Typed upstream and validation errors retain their HTTP status even when history spans multiple accounts. Their error bodies use the generic code `context_backend_unavailable` to avoid exposing private upstream details. Invalid Responses containers produce `400` or `403` with `context_result_invalid`.
 
 Timeouts and ambiguous writes are not retried. An explicit authentication rejection may refresh and retry once on the same owner. There is no account-to-account notes copy or new dashboard setting.
 

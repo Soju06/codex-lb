@@ -33,7 +33,7 @@ Context endpoints MUST authenticate a valid proxy API key. Global API-key authen
 - **THEN** the operation fails without replacing A or writing notes to B
 
 ### Requirement: Private context transport
-The proxy MUST NOT include context contents, private upstream error text, or credential-bearing header values in control-request diagnostics or upstream payload tracing. Native tool arguments and encrypted outputs MUST remain opaque. Context request logs SHALL contain generic operation status without payload content. Context endpoint failures SHALL use the generic OpenAI error code `context_backend_unavailable`, preserving a direct upstream HTTP failure status. Unexpected transport failures and failed multi-account history operations SHALL return a generic HTTP 503 response without partial results.
+The proxy MUST NOT include context contents, private upstream error text, or credential-bearing header values in control-request diagnostics or upstream payload tracing. Native tool arguments and encrypted outputs MUST remain opaque. Context request logs SHALL contain generic operation status without payload content. Context endpoint failures SHALL use the generic OpenAI error code `context_backend_unavailable`, preserving a direct upstream HTTP failure status. Typed upstream and validation failures SHALL retain their HTTP status for both single-account and multi-account history. Unexpected transport failures SHALL return a generic HTTP 503 response. Failed history operations MUST NOT return partial results.
 
 #### Scenario: Upstream echoes sensitive content in an error
 - **WHEN** an upstream failure contains private note text
@@ -44,7 +44,7 @@ The proxy MUST NOT include context contents, private upstream error text, or cre
 - **THEN** the proxy forwards both headers without decoding or reserializing the request body
 
 ### Requirement: Durable history participation
-Authenticated Responses with `reasoning.context=all_turns` and a canonical `client_metadata.session_id` SHALL record the selected account before HTTP, HTTP-bridge or native WebSocket dispatch. A rejected attempt MAY leave an empty history participant. Context calls MUST validate the root session UUID and current agent path and preserve child-agent query fields. History queries SHALL contact every recorded participant, or the notes owner when none exists, within the current key scope. Ownership and participant records MUST survive process restart and account/key deletion without retaining credentials or note bodies.
+Authenticated Responses with `reasoning.context=all_turns` and a canonical `client_metadata.session_id` SHALL bind session/API-key ownership before HTTP, HTTP-bridge or native WebSocket dispatch. HTTP streaming SHALL record participation after its first upstream event; startup failures or empty streams before that event MUST NOT add a participant. HTTP-bridge and native WebSocket participation SHALL persist before send. A rejected attempt after these observation boundaries MAY leave an empty history participant. Native WebSocket requests MUST set their sent timestamp immediately before send, without an intervening await. Context calls MUST validate the root session UUID and current agent path and preserve child-agent query fields. History queries SHALL contact every recorded participant, or the notes owner when none exists, within the current key scope. Ownership and participant records MUST survive process restart and account/key deletion without retaining credentials or note bodies.
 
 #### Scenario: Child recovers history after rotation
 - **GIVEN** accounts A and B have participated in the same root session
@@ -77,3 +77,12 @@ A rate-limited notes owner SHALL remain eligible for its context operations. A s
 #### Scenario: Ambiguous append failure
 - **WHEN** an append returns HTTP 500 or times out
 - **THEN** the proxy makes no duplicate append attempt and does not select another owner
+
+### Requirement: Migration owns only newly created context tables
+The context ownership migration MUST reject unexpected pre-existing context tables before creating either table. A rejected upgrade MUST preserve their rows and the previous Alembic revision. A successful upgrade SHALL support an idempotent upgrade-to-head and a downgrade/re-upgrade round trip.
+
+#### Scenario: One context table already exists
+- **GIVEN** either context table exists before the context ownership revision
+- **WHEN** the revision is applied
+- **THEN** it fails before creating the other table or changing the existing rows
+- **AND** it does not claim the revision

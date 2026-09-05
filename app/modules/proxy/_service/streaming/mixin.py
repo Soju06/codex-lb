@@ -582,7 +582,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             }
             if upstream_stream_transport is not None:
                 stream_optional_kwargs["upstream_stream_transport_override"] = upstream_stream_transport
-            await record_context_dispatch(payload.to_payload(), api_key, account.id)
+            await record_context_dispatch(payload.to_payload(), api_key, account.id, record_participant=False)
             stream = _facade()._call_stream_with_supported_optional_kwargs(
                 _facade().core_stream_responses,
                 payload,
@@ -629,6 +629,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
                 )
                 return
+            await record_context_dispatch(payload.to_payload(), api_key, account.id)
             response_create_lease.release()
             await proxy._load_balancer.release_account_lease(account_response_create_lease)
             account_response_create_lease = None

@@ -13,3 +13,7 @@ The database keeps ownership tombstones after account/key deletion so a session 
 Keep the database and existing `encryption.key` together across restarts. Replicas need the same database and encryption key to route context and unwrap stored tool results. Transparent replay through cross-replica forwarding or after restoring durable request state is not established: in-memory ciphertext verification evidence is deliberately not accepted from client JSON. Such paths may retain strict account ownership.
 
 `docs/codex-context-management.md` describes setup and failure behavior. Integration tests use disposable databases and simulated upstream responses. Live CLI checks used an isolated two-account pool, synthetic notes, a quota rejection injected before provider dispatch, and a proxy restart followed by `new_context` and history recovery.
+
+HTTP streaming binds session/API-key ownership before starting the upstream iterator, then records participation after the first event. A startup failure leaves the ownership fence intact without adding an unused history account. WebSocket persistence finishes before the sent timestamp is set; no database await separates that timestamp from send.
+
+The migration refuses pre-existing context tables before creating either one, so downgrade can only remove tables created by its successful upgrade. Historical test fixtures omit these new tables when simulating an older schema.

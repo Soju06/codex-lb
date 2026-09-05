@@ -41,13 +41,17 @@ Fidelity notes (each pinned by ``tests/simulation/test_virtual_time.py``):
   pending (Python 3.14 leaves their ``_clear_awaited_by_callback`` behind,
   the growth behind the 2026-08-30 event-loop livelock). A live shield
   carries both of its callbacks and counts as zero; the fan-out helper adds
-  none.
+  none. The oracle observes only on CPython 3.14+
+  (``ABANDONED_SHIELD_ORACLE_SUPPORTED``): 3.13's ``shield`` registers a
+  single callback and removes it when the outer is cancelled, so there is no
+  residue to count and the oracle reads zero whatever the code does.
 """
 
 from __future__ import annotations
 
 import asyncio
 import heapq
+import sys
 from collections.abc import Awaitable, Coroutine, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -62,6 +66,15 @@ T = TypeVar("T")
 # this distance of the target is due. Sequential ``sleep(0.1)`` calls otherwise
 # accumulate binary floating-point error past an ``advance(0.3)`` target.
 _DEADLINE_SLACK_SECONDS = 1e-9
+
+# ``asyncio.shield`` registers ``_clear_awaited_by_callback`` on the inner
+# future only from CPython 3.14 (task ``awaited_by`` introspection, the leak
+# behind the 2026-08-30 livelock). On 3.13 the outer's cancellation removes the
+# single ``_inner_done_callback`` again, so an abandoned shield leaves nothing to
+# count. CI's unit slice runs on 3.13 (``.github/workflows/ci.yml``) while the
+# production image is 3.14: assertions on the oracle's *count* are gated on this
+# flag, and the ``abandoned_shields`` invariant is vacuous where it is false.
+ABANDONED_SHIELD_ORACLE_SUPPORTED = sys.version_info >= (3, 14)
 
 
 @dataclass(slots=True)
@@ -124,7 +137,8 @@ def _abandoned_shield_callbacks(future: asyncio.Future[Any]) -> int:
     ``asyncio.shield`` registers ``_clear_awaited_by_callback`` and
     ``_inner_done_callback`` on the inner future; cancelling the outer removes
     only the latter, so the surplus of the former is the number of abandoned
-    attempts still holding a callback slot on the pending task.
+    attempts still holding a callback slot on the pending task. Always zero
+    before CPython 3.14 (see ``ABANDONED_SHIELD_ORACLE_SUPPORTED``).
     """
 
     names = [

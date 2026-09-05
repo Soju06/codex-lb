@@ -71,7 +71,7 @@ from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.websocket.helpers import _release_websocket_response_create_gate
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
-from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
+from tests.simulation.virtual_time import ABANDONED_SHIELD_ORACLE_SUPPORTED, VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.unit
 
@@ -658,7 +658,8 @@ class _ReshieldingLeaseReleaseBridgeTurn(_ProductionBridgeTurn):
     Each abandoned ``asyncio.shield`` attempt leaves one done callback behind
     on the still-pending inner task (Python 3.14), the growth pattern behind
     the 2026-08-30 event-loop livelock. The functional outcome is unaffected,
-    so only the abandoned-shield oracle sampled by the scheduler can reject it.
+    so only the abandoned-shield oracle sampled by the scheduler can reject it,
+    and only on an interpreter where the residue exists.
     """
 
     async def _release_account_create_lease(self, lease: object) -> None:
@@ -717,6 +718,8 @@ def _assert_bridge_turn_invariants(turn: _BridgeTurn, *, seed: int, schedule: Sc
     # No wait loop re-shielded a pending owned task: every cancelled shield
     # attempt leaves a callback behind on the still-pending task, the growth
     # behind the 2026-08-30 event-loop livelock. A live shield counts as zero.
+    # The oracle only observes on CPython 3.14+ (the residue does not exist on
+    # 3.13, where CI's unit slice runs), so this line is vacuous there.
     assert snapshot.abandoned_shield_callbacks == 0, violated("abandoned_shields")
 
 
@@ -827,6 +830,25 @@ async def test_bridge_turn_lifecycle_checker_catches_retry_reacquisition_canary(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    not ABANDONED_SHIELD_ORACLE_SUPPORTED,
+    reason="asyncio.shield leaves no callback residue before CPython 3.14; the oracle cannot see this canary",
+)
 async def test_bridge_turn_lifecycle_checker_catches_reshielded_release_canary() -> None:
     with pytest.raises(AssertionError, match=r"^violated=abandoned_shields "):
         await _check_schedules(_ReshieldingLeaseReleaseBridgeTurn)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(ABANDONED_SHIELD_ORACLE_SUPPORTED, reason="on CPython 3.14+ the canary is caught (test above)")
+async def test_bridge_turn_lifecycle_reshielded_release_canary_is_invisible_before_python_3_14() -> None:
+    """Documents the CI blind spot: on 3.13 the leak shape has no observable residue.
+
+    The functional invariants still hold for this canary, so the checker
+    accepts it; the production image runs 3.14, where the sibling test proves
+    the oracle rejects it.
+    """
+
+    snapshots = await _check_schedules(_ReshieldingLeaseReleaseBridgeTurn)
+
+    assert all(snapshot.abandoned_shield_callbacks == 0 for snapshot in snapshots)

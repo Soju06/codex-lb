@@ -20,7 +20,7 @@ from collections.abc import AsyncGenerator
 import anyio
 import pytest
 
-from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
+from tests.simulation.virtual_time import ABANDONED_SHIELD_ORACLE_SUPPORTED, VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.unit
 
@@ -557,7 +557,13 @@ async def test_drain_samples_pending_owned_task_callbacks() -> None:
 
 @pytest.mark.asyncio
 async def test_drain_counts_abandoned_shield_attempts_on_pending_owned_tasks() -> None:
-    """A live shield counts as zero; every cancelled outer left behind counts as one."""
+    """A live shield counts as zero; every cancelled outer left behind counts as one.
+
+    The residue exists only from CPython 3.14 (``_clear_awaited_by_callback``);
+    3.13's ``shield`` removes its single callback when the outer is cancelled.
+    Pinning ``0`` there keeps the platform assumption behind
+    ``ABANDONED_SHIELD_ORACLE_SUPPORTED`` honest in both directions.
+    """
 
     scheduler = _scheduler()
     blocked = asyncio.Event()
@@ -570,7 +576,7 @@ async def test_drain_counts_abandoned_shield_attempts_on_pending_owned_tasks() -
         asyncio.shield(task).cancel()
     await scheduler.drain()
 
-    assert scheduler.max_abandoned_shield_callbacks == 2
+    assert scheduler.max_abandoned_shield_callbacks == (2 if ABANDONED_SHIELD_ORACLE_SUPPORTED else 0)
     blocked.set()
     await task
     await live

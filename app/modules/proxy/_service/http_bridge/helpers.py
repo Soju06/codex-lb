@@ -38,7 +38,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
-from app.core.clock import REAL_SCHEDULER, Scheduler, scheduler_for
+from app.core.clock import REAL_SCHEDULER, Scheduler, clock_for, scheduler_for
 from app.core.config.settings import Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import (
@@ -383,7 +383,7 @@ def _schedule_http_bridge_background_cleanup(
         if inspect.iscoroutine(awaitable):
             awaitable.close()
         return None
-    task = asyncio.create_task(awaitable, name=name)
+    task = scheduler_for(service).create_task(awaitable, name=name)
     if attribute is not None:
         setattr(task, attribute[0], attribute[1])
     cleanup_tasks.add(task)
@@ -759,10 +759,6 @@ def _service_get_settings_cache() -> Any:
     return _service_global_or("get_settings_cache", get_settings_cache)()
 
 
-def _service_time() -> Any:
-    return _service_global_or("time", time)
-
-
 def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
     return cast(Callable[[Any | None], float], _service_global("_proxy_admission_wait_timeout_seconds"))(settings)
 
@@ -855,7 +851,7 @@ def _http_bridge_pending_count_nowait(
 
 
 def _cleanup_http_bridge_inflight_sessions_nowait(service: Any) -> dict[str, int]:
-    now = _service_time().monotonic()
+    now = clock_for(service).monotonic()
     stale_after_seconds = _http_bridge_stale_inflight_seconds()
     cleaned = 0
     stale = 0
@@ -1678,7 +1674,7 @@ async def _close_http_bridge_session(
                 if service._http_bridge_detached_sessions.get(id(session)) is session:
                     service._http_bridge_detached_sessions.pop(id(session), None)
 
-    ownership_task = asyncio.create_task(
+    ownership_task = scheduler_for(service).create_task(
         finalize_detached_ownership(),
         name=f"http-bridge-detached-finalize-{_hash_identifier(session.key.affinity_key)}",
     )
@@ -1747,6 +1743,7 @@ async def _close_http_bridge_session_bounded(
         await wait_on_shared_future(
             close_task,
             timeout=_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+            scheduler=scheduler_for(service),
         )
     except TimeoutError:
         track_after_interruption(interruption="timeout")
@@ -2708,17 +2705,7 @@ async def _await_cancelled_task(
     if cancel:
         task.cancel()
     try:
-        await scheduler.wait_for(asyncio.wait({task}), timeout=effective_timeout)
-    except TimeoutError:
-        logger.warning("Timed out waiting for %s cancellation", label)
-        _cancel_and_track_cancelled_task(
-            task,
-            label=label,
-            cleanup_tasks=cleanup_tasks,
-            cancel_task=False,
-            scheduler=scheduler,
-        )
-        return False
+        done, _ = await scheduler.wait({task}, timeout=effective_timeout)
     except asyncio.CancelledError:
         if not task.done():
             _cancel_and_track_cancelled_task(
@@ -2729,6 +2716,16 @@ async def _await_cancelled_task(
                 scheduler=scheduler,
             )
         raise
+    if task not in done:
+        logger.warning("Timed out waiting for %s cancellation", label)
+        _cancel_and_track_cancelled_task(
+            task,
+            label=label,
+            cleanup_tasks=cleanup_tasks,
+            cancel_task=False,
+            scheduler=scheduler,
+        )
+        return False
     try:
         task.result()
     except asyncio.CancelledError:
@@ -3127,7 +3124,7 @@ async def _reconcile_durable_http_bridge_ownership(service: _HTTPBridgeServicePr
 
     current_instance = _service_get_settings().http_responses_session_bridge_instance_id
     lease_ttl_seconds = _http_bridge_durable_lease_ttl_seconds()
-    now = _service_time().monotonic()
+    now = clock_for(service).monotonic()
     async with service._http_bridge_lock:
         candidates = [
             (key, session)

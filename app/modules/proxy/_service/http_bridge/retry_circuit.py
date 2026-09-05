@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
 import anyio
 
-from app.core.clock import clock_for
+from app.core.clock import clock_for, scheduler_for
 from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_circuit_total
 from app.modules.proxy._service.http_bridge.quarantine import (
@@ -345,7 +344,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 ):
                     return False
             try:
-                claimed = await asyncio.wait_for(
+                claimed = await scheduler_for(self).wait_for(
                     claim_generation(
                         session_key_kind=key.affinity_kind,
                         session_key_value=key.affinity_key,
@@ -401,14 +400,14 @@ class _HTTPBridgeRetryCircuitMixin:
                 state = self._http_bridge_retry_circuits.get(key)
                 if (
                     state is not None
-                    and time.monotonic() - state.last_durable_load_monotonic
+                    and clock_for(self).monotonic() - state.last_durable_load_monotonic
                     <= _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS
                 ):
                     return
             missed_at = self._http_bridge_retry_circuit_planning_misses.get(key)
             if (
                 missed_at is not None
-                and time.monotonic() - missed_at <= _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS
+                and clock_for(self).monotonic() - missed_at <= _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS
             ):
                 # A confirmed durable miss within the planning window: a row
                 # another replica created since is still enforced by the
@@ -1104,7 +1103,7 @@ class _HTTPBridgeRetryCircuitMixin:
                         # the stale-load guard compares against this value.
                         state.last_durable_load_monotonic = max(
                             state.last_durable_load_monotonic,
-                            time.monotonic(),
+                            clock_for(self).monotonic(),
                         )
             async with self._http_bridge_retry_circuit_lock:
                 if self._http_bridge_retry_circuits.get(session.key) is state:
@@ -1408,7 +1407,7 @@ class _HTTPBridgeRetryCircuitMixin:
             return 0.0, "none"
 
         await self._load_http_bridge_retry_circuit(session)
-        now = time.monotonic()
+        now = clock_for(self).monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
             if state is None:
@@ -1450,7 +1449,7 @@ class _HTTPBridgeRetryCircuitMixin:
         """
         if key.strength != "hard":
             return 0.0, "none"
-        now = time.monotonic()
+        now = clock_for(self).monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(key)
             local_cooldown_remaining = max(0.0, state.cooldown_until - now) if state is not None else 0.0
@@ -1671,7 +1670,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     prior_entry = _http_bridge_quarantine_registry(self).get(session.key)
                     if (
                         prior_entry is not None
-                        and prior_entry.quarantined_until > time.monotonic()
+                        and prior_entry.quarantined_until > clock_for(self).monotonic()
                         and prior_entry.reason != _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
                     ):
                         pre_arm_quarantine_reason = prior_entry.reason
@@ -1723,8 +1722,8 @@ class _HTTPBridgeRetryCircuitMixin:
             await self._persist_http_bridge_retry_circuit_serialized(
                 session,
                 state,
-                now_monotonic=time.monotonic(),
-                now_wall=time.time(),
+                now_monotonic=clock_for(self).monotonic(),
+                now_wall=clock_for(self).time(),
                 threshold=threshold,
             )
             merged_cooldown_remaining = 0.0
@@ -1768,7 +1767,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 # no-op except for the generation bump, which is the fence the
                 # verified stale-anchor replay claims at dispatch (#1863).
                 if self._http_bridge_retry_circuits.get(session.key) is state:
-                    merged_cooldown_remaining = max(0.0, state.cooldown_until - time.monotonic())
+                    merged_cooldown_remaining = max(0.0, state.cooldown_until - clock_for(self).monotonic())
                     # The persist merge adopted the returned row, so the
                     # verdict must come from the adopted detail and count,
                     # not the local strike's class: a clean_close losing to
@@ -1960,8 +1959,8 @@ class _HTTPBridgeRetryCircuitMixin:
         newer evidence.
         """
         key = session.key
-        now_wall = time.time()
-        now_monotonic = time.monotonic()
+        now_wall = clock_for(self).time()
+        now_monotonic = clock_for(self).monotonic()
         try:
             row = await self._durable_bridge.lookup_retry_circuit(
                 session_key_kind=key.affinity_kind,
@@ -2283,7 +2282,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 # to resurrect, and stamping every completed conversation
                 # would grow this map — and its global-lock prune scan —
                 # with every key the process ever serves.
-                self._http_bridge_retry_circuit_reconcile_watermarks[key] = time.monotonic()
+                self._http_bridge_retry_circuit_reconcile_watermarks[key] = clock_for(self).monotonic()
             expected_updated_at_epoch = (
                 state.persisted_updated_at_epoch if state is not None and state.persisted_updated_at_epoch > 0 else None
             )
@@ -2447,17 +2446,17 @@ class _HTTPBridgeRetryCircuitMixin:
                                     state.poison_anchor_cleared = False
                                     state.owed_poison_detail = None
                                 state.consecutive_failures = max(0, surviving.consecutive_failures)
-                                state.cooldown_until = time.monotonic() + max(
-                                    0.0, surviving.cooldown_until_epoch - time.time()
+                                state.cooldown_until = clock_for(self).monotonic() + max(
+                                    0.0, surviving.cooldown_until_epoch - clock_for(self).time()
                                 )
                                 state.last_detail = surviving.last_detail
-                                if state.cooldown_until > time.monotonic():
+                                if state.cooldown_until > clock_for(self).monotonic():
                                     state.half_open_until = 0.0
                                 state.persisted_updated_at_epoch = surviving.updated_at_epoch
                                 state.persisted_admission_generation = getattr(surviving, "admission_generation", 0)
                                 state.last_durable_load_monotonic = max(
                                     state.last_durable_load_monotonic,
-                                    time.monotonic(),
+                                    clock_for(self).monotonic(),
                                 )
                             self._http_bridge_retry_circuits[key] = state
                             self._http_bridge_retry_circuit_loaded_keys.add(key)
@@ -2493,7 +2492,7 @@ class _HTTPBridgeRetryCircuitMixin:
             # row. Strikes hold this key's lock for the whole settle, so any
             # state present here was resurrected by exactly such a load —
             # drop it with the same fence.
-            self._http_bridge_retry_circuit_reconcile_watermarks[key] = time.monotonic()
+            self._http_bridge_retry_circuit_reconcile_watermarks[key] = clock_for(self).monotonic()
             resurrected = self._http_bridge_retry_circuits.get(key)
             if resurrected is not None and resurrected is not state:
                 self._http_bridge_retry_circuits.pop(key, None)

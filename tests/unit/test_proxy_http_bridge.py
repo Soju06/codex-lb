@@ -74,7 +74,10 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeRetryCircuitSnapshot,
 )
 from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
-from app.modules.proxy.http_bridge_event_batcher import TerminalOperationEventAppendResult
+from app.modules.proxy.http_bridge_event_batcher import (
+    HttpBridgeOperationEventBatcher,
+    TerminalOperationEventAppendResult,
+)
 from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, CatalogOmissionQuotaAdmission
 from tests.unit.hypothesis_strategies import json_values as hypothesis_json_values
@@ -6123,6 +6126,81 @@ async def test_terminal_append_failure_retains_last_persisted_response_id_after_
 
     assert settle_terminal_event.await_args is not None
     assert settle_terminal_event.await_args.kwargs["expected_response_id"] == "resp-before-retry"
+
+
+@pytest.mark.asyncio
+async def test_stalled_terminal_spool_does_not_block_downstream_delivery() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-stalled-terminal-spool",
+        response_id="resp-stalled-terminal-spool",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.operation_id = "op-stalled-terminal-spool"
+    session = _make_bridge_session(key_value="stalled-terminal-spool")
+    session.durable_session_id = "durable-stalled-terminal-spool"
+    session.durable_owner_epoch = 4
+    append_cancelled = asyncio.Event()
+
+    async def append_terminal_operation_event(**kwargs: Any) -> bool:
+        del kwargs
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            append_cancelled.set()
+            raise
+        raise AssertionError("stalled terminal append unexpectedly resumed")
+
+    settlement_started = asyncio.Event()
+    release_settlement = asyncio.Event()
+
+    async def settle_terminal_append_failure(**kwargs: Any) -> bool:
+        del kwargs
+        settlement_started.set()
+        await release_settlement.wait()
+        return True
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            append_terminal_operation_event=append_terminal_operation_event,
+            settle_terminal_append_failure=settle_terminal_append_failure,
+        ),
+    )
+    service._http_bridge_operation_event_batcher = HttpBridgeOperationEventBatcher(
+        service._durable_bridge,
+        max_bytes=1024,
+        terminal_append_timeout_seconds=0.01,
+    )
+    event_block = 'data: {"type":"response.completed"}\n\n'
+
+    persist_task = asyncio.create_task(
+        http_bridge_upstream_events_module._persist_http_bridge_operation_event(
+            service,
+            session,
+            request_state,
+            event_block,
+            terminal=True,
+            terminal_state="completed",
+            terminal_event_queue=event_queue,
+        )
+    )
+
+    await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
+    assert append_cancelled.is_set()
+    assert await asyncio.wait_for(event_queue.get(), timeout=1.0) == event_block
+    assert await asyncio.wait_for(event_queue.get(), timeout=1.0) is None
+    assert persist_task.done() is False
+    release_settlement.set()
+    assert await asyncio.wait_for(persist_task, timeout=1.0) is True
 
 
 @pytest.mark.asyncio

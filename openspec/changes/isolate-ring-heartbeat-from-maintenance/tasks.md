@@ -10,7 +10,7 @@
 - [x] 2.2 Make heartbeat success, failure, timeout, late completion, and recovery flow through the supervised owner without overlapping heartbeat attempts; verify a blocked attempt ages the row out while a later successful upsert restores membership.
 - [x] 2.3 Move durable-ownership reconciliation (including stale-operation abandonment) and idle-session sweeping to separate bounded owners while preserving existing eligibility, fencing, and close behavior; verify a blocked or failed reconciliation neither delays heartbeat nor skips stale-operation cleanup or idle sweeping.
 - [x] 2.4 Move cap-partition refresh to its own bounded owner while preserving initial refresh, self-counting, last-known partition fallback, and hysteresis; verify blocked refresh does not delay heartbeat and is not invoked concurrently.
-- [x] 2.5 Update lifespan shutdown to cancel and drain every supervisor and phase child before `mark_stale()`, including shutdown during registration and during overdue maintenance; verify no periodic task remains untracked and no renewal occurs after stale-marking.
+- [x] 2.5 Update lifespan shutdown to cancel and drain every supervisor and phase child before `mark_stale()`, including shutdown during registration and during overdue maintenance; verify no periodic task remains untracked, no renewal occurs after stale-marking, and an unsettled owner suppresses the SQLite clean-shutdown marker.
 
 ## 3. Readiness and Heartbeat-Age Reporting
 
@@ -22,7 +22,7 @@
 ## 4. Product-Surface and Partial-Failure Regressions
 
 - [x] 4.1 Add a lifecycle regression that blocks each optional phase in turn for longer than the heartbeat interval and proves heartbeat timestamps continue advancing and unrelated phases remain schedulable.
-- [x] 4.2 Add bridge-owner and cap-partition partial-failure regressions proving each phase owns a distinct database session/task, unfinished work is not duplicated, and late completion is settled exactly once.
+- [x] 4.2 Add bridge-owner and cap-partition partial-failure regressions proving each phase owns a distinct database session/task, heartbeat pool admission remains available when the production-sized request pool is occupied, unfinished work is not duplicated, and late completion is settled exactly once.
 - [x] 4.3 Add shutdown regressions for cancellation during heartbeat, maintenance, and registration, verifying bounded drainage, task deregistration, and stale-row ordering.
 
 ## 5. Verification and Rollout Evidence

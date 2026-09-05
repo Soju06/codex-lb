@@ -844,9 +844,15 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dispose_failure", [False, True], ids=["clean-dispose", "failed-dispose"])
+@pytest.mark.parametrize(
+    "periodic_shutdown_failure",
+    [False, True],
+    ids=["periodic-drained", "periodic-owner-active"],
+)
 async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown(
     monkeypatch: pytest.MonkeyPatch,
     dispose_failure: bool,
+    periodic_shutdown_failure: bool,
 ):
     import app.core.startup as startup_module
     import app.main as main
@@ -883,6 +889,8 @@ async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown
 
     close_db = AsyncMock(side_effect=_close_db)
     register = AsyncMock()
+    heartbeat_session_factory = Mock(name="heartbeat_session_factory")
+    ring_session_factories: list[object] = []
 
     async def _register(instance_id: str, *, endpoint_base_url: str | None = None) -> None:
         assert startup_module._startup_complete is True
@@ -928,7 +936,13 @@ async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown
     monkeypatch.setattr(main, "build_api_key_limit_reset_scheduler", lambda: api_key_limit_reset_scheduler)
     monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
     monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
-    monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
+    monkeypatch.setattr(main, "get_background_session_factory", lambda: heartbeat_session_factory)
+
+    def _ring_membership_service(session_factory: object) -> SimpleNamespace:
+        ring_session_factories.append(session_factory)
+        return ring_service
+
+    monkeypatch.setattr(main, "RingMembershipService", _ring_membership_service)
     wait_for_reachable = AsyncMock()
     monkeypatch.setattr(main, "_wait_for_bridge_advertise_endpoint", wait_for_reachable)
     validate_advertise = AsyncMock()
@@ -942,6 +956,12 @@ async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown
         "app.modules.proxy.account_cache.get_routing_availability_cache",
         lambda: routing_availability_cache,
     )
+    if periodic_shutdown_failure:
+
+        async def _incomplete_bridge_shutdown(**_: object) -> tuple[bool, None]:
+            return False, None
+
+        monkeypatch.setattr(main, "_shutdown_bridge_ring_membership", _incomplete_bridge_shutdown)
 
     if dispose_failure:
         with pytest.raises(RuntimeError, match="dispose failed"):
@@ -954,17 +974,23 @@ async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown
             assert startup_module._startup_complete is True
 
     register.assert_awaited_once_with("pod-a", endpoint_base_url=None)
+    assert ring_session_factories == [heartbeat_session_factory, main.SessionLocal]
     wait_for_reachable.assert_not_awaited()
     validate_advertise.assert_not_awaited()
     ring_service.heartbeat.assert_not_awaited()
-    ring_service.mark_stale.assert_awaited_once_with(
-        "pod-a",
-        stale_threshold_seconds=main.RING_STALE_THRESHOLD_SECONDS,
-        grace_seconds=main.RING_STALE_GRACE_SECONDS,
-    )
+    if periodic_shutdown_failure:
+        ring_service.mark_stale.assert_not_awaited()
+    else:
+        ring_service.mark_stale.assert_awaited_once_with(
+            "pod-a",
+            stale_threshold_seconds=main.RING_STALE_THRESHOLD_SECONDS,
+            grace_seconds=main.RING_STALE_GRACE_SECONDS,
+        )
     ring_service.unregister.assert_not_called()
     cache_poller.stop.assert_awaited_once()
-    expected_events = ["close_db"] if dispose_failure else ["close_db", "mark_clean"]
+    expected_events = ["close_db"]
+    if not dispose_failure and not periodic_shutdown_failure:
+        expected_events.append("mark_clean")
     assert shutdown_events == expected_events
     # Shutdown must clear the process-global poller so bump_cache_invalidation
     # is a no-op (not a call through this test's fake) after lifespan exit.

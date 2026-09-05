@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Ring membership is maintained by periodic heartbeats
-Each registered replica MUST refresh its ring row via an upsert heartbeat every 10 seconds so sibling replicas observing the shared table converge on the same active-member view. Ring renewal MUST run under an independently supervised periodic owner and MUST NOT await durable-ownership reconciliation, idle-session sweeping, cap-partition refresh, or other optional maintenance. Each heartbeat attempt MUST have a bounded execution deadline, MUST have at most one in-flight owner, and a failed or timed-out attempt MUST NOT terminate future heartbeat scheduling. If the periodic worker exits unexpectedly while the lifespan is active, supervision MUST record the exit and restart the worker with bounded delay. Ring readers MUST treat a member as active only when its heartbeat is within the 30-second stale threshold.
+Each registered replica MUST refresh its ring row via an upsert heartbeat every 10 seconds so sibling replicas observing the shared table converge on the same active-member view. Ring renewal MUST run under an independently supervised periodic owner, MUST use local database-pool admission capacity isolated from durable-ownership reconciliation and cap-partition refresh, and MUST NOT await durable-ownership reconciliation, idle-session sweeping, cap-partition refresh, or other optional maintenance. Each heartbeat attempt MUST have a bounded execution deadline, MUST have at most one in-flight owner, and a failed or timed-out attempt MUST NOT terminate future heartbeat scheduling. If the periodic worker exits unexpectedly while the lifespan is active, supervision MUST record the exit and restart the worker with bounded delay. Ring readers MUST treat a member as active only when its heartbeat is within the 30-second stale threshold.
 
 #### Scenario: Missed heartbeats age a member out of the active ring
 - **WHEN** a replica stops heartbeating for longer than the stale threshold
@@ -18,6 +18,12 @@ Each registered replica MUST refresh its ring row via an upsert heartbeat every 
 - **THEN** the replica still attempts its ring heartbeat without waiting for that maintenance phase
 - **AND** no second owner is created for the still-running maintenance phase
 
+#### Scenario: Optional maintenance occupies the request database pool
+- **GIVEN** durable-ownership reconciliation and cap-partition refresh occupy the request database pool's available connections
+- **WHEN** the independent heartbeat cadence becomes due
+- **THEN** heartbeat renewal uses its isolated local pool admission path
+- **AND** attempts the ring upsert without waiting for those optional phases to release request-pool connections
+
 #### Scenario: Timed-out heartbeat attempt does not overlap its owner
 - **GIVEN** a heartbeat attempt exceeds its execution deadline and remains unfinished while cancellation drains
 - **WHEN** another heartbeat interval becomes due
@@ -33,6 +39,7 @@ Each registered replica MUST refresh its ring row via an upsert heartbeat every 
 - **WHEN** graceful shutdown begins
 - **THEN** the runtime cancels and drains the heartbeat and maintenance owners within the existing shutdown bounds
 - **AND** it stops heartbeat renewal before aging the shared ring row for shutdown
+- **AND** if any registration or periodic owner remains active after the bound, the runtime withholds the SQLite clean-shutdown marker
 
 ## ADDED Requirements
 

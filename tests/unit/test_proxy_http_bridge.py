@@ -37307,6 +37307,32 @@ async def test_stale_operation_maintenance_honours_dashboard_bridge_budget_over_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["protection_snapshot", "durable_cleanup"])
+async def test_stale_operation_maintenance_surfaces_failures(failure_stage: str) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    pending_operation_ids = AsyncMock(return_value=set())
+    abandon_stale_operations = AsyncMock(return_value=[])
+    if failure_stage == "protection_snapshot":
+        pending_operation_ids.side_effect = RuntimeError("snapshot failed")
+    else:
+        abandon_stale_operations.side_effect = RuntimeError("cleanup failed")
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(pending_operation_ids=pending_operation_ids),
+    )
+    service._durable_bridge = cast(Any, SimpleNamespace(abandon_stale_operations=abandon_stale_operations))
+
+    with pytest.raises(RuntimeError, match="failed"):
+        await service.abandon_stale_http_bridge_operations()
+
+    pending_operation_ids.assert_awaited_once()
+    if failure_stage == "protection_snapshot":
+        abandon_stale_operations.assert_not_awaited()
+    else:
+        abandon_stale_operations.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_periodic_maintenance_helpers_run_distinct_bridge_passes() -> None:
     from app.main import (
         run_http_bridge_durable_ownership_maintenance,

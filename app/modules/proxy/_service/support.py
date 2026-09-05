@@ -21,6 +21,7 @@ from app.core.clients.proxy_websocket import (
     UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL,
     UpstreamWebSocket,
 )
+from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
 from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, OpenAIErrorParam, openai_error
 from app.core.openai.model_registry import get_model_registry
@@ -506,6 +507,8 @@ async def _sleep_for_account_selection_recovery(
     max_sleep_seconds: float | None = None,
     request_state: "_WebSocketRequestState | None" = None,
     heartbeat: Callable[[float], Awaitable[None]] | None = None,
+    scheduler: Scheduler = REAL_SCHEDULER,
+    clock: Clock = REAL_CLOCK,
 ) -> bool:
     sleep_seconds = _account_selection_recovery_sleep_seconds(selection)
     if sleep_seconds is None:
@@ -519,7 +522,7 @@ async def _sleep_for_account_selection_recovery(
         request_state.account_capacity_waiting = True
         request_state.account_capacity_wait_reason = selection.error_message
         request_state.account_capacity_wait_started_at = (
-            request_state.account_capacity_wait_started_at or time.monotonic()
+            request_state.account_capacity_wait_started_at or clock.monotonic()
         )
         request_state.account_capacity_wait_retry_after_seconds = sleep_seconds
 
@@ -539,7 +542,7 @@ async def _sleep_for_account_selection_recovery(
             if heartbeat is not None:
                 await heartbeat(remaining)
             chunk = min(remaining, _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS)
-            await asyncio.sleep(chunk)
+            await scheduler.sleep(chunk)
             remaining -= chunk
     finally:
         if request_state is not None:
@@ -1749,16 +1752,18 @@ async def _wait_for_websocket_continuity_gap(
     *,
     pending_lock: anyio.Lock,
     timeout_seconds: float,
+    scheduler: Scheduler = REAL_SCHEDULER,
+    clock: Clock = REAL_CLOCK,
 ) -> bool:
-    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    deadline = clock.monotonic() + max(0.0, timeout_seconds)
     while True:
         async with pending_lock:
             if not pending_requests:
                 return True
-        remaining = deadline - time.monotonic()
+        remaining = deadline - clock.monotonic()
         if remaining <= 0:
             return False
-        await asyncio.sleep(min(_WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS, remaining))
+        await scheduler.sleep(min(_WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS, remaining))
 
 
 async def _websocket_full_replay_should_wait_for_continuity(

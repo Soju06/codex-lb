@@ -860,16 +860,21 @@ def _normalize_configuration_update_efforts(payload: MutableJsonObject) -> None:
     model = payload.get("model")
     if not isinstance(model, str) or model.strip().lower() != "gpt-6-astra":
         return
+    reasoning = payload.get("reasoning")
+    if is_json_mapping(reasoning):
+        effort = reasoning.get("effort")
+        if isinstance(effort, str) and effort.strip().lower() == "ultra":
+            payload["reasoning"] = {**reasoning, "effort": "max"}
     items = payload.get("input")
     if not is_json_list(items):
         return
     for index, item in enumerate(items):
         if not is_json_mapping(item) or item.get("type") != "configuration_update":
             continue
-        reasoning = item.get("reasoning")
-        effort = reasoning.get("effort") if is_json_mapping(reasoning) else None
-        if isinstance(effort, str):
-            normalized = effort.strip().lower()
+        item_reasoning = item.get("reasoning")
+        item_effort = item_reasoning.get("effort") if is_json_mapping(item_reasoning) else None
+        if isinstance(item_effort, str):
+            normalized = item_effort.strip().lower()
             items[index] = {
                 **item,
                 "reasoning": {"effort": "max" if normalized == "ultra" else normalized},

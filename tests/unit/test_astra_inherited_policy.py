@@ -107,12 +107,17 @@ def test_client_plane_alias_reset_is_canonical_and_idempotent(
     _apply_and_validate(request, key)
     validate_astra_request(request, key)
 
+    assert request.reasoning is not None
+    if client_effort == "ultra":
+        assert request.reasoning.effort == "ultra"
     assert request.input == [
         {"type": "configuration_update", "reasoning": {"effort": wire_effort}},
         {"role": "user", "content": "Continue"},
     ]
     forwarded_effort = "max" if client_effort == "ultra" else wire_effort
-    assert request.to_payload()["input"] == [
+    forwarded = request.to_payload()
+    assert forwarded["reasoning"] == {"effort": forwarded_effort}
+    assert forwarded["input"] == [
         {"type": "configuration_update", "reasoning": {"effort": forwarded_effort}},
         {"role": "user", "content": "Continue"},
     ]

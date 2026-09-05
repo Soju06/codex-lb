@@ -81,6 +81,37 @@ def test_astra_ultra_update_survives_repeated_policy_and_owner_serialization():
     assert _configuration_effort(forwarded_owner.to_replay_safety_payload()["input"]) == "max"
 
 
+def test_astra_ultra_continuation_keeps_client_identity_across_owner_hops():
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-6-astra",
+            "instructions": "",
+            "previous_response_id": "resp_owner",
+            "reasoning": {"effort": "ultra"},
+            "input": [{"role": "user", "content": "Continue"}],
+        }
+    )
+    key = _key(allowed=["ultra"])
+    _apply_subscription_policy(request, key)
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "ultra"
+    assert request.input == [
+        {"type": "configuration_update", "reasoning": {"effort": "ultra"}},
+        {"role": "user", "content": "Continue"},
+    ]
+
+    forwarded_owner = ResponsesRequest.model_validate(request.model_dump_for_forwarding())
+    _apply_subscription_policy(forwarded_owner, key)
+    assert forwarded_owner.reasoning is not None
+    assert forwarded_owner.reasoning.effort == "ultra"
+    assert forwarded_owner.input == request.input
+    forwarded = forwarded_owner.to_payload()
+    assert forwarded["reasoning"] == {"effort": "max"}
+    forwarded_input = forwarded["input"]
+    assert isinstance(forwarded_input, list)
+    assert forwarded_input[0] == {"type": "configuration_update", "reasoning": {"effort": "max"}}
+
+
 @pytest.mark.parametrize("effort", ["none", "minimal", "invalid"])
 def test_astra_rejects_unsupported_configuration_effort(effort):
     with pytest.raises(ProxyInvalidRequestError):

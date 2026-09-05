@@ -3,6 +3,16 @@
 ## Purpose
 TBD - created by manual sync from archived OpenSpec changes. Update Purpose after archive.
 ## Requirements
+### Requirement: Selected-account auth.json export remains distinct
+
+The existing selected-account auth.json export MUST remain independently available and behavior-compatible when encrypted multi-account export is available.
+
+#### Scenario: Operator exports one selected auth.json
+
+- **WHEN** an operator uses the selected account's existing auth export action
+- **THEN** the existing auth.json response and download behavior apply
+- **AND** the multi-account selection and passphrase dialog is not used
+
 ### Requirement: Per-account OpenCode auth export
 The system SHALL let an authenticated dashboard user export one selected account as an OpenCode-compatible `auth.json` payload.
 

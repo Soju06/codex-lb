@@ -46,6 +46,7 @@ _SECTION_OTHER = "Other"
 # Functional-area grouping by field-name prefix; the longest matching prefix
 # wins and unmatched fields land in the "Other" bucket.
 _PREFIX_SECTIONS: tuple[tuple[str, str], ...] = (
+    ("account_bundle_", "Encryption"),
     ("database_", "Database"),
     ("encryption_", "Encryption"),
     ("upstream_", "Upstream transport"),
@@ -269,6 +270,8 @@ def render_settings_reference() -> str:
             "",
             "*Specs: [user-documentation]"
             "(https://github.com/Soju06/codex-lb/tree/main/openspec/specs/user-documentation) · "
+            "[account-bundles]"
+            "(https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-bundles) · "
             "[responses-api-compat]"
             "(https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat) · "
             "[rate-limit-reset-credits]"

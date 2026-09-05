@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Plus, Search } from "lucide-react";
+import { ChevronDown, ChevronUp, Download, Plus, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -31,6 +31,8 @@ export type AccountListProps = {
   selectedAccountId: string | null;
   onSelect: (accountId: string) => void;
   onOpenImport: () => void;
+  onOpenImportBundle?: () => void;
+  onOpenExportBundle?: () => void;
   onOpenOauth: () => void;
   sortMode?: AccountSortMode;
   onSortModeChange?: (sortMode: AccountSortMode) => void;
@@ -43,6 +45,8 @@ export function AccountList({
   selectedAccountId,
   onSelect,
   onOpenImport,
+  onOpenImportBundle,
+  onOpenExportBundle,
   onOpenOauth,
   sortMode,
   onSortModeChange,
@@ -136,16 +140,18 @@ export function AccountList({
           {t("accounts.list.needHelp")}
           {helpOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
         </Button>
-        <Button
-          type="button"
-          size="sm"
-          className="gap-1.5"
-          disabled={readOnly}
-          onClick={() => setChooserOpen(true)}
-        >
-          <Plus className="h-3.5 w-3.5" />
-          {t("accounts.list.addAccount")}
-        </Button>
+        <div className="flex items-center gap-2">
+          {onOpenExportBundle ? (
+            <Button type="button" variant="outline" size="sm" className="gap-1.5" disabled={readOnly} onClick={onOpenExportBundle}>
+              <Download className="h-3.5 w-3.5" />
+              {t("accounts.bundle.exportTitle")}
+            </Button>
+          ) : null}
+          <Button type="button" size="sm" className="gap-1.5" disabled={readOnly} onClick={() => setChooserOpen(true)}>
+            <Plus className="h-3.5 w-3.5" />
+            {t("accounts.list.addAccount")}
+          </Button>
+        </div>
       </div>
 
       {helpOpen ? <WindowsOauthHelp /> : null}
@@ -187,6 +193,7 @@ export function AccountList({
         open={chooserOpen}
         onOpenChange={setChooserOpen}
         onImport={onOpenImport}
+        onImportBundle={onOpenImportBundle}
         onAddAccount={onOpenOauth}
       />
     </div>

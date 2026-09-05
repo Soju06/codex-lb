@@ -131,6 +131,101 @@ class AccountsRepositoryWithStatusComparePort(AccountsRepositoryPort, Protocol):
     ) -> bool: ...
 
 
+class _BundleValidationAuthRepository:
+    """Allow guarded token rotation without validation-driven account mutations."""
+
+    def __init__(self, delegate: AccountsRepositoryPort) -> None:
+        self._delegate = delegate
+
+    async def get_by_id(self, account_id: str) -> Account | None:
+        return await self._delegate.get_by_id(account_id)
+
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        return await self._delegate.get_by_id_fresh(account_id)
+
+    async def update_status(
+        self,
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        blocked_at: int | None = None,
+    ) -> bool:
+        return False
+
+    async def update_status_if_current(
+        self,
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        *,
+        expected_status: AccountStatus,
+        expected_deactivation_reason: str | None = None,
+        expected_reset_at: int | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
+    ) -> bool:
+        return False
+
+    async def rotate_tokens(
+        self,
+        account_id: str,
+        access_token_encrypted: bytes,
+        refresh_token_encrypted: bytes,
+        id_token_encrypted: bytes,
+        last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+    ) -> bool:
+        # AuthManager's exact-refresh-token CAS is preserved, but metadata from
+        # an untrusted validation response is deliberately not co-written.
+        return await self._delegate.rotate_tokens(
+            account_id,
+            access_token_encrypted,
+            refresh_token_encrypted,
+            id_token_encrypted,
+            last_refresh,
+            expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+        )
+
+    async def update_account_metadata(
+        self,
+        account_id: str,
+        *,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+        last_refresh: datetime | None = None,
+    ) -> bool:
+        return False
+
+    async def workspace_slot_taken(
+        self,
+        *,
+        account_id: str,
+        email: str,
+        chatgpt_account_id: str | None,
+        workspace_id: str,
+    ) -> bool:
+        return await self._delegate.workspace_slot_taken(
+            account_id=account_id,
+            email=email,
+            chatgpt_account_id=chatgpt_account_id,
+            workspace_id=workspace_id,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class AccountRefreshResult:
     usage_written: bool
@@ -260,6 +355,8 @@ class UsageUpdater:
         additional_usage_repo: AdditionalUsageRepositoryPort | AdditionalUsageRepository | None = None,
         *,
         auth_manager: AuthManager | None = None,
+        redact_sensitive_logs: bool = False,
+        bundle_validation_mode: bool = False,
     ) -> None:
         self._usage_repo = usage_repo
         self._accounts_repo = accounts_repo
@@ -268,6 +365,13 @@ class UsageUpdater:
         self._auth_manager = (
             auth_manager if auth_manager is not None else AuthManager(accounts_repo) if accounts_repo else None
         )
+        self._redact_sensitive_logs = redact_sensitive_logs
+        self._bundle_validation_mode = bundle_validation_mode
+
+    def _diagnostic_value(self, value: object) -> object:
+        if self._redact_sensitive_logs and value is not None:
+            return "<redacted>"
+        return value
 
     async def refresh_accounts(
         self,
@@ -421,19 +525,31 @@ class UsageUpdater:
                 ),
                 join_existing=False,
             )
-            await self._sync_account_from_repo(account)
+            # Bundle restore must CAS against the exact credential snapshot this
+            # call validated. AuthManager mirrors its own guarded rotation onto
+            # ``account``; a generic re-read here could instead adopt an unrelated
+            # replacement that committed after the fetch and falsely validate it.
+            if not self._bundle_validation_mode:
+                await self._sync_account_from_repo(account)
             if result.fetch_succeeded:
                 _last_successful_refresh[account.id] = utcnow()
                 _clear_usage_refresh_auth_cooldown(account.id)
             return result
         except Exception as exc:
-            logger.warning(
-                "Forced usage refresh failed account_id=%s request_id=%s error=%s",
-                account.id,
-                get_request_id(),
-                exc,
-                exc_info=True,
-            )
+            if self._redact_sensitive_logs:
+                logger.warning(
+                    "Forced usage refresh failed account_id=%s request_id=%s",
+                    account.id,
+                    get_request_id(),
+                )
+            else:
+                logger.warning(
+                    "Forced usage refresh failed account_id=%s request_id=%s error=%s",
+                    account.id,
+                    get_request_id(),
+                    exc,
+                    exc_info=True,
+                )
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
     async def _refresh_account_if_stale(
@@ -566,6 +682,7 @@ class UsageUpdater:
                 account_id=usage_account_id,
                 route=route,
                 allow_direct_egress=route is None,
+                redact_sensitive_logs=self._redact_sensitive_logs,
             )
         except UpstreamProxyRouteError as exc:
             logger.warning(
@@ -598,6 +715,7 @@ class UsageUpdater:
                     account_id=usage_account_id,
                     route=route,
                     allow_direct_egress=route is None,
+                    redact_sensitive_logs=self._redact_sensitive_logs,
                 )
             except UpstreamProxyRouteError as route_exc:
                 logger.warning(
@@ -617,29 +735,33 @@ class UsageUpdater:
         if payload is None:
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
-        if await _payload_mismatches_account_slot(account, payload):
+        if await _payload_mismatches_account_slot(
+            account,
+            payload,
+            mutate_plan_downgrade_observations=not self._bundle_validation_mode,
+        ):
             logger.warning(
                 "Usage refresh payload identity mismatch; skipping account mutation "
                 "account_id=%s stored_workspace_id=%s payload_workspace_id=%s stored_plan_type=%s "
                 "payload_plan_type=%s stored_seat_type=%s payload_seat_type=%s request_id=%s",
                 account.id,
-                account.workspace_id,
-                payload.workspace_id,
-                account.plan_type,
-                payload.plan_type,
-                account.seat_type,
-                payload.seat_type,
+                self._diagnostic_value(account.workspace_id),
+                self._diagnostic_value(payload.workspace_id),
+                self._diagnostic_value(account.plan_type),
+                self._diagnostic_value(payload.plan_type),
+                self._diagnostic_value(account.seat_type),
+                self._diagnostic_value(payload.seat_type),
                 get_request_id(),
             )
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
-        identity_matches_slot = await self._sync_identity_metadata(account, payload)
+        identity_matches_slot = self._bundle_validation_mode or await self._sync_identity_metadata(account, payload)
         if not identity_matches_slot:
             logger.warning(
                 "Usage refresh payload reported a workspace slot owned by another account; "
                 "skipping account usage mutation account_id=%s payload_workspace_id=%s request_id=%s",
                 account.id,
-                payload.workspace_id,
+                self._diagnostic_value(payload.workspace_id),
                 get_request_id(),
             )
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
@@ -761,9 +883,13 @@ class UsageUpdater:
         return AccountRefreshResult(usage_written=usage_written)
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
-        if not self._auth_manager:
+        if not self._auth_manager or self._bundle_validation_mode:
             return
-        reason = f"Usage API error: HTTP {exc.status_code} - {exc.message}"
+        reason = (
+            f"Usage API error: HTTP {exc.status_code}"
+            if self._redact_sensitive_logs
+            else f"Usage API error: HTTP {exc.status_code} - {exc.message}"
+        )
         status = (
             account_status_for_permanent_failure(exc.code)
             if exc.code in PERMANENT_FAILURE_CODES
@@ -775,7 +901,7 @@ class UsageUpdater:
             account.id,
             status.value,
             exc.status_code,
-            exc.message,
+            self._diagnostic_value(exc.message),
             get_request_id(),
         )
         await self._auth_manager._repo.update_status(account.id, status, reason)
@@ -802,7 +928,7 @@ class UsageUpdater:
                 logger.warning(
                     "Usage payload reported workspace_id=%s for legacy account_id=%s, but that slot "
                     "is already owned by another account; skipping usage payload",
-                    payload_workspace_id,
+                    self._diagnostic_value(payload_workspace_id),
                     account.id,
                 )
                 return False
@@ -845,7 +971,7 @@ class UsageUpdater:
         secondary: UsageWindow | None,
         monthly: UsageWindow | None = None,
     ) -> None:
-        if not self._auth_manager:
+        if not self._auth_manager or self._bundle_validation_mode:
             return
         if account.status == AccountStatus.RATE_LIMITED:
             if account.blocked_at is not None:
@@ -942,13 +1068,22 @@ class UsageUpdater:
         account.blocked_at = stored.blocked_at
 
 
-def build_background_usage_updater() -> UsageUpdater:
+def build_background_usage_updater(
+    *,
+    redact_sensitive_logs: bool = False,
+    bundle_validation_mode: bool = False,
+) -> UsageUpdater:
     accounts_repo = BackgroundAccountsRepository()
+    auth_repo: AccountsRepositoryPort = (
+        _BundleValidationAuthRepository(accounts_repo) if bundle_validation_mode else accounts_repo
+    )
     return UsageUpdater(
         BackgroundUsageRepository(),
         accounts_repo=accounts_repo,
         additional_usage_repo=BackgroundAdditionalUsageRepository(),
-        auth_manager=AuthManager(accounts_repo),
+        auth_manager=AuthManager(auth_repo, redact_sensitive_details=redact_sensitive_logs),
+        redact_sensitive_logs=redact_sensitive_logs,
+        bundle_validation_mode=bundle_validation_mode,
     )
 
 
@@ -962,7 +1097,12 @@ def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, 
     return credits_has, credits_unlimited, _parse_credits_balance(balance_value)
 
 
-async def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) -> bool:
+async def _payload_mismatches_account_slot(
+    account: Account,
+    payload: UsagePayload,
+    *,
+    mutate_plan_downgrade_observations: bool = True,
+) -> bool:
     payload_workspace_id = _clean_optional(payload.workspace_id)
     if account.workspace_id and payload_workspace_id and account.workspace_id != payload_workspace_id:
         # The payload reports a different workspace slot than the one this
@@ -996,7 +1136,7 @@ async def _payload_mismatches_account_slot(account: Account, payload: UsagePaylo
             # account's own token, so an agreeing repeat observation is no
             # longer the single-sample degraded signature above. Persist the
             # downgrade only once it has been confirmed (issue #1456).
-            if await _free_plan_downgrade_is_confirmed(
+            if mutate_plan_downgrade_observations and await _free_plan_downgrade_is_confirmed(
                 account,
                 stored_plan_type=stored_plan_type,
                 normalized_payload_plan_type=normalized_payload_plan_type,
@@ -1008,7 +1148,8 @@ async def _payload_mismatches_account_slot(account: Account, payload: UsagePaylo
             # evidence that it is still paid, so any pending downgrade evidence
             # is discarded. An unrecognized value is absence of evidence and
             # deliberately does not reach here.
-            await _clear_workspace_less_free_plan_observations(account.id)
+            if mutate_plan_downgrade_observations:
+                await _clear_workspace_less_free_plan_observations(account.id)
     return False
 
 

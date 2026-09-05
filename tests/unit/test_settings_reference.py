@@ -69,15 +69,17 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # operator-selectable because startup invariant failures need two supported
 # modes: report-only by default for mixed/self-hosted environments, and
 # fail-fast when CI or strict operators want config drift to abort startup.
-# 131 -> 132: operation_spool_format. The default remains rows_v1 because a
+# 131 -> 132: account_bundle_max_bytes. The operator-controlled upload and
+# plaintext bound are justified in portable-encrypted-account-bundles.
+# 132 -> 133: operation_spool_format. The default remains rows_v1 because a
 # rolling deployment may enable chunks_v2 only after every replica can read it;
 # no existing timeout or size setting can express that compatibility fence.
-# 132 -> 133: http_responses_session_bridge_server_recovery_max_attempts. The
+# 133 -> 134: http_responses_session_bridge_server_recovery_max_attempts. The
 # bounded server-owned eventless recovery cap was hardcoded at 6 while the
 # bound-eventless-server-recovery spec called it "configured"; the maintainer
 # asked for it to be promoted to a setting on PR #1633 (2026-08-20/08-26),
 # consistent with that PR's budget-from-settings principle.
-MAX_SETTINGS_FIELDS = 133
+MAX_SETTINGS_FIELDS = 134
 
 
 def test_generated_settings_reference_matches_code() -> None:

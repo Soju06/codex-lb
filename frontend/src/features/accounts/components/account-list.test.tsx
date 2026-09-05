@@ -637,4 +637,48 @@ describe("AccountList", () => {
       ),
     ).not.toBeInTheDocument();
   });
+
+  it("hides optional bundle actions when callbacks are unavailable", async () => {
+    const user = userEvent.setup();
+    render(
+      <AccountList
+        accounts={[]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Export accounts" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Add account" }));
+    expect(screen.queryByRole("button", { name: /^Import account bundle/ })).not.toBeInTheDocument();
+  });
+
+  it("wires optional bundle actions when callbacks are available", async () => {
+    const user = userEvent.setup();
+    const onOpenExportBundle = vi.fn();
+    const onOpenImportBundle = vi.fn();
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+    render(
+      <AccountList
+        accounts={[]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenImportBundle={onOpenImportBundle}
+        onOpenExportBundle={onOpenExportBundle}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Export accounts" }));
+    expect(onOpenExportBundle).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("button", { name: "Add account" }));
+    await user.click(screen.getByRole("button", { name: /^Import account bundle/ }));
+    expect(onOpenImportBundle).toHaveBeenCalledOnce();
+  });
 });

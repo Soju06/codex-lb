@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+import app.core.middleware.multipart_content_encoding as multipart_content_encoding_module
 from app.core.resilience.backpressure import BackpressureMiddleware
 
 pytestmark = pytest.mark.unit
@@ -55,7 +56,72 @@ async def test_backpressure_returns_429_when_at_capacity():
     assert overloaded.status_code == 429
     assert overloaded.json() == {"detail": "codex-lb is temporarily overloaded by local backpressure"}
     assert overloaded.headers["retry-after"] == "5"
+    assert "cache-control" not in overloaded.headers
+    assert "pragma" not in overloaded.headers
+    assert "expires" not in overloaded.headers
     assert first_response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_backpressure_bundle_rejection_is_not_cacheable_and_is_audited(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    audit_events: list[tuple[str, dict[str, object] | None]] = []
+    monkeypatch.setattr(
+        multipart_content_encoding_module.AuditService,
+        "log_async",
+        lambda action, **kwargs: audit_events.append((action, kwargs.get("details"))),
+    )
+    app = FastAPI()
+    app.add_middleware(cast(Any, BackpressureMiddleware), max_concurrent=1)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    @app.get("/work")
+    async def work():
+        entered.set()
+        await release.wait()
+        return {"ok": True}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        first_request = asyncio.create_task(client.get("/work"))
+        await entered.wait()
+
+        overloaded = await client.post("/api/accounts/bundle/export")
+        release.set()
+        await first_request
+
+    assert overloaded.status_code == 429
+    assert overloaded.headers["retry-after"] == "5"
+    assert overloaded.headers["cache-control"] == "no-store, no-cache, must-revalidate, private"
+    assert overloaded.headers["pragma"] == "no-cache"
+    assert overloaded.headers["expires"] == "0"
+    assert audit_events == [("account_bundle_request_failed", {"operation": "export", "outcome": "http_429"})]
+
+
+@pytest.mark.asyncio
+async def test_backpressure_does_not_duplicate_bundle_failure_audit(monkeypatch: pytest.MonkeyPatch):
+    audit_events: list[str] = []
+    monkeypatch.setattr(
+        multipart_content_encoding_module.AuditService,
+        "log_async",
+        lambda action, **_kwargs: audit_events.append(action),
+    )
+    app = FastAPI()
+    app.add_middleware(cast(Any, multipart_content_encoding_module.MultipartContentEncodingMiddleware))
+    app.add_middleware(cast(Any, BackpressureMiddleware), max_concurrent=1)
+
+    @app.post("/api/accounts/bundle/export", status_code=400)
+    async def export_bundle():
+        return {"detail": "inner failure"}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/accounts/bundle/export")
+
+    assert response.status_code == 400
+    assert audit_events == ["account_bundle_request_failed"]
 
 
 @pytest.mark.asyncio

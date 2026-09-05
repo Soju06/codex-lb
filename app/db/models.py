@@ -2194,6 +2194,7 @@ Index(
     postgresql_include=["used_percent", "reset_at", "window_minutes", "id"],
 )
 Index("idx_accounts_email", Account.email)
+Index("idx_accounts_email_lower", func.lower(Account.email))
 # Pending-deletion queue: every replica probes ``delete_requested_at IS NOT
 # NULL LIMIT 1`` each worker interval and the leader orders the queue by
 # (delete_requested_at, id); the partial index keeps both reads off the full

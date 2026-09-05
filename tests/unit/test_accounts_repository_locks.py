@@ -322,6 +322,36 @@ async def test_account_slot_upsert_locks_upstream_before_slot_keys(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_bundle_persist_locks_upstream_identities_once_before_slot_locks(monkeypatch):
+    repo, recorded = _make_postgres_repo(monkeypatch)
+    first = _stub_account("acc_bundle_a", "z@example.com", chatgpt_id="workspace-z")
+    second = _stub_account("acc_bundle_b", "a@example.com", chatgpt_id="workspace-a")
+    empty_result = MagicMock()
+    empty_result.__iter__.return_value = iter(())
+    empty_result.scalars.return_value.all.return_value = []
+    cast(Any, repo.session.execute).return_value = empty_result
+
+    async def fake_lock_account_identities(
+        _session: object,
+        identities: tuple[str, ...] | frozenset[str],
+    ) -> tuple[str, ...]:
+        ordered = tuple(sorted(identities))
+        recorded["upstream"].extend(ordered)
+        recorded["order"].append(f"upstream-batch:{','.join(ordered)}")
+        return ordered
+
+    monkeypatch.setattr(repository_module, "lock_postgresql_account_identities", fake_lock_account_identities)
+    monkeypatch.setattr(repository_module, "bump_cache_invalidation_in_transaction", AsyncMock())
+
+    await repo.persist_account_bundle([first, second], conflict_mode="replace")
+
+    assert recorded["upstream"] == ["workspace-a", "workspace-z"]
+    assert recorded["order"][0] == "upstream-batch:workspace-a,workspace-z"
+    assert all(not item.startswith("upstream:") for item in recorded["order"])
+    assert all(item.startswith(("upstream-batch:", "email:", "identity:")) for item in recorded["order"])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("slot_upsert", [False, True])
 async def test_identity_candidate_revalidation_restarts_once_then_succeeds(monkeypatch, slot_upsert: bool):
     repo, _recorded = _make_postgres_repo(monkeypatch)

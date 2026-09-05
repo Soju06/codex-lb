@@ -14,10 +14,11 @@ export type AddAccountDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onImport: () => void;
+  onImportBundle?: () => void;
   onAddAccount: () => void;
 };
 
-export function AddAccountDialog({ open, onOpenChange, onImport, onAddAccount }: AddAccountDialogProps) {
+export function AddAccountDialog({ open, onOpenChange, onImport, onImportBundle, onAddAccount }: AddAccountDialogProps) {
   const { t } = useTranslation();
   // Close the chooser first, then defer the action to the next frame. Opening a
   // second modal Dialog in the same tick the chooser closes can leave Radix's
@@ -73,6 +74,27 @@ export function AddAccountDialog({ open, onOpenChange, onImport, onAddAccount }:
               </span>
             </span>
           </button>
+
+          {onImportBundle ? (
+            <button
+              type="button"
+              onClick={() => handleSelect(onImportBundle)}
+              className={cn(
+                "flex w-full cursor-pointer items-start gap-3 rounded-lg border p-3 text-left transition-colors hover:bg-muted/50",
+                "outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]",
+              )}
+            >
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border bg-muted/50">
+                <Upload className="h-4 w-4 text-muted-foreground" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-medium">{t("accounts.bundle.importTitle")}</span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  {t("accounts.addDialog.bundleDescription")}
+                </span>
+              </span>
+            </button>
+          ) : null}
         </div>
       </DialogContent>
     </Dialog>

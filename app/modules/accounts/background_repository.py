@@ -83,6 +83,26 @@ class BackgroundAccountsRepository:
                 **kwargs,
             )
 
+    async def restore_validated_bundle_account(
+        self,
+        account_id: str,
+        *,
+        expected_refresh_token_encrypted: bytes,
+        status: AccountStatus,
+        deactivation_reason: str | None,
+        reset_at: int | None,
+        blocked_at: int | None,
+    ) -> bool:
+        async with get_background_session() as session:
+            return await AccountsRepository(session).restore_validated_bundle_account(
+                account_id,
+                expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+                status=status,
+                deactivation_reason=deactivation_reason,
+                reset_at=reset_at,
+                blocked_at=blocked_at,
+            )
+
     async def rotate_tokens(
         self,
         account_id: str,

@@ -55,6 +55,49 @@ _POLL_FAILURES_WARNING_THRESHOLD = 3
 _POLL_FAILURES_ERROR_THRESHOLD = 10
 
 
+async def bump_cache_invalidation_in_transaction(session: AsyncSession, namespace: str) -> None:
+    """Increment ``namespace`` in the caller's transaction without committing.
+
+    Mutation paths that must publish cache invalidation atomically with durable
+    state use this helper so cancellation cannot commit one without the other.
+    Ordinary callers should continue using :meth:`CacheInvalidationPoller.bump`.
+    """
+
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        stmt = (
+            pg_insert(CacheInvalidation)
+            .values(namespace=namespace, version=1)
+            .on_conflict_do_update(
+                index_elements=[CacheInvalidation.namespace],
+                set_={"version": CacheInvalidation.version + 1},
+            )
+        )
+        await session.execute(stmt)
+        return
+    if dialect == "sqlite":
+        stmt = (
+            sqlite_insert(CacheInvalidation)
+            .values(namespace=namespace, version=1)
+            .on_conflict_do_update(
+                index_elements=[CacheInvalidation.namespace],
+                set_={"version": CacheInvalidation.version + 1},
+            )
+        )
+        await session.execute(stmt)
+        return
+
+    existing = await session.scalar(select(CacheInvalidation).where(CacheInvalidation.namespace == namespace))
+    if existing is None:
+        session.add(CacheInvalidation(namespace=namespace, version=1))
+        return
+    await session.execute(
+        update(CacheInvalidation)
+        .where(CacheInvalidation.namespace == namespace)
+        .values(version=CacheInvalidation.version + 1)
+    )
+
+
 class CacheInvalidationPoller:
     def __init__(
         self,
@@ -219,39 +262,7 @@ class CacheInvalidationPoller:
     async def _bump_once(self, namespace: str) -> None:
         session = self._session_factory()
         try:
-            dialect = session.get_bind().dialect.name
-            if dialect == "postgresql":
-                stmt = (
-                    pg_insert(CacheInvalidation)
-                    .values(namespace=namespace, version=1)
-                    .on_conflict_do_update(
-                        index_elements=[CacheInvalidation.namespace],
-                        set_={"version": CacheInvalidation.version + 1},
-                    )
-                )
-                await session.execute(stmt)
-            elif dialect == "sqlite":
-                stmt = (
-                    sqlite_insert(CacheInvalidation)
-                    .values(namespace=namespace, version=1)
-                    .on_conflict_do_update(
-                        index_elements=[CacheInvalidation.namespace],
-                        set_={"version": CacheInvalidation.version + 1},
-                    )
-                )
-                await session.execute(stmt)
-            else:
-                existing = await session.scalar(
-                    select(CacheInvalidation).where(CacheInvalidation.namespace == namespace)
-                )
-                if existing is None:
-                    session.add(CacheInvalidation(namespace=namespace, version=1))
-                else:
-                    await session.execute(
-                        update(CacheInvalidation)
-                        .where(CacheInvalidation.namespace == namespace)
-                        .values(version=CacheInvalidation.version + 1)
-                    )
+            await bump_cache_invalidation_in_transaction(session, namespace)
             await session.commit()
         finally:
             await close_session(session)

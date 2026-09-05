@@ -42,6 +42,7 @@ from app.core.errors import (
     openai_error,
     response_failed_event,
 )
+from app.core.exceptions import ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     bridge_durable_recover_total,
@@ -1630,6 +1631,8 @@ class _HTTPBridgeStreamingMixin:
                                 ),
                             )
                     except ProxyResponseError:
+                        raise
+                    except (ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed):
                         raise
                     except Exception:
                         logger.warning("Failed to inspect HTTP bridge recovery attempt", exc_info=True)

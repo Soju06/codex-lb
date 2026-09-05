@@ -852,6 +852,7 @@ class ResponsesCompactRequest(BaseModel):
 
     def to_payload(self) -> JsonObject:
         payload: MutableJsonObject = self.model_dump(mode="json", exclude_none=True)
+        _normalize_configuration_update_efforts(payload)
         return _strip_compact_unsupported_fields(payload)
 
 

@@ -178,6 +178,21 @@ def test_astra_standalone_compact_rejects_updates():
         _apply_subscription_policy(request, None)
 
 
+def test_astra_compact_ultra_maps_to_max_at_serialization():
+    request = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-6-astra",
+            "instructions": "",
+            "input": "Summarize this",
+            "reasoning": {"effort": "ultra"},
+        }
+    )
+    _apply_subscription_policy(request, _key(allowed=["ultra"]))
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "ultra"
+    assert request.to_payload()["reasoning"] == {"effort": "max"}
+
+
 def test_astra_rejects_adjacent_updates():
     request = _request()
     assert isinstance(request.input, list)

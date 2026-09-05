@@ -4,6 +4,7 @@ import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,6 +19,7 @@ from app.modules.proxy.request_policy import (
     prepare_astra_reasoning_policy_continuation,
     validate_astra_request,
 )
+from tests.unit.test_proxy_utils import _repo_factory, _RequestLogsRecorder
 
 
 def _key(*, allowed: list[str] | None = None, enforced: str | None = None) -> ApiKeyData:
@@ -272,3 +274,65 @@ def test_http_bridge_injected_anchor_resets_before_derived_state() -> None:
         request_state=cast(Any, request_state),
     )
     assert json.loads(repeated_text) == wire_payload
+
+
+def test_http_bridge_injected_anchor_preserves_ultra_from_request_state() -> None:
+    text_data = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-6-astra",
+            "instructions": "",
+            "reasoning": {"effort": "max"},
+            "input": [{"role": "user", "content": "Continue"}],
+        }
+    )
+    request_state = SimpleNamespace(
+        reasoning_effort="ultra",
+        input_item_count=1,
+        input_full_fingerprint=None,
+        request_usage_budget=None,
+    )
+
+    updated_text = request_submit_module._text_with_previous_response_id(
+        text_data,
+        "resp_injected",
+        api_key=_key(allowed=["ultra"]),
+        request_state=cast(Any, request_state),
+    )
+
+    wire_payload = json.loads(updated_text)
+    assert wire_payload["previous_response_id"] == "resp_injected"
+    assert wire_payload["reasoning"] == {"effort": "max"}
+    assert wire_payload["input"][0] == {
+        "type": "configuration_update",
+        "reasoning": {"effort": "max"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_websocket_create_rejects_disallowed_configuration_update(monkeypatch) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    key = _key(allowed=["low"])
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=key))
+
+    with pytest.raises(ProxyReasoningEffortNotAllowed):
+        await service._prepare_websocket_response_create_request(
+            {
+                "type": "response.create",
+                "model": "gpt-6-astra",
+                "instructions": "",
+                "reasoning": {"effort": "low"},
+                "input": [
+                    {"role": "user", "content": "First task"},
+                    {"type": "configuration_update", "reasoning": {"effort": "high"}},
+                    {"role": "user", "content": "Continue"},
+                ],
+            },
+            headers={},
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            sticky_threads_enabled=False,
+            openai_cache_affinity_max_age_seconds=300,
+            api_key=key,
+        )

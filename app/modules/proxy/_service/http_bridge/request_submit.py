@@ -636,6 +636,9 @@ def _text_with_previous_response_id(
     model = payload.get("model")
     if api_key is not None and isinstance(model, str) and model.strip().lower() == "gpt-6-astra":
         request = ResponsesRequest.model_validate(payload)
+        client_effort = getattr(request_state, "reasoning_effort", None) if request_state is not None else None
+        if isinstance(client_effort, str) and client_effort:
+            request._codex_lb_client_reasoning_effort = client_effort
         prepare_astra_reasoning_policy_continuation(request, api_key)
         validate_astra_request(request, api_key)
         forwarded_payload = request.to_payload()

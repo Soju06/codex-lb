@@ -498,6 +498,7 @@ from app.modules.proxy.request_policy import (
     openai_invalid_payload_error,
     openai_validation_error,
     responses_source_route_excluded,
+    validate_astra_request,
     validate_model_access,
     validate_top_level_compaction_trigger_input_shape,
 )
@@ -3095,6 +3096,7 @@ class _WebSocketMixin:
             responses_payload,
             service_tier_was_enforced=service_tier_was_enforced,
         )
+        validate_astra_request(responses_payload, refreshed_api_key)
         # Judged on the full client input, before the websocket-specific
         # trimming and anchor injection below rewrite it — the same payload
         # the HTTP route evaluates for its source-selection gate.

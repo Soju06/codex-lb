@@ -1020,6 +1020,8 @@ def _build_upstream_transcribe_headers(
             headers[key] = value
         elif lower.startswith(_TRANSCRIBE_FORWARD_HEADER_PREFIXES):
             headers[key] = value
+    if not _is_native_codex_request(inbound):
+        _normalize_non_native_upstream_fingerprint(headers)
     return headers
 
 

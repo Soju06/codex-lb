@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 
+from starlette._utils import get_route_path
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.metrics.prometheus import (
@@ -11,6 +12,8 @@ from app.core.metrics.prometheus import (
     requests_total,
 )
 
+_SUPPORTED_METHODS = frozenset(("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"))
+
 
 def _normalize_path(path: str) -> str:
     if path.startswith("/v1/"):
@@ -19,9 +22,17 @@ def _normalize_path(path: str) -> str:
         return "/api/..."
     if path.startswith("/health/"):
         return "/health/..."
-    if len(path) > 50:
-        return path[:50]
-    return path or "/"
+    if path == "/health":
+        return path
+    if path.startswith("/backend-api/"):
+        return "/backend-api/..."
+    if path.startswith("/internal/"):
+        return "/internal/..."
+    return "/other"
+
+
+def _normalize_method(method: str) -> str:
+    return method if method in _SUPPORTED_METHODS else "OTHER"
 
 
 class MetricsMiddleware:
@@ -40,8 +51,8 @@ class MetricsMiddleware:
 
         start = time.monotonic()
         status_code = 500
-        method = scope.get("method", "GET")
-        path = _normalize_path(scope.get("path", "/"))
+        method = _normalize_method(scope.get("method", "GET"))
+        path = _normalize_path(get_route_path(scope))
 
         active_connections.inc()
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 
 import pytest
 
@@ -509,6 +510,104 @@ def test_authorization_midline_redaction_truncates_to_separator(text_formatter):
     assert "dXNlcjpwYXNz" not in output
     assert output.endswith("upstream rejected Authorization: [REDACTED]\n")
     assert "status=failed" not in output
+
+
+@pytest.mark.parametrize("log_format", ["text", "json"])
+def test_authorization_redaction_does_not_swallow_following_traceback_line(monkeypatch, log_format):
+    import sys
+
+    formatter = _formatter_from_config(monkeypatch, log_format)
+    basic = "BASICCRED"
+    keyed = "KEYEDCRED"
+    try:
+        raise RuntimeError("authorization=Basic " + basic + "\nstatus=failed\napi_key=" + keyed)
+    except RuntimeError:
+        record = _record("request failed", exc_info=sys.exc_info())
+
+    output = _render(formatter, record)
+    rendered = json.loads(output)["exception"] if log_format == "json" else output
+
+    assert basic not in rendered
+    assert "authorization=[REDACTED]" in rendered
+    assert "status=failed" in rendered
+    assert keyed not in rendered
+    assert "api_key=[REDACTED]" in rendered
+
+
+@pytest.mark.parametrize("log_format", ["text", "json"])
+def test_unterminated_json_secret_with_trailing_escape_redacts_through_end_of_line(monkeypatch, log_format):
+    import sys
+
+    formatter = _formatter_from_config(monkeypatch, log_format)
+    token = "QAJSONSECRET"
+    try:
+        raise RuntimeError('payload={"token":"' + token + "\\\nsafe diagnostic line")
+    except RuntimeError:
+        record = _record("request failed", exc_info=sys.exc_info())
+
+    output = _render(formatter, record)
+    rendered = json.loads(output)["exception"] if log_format == "json" else output
+
+    assert token not in rendered
+    assert '{"token":"[REDACTED]\nsafe diagnostic line' in rendered
+
+
+def test_basic_token_prepass_does_not_swallow_following_line():
+    output = runtime_logging.redact_rendered_log_text("Authorization: Basic \nSAFE diagnostic", keyed_secrets=False)
+
+    assert output == "Authorization: Basic \nSAFE diagnostic"
+
+
+@pytest.mark.parametrize("log_format", ["text", "json"])
+def test_unterminated_json_secret_redacts_through_end_of_line(monkeypatch, log_format):
+    import sys
+
+    formatter = _formatter_from_config(monkeypatch, log_format)
+    token = "QAJSONSECRET"
+    try:
+        raise RuntimeError('payload={"token":"' + token + "\nsafe diagnostic line")
+    except RuntimeError:
+        record = _record("request failed", exc_info=sys.exc_info())
+
+    output = _render(formatter, record)
+    rendered = json.loads(output)["exception"] if log_format == "json" else output
+
+    assert token not in rendered
+    assert '{"token":"[REDACTED]' in rendered
+    assert "safe diagnostic line" in rendered
+
+
+@pytest.mark.parametrize("log_format", ["text", "json"])
+def test_bearer_redaction_consumes_glued_colon_tail(monkeypatch, log_format):
+    formatter = _formatter_from_config(monkeypatch, log_format)
+    output = _render(formatter, _record("upstream Bearer abc.def:GLUEDTAIL, status=502"))
+    rendered = json.loads(output)["message"] if log_format == "json" else output
+
+    assert "abc.def" not in rendered
+    assert "GLUEDTAIL" not in rendered
+    assert "Bearer [REDACTED], status=502" in rendered
+
+
+def test_secret_pattern_redaction_preserves_terminators_and_is_idempotent():
+    text = (
+        "authorization=Digest username=a\n"
+        "retrying upstream\r\n"
+        "cr-only diagnostic\r"
+        'payload={"token":"QAJSONSECRET\n'
+        "Bearer abc.def:GLUEDTAIL, status=502\n"
+    )
+    terminators = re.compile(r"\r\n|\n|\r")
+
+    once = runtime_logging.redact_rendered_log_text(text)
+    twice = runtime_logging.redact_rendered_log_text(once)
+
+    assert once == twice
+    assert terminators.findall(once) == terminators.findall(text)
+    assert "retrying upstream" in once
+    assert "cr-only diagnostic" in once
+    assert "abc.def" not in once
+    assert "GLUEDTAIL" not in once
+    assert "QAJSONSECRET" not in once
 
 
 @pytest.mark.parametrize("log_format", ["text", "json"])

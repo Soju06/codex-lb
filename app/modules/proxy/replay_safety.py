@@ -352,7 +352,7 @@ def responses_input_suffix_retains_prior_output(
     )
     if prefix_state is None:
         return False
-    pending_suffix_calls, seen_suffix_call_ids = prefix_state
+    pending_suffix_calls, seen_suffix_call_ids, _prefix_async = prefix_state
     retained_output_seen = False
     retained_output_is_final_answer = False
     fresh_followup_seen = False
@@ -458,11 +458,10 @@ def responses_input_suffix_matches_pending_tool_calls(
         for item in suffix
     ):
         return False
-    if not responses_input_items_are_self_contained_fresh_replay(suffix):
-        return False
     suffix_calls: dict[str, str] = {}
     suffix_outputs: dict[str, str] = {}
-    async_calls: dict[str, str] = {}
+    async_calls: dict[str, str] = dict(prefix_state[2])
+    sync_items: list[JsonValue] = []
     for item in cast(list[dict[str, JsonValue]], suffix):
         item_type = cast(str, item["type"])
         call_id = cast(str, item["call_id"])
@@ -471,6 +470,7 @@ def responses_input_suffix_matches_pending_tool_calls(
                 async_calls[call_id] = item_type
                 continue
             suffix_calls[call_id] = item_type
+            sync_items.append(item)
         else:
             mapped = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE[item_type]
             expected_async = async_calls.get(call_id)
@@ -480,6 +480,9 @@ def responses_input_suffix_matches_pending_tool_calls(
                 del async_calls[call_id]
                 continue
             suffix_outputs[call_id] = mapped
+            sync_items.append(item)
+    if sync_items and not responses_input_items_are_self_contained_fresh_replay(sync_items):
+        return False
     expected = dict(pending_tool_calls)
     return suffix_calls == expected and suffix_outputs == expected
 
@@ -489,9 +492,9 @@ def _direct_tool_call_prefix_state(
     *,
     allow_historical_developer_interleave: bool = False,
     canonical_lite_developer_index: int | None = None,
-) -> tuple[deque[tuple[str, str]], set[str]] | None:
+) -> tuple[deque[tuple[str, str]], set[str], dict[str, str]] | None:
     pending_calls: deque[tuple[str, str]] = deque()
-    async_unsettled: set[tuple[str, str]] = set()
+    async_unsettled: dict[str, str] = {}
     seen_call_ids: set[str] = set()
     # A pending window opens when ``pending_calls`` becomes non-empty and closes when it
     # drains. Historical interleaving is proven only for a window that never held more than
@@ -535,7 +538,7 @@ def _direct_tool_call_prefix_state(
                 return None
             seen_call_ids.add(call_id)
             if item.get("async") is True:
-                async_unsettled.add((item_type, call_id))
+                async_unsettled[call_id] = item_type
                 continue
             pending_calls.append((item_type, call_id))
             if len(pending_calls) > 1:
@@ -559,8 +562,8 @@ def _direct_tool_call_prefix_state(
                     pending_window_developer_seen = False
                     pending_window_held_parallel_calls = False
                 continue
-            if (call_type, call_id) in async_unsettled:
-                async_unsettled.discard((call_type, call_id))
+            if async_unsettled.get(call_id) == call_type:
+                del async_unsettled[call_id]
                 continue
             return None
         if pending_calls and (
@@ -575,7 +578,7 @@ def _direct_tool_call_prefix_state(
         fallthrough_call_id = item.get("call_id")
         if isinstance(fallthrough_call_id, str) and fallthrough_call_id:
             seen_call_ids.add(fallthrough_call_id)
-    return pending_calls, seen_call_ids
+    return pending_calls, seen_call_ids, async_unsettled
 
 
 def _historical_pending_developer_message_is_transparent(

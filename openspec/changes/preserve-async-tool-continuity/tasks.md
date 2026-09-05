@@ -2,7 +2,7 @@
 
 - [x] 1.1 Record async function/custom tool call identities from upstream events
 - [x] 1.2 Complete pending async calls only on matching typed outputs
-- [x] 1.3 Skip durable pending-tool manifests while async calls are outstanding
+- [x] 1.3 Persist the synchronous subset of the durable pending-tool manifest while async calls are outstanding
 
 ## 2. Injection
 

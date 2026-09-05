@@ -1767,6 +1767,13 @@ def test_handle_permanent_failure_sets_reauth_required_for_token_invalidated():
     assert state.deactivation_reason == "Authentication token invalidated - re-login required"
 
 
+def test_handle_permanent_failure_sets_reauth_required_for_token_revoked():
+    state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    handle_permanent_failure(state, "token_revoked")
+    assert state.status == AccountStatus.REAUTH_REQUIRED
+    assert state.deactivation_reason == "Authentication token revoked - re-login required"
+
+
 def test_handle_permanent_failure_sets_reason_for_account_deactivated():
     state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
     handle_permanent_failure(state, "account_deactivated")

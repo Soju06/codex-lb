@@ -1806,6 +1806,7 @@ def _status_code_from_openai_error(error: OpenAIError) -> int | None:
         "invalid_api_key",
         "invalid_authentication",
         "token_invalidated",
+        "token_revoked",
     }:
         return 401
     if error_type == "permission_error" or error_code == "insufficient_permissions":

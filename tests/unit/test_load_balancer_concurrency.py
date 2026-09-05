@@ -40,8 +40,125 @@ from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickyOwnerLookup
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
+from tests.simulation.virtual_time import VirtualClock
 
 pytestmark = pytest.mark.unit
+
+
+def test_selected_probe_timestamps_use_injected_clock() -> None:
+    clock = VirtualClock(epoch_value=1_700_000_123.0)
+    balancer = LoadBalancer(cast(Any, None), clock=clock)
+    account = _make_account("acc-virtual-clock")
+    balancer._runtime[account.id] = RuntimeState(last_selected_at=10.0)
+    reservation = load_balancer_module.ProbeReservation(
+        account_id=account.id,
+        previous_last_selected_at=None,
+        reserved_at=10.0,
+        expected_runtime_version=0,
+    )
+
+    assert balancer._commit_due_probe_reservation_locked(reservation)
+    assert balancer._runtime[account.id].last_selected_at == clock.time()
+
+    state = balancer._state_for(account)
+    clock.advance(1.0)
+    assert balancer._sync_runtime_state(
+        account,
+        state,
+        selected=True,
+        expected_version=balancer._runtime[account.id].version,
+    )
+    assert balancer._runtime[account.id].last_selected_at == clock.time()
+
+
+def test_probe_selection_uses_injected_clock() -> None:
+    clock = VirtualClock(epoch_value=1_700_000_123.0)
+    balancer = LoadBalancer(cast(Any, None), clock=clock)
+    healthy = _make_account("acc-virtual-clock-healthy")
+    probing = _make_account("acc-virtual-clock-probing")
+    recent_selection = clock.time() - 1.0
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=recent_selection,
+    )
+
+    reservation = balancer._reserve_due_probe_locked(
+        [
+            AccountState(
+                account_id=healthy.id,
+                status=AccountStatus.ACTIVE,
+                health_tier=HEALTH_TIER_HEALTHY,
+            ),
+            AccountState(
+                account_id=probing.id,
+                status=AccountStatus.ACTIVE,
+                last_selected_at=recent_selection,
+                health_tier=HEALTH_TIER_PROBING,
+            ),
+        ],
+        prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        relative_availability_power=2.0,
+        relative_availability_top_k=5,
+        traffic_class=load_balancer_module.TRAFFIC_CLASS_FOREGROUND,
+        routing_costs_by_account_id=None,
+    )
+
+    assert reservation is None
+
+
+@pytest.mark.asyncio
+async def test_record_errors_uses_injected_clock() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    account = _make_account("acc-virtual-clock-error")
+    balancer = LoadBalancer(
+        lambda: _repo_factory(_StubAccountsRepository([account]), _StubUsageRepository({}, {})),
+        clock=clock,
+    )
+
+    await balancer.record_errors(account, 2)
+
+    runtime = balancer._runtime[account.id]
+    assert runtime.error_count == 2
+    assert runtime.last_error_at == clock.time()
+
+
+@pytest.mark.asyncio
+async def test_record_errors_uses_real_clock_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_epoch = 2_000_000_001.0
+    monkeypatch.setattr("app.core.clock.time.time", lambda: real_epoch)
+    account = _make_account("acc-real-clock-error")
+    balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([account]), _StubUsageRepository({}, {})))
+
+    await balancer.record_error(account)
+
+    assert balancer._runtime[account.id].last_error_at == real_epoch
+
+
+@pytest.mark.asyncio
+async def test_virtual_clock_controls_state_and_probe_health_transitions() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    account = _make_account("acc-virtual-clock-state")
+    primary = _usage_row_with_percent(
+        900,
+        account.id,
+        used_percent=DRAIN_PRIMARY_THRESHOLD_PCT,
+        reset_at=int(clock.time() + 300),
+    )
+    usage_repo = _StubUsageRepository({account.id: primary}, {})
+    balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([account]), usage_repo), clock=clock)
+    balancer._runtime[account.id] = RuntimeState(health_tier=HEALTH_TIER_PROBING, probe_success_streak=2)
+
+    await balancer.select_account()
+    runtime = balancer._runtime[account.id]
+    assert runtime.health_tier == HEALTH_TIER_DRAINING
+    assert runtime.drain_entered_at == clock.time()
+
+    await balancer.record_probe_result(account_id=account.id, http_status=200)
+
+    assert runtime.health_tier == HEALTH_TIER_DRAINING
+    assert runtime.drain_entered_at == clock.time()
 
 
 @pytest.fixture(autouse=True)
@@ -1415,6 +1532,7 @@ def test_bypass_routing_strategies_do_not_require_probe_reservations(routing_str
         states[1],
         routing_strategy=routing_strategy,
         traffic_class=load_balancer_module.TRAFFIC_CLASS_FOREGROUND,
+        now=0.0,
     )
 
 
@@ -1441,6 +1559,7 @@ def test_blocked_healthy_tier_peer_does_not_suppress_recovery_probe() -> None:
         load_balancer_module._filter_recovery_probe_candidates(
             states,
             traffic_class=load_balancer_module.TRAFFIC_CLASS_FOREGROUND,
+            now=float(now_epoch),
         )
         == states
     )
@@ -1449,7 +1568,31 @@ def test_blocked_healthy_tier_peer_does_not_suppress_recovery_probe() -> None:
         due_probe,
         routing_strategy="usage_weighted",
         traffic_class=load_balancer_module.TRAFFIC_CLASS_FOREGROUND,
+        now=float(now_epoch),
     )
+
+
+def test_recovery_probe_filter_uses_injected_selection_time() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    recovered_healthy = AccountState(
+        "recovered-healthy",
+        AccountStatus.RATE_LIMITED,
+        used_percent=100.0,
+        reset_at=clock.time() - 1.0,
+        health_tier=HEALTH_TIER_HEALTHY,
+    )
+    due_probe = AccountState(
+        "due-probe",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        health_tier=HEALTH_TIER_PROBING,
+    )
+
+    assert load_balancer_module._filter_recovery_probe_candidates(
+        [recovered_healthy, due_probe],
+        traffic_class=load_balancer_module.TRAFFIC_CLASS_FOREGROUND,
+        now=clock.time(),
+    ) == [recovered_healthy]
 
 
 @pytest.mark.asyncio

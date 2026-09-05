@@ -36,6 +36,7 @@ from app.core.clients.proxy import codex_control_request as core_codex_control_r
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
+from app.core.clock import Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
@@ -157,7 +158,6 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _responses_request_uses_image_generation,
     _service_get_settings,
     _service_get_settings_cache,
-    _service_time,
     _stream_keepalive_max_count,
     _websocket_downstream_response_id,
     _websocket_event_error_code,
@@ -642,11 +642,12 @@ def _http_bridge_capacity_wait_plan(
     exc: ProxyResponseError,
     *,
     request_deadline: float,
+    now: float,
 ) -> tuple[float, float, str | None] | None:
     account_capacity_wait_seconds = _http_bridge_account_capacity_wait_seconds(exc)
     if account_capacity_wait_seconds is None:
         return None
-    remaining_budget_seconds = max(0.0, request_deadline - _service_time().monotonic())
+    remaining_budget_seconds = max(0.0, request_deadline - now)
     if remaining_budget_seconds <= 0:
         return None
     code, message = _proxy_error_code_message(exc)
@@ -704,6 +705,8 @@ async def _iter_account_capacity_wait_sse(
     sleep_seconds: float,
     emit_keepalives: bool,
     request_state: _WebSocketRequestState | None = None,
+    scheduler: Scheduler,
+    clock: Clock,
 ) -> AsyncIterator[str]:
     if not emit_keepalives:
         if request_state is not None and request_state.capacity_startup_ready_event is not None:
@@ -711,7 +714,7 @@ async def _iter_account_capacity_wait_sse(
         if request_state is not None and request_state.capacity_startup_wait_event is not None:
             request_state.capacity_startup_wait_event.set()
         _signal_propagated_capacity_startup_wait()
-    wait_started_at = _service_time().monotonic()
+    wait_started_at = clock.monotonic()
     remaining_sleep_seconds = sleep_seconds
     while remaining_sleep_seconds > 0:
         if emit_keepalives:
@@ -724,6 +727,7 @@ async def _iter_account_capacity_wait_sse(
                         reason=reason,
                         retry_after_seconds=remaining_sleep_seconds,
                         started_at=wait_started_at,
+                        now=clock.monotonic(),
                     ),
                 )
             )
@@ -731,7 +735,7 @@ async def _iter_account_capacity_wait_sse(
             remaining_sleep_seconds,
             _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
         )
-        await asyncio.sleep(chunk_seconds)
+        await scheduler.sleep(chunk_seconds)
         remaining_sleep_seconds -= chunk_seconds
 
 
@@ -1247,6 +1251,8 @@ class _HTTPBridgeStreamingMixin:
         bridge_payload: JsonObject | None = None,
         _denied_anchor_request_id: str | None = None,
     ) -> AsyncIterator[str]:
+        scheduler = scheduler_for(self)
+        clock = clock_for(self)
         del suppress_text_done_events
         dead_owner_anchor = False
         dead_owner_process_epoch_mismatch = False
@@ -2303,7 +2309,9 @@ class _HTTPBridgeStreamingMixin:
                         request_state.preferred_account_id = None
                         preferred_account_has_continuity_provenance = False
                         continue
-                    wait_plan = _http_bridge_capacity_wait_plan(exc, request_deadline=request_deadline)
+                    wait_plan = _http_bridge_capacity_wait_plan(
+                        exc, request_deadline=request_deadline, now=clock.monotonic()
+                    )
                     if wait_plan is not None:
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                         logger.info(
@@ -2321,9 +2329,11 @@ class _HTTPBridgeStreamingMixin:
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
                             request_state=request_state,
+                            scheduler=scheduler,
+                            clock=clock,
                         ):
                             yield line
-                        if _service_time().monotonic() >= request_deadline:
+                        if clock.monotonic() >= request_deadline:
                             raise
                         continue
                     raise
@@ -2557,7 +2567,9 @@ class _HTTPBridgeStreamingMixin:
                             switch_to_account_neutral_replay()
                             owner_forward_fresh_replay = True
                             continue
-                        wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
+                        wait_plan = _http_bridge_capacity_wait_plan(
+                            capacity_exc, request_deadline=request_deadline, now=clock.monotonic()
+                        )
                         if wait_plan is None:
                             raise
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
@@ -2579,9 +2591,11 @@ class _HTTPBridgeStreamingMixin:
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
                             request_state=request_state,
+                            scheduler=scheduler,
+                            clock=clock,
                         ):
                             yield line
-                        if _service_time().monotonic() >= request_deadline:
+                        if clock.monotonic() >= request_deadline:
                             raise
                         continue
                     break
@@ -2802,7 +2816,7 @@ class _HTTPBridgeStreamingMixin:
                     if retry_request_state is not None:
                         with anyio.CancelScope(shield=True):
                             await self._detach_http_bridge_request(session, request_state=retry_request_state)
-                            session.last_used_at = _service_time().monotonic()
+                            session.last_used_at = clock.monotonic()
                 return
         session = session_or_forward
         if (
@@ -3344,7 +3358,9 @@ class _HTTPBridgeStreamingMixin:
                             defer_account_health_writes=request_state.api_key_reservation is not None,
                         )
                     except ProxyResponseError as capacity_exc:
-                        wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
+                        wait_plan = _http_bridge_capacity_wait_plan(
+                            capacity_exc, request_deadline=request_deadline, now=clock.monotonic()
+                        )
                         if wait_plan is None:
                             raise
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
@@ -3363,9 +3379,11 @@ class _HTTPBridgeStreamingMixin:
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
                             request_state=request_state,
+                            scheduler=scheduler,
+                            clock=clock,
                         ):
                             yield line
-                        if _service_time().monotonic() >= request_deadline:
+                        if clock.monotonic() >= request_deadline:
                             raise
                         continue
                     break
@@ -3450,7 +3468,9 @@ class _HTTPBridgeStreamingMixin:
                             defer_account_health_writes=request_state.api_key_reservation is not None,
                         )
                     except ProxyResponseError as capacity_exc:
-                        wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
+                        wait_plan = _http_bridge_capacity_wait_plan(
+                            capacity_exc, request_deadline=request_deadline, now=clock.monotonic()
+                        )
                         if wait_plan is None:
                             raise
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
@@ -3469,9 +3489,11 @@ class _HTTPBridgeStreamingMixin:
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
                             request_state=request_state,
+                            scheduler=scheduler,
+                            clock=clock,
                         ):
                             yield line
-                        if _service_time().monotonic() >= request_deadline:
+                        if clock.monotonic() >= request_deadline:
                             raise
                         continue
                     break
@@ -3813,7 +3835,9 @@ class _HTTPBridgeStreamingMixin:
                             defer_account_health_writes=request_state.api_key_reservation is not None,
                         )
                     except ProxyResponseError as capacity_exc:
-                        wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
+                        wait_plan = _http_bridge_capacity_wait_plan(
+                            capacity_exc, request_deadline=request_deadline, now=clock.monotonic()
+                        )
                         if wait_plan is None:
                             raise
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
@@ -3833,9 +3857,11 @@ class _HTTPBridgeStreamingMixin:
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
                             request_state=request_state,
+                            scheduler=scheduler,
+                            clock=clock,
                         ):
                             yield line
-                        if _service_time().monotonic() >= request_deadline:
+                        if clock.monotonic() >= request_deadline:
                             raise
                         continue
                     break
@@ -4072,6 +4098,8 @@ class _HTTPBridgeStreamingMixin:
         downstream_turn_state: str | None,
         request_deadline: float | None = None,
     ) -> AsyncGenerator[str, None]:
+        scheduler = scheduler_for(self)
+        clock = clock_for(self)
         if request_deadline is None:
             request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(_service_get_settings())
         request_state.bridge_request_deadline = request_deadline
@@ -4092,7 +4120,7 @@ class _HTTPBridgeStreamingMixin:
             # failure and detaching the request underneath the replay.
             if request_state.clean_close_retry_in_progress:
                 while request_state.clean_close_retry_in_progress:
-                    if _service_time().monotonic() >= request_deadline:
+                    if clock.monotonic() >= request_deadline:
                         return (
                             False,
                             format_sse_event(
@@ -4107,7 +4135,7 @@ class _HTTPBridgeStreamingMixin:
                                 )
                             ),
                         )
-                    await asyncio.sleep(0.01)
+                    await scheduler.sleep(0.01)
                 if request_state.clean_close_retry_result is True:
                     return True, None
             try:
@@ -4187,7 +4215,7 @@ class _HTTPBridgeStreamingMixin:
             retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
             if retry_cooldown_seconds <= 0:
                 return False
-            remaining_budget_seconds = request_deadline - _service_time().monotonic()
+            remaining_budget_seconds = request_deadline - clock.monotonic()
             if remaining_budget_seconds <= 0:
                 return False
             wait_seconds = min(retry_cooldown_seconds, remaining_budget_seconds)
@@ -4232,7 +4260,7 @@ class _HTTPBridgeStreamingMixin:
                 remaining_wait_seconds = wait_seconds
                 while remaining_wait_seconds > 0:
                     sleep_seconds = min(remaining_wait_seconds, lease_refresh_interval_seconds)
-                    await asyncio.sleep(sleep_seconds)
+                    await scheduler.sleep(sleep_seconds)
                     remaining_wait_seconds = max(0.0, remaining_wait_seconds - sleep_seconds)
                     if remaining_wait_seconds <= 0:
                         break
@@ -4278,7 +4306,7 @@ class _HTTPBridgeStreamingMixin:
             return True
 
         async def operation_fenced_request_budget_terminal_event() -> str | None:
-            if not operation_fenced_cooldown_wait_enabled() or _service_time().monotonic() < request_deadline:
+            if not operation_fenced_cooldown_wait_enabled() or clock.monotonic() < request_deadline:
                 return None
             await self._release_websocket_request_state_reservation(request_state)
             request_state.api_key_reservation = None
@@ -4395,7 +4423,7 @@ class _HTTPBridgeStreamingMixin:
                     )
 
             nonlocal idle_settlement_task
-            idle_settlement_task = asyncio.create_task(
+            idle_settlement_task = scheduler.create_task(
                 _transport_consult_and_clear(),
                 name=f"http-bridge-eventless-poison-settlement-{session.durable_session_id}",
             )
@@ -4521,7 +4549,9 @@ class _HTTPBridgeStreamingMixin:
             except ProxyResponseError as exc:
                 if request_state.bridge_soft_capacity_reroute_allowed:
                     raise
-                wait_plan = _http_bridge_capacity_wait_plan(exc, request_deadline=request_deadline)
+                wait_plan = _http_bridge_capacity_wait_plan(
+                    exc, request_deadline=request_deadline, now=clock.monotonic()
+                )
                 if wait_plan is None:
                     raise
                 bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
@@ -4565,13 +4595,15 @@ class _HTTPBridgeStreamingMixin:
                         sleep_seconds=bounded_wait_seconds,
                         emit_keepalives=not propagate_http_errors,
                         request_state=request_state,
+                        scheduler=scheduler,
+                        clock=clock,
                     ):
                         yield line
                 finally:
                     if gate_contention:
                         async with session.pending_lock:
                             session.queued_request_count = max(0, session.queued_request_count - 1)
-                if _service_time().monotonic() >= request_deadline:
+                if clock.monotonic() >= request_deadline:
                     raise
                 if gate_contention and session.closed:
                     raise
@@ -4701,7 +4733,7 @@ class _HTTPBridgeStreamingMixin:
                         "request_id=%s response_id=%s elapsed_seconds=%.2f",
                         request_state.request_id,
                         downstream_response_id,
-                        max(0.0, _service_time().monotonic() - request_state.started_at),
+                        max(0.0, clock.monotonic() - request_state.started_at),
                     )
                     completed_delivery_suppression_logged = True
                 return completed_delivery_owns_queue
@@ -4777,12 +4809,12 @@ class _HTTPBridgeStreamingMixin:
                         if circuit_keepalive_until is not None:
                             wait_timeout = min(
                                 wait_timeout,
-                                max(0.001, circuit_keepalive_until - _service_time().monotonic()),
+                                max(0.001, circuit_keepalive_until - clock.monotonic()),
                             )
                     if not yielded_any and not keepalive_sent:
                         wait_timeout = max(wait_timeout, _http_bridge_startup_keepalive_grace_seconds())
                     try:
-                        event_block = await asyncio.wait_for(event_queue.get(), timeout=wait_timeout)
+                        event_block = await scheduler.wait_for(event_queue.get(), timeout=wait_timeout)
                     except asyncio.TimeoutError:
                         if request_state.account_capacity_waiting:
                             keepalive_count = 0
@@ -4799,6 +4831,7 @@ class _HTTPBridgeStreamingMixin:
                                         request_id=request_state.request_id,
                                         reason=request_state.account_capacity_wait_reason,
                                         retry_after_seconds=request_state.account_capacity_wait_retry_after_seconds,
+                                        now=clock.monotonic(),
                                     ),
                                 )
                             )
@@ -4924,7 +4957,7 @@ class _HTTPBridgeStreamingMixin:
                                 if retry_cooldown_seconds > 0:
                                     retry_cooldown_remaining_budget = max(
                                         0.0,
-                                        request_deadline - _service_time().monotonic(),
+                                        request_deadline - clock.monotonic(),
                                     )
                                     if retry_cooldown_seconds >= retry_cooldown_remaining_budget:
                                         if await completed_delivery_suppresses_idle_timeout(
@@ -4968,7 +5001,7 @@ class _HTTPBridgeStreamingMixin:
                                         break
                                     circuit_keepalive_waiting = True
                                     keepalive_count = 0
-                                    circuit_keepalive_until = _service_time().monotonic() + retry_cooldown_seconds
+                                    circuit_keepalive_until = clock.monotonic() + retry_cooldown_seconds
                                     if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
                                         http_bridge_retry_circuit_total.labels(outcome="keepalive").inc()
                                     logger.info(
@@ -5106,7 +5139,7 @@ class _HTTPBridgeStreamingMixin:
                                         # (the frame is not delayed behind the durable
                                         # store) and survives the generator through the
                                         # cleanup registry.
-                                        idle_settlement_task = asyncio.create_task(
+                                        idle_settlement_task = scheduler.create_task(
                                             _idle_consult_and_clear(),
                                             name=f"http-bridge-idle-poison-settlement-{session.durable_session_id}",
                                         )
@@ -5181,7 +5214,7 @@ class _HTTPBridgeStreamingMixin:
                 block_event_type = _event_type_from_payload(None, block_payload)
                 if request_state.latency_first_token_ms is None:
                     ttft_visible_at = _ttft_event_visible_at(
-                        block_event_type, block_payload, request_state.ttft_reasoning_deltas
+                        block_event_type, block_payload, request_state.ttft_reasoning_deltas, now=clock.monotonic()
                     )
                     if ttft_visible_at is not None:
                         request_state.latency_first_token_ms = max(
@@ -5250,5 +5283,5 @@ class _HTTPBridgeStreamingMixin:
                             exc_info=True,
                         )
                 await self._detach_http_bridge_request(session, request_state=request_state)
-                session.last_used_at = _service_time().monotonic()
+                session.last_used_at = clock.monotonic()
                 await self._maybe_release_idle_http_bridge_session_lease(session)

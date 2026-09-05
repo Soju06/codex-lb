@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from app.core.clock import Clock, Scheduler
+
 
 class _WebSocketServiceProtocol(Protocol):
     _capability_router: Any
     _background_cleanup_tasks: Any
+    _clock: Clock
+    _remaining_budget_seconds: Any
     _acquire_account_response_create_lease_or_overload: Any
     _acquire_request_state_response_create_admission: Any
     _cancel_request_state_api_key_reservation_heartbeat: Any
@@ -53,6 +57,7 @@ class _WebSocketServiceProtocol(Protocol):
     _resolve_upstream_route_for_account: Any
     _resolve_websocket_previous_response_owner: Any
     _retry_websocket_connect_after_401: Any
+    _scheduler: Scheduler
     _select_account_with_budget_compatible: Any
     _select_websocket_connect_account: Any
     _send_downstream_websocket_bytes: Any

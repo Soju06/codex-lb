@@ -146,6 +146,7 @@ async def run_unbound_selection_path(
         probe_reservation: ProbeReservation | None = None
         probe_reservation_invalidated = False
         async with owner._runtime_lock:
+            selection_now = owner._clock.time()
             states, account_map = owner._prepare_sticky_selection_states(
                 selection_inputs,
                 required_account_id=required_account_id,
@@ -157,7 +158,7 @@ async def run_unbound_selection_path(
                 else build_routing_costs(
                     settings=selection_inputs.quota_planner_settings,
                     states=states,
-                    now=datetime.now(timezone.utc),
+                    now=datetime.fromtimestamp(selection_now, timezone.utc),
                 )
             )
             fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
@@ -179,6 +180,7 @@ async def run_unbound_selection_path(
                 selection_states = _filter_recovery_probe_candidates(
                     selection_states,
                     traffic_class=traffic_class,
+                    now=selection_now,
                 )
             if fair_share_denial is not None:
                 # Gate and acquire share this lock section, so the denial is
@@ -238,6 +240,7 @@ async def run_unbound_selection_path(
                     result.account,
                     routing_strategy=routing_strategy,
                     traffic_class=traffic_class,
+                    now=selection_now,
                 )
                 if probing_result_requires_reservation and result.account is not None:
                     # Unbound recovery admissions have the same

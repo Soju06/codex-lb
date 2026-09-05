@@ -20,6 +20,7 @@ from app.modules.proxy._service.http_bridge import helpers as http_bridge_helper
 from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.http_bridge_event_batcher import TerminalOperationEventAppendResult
+from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.unit
 
@@ -332,6 +333,136 @@ async def test_cancelled_stream_settlement_task_releases_reservation(
     assert ("release_stream_api_key_reservation_after_cancelled_settlement", "req-cancel-settle") in scheduled
     assert ("key-cancel-settle", "res-cancel-settle") in scheduled
     assert release_retry_flags == [True]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_task_cleanup_is_scheduler_owned() -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    cleanup_tasks: set[asyncio.Task[None]] = set()
+    blocked = asyncio.Event()
+    task = scheduler.create_task(blocked.wait())
+
+    await scheduler.drain()
+    http_bridge_helpers._cancel_and_track_cancelled_task(
+        task,
+        label="owned-cleanup",
+        cleanup_tasks=cleanup_tasks,
+        scheduler=scheduler,
+    )
+
+    assert cleanup_tasks
+    await scheduler.cancel_owned_tasks()
+
+    assert task.done() is True
+    assert all(cleanup_task.done() for cleanup_task in cleanup_tasks)
+
+
+@pytest.mark.asyncio
+async def test_await_cancelled_task_reports_settled_child_at_zero_timeout(caplog: pytest.LogCaptureFixture) -> None:
+    """An already-settled child is reported done even with no time budget left.
+
+    ``asyncio.wait({task}, timeout=0)`` reports a done task as done; the
+    takeover branch's ``wait_for(asyncio.wait(...), timeout=0)`` shape raised
+    ``TimeoutError`` instead, tracked the settled child as a stubborn cleanup
+    and returned ``False``. Both the virtual and the real scheduler must keep
+    main's answer.
+    """
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+
+    async def finished() -> str:
+        return "done"
+
+    for candidate in (scheduler, http_bridge_helpers.REAL_SCHEDULER):
+        cleanup_tasks: set[asyncio.Task[None]] = set()
+        child = scheduler.create_task(finished())
+        await scheduler.drain()
+        assert child.done()
+
+        with caplog.at_level(logging.WARNING):
+            result = await http_bridge_helpers._await_cancelled_task(
+                child,
+                timeout_seconds=0.0,
+                label="settled child",
+                cleanup_tasks=cleanup_tasks,
+                scheduler=candidate,
+            )
+
+        assert result is True
+        assert cleanup_tasks == set()
+        assert "Timed out waiting for settled child cancellation" not in caplog.text
+    assert scheduler.pending_timers == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_child_uses_owner_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+
+    async def blocked_reader() -> None:
+        await asyncio.Event().wait()
+
+    reader = scheduler.create_task(blocked_reader())
+    await scheduler.drain()
+    captured_schedulers: list[Any] = []
+
+    async def await_cancelled_task(task: asyncio.Task[Any], **kwargs: Any) -> bool:
+        captured_schedulers.append(kwargs["scheduler"])
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return True
+
+    monkeypatch.setattr(http_bridge_upstream_events, "_await_cancelled_task", await_cancelled_task)
+
+    assert await http_bridge_upstream_events._cancel_http_bridge_reader_child(
+        reader,
+        label="owned-reader",
+        scheduler_owner=SimpleNamespace(_scheduler=scheduler),
+    )
+    assert captured_schedulers == [scheduler]
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_resource_close_uses_service_scheduler_for_reader_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    session = _make_http_bridge_session(deque(), queued_request_count=0)
+
+    async def blocked_reader() -> None:
+        await asyncio.Event().wait()
+
+    reader = scheduler.create_task(blocked_reader())
+    session.upstream_reader = reader
+    await scheduler.drain()
+
+    captured_schedulers: list[Any] = []
+
+    async def await_cancelled_task(task: asyncio.Task[Any], **kwargs: Any) -> bool:
+        captured_schedulers.append(kwargs["scheduler"])
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return True
+
+    monkeypatch.setattr(http_bridge_helpers, "_await_cancelled_task", await_cancelled_task)
+    service = SimpleNamespace(
+        _scheduler=scheduler,
+        _background_cleanup_tasks=set(),
+        _unregister_http_bridge_turn_states=AsyncMock(),
+        _unregister_http_bridge_previous_response_ids=AsyncMock(),
+        _load_balancer=SimpleNamespace(release_account_lease=AsyncMock()),
+        _fail_pending_websocket_requests=AsyncMock(),
+    )
+
+    await http_bridge_helpers._close_http_bridge_session_resources(service, session)
+
+    assert captured_schedulers == [scheduler]
+    assert reader.cancelled()
+    assert session.upstream_reader is None
 
 
 @pytest.mark.asyncio
@@ -729,7 +860,9 @@ async def test_http_bridge_detach_reclaims_abandoned_terminal_settlement(
 async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()), clock=clock, scheduler=scheduler)
     queue_waiting = asyncio.Event()
 
     class ObservedQueue(asyncio.Queue[str | None]):
@@ -785,6 +918,10 @@ async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_cl
     finalize_request = AsyncMock()
     monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
     monkeypatch.setattr(service, "_detach_http_bridge_request", fake_detach_http_bridge_request)
+    # The retry circuit lookup loads durable state over the real DB session,
+    # which the virtual clock cannot advance; this scenario is about the idle
+    # timeout, so the cooldown is stubbed out rather than simulated.
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
     monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", AsyncMock(return_value=True))
     monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request)
     monkeypatch.setattr(
@@ -811,9 +948,11 @@ async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_cl
             )
         ]
 
-    stream_task = asyncio.create_task(consume_stream())
-    await asyncio.wait_for(queue_waiting.wait(), timeout=1.0)
-    event_blocks = await asyncio.wait_for(stream_task, timeout=1.0)
+    stream_task = scheduler.create_task(consume_stream())
+    await scheduler.drain()
+    await scheduler.advance(0.001)
+    assert queue_waiting.is_set()
+    event_blocks = await stream_task
 
     assert queue_revoked_before_lock_release is True
     assert request_state.event_queue is None
@@ -832,7 +971,9 @@ async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_cl
 async def test_http_bridge_completed_delivery_stays_dominant_after_recovery_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()), clock=clock, scheduler=scheduler)
     recovery_started = asyncio.Event()
     release_recovery = asyncio.Event()
     event_queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -893,8 +1034,10 @@ async def test_http_bridge_completed_delivery_stays_dominant_after_recovery_wait
             )
         ]
 
-    stream_task = asyncio.create_task(consume_stream())
-    await asyncio.wait_for(recovery_started.wait(), timeout=1.0)
+    stream_task = scheduler.create_task(consume_stream())
+    await scheduler.drain()
+    await scheduler.advance(0.001)
+    assert recovery_started.is_set()
 
     terminal_text = (
         '{"type":"response.completed","response":{"id":"resp-completed-during-recovery","status":"completed"}}'
@@ -905,7 +1048,8 @@ async def test_http_bridge_completed_delivery_stays_dominant_after_recovery_wait
     assert request_state.completed_delivery_scope.active is False
     assert request_state.completed_delivery_scope.terminal_enqueued is True
     release_recovery.set()
-    event_blocks = await asyncio.wait_for(stream_task, timeout=1.0)
+    await scheduler.drain()
+    event_blocks = await stream_task
 
     event_types = [
         payload["type"]
@@ -1198,3 +1342,70 @@ async def test_response_created_does_not_promote_in_progress_durable_anchor() ->
     assert refreshed is not None
     assert refreshed.latest_response_id == "resp_B_completed"
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_schedule_http_bridge_background_cleanup_is_scheduler_owned() -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()), scheduler=scheduler)
+    release = asyncio.Event()
+
+    async def cleanup() -> None:
+        await release.wait()
+
+    task = http_bridge_helpers._schedule_http_bridge_background_cleanup(
+        service,
+        cleanup(),
+        name="http-bridge-virtual-cleanup",
+        error_message="virtual cleanup failed",
+    )
+
+    assert task is not None
+    assert task.get_name() == "http-bridge-virtual-cleanup"
+    assert task in service._background_cleanup_tasks
+    assert task in scheduler.owned_tasks
+
+    await scheduler.cancel_owned_tasks()
+    await scheduler.drain()
+
+    assert task.cancelled()
+    assert task not in service._background_cleanup_tasks
+
+
+@pytest.mark.asyncio
+async def test_close_http_bridge_session_bounded_times_out_on_injected_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bounded close waits on the owner scheduler; the timeout branch keeps tracking the close."""
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()), scheduler=scheduler)
+    session = _make_http_bridge_session(deque(), queued_request_count=0)
+    release_close = asyncio.Event()
+
+    async def slow_close(_session: object) -> None:
+        await release_close.wait()
+
+    monkeypatch.setattr(service, "_close_http_bridge_session", slow_close)
+    bounded = scheduler.create_task(
+        http_bridge_helpers._close_http_bridge_session_bounded(service, session, reason="virtual-timeout")
+    )
+    await scheduler.drain()
+    assert not bounded.done()
+
+    await scheduler.advance(http_bridge_helpers._HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS)
+
+    assert bounded.done()
+    close_tasks = [
+        task for task in service._background_cleanup_tasks if task.get_name().startswith("http-bridge-close-")
+    ]
+    assert len(close_tasks) == 1
+    assert not close_tasks[0].done()
+
+    release_close.set()
+    await scheduler.drain()
+
+    assert close_tasks[0].done()
+    assert close_tasks[0] not in service._background_cleanup_tasks
+    assert scheduler.owned_tasks == frozenset()

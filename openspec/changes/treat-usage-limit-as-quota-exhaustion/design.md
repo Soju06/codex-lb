@@ -25,6 +25,8 @@ After quota classification, the load-balancer state builder has a second recover
 - Keep `rate_limit_exceeded` classified as `rate_limit`. A temporary throttle and an exhausted usage allowance have different recovery evidence and must not share the same health mutation.
 - Preserve the public upstream code and response body. The change affects account-health state only, so clients continue receiving the original error if failover is unsafe or no replacement can be selected.
 - Preserve an explicit quota state when fresh applicable long-window usage remains exhausted and no usable credit override exists. The observed long-window reset becomes the routing reset deadline, replacing a shorter fallback deadline when available.
+- Discard an elapsed fallback deadline when the exhausted sample has no reset metadata. Selection then waits for quota recovery evidence without inventing another reset time.
+- For explicit quota blocks with a persisted or runtime block timestamp, use only credit snapshots recorded strictly after that timestamp. Fresh quota-window data without credit fields cannot refresh the age of older credit evidence.
 
 The alternative was to lengthen the generic rate-limit cooldown. That would delay genuine short throttles and would still allow the account to recover without proving that its exhausted long window is available.
 

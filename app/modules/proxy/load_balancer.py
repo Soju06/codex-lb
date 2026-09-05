@@ -2272,10 +2272,12 @@ def _state_from_account(
     effective_secondary_entry = normalized_usage.effective_secondary_entry
     secondary_used = normalized_usage.secondary_used
     secondary_reset = normalized_usage.secondary_reset
+    effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
     credits_has, credits_unlimited, credits_balance = _extract_credit_status(
         primary_entry,
         effective_secondary_entry,
         secondary_entry,
+        recorded_after=effective_blocked_at if account.status == AccountStatus.QUOTA_EXCEEDED else None,
     )
 
     # If the usage window has reset (reset_at is in the past), the last
@@ -2317,8 +2319,6 @@ def _state_from_account(
         and effective_secondary_entry.used_percent is not None
         and float(effective_secondary_entry.used_percent) < 100.0
     )
-    effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
-
     # An account marked RATE_LIMITED by an actual 429 always carries a
     # blocked_at marker (stale window-derived RATE_LIMITED rows do not).
     # Evaluate the persisted cooldown against the ORIGINAL persisted
@@ -2854,11 +2854,13 @@ def _usage_entry_recorded_after_block(entry: _UsageWindowEntry | None, blocked_a
 
 def _extract_credit_status(
     *entries: _UsageWindowEntry | None,
+    recorded_after: float | None = None,
 ) -> tuple[bool | None, bool | None, float | None]:
     credit_entries: list[UsageHistory] = [
         entry
         for entry in entries
         if isinstance(entry, UsageHistory)
+        and (recorded_after is None or _usage_entry_recorded_after_block(entry, recorded_after))
         and not (entry.credits_has is None and entry.credits_unlimited is None and entry.credits_balance is None)
     ]
     if not credit_entries:

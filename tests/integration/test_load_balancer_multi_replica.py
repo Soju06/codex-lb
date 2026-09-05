@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import timezone
+from datetime import timedelta, timezone
 
 import pytest
 
@@ -139,6 +139,70 @@ async def test_peer_replica_honors_metadata_free_rate_limit_cooldown(db_setup):
     assert row.status == AccountStatus.RATE_LIMITED
     assert row.reset_at == persisted_reset_at
     assert row.blocked_at is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("credits_has", "credits_unlimited", "credits_balance"),
+    [(True, None, None), (None, True, None), (None, None, 25.0)],
+    ids=["has_credits", "unlimited", "positive_balance"],
+)
+@pytest.mark.parametrize("has_secondary", [False, True])
+async def test_peer_replica_requires_post_block_credits_to_recover_quota(
+    db_setup, credits_has, credits_unlimited, credits_balance, has_secondary
+):
+    limited = _make_account("quota_stale_credits")
+    healthy = _make_account("quota_healthy")
+    await _seed_accounts_with_usage((healthy, 20.0, 10.0))
+    stale_time = utcnow() - timedelta(seconds=5)
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(limited)
+        usage_repo = UsageRepository(session)
+        for window in ("primary", "secondary") if has_secondary else ("primary",):
+            await usage_repo.add_entry(
+                account_id=limited.id,
+                used_percent=50.0 if window == "primary" else 100.0,
+                window=window,
+                reset_at=int(time.time()) + 7200,
+                window_minutes=300 if window == "primary" else 10080,
+                recorded_at=stale_time,
+                credits_has=credits_has,
+                credits_unlimited=credits_unlimited,
+                credits_balance=credits_balance,
+            )
+
+    marking_replica = LoadBalancer(_repo_factory)
+    await marking_replica.mark_quota_exceeded(limited, {"message": "Usage limit reached"})
+    blocked = await _fetch_account(limited.id)
+    assert blocked.blocked_at is not None
+
+    for _ in range(2):
+        selection = await LoadBalancer(_repo_factory).select_account(routing_strategy="fill_first")
+        assert selection.account is not None
+        assert selection.account.id == healthy.id
+        row = await _fetch_account(limited.id)
+        assert row.status == AccountStatus.QUOTA_EXCEEDED
+        assert row.blocked_at == blocked.blocked_at
+
+    async with SessionLocal() as session:
+        await UsageRepository(session).add_entry(
+            account_id=limited.id,
+            used_percent=100.0,
+            window="secondary",
+            reset_at=int(time.time()) + 7200,
+            window_minutes=10080,
+            recorded_at=utcnow(),
+            credits_has=credits_has,
+            credits_unlimited=credits_unlimited,
+            credits_balance=credits_balance,
+        )
+
+    selection = await LoadBalancer(_repo_factory).select_account(account_ids={limited.id})
+    assert selection.account is not None
+    assert selection.account.id == limited.id
+    recovered = await _fetch_account(limited.id)
+    assert recovered.status == AccountStatus.ACTIVE
+    assert recovered.blocked_at is None
 
 
 @pytest.mark.asyncio

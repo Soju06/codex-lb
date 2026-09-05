@@ -167,12 +167,16 @@ async def test_load_balancer_reactivates_after_secondary_reset(db_setup):
 
 
 @pytest.mark.asyncio
-async def test_load_balancer_does_not_reactivate_explicit_quota_from_fresh_exhausted_secondary_usage(db_setup):
+@pytest.mark.parametrize("has_reset_metadata", [True, False])
+@pytest.mark.parametrize("has_block_marker", [True, False])
+async def test_load_balancer_does_not_reactivate_explicit_quota_from_fresh_exhausted_secondary_usage(
+    db_setup, has_reset_metadata, has_block_marker
+):
     encryptor = TokenEncryptor()
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
-    fallback_reset = now_epoch + 3600
-    secondary_reset = now_epoch + 5 * 24 * 3600
+    fallback_reset = now_epoch - 1
+    secondary_reset = now_epoch + 5 * 24 * 3600 if has_reset_metadata else None
 
     exhausted = Account(
         id="acc_explicit_quota_still_full",
@@ -185,7 +189,7 @@ async def test_load_balancer_does_not_reactivate_explicit_quota_from_fresh_exhau
         status=AccountStatus.QUOTA_EXCEEDED,
         deactivation_reason=None,
         reset_at=fallback_reset,
-        blocked_at=now_epoch - 130,
+        blocked_at=now_epoch - 3601 if has_block_marker else None,
     )
     available = Account(
         id="acc_explicit_quota_replacement",
@@ -229,16 +233,31 @@ async def test_load_balancer_does_not_reactivate_explicit_quota_from_fresh_exhau
                 recorded_at=now,
             )
 
-        selection = await LoadBalancer(_repo_factory).select_account()
-
-        assert selection.account is not None
-        assert selection.account.id == available.id
+        for _ in range(2):
+            selection = await LoadBalancer(_repo_factory).select_account()
+            assert selection.account is not None
+            assert selection.account.id == available.id
 
         refreshed = await session.get(Account, exhausted.id)
         assert refreshed is not None
         await session.refresh(refreshed)
         assert refreshed.status == AccountStatus.QUOTA_EXCEEDED
         assert refreshed.reset_at == secondary_reset
+
+        await usage_repo.add_entry(
+            account_id=exhausted.id,
+            used_percent=25.0,
+            window="secondary",
+            reset_at=secondary_reset + 1 if secondary_reset is not None else None,
+            window_minutes=10080,
+            recorded_at=utcnow(),
+        )
+        recovered = await LoadBalancer(_repo_factory).select_account(account_ids={exhausted.id})
+        assert recovered.account is not None
+        assert recovered.account.id == exhausted.id
+        await session.refresh(refreshed)
+        assert refreshed.status == AccountStatus.ACTIVE
+        assert refreshed.blocked_at is None
 
 
 @pytest.mark.asyncio

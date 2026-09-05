@@ -12,8 +12,8 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from datetime import timezone
-from types import SimpleNamespace
-from typing import Any
+from types import CoroutineType, SimpleNamespace
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -204,6 +204,36 @@ async def test_real_scheduler_owns_nothing() -> None:
     assert not hasattr(REAL_SCHEDULER, "_tasks")
     blocked.set()
     await asyncio.gather(unrelated, rerouted)
+
+
+@pytest.mark.asyncio
+async def test_real_scheduler_timing_methods_return_the_asyncio_coroutine_itself() -> None:
+    """No wrapper frame: the per-event relay sites await the raw asyncio coroutine."""
+
+    scheduler = RealScheduler()
+    future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    async def never() -> None:
+        await future
+
+    inner = never()
+    coroutines = {
+        asyncio.sleep: scheduler.sleep(0),
+        asyncio.wait_for: scheduler.wait_for(inner, 1.0),
+        asyncio.wait: scheduler.wait({future}, timeout=1.0),
+    }
+    try:
+        for primitive, coroutine in coroutines.items():
+            assert asyncio.iscoroutine(coroutine)
+            assert cast(CoroutineType[Any, Any, Any], coroutine).cr_code is primitive.__code__, primitive.__name__
+        drain = scheduler.drain()
+        coroutines[asyncio.sleep] = drain
+        assert cast(CoroutineType[Any, Any, Any], drain).cr_code is asyncio.sleep.__code__
+    finally:
+        for coroutine in coroutines.values():
+            coroutine.close()
+        inner.close()
+        future.cancel()
 
 
 def test_collaborator_accessors_default_to_real_singletons() -> None:

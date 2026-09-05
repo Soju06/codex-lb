@@ -1932,7 +1932,12 @@ async def test_http_bridge_reader_timeout_rechecks_receive_completed_during_time
     await reader_task
 
     assert clock.monotonic() == pytest.approx(5.0)
-    process_text.assert_awaited_once_with(session, '{"type":"response.completed"}')
+    process_text.assert_awaited_once_with(
+        session,
+        '{"type":"response.completed"}',
+        scheduler=service._scheduler,
+        clock=service._clock,
+    )
     retire_after_drain.assert_awaited_once_with(session)
     retry_precreated.assert_not_awaited()
     fail_reader.assert_not_awaited()
@@ -28408,7 +28413,12 @@ async def test_http_bridge_eventless_timeout_does_not_mark_or_clear_after_late_r
     )
     await asyncio.wait_for(reader_task, timeout=1.0)
 
-    process_text.assert_awaited_once_with(session, "late response")
+    process_text.assert_awaited_once_with(
+        session,
+        "late response",
+        scheduler=service._scheduler,
+        clock=service._clock,
+    )
     retry_precreated.assert_not_awaited()
     clear_anchor.assert_not_awaited()
     assert owner.failure_phase_override is None
@@ -28602,6 +28612,7 @@ async def test_http_bridge_reader_marks_session_closed_before_reconnect_close(
     async def request_reconnect(
         target_session: proxy_service._HTTPBridgeSession,
         _upstream_text: str,
+        **_kwargs: Any,
     ) -> None:
         target_session.upstream_control.reconnect_requested = True
         target_session.upstream_control.retire_after_drain = True

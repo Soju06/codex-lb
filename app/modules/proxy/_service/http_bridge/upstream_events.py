@@ -2282,7 +2282,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                             account_id=session.account.id,
                             chatgpt_account_id=session.account.chatgpt_account_id,
                         )
-                    await self._process_http_bridge_upstream_text(session, message.text)
+                    await self._process_http_bridge_upstream_text(
+                        session,
+                        message.text,
+                        scheduler=scheduler,
+                        clock=clock,
+                    )
                     if await self._retire_http_bridge_after_drain_if_ready(session):
                         break
                     continue
@@ -2447,7 +2452,16 @@ class _HTTPBridgeUpstreamEventsMixin:
         self: Any,
         session: "_HTTPBridgeSession",
         text: str,
+        *,
+        scheduler: Scheduler | None = None,
+        clock: Clock | None = None,
     ) -> None:
+        # The relay loop resolves the collaborators once per session and passes
+        # them down; the fallback only serves direct callers (tests).
+        if scheduler is None:
+            scheduler = scheduler_for(self)
+        if clock is None:
+            clock = clock_for(self)
         # One JSON document per websocket text frame: parse it directly instead
         # of framing it as SSE and running the line parser over it. The
         # data-only block is what unmatched events relay.
@@ -2467,6 +2481,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                 event_type=event_type,
                 completed_delivery_scope=completed_delivery_scope,
                 claimed_terminal_request_states=claimed_terminal_request_states,
+                scheduler=scheduler,
+                clock=clock,
             )
         except BaseException:
             # Includes CancelledError. A terminal request popped from
@@ -2580,9 +2596,9 @@ class _HTTPBridgeUpstreamEventsMixin:
         event_type: str | None,
         completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None,
         claimed_terminal_request_states: list[_WebSocketRequestState],
+        scheduler: Scheduler,
+        clock: Clock,
     ) -> None:
-        scheduler = scheduler_for(self)
-        clock = clock_for(self)
         original_text = text
         response_id = _websocket_response_id(event, payload)
         error_message = _websocket_event_error_message(event_type, payload)

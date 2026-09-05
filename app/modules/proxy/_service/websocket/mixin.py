@@ -63,7 +63,7 @@ from app.core.clients.proxy_websocket import (
     filter_inbound_websocket_headers,
     is_account_neutral_websocket_error_code,
 )
-from app.core.clock import Scheduler, clock_for, scheduler_for
+from app.core.clock import Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_NOT_FOUND_CODE,
@@ -1001,6 +1001,7 @@ async def _process_and_forward_upstream_websocket_text(
     downstream_activity: _DownstreamWebSocketActivity,
     continuity_state: _WebSocketContinuityState | None,
     codex_session_affinity: bool,
+    clock: Clock | None = None,
 ) -> bool:
     parsed_frame = _parse_upstream_websocket_text_frame(text)
     archive_request_id = await _websocket_archive_request_id_for_message(
@@ -1026,6 +1027,7 @@ async def _process_and_forward_upstream_websocket_text(
         response_create_gate=response_create_gate,
         continuity_state=continuity_state,
         codex_session_affinity=codex_session_affinity,
+        clock=clock,
     )
     suppress_downstream_event = upstream_control.suppress_downstream_event
     downstream_texts = upstream_control.downstream_texts
@@ -5103,7 +5105,7 @@ class _WebSocketMixin:
                     continue
                 if message.kind == "text" and message.text is not None:
                     downstream_activity.mark()
-                    terminal_task = scheduler_for(proxy).create_task(
+                    terminal_task = scheduler.create_task(
                         _process_and_forward_upstream_websocket_text(
                             proxy,
                             websocket,
@@ -5121,6 +5123,7 @@ class _WebSocketMixin:
                             downstream_activity=downstream_activity,
                             continuity_state=continuity_state,
                             codex_session_affinity=codex_session_affinity,
+                            clock=clock,
                         ),
                         name=f"proxy-websocket-terminal-{account_id_value}",
                     )
@@ -5137,7 +5140,7 @@ class _WebSocketMixin:
                             await _await_owned_websocket_task_after_reader_cancellation(
                                 terminal_task,
                                 failure_message="Websocket terminal task failed during reader cancellation",
-                                scheduler=scheduler_for(proxy),
+                                scheduler=scheduler,
                             )
                             raise
                     finally:
@@ -5181,7 +5184,7 @@ class _WebSocketMixin:
                             )
                         break
                     continue
-                terminal_task = scheduler_for(proxy).create_task(
+                terminal_task = scheduler.create_task(
                     _process_upstream_websocket_transport_end(
                         proxy,
                         websocket,
@@ -5212,7 +5215,7 @@ class _WebSocketMixin:
                         await _await_owned_websocket_task_after_reader_cancellation(
                             terminal_task,
                             failure_message="Websocket transport-end task failed during reader cancellation",
-                            scheduler=scheduler_for(proxy),
+                            scheduler=scheduler,
                         )
                         raise
                 finally:
@@ -5321,9 +5324,13 @@ class _WebSocketMixin:
         continuity_state: "_WebSocketContinuityState | None" = None,
         codex_session_affinity: bool = False,
         parsed_frame: _ParsedUpstreamWebSocketFrame | None = None,
+        clock: Clock | None = None,
     ) -> str:
         proxy = cast(_WebSocketServiceProtocol, self)
-        clock = clock_for(proxy)
+        # The reader loop resolves the owner clock once per connection and
+        # passes it per frame; the fallback only serves direct callers (tests).
+        if clock is None:
+            clock = clock_for(proxy)
         if parsed_frame is None:
             parsed_frame = _parse_upstream_websocket_text_frame(text)
         payload = parsed_frame.payload

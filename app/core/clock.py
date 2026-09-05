@@ -6,7 +6,11 @@ protocols so a test can substitute a virtual implementation
 wall-clock sleeps. The real adapters are *verbatim* passthroughs: every
 ``RealScheduler`` method is the corresponding ``asyncio``/``anyio`` call with
 no task registry, no extra timeout and no wrapper task, so injecting the
-defaults changes nothing about production behavior.
+defaults changes nothing about production behavior. The timing methods are
+plain functions that return the ``asyncio`` coroutine object itself, so the
+per-event relay sites (``scheduler.wait_for(queue.get(), ...)`` per delivered
+block, ``scheduler.wait(...)`` per upstream message) pay no extra coroutine
+frame over the raw call.
 
 Usage rules (also enforced by ``scripts/check_proxy_timing_seams.py`` once it
 lands):
@@ -44,24 +48,31 @@ class Clock(Protocol):
 
 
 class Scheduler(Protocol):
-    async def sleep(self, delay: float, result: T | None = None) -> T | None: ...
+    """Timing and task-spawn seam.
 
-    async def wait_for(self, awaitable: Awaitable[T], timeout: float | None) -> T:
+    The timing members are declared as plain functions returning a coroutine
+    (an ``async def`` implementation satisfies them too) so the real adapter
+    can hand back the ``asyncio`` coroutine object without a wrapper frame.
+    """
+
+    def sleep(self, delay: float, result: T | None = None) -> Coroutine[Any, Any, T | None]: ...
+
+    def wait_for(self, awaitable: Awaitable[T], timeout: float | None) -> Coroutine[Any, Any, T]:
         """Bound ``awaitable`` by ``timeout``.
 
-        Real: ``asyncio.wait_for`` verbatim. Virtual: the awaitable runs in an
-        owned child task (real 3.12+ runs a coroutine inline in the caller);
-        see ``tests/simulation/test_virtual_time.py``.
+        Real: ``asyncio.wait_for`` verbatim. Virtual: the same inline
+        ``asyncio.timeout`` shape on a virtual deadline (same task, same
+        contextvars); see ``tests/simulation/test_virtual_time.py``.
         """
         ...
 
-    async def wait(
+    def wait(
         self,
         fs: Iterable[asyncio.Future[Any]],
         *,
         timeout: float | None = None,
         return_when: str = asyncio.ALL_COMPLETED,
-    ) -> tuple[set[asyncio.Future[Any]], set[asyncio.Future[Any]]]:
+    ) -> Coroutine[Any, Any, tuple[set[asyncio.Future[Any]], set[asyncio.Future[Any]]]]:
         """Mirror ``asyncio.wait``: never cancels ``fs``, reports done at the deadline."""
         ...
 
@@ -71,7 +82,7 @@ class Scheduler(Protocol):
         """Mirror ``anyio.fail_after``: cancel the enclosing scope after ``delay``."""
         ...
 
-    async def drain(self) -> None: ...
+    def drain(self) -> Coroutine[Any, Any, None]: ...
 
     async def cancel_owned_tasks(self) -> None: ...
 
@@ -96,20 +107,22 @@ class RealScheduler:
     scheduler used by tests.
     """
 
-    async def sleep(self, delay: float, result: T | None = None) -> T | None:
-        return await asyncio.sleep(delay, result=result)
+    # Plain functions on purpose: ``await scheduler.sleep(d)`` then awaits the
+    # ``asyncio.sleep`` coroutine object itself, with no extra frame per call.
+    def sleep(self, delay: float, result: T | None = None) -> Coroutine[Any, Any, T | None]:
+        return asyncio.sleep(delay, result=result)
 
-    async def wait_for(self, awaitable: Awaitable[T], timeout: float | None) -> T:
-        return await asyncio.wait_for(awaitable, timeout=timeout)
+    def wait_for(self, awaitable: Awaitable[T], timeout: float | None) -> Coroutine[Any, Any, T]:
+        return asyncio.wait_for(awaitable, timeout=timeout)
 
-    async def wait(
+    def wait(
         self,
         fs: Iterable[asyncio.Future[Any]],
         *,
         timeout: float | None = None,
         return_when: str = asyncio.ALL_COMPLETED,
-    ) -> tuple[set[asyncio.Future[Any]], set[asyncio.Future[Any]]]:
-        return await asyncio.wait(fs, timeout=timeout, return_when=return_when)
+    ) -> Coroutine[Any, Any, tuple[set[asyncio.Future[Any]], set[asyncio.Future[Any]]]]:
+        return asyncio.wait(fs, timeout=timeout, return_when=return_when)
 
     def create_task(self, coroutine: Coroutine[Any, Any, T], *, name: str | None = None) -> asyncio.Task[T]:
         return asyncio.create_task(coroutine, name=name)
@@ -117,8 +130,8 @@ class RealScheduler:
     def fail_after(self, delay: float) -> AbstractContextManager[Any]:
         return anyio.fail_after(delay)
 
-    async def drain(self) -> None:
-        await asyncio.sleep(0)
+    def drain(self) -> Coroutine[Any, Any, None]:
+        return asyncio.sleep(0)
 
     async def cancel_owned_tasks(self) -> None:
         # The real scheduler owns nothing; production tasks are never cancelled here.

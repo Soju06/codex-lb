@@ -13,9 +13,16 @@ of these paths, but several rely on short real sleeps and scheduler jitter.
   wall-clock sleeps.
 - Add a seeded schedule checker for bridge-turn terminal and lease-release
   invariants that drives the production terminal, detach and retry paths under
-  real injected cancellation, plus production-shaped canaries that prove the
-  checker catches planted double-release, lost-settlement, dropped-release,
-  retry-reacquisition and shield-leak bugs.
+  real injected cancellation (landing before, inside and after the reservation
+  settlement), judges the API-key reservation on its effective
+  compare-and-set settlement under several write-latency profiles, and ships
+  production-shaped canaries that prove the checker catches planted
+  double-release, lost-settlement, dropped-release, retry-reacquisition and
+  shield-leak bugs.
+- Pin two known findings as strict expected failures instead of prose: the
+  redundant reservation release calls production issues in detach/terminal
+  races (tolerated by the DB compare-and-set) and the anyio 4.13 `Lock`
+  wedge (fixed upstream in 4.14.0).
 
 ## Impact
 

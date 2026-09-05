@@ -63,6 +63,21 @@
       settlement, dropped reservation release, retry reacquisition,
       re-shielded lease release) plus a coverage test over the settlement
       paths and the injected cancellation.
+- [x] 2.10 Model the reservation boundary like production: per-reservation-id
+      compare-and-set (effective vs redundant writes), detached finalizer
+      settlement write, modelled health write; check the invariant under
+      several write-latency profiles and pin the redundant-release
+      observation as a strict known failure.
+- [x] 2.11 Land the settlement cancel at seeded virtual offsets (inside the
+      lease release, inside the reservation write, after the settlement
+      transfer), classify each landing from product state, assert the
+      abort path never writes a finalizer-settled reservation, and prove the
+      landing coverage.
+- [x] 2.12 Gate the abandoned-shield oracle's count assertions on CPython 3.14
+      (the residue does not exist on CI's 3.13) and document the blind spot.
+- [x] 2.13 Pin the anyio 4.13 `Lock` wedge: minimal reproduction and the
+      affected production-turn seeds as strict expected failures conditioned
+      on the anyio version.
 
 ## 3. Verification
 
@@ -81,3 +96,6 @@
       cancel-unsafe lease release, re-introduced shield leak all caught;
       the surviving retry-ownership and non-bridge-path mutants are explained
       in the change context).
+- [x] 3.8 Re-run the mutants and a 3000-seed sweep under the compare-and-set
+      model and every latency profile; record which post-settlement guard
+      mutants the `abort_after_transfer` invariant catches.

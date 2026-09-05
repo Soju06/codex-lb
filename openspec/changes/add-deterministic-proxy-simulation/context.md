@@ -58,6 +58,52 @@ second cancellation into the shielded abort path is outside the modelled
 contract. Modelled lease releases suspend on a virtual timer, standing in for
 the DB writes they replace, so cancellations can land inside them.
 
+The reservation boundary is modelled the way production has it, because the
+first version of the checker counted release *calls* and its 200-seed green
+turned out to be a timing coincidence: with only the modelled write latency
+changed (0.03 instead of 0.01, or the reservation write merely slower than the
+account-lease release) 25-40% of the seeds failed on pristine production with
+two or three `_release_websocket_reservation` calls per turn, e.g.
+`('abort', 'detach')`, `('abort', 'detach', 'detach')` and, with no
+cancellation at all, `('finalize', 'detach')`. Production tolerates those
+calls through the `status == "reserved"` compare-and-set in
+`ApiKeysService._release_usage_reservation_once` /
+`settle_usage_reservation`, not through exactly-once calls: the detach
+backstop decides `detached` under `pending_lock`, awaits the gate release and
+only then reads `request_state.api_key_reservation`, which the terminal path
+(draining-branch finalizer or shielded abort settlement) may already be
+writing, and every path clears the reservation only after its awaited write
+returns. The recording service therefore models the compare-and-set per
+reservation id (`_write_reservation`: the first completed write is the
+settlement, later ones are recorded as redundant), runs the finalizer's
+settlement as a detached scheduler-owned write that survives the caller's
+cancellation like `_settle_stream_api_key_usage` (including the shielded
+wait loop for ordering-sensitive callers), keeps
+`_release_websocket_reservation` interruptible in the calling task (a raw
+`Task.cancel()` cuts through production's anyio shield there too), and gives
+the load balancer's success write a round trip so the finalizer suspends after
+the settlement transfer. "Exactly once" is one effective flip; the invariant
+is checked under four write-latency profiles. The redundant calls are a
+production observation, not a harness one, so they are pinned by the strict
+known-failing `test_bridge_turn_lifecycle_settles_reservation_with_a_single_write`
+(8 of 200 default-profile seeds, 60 under uniform 30 ms, 46 with the
+reservation write slower, none with the account-lease release slower) rather
+than asserted away or folded into the invariant.
+
+The settlement cancel lands at a seeded virtual offset after the claim
+(`_SETTLEMENT_CANCEL_OFFSETS`) in addition to the seeded loop turns: loop turns
+alone always fired before the first modelled write completed, so the cancel
+never reached the reservation write or the window after the settlement
+transfer and the post-settlement claim guards were untested. Each landing is
+classified from product state (`before_settlement`,
+`inside_reservation_write`, `after_settlement`; default profile: 34/33/18 of
+200 seeds, 18 interrupted writes) and the coverage test asserts all three. The
+`abort_after_transfer` invariant is what makes the post-settlement window
+observable under the compare-and-set model: once the finalizer settled the
+reservation, the shielded abort path must find the claim cleared and never
+write that reservation. Pristine production satisfies it on every profile and
+on the first 3000 default-profile seeds.
+
 The canaries plant production-shaped bugs in overridable seams: a detach that
 releases the response-create admission it does not own, an abort path that
 never settles a claimed request (the same failure a never-recorded claim
@@ -67,8 +113,19 @@ task. Each fails the checker at a deterministic seed with the invariant it
 violates. Run against production mutants, the checker catches a dropped
 terminal claim, an abort path that skips settlement, a double admission release
 in `_release_websocket_response_create_gate`, that helper awaiting the account
-lease release without the deferring wrapper, and a re-introduced
-`asyncio.shield` in `_await_task_deferring_cancellation`. Mutants it cannot see,
+lease release without the deferring wrapper, a re-introduced
+`asyncio.shield` in `_await_task_deferring_cancellation` (on CPython 3.14,
+where the shield residue exists), and, through `abort_after_transfer`, the
+compound post-settlement guard removals: the finalizer clearing neither the
+claim marker nor the reservation after the settlement transfer, and the abort
+path ignoring the claim marker while the finalizer leaves the reservation set.
+Removing a single post-settlement guard (only the marker clear, only the
+reservation clear, only the abort path's marker check, only the draining
+branch's marker clear) is an equivalent mutant: each guard is redundant with
+its partner by design, so no oracle can see one alone. Under the
+compare-and-set model a mutant whose only effect is an extra release call
+on an already settled reservation is not a violation; it shows up in the
+snapshot's `redundant_reservation_releases`. Mutants it cannot see,
 by construction of this slice: a checkpoint in the websocket-transport cleanup
 helper (`_release_websocket_response_create_ownership_for_cleanup` is not on
 the bridge path), a checkpoint before `_release_websocket_reservation` in
@@ -84,12 +141,33 @@ the natural next slice).
 Known finding from the harness, out of scope for this change: with the pinned
 anyio 4.13.0, a raw cancellation of a task parked on an `anyio.Lock` that races
 the holder's `release()` in the same loop tick leaves the lock unowned with a
-stale waiter entry, and every later `acquire()` parks forever. Seven of the
-first 3000 production-turn seeds (340, 1079, 1590, 2010, 2331, 2589, 2744)
-wedge `pending_lock` this way after the injected reader cancellation; the
-default 200-seed run does not. anyio 4.14.0 fixed it upstream
-("Fixed asyncio Lock and Semaphore deadlocks caused by cancelled waiters left
-queued during release", #1145); the dependency bump is a separate decision.
+stale waiter entry, and every later `acquire()` parks forever
+(`Lock.release` skips a cancelled waiter but leaves its entry queued; an
+already-runnable acquirer sees the non-empty queue, takes the slow path and
+parks; the cancelled waiter's cleanup finds no owner to hand over from). The
+shape is production's own: `_await_cancelled_task` raw-cancels the bridge
+reader while it sits on `session.pending_lock`. anyio 4.14.0 fixed it
+upstream ("Fixed asyncio Lock and Semaphore deadlocks caused by cancelled
+waiters left queued during release", agronholm/anyio#1145); the dependency
+bump is a separate decision. It is pinned rather than described: a minimal
+stdlib+anyio reproduction (`tests/simulation/test_anyio_lock_cancelled_waiter.py`)
+and the production-turn seeds that wedge `pending_lock` under the default
+profile in the first 3000 (`_ANYIO_LOCK_WEDGE_SEEDS`, currently seed 1234;
+the default 200-seed run and the other latency profiles' 200 seeds are free
+of wedges) are strict expected failures conditioned on `anyio < 4.14`, so a
+widened schedule count or a dependency bump reports the change instead of
+looking like harness rot. Seed 1234 passes the full invariant set with the
+4.14 `Lock.release` fix applied.
+
+The abandoned-shield oracle (`max_abandoned_shield_callbacks`) counts
+`_clear_awaited_by_callback` entries, which `asyncio.shield` registers only
+from CPython 3.14; on 3.13 the outer's cancellation removes the single
+callback again and there is no residue. CI's unit slice runs on 3.13 while the
+production image is 3.14, so the oracle's count assertions and the reshield
+canary are gated on `ABANDONED_SHIELD_ORACLE_SUPPORTED` (with the 3.13
+reading pinned to zero so the platform assumption is checked both ways) and
+the `abandoned_shields` invariant is documented as vacuous on 3.13. Running
+the simulation slice on 3.14 in CI, matching the image, is the owner's call.
 
 ## Takeover notes (PR A)
 

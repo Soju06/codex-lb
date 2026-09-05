@@ -31,10 +31,13 @@ of these paths, but several rely on short real sleeps and scheduler jitter.
 - Disclosed deltas, listed in the PR body: the startup-probe and request-log
   rewrite deadlines read `time.monotonic()` instead of
   `asyncio.get_running_loop().time()` (a different clock source under uvloop;
-  each deadline's two sides share it); sticky/unbound selection and the
-  account state derivation it drives (`_state_from_account`,
-  `_usage_entry_is_recent_enough`) sample the epoch once under the runtime
-  lock instead of several fresh reads; shared helpers that used to sample the
+  each deadline's two sides share it); the unbound selection path samples the
+  epoch once under the runtime lock (no await separates that sample from its
+  uses) and the account state derivation (`_state_from_account`,
+  `_usage_entry_is_recent_enough`) samples once per build instead of once per
+  account, while the sticky path keeps main's per-use sampling (`clock.time()`
+  exactly where main read `time.time()`, including after the sticky-row
+  lookup await and after the runtime lock is re-acquired); shared helpers that used to sample the
   clock themselves (`waited_seconds` keepalive payloads, TTFT visibility
   stamps, `last_upstream_activity_at`, the bridge/websocket/streaming
   remaining-budget receivers) now take the caller's sample from the same owner

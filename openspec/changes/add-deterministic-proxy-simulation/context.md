@@ -150,6 +150,13 @@ durable id), the realtime relay and the compact endpoint keep their own
 transport loops, the request-log shutdown drain stays on `loop.time()`, and
 the process-global TTL caches (stale previous-response, upstream transport
 failure, account and rate-limit caches) read the wall clock by design. The
+`select_account` calls main left on the selector's internal `time.time()`
+default (`_select_account_preferring_budget_safe` and the direct calls inside
+`_select_with_stickiness`) keep that default: production-identical under
+`RealClock`, but a virtual-clock selection test cannot move those cooldown and
+reset comparisons yet. Threading `now=` through them is the next fidelity
+step, kept out of this change so the sticky diff against main stays a pure
+`time.time()` -> `clock.time()` substitution at the same sites. The
 property turn stubs `_release_websocket_reservation`,
 `_settle_stream_api_key_usage`, `_reconnect_http_bridge_session`,
 `_release_retry_account_lease`, `_get_work_admission` and the load balancer's

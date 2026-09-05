@@ -199,7 +199,6 @@ class StickySelectionOwner(Protocol):
         allow_usage_exhaustion_error: bool = True,
         usage_exhaustion_states: Iterable[AccountState] | None = None,
         sticky_refresh_skip_deadline: datetime | None = None,
-        now: float,
     ) -> _StickySelectionOutcome: ...
 
     async def release_account_lease(self, lease: AccountLease | None) -> None: ...
@@ -419,7 +418,6 @@ async def run_sticky_selection_path(
                 # not the raw legacy owner that now shadows it.
                 sticky_refresh_skip_deadline = None
         async with owner._runtime_lock:
-            selection_now = owner._clock.time()
             states, account_map = owner._prepare_sticky_selection_states(
                 selection_inputs,
                 required_account_id=required_account_id,
@@ -442,7 +440,7 @@ async def run_sticky_selection_path(
                 else build_routing_costs(
                     settings=selection_inputs.quota_planner_settings,
                     states=states,
-                    now=datetime.fromtimestamp(selection_now, timezone.utc),
+                    now=datetime.fromtimestamp(owner._clock.time(), timezone.utc),
                 )
             )
             # Key shape is deliberately irrelevant here. Only typed
@@ -546,7 +544,7 @@ async def run_sticky_selection_path(
                 selection_states = _filter_recovery_probe_candidates(
                     selection_states,
                     traffic_class=traffic_class,
-                    now=selection_now,
+                    now=owner._clock.time(),
                 )
             probe_reservation: ProbeReservation | None = None
         # Raw sticky rows are global, while account-assigned API keys and
@@ -694,7 +692,6 @@ async def run_sticky_selection_path(
                         allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                         usage_exhaustion_states=states,
                         sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
-                        now=selection_now,
                     )
                     result = sticky_outcome.selection
                     if (
@@ -739,7 +736,7 @@ async def run_sticky_selection_path(
                 result.account,
                 routing_strategy=routing_strategy,
                 traffic_class=traffic_class,
-                now=selection_now,
+                now=owner._clock.time(),
             )
             if should_reserve_probe and probing_result_requires_reservation:
                 # Sticky persistence happens outside the runtime lock.
@@ -1179,7 +1176,7 @@ async def _select_with_stickiness(
     allow_usage_exhaustion_error: bool = True,
     usage_exhaustion_states: Iterable[AccountState] | None = None,
     sticky_refresh_skip_deadline: datetime | None = None,
-    now: float,
+    clock: Clock,
 ) -> _StickySelectionOutcome:
     if not sticky_key or not sticky_repo:
         return _StickySelectionOutcome(
@@ -1284,6 +1281,7 @@ async def _select_with_stickiness(
             # budget threshold. That preserves continuity below the
             # threshold while avoiding obvious short-window failures once
             # the session is skating on the edge of exhaustion.
+            now = clock.time()
             budget_pressured = (
                 sticky_kind
                 in (
@@ -1408,7 +1406,7 @@ async def _select_with_stickiness(
                 grace_copy = replace(pinned)
                 grace_result = select_account(
                     [grace_copy],
-                    now=now + _STICKY_GRACE_PERIOD_SECONDS,
+                    now=clock.time() + _STICKY_GRACE_PERIOD_SECONDS,
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
                     prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,

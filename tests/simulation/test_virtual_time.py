@@ -1,16 +1,23 @@
-"""Regression tests for the virtual scheduler's asyncio fidelity.
+"""Regression tests for the virtual scheduler's asyncio/anyio fidelity.
 
 Each test pins one semantic the proxy harness depends on. The two Codex
 findings on #1647 are covered first: ``wait_for`` with a non-positive timeout
 must behave like ``asyncio.wait_for`` (raise, not sleep), and ``advance`` must
-move chronologically so sequential sleeps complete under one call.
+move chronologically so sequential sleeps complete under one call. The
+``wait_for`` and ``fail_after`` groups then pin the shape of the real
+primitives: ``wait_for`` awaits inline under an ``asyncio.timeout``-style
+deadline (same task, contextvars visible, cuts through an anyio shield), and
+``fail_after`` cancels a real ``anyio.CancelScope`` (shield respected,
+cancellation re-delivered at every checkpoint).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from collections.abc import AsyncGenerator
 
+import anyio
 import pytest
 
 from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
@@ -310,7 +317,15 @@ async def test_fail_after_zero_cancels_at_first_checkpoint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_wait_for_prefers_result_when_timeout_completes_same_tick() -> None:
+async def test_wait_for_same_tick_deadline_reports_timeout_like_asyncio() -> None:
+    """The deadline is a timer like any other and fires first at a tie.
+
+    ``asyncio.timeout`` cancels the task when its timer callback runs before
+    the task's wakeup, even though the awaited future already completed; the
+    virtual deadline (armed before the awaitable ran) behaves the same way, so
+    the semaphore permit released in the deadline tick is not consumed.
+    """
+
     scheduler = _scheduler()
     semaphore = asyncio.Semaphore(0)
 
@@ -324,13 +339,14 @@ async def test_wait_for_prefers_result_when_timeout_completes_same_tick() -> Non
     await scheduler.drain()
     await scheduler.advance(0.1)
 
-    assert await waiter is True
-    assert semaphore.locked()
+    with pytest.raises(asyncio.TimeoutError):
+        await waiter
+    assert not semaphore.locked()
     await scheduler.cancel_owned_tasks()
 
 
 @pytest.mark.asyncio
-async def test_wait_for_accepts_non_coroutine_awaitables_and_owns_created_tasks() -> None:
+async def test_wait_for_accepts_non_coroutine_awaitables_inline() -> None:
     scheduler = _scheduler()
 
     async def items() -> AsyncGenerator[str, None]:
@@ -340,11 +356,14 @@ async def test_wait_for_accepts_non_coroutine_awaitables_and_owns_created_tasks(
     generator = items()
     waiter = scheduler.create_task(scheduler.wait_for(generator.__anext__(), timeout=1.0))
     await scheduler.drain()
-    # The waiter itself, the wrapped ``__anext__`` awaitable and the deadline timer.
-    assert len(scheduler.owned_tasks) == 3
+    # Only the waiter: the ``__anext__`` awaitable runs inline and the deadline
+    # is a timer, not a task, exactly as with ``asyncio.wait_for``.
+    assert scheduler.owned_tasks == {waiter}
+    assert scheduler.pending_timers == 2
 
     await scheduler.advance(0.5)
     assert await waiter == "first"
+    assert scheduler.pending_timers == 0
     await generator.aclose()
 
     blocked = asyncio.Event()
@@ -359,18 +378,180 @@ async def test_wait_for_accepts_non_coroutine_awaitables_and_owns_created_tasks(
 
 
 @pytest.mark.asyncio
-async def test_wait_for_runs_coroutine_in_owned_child_task() -> None:
+async def test_wait_for_runs_coroutine_inline_like_asyncio() -> None:
+    """Same task, same context: what real ``asyncio.wait_for`` (3.12+) does.
+
+    A child task would hide contextvar writes from the caller and break
+    task-bound primitives (``anyio.Lock`` acquired inside ``wait_for`` could
+    not be released by the caller), a false-failure trap for any production
+    site converted to the seam.
+    """
+
     scheduler = _scheduler()
+    marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="unset")
+    lock = anyio.Lock()
 
     async def report() -> asyncio.Task[object] | None:
+        marker.set("set-inside")
         return asyncio.current_task()
 
-    virtual_inner = await scheduler.wait_for(report(), timeout=1.0)
     real_inner = await asyncio.wait_for(report(), timeout=1.0)
-
-    # Documented divergence: real asyncio (3.12+) awaits the coroutine inline.
     assert real_inner is asyncio.current_task()
-    assert virtual_inner is not asyncio.current_task()
+    assert marker.get() == "set-inside"
+    marker.set("reset")
+
+    virtual_inner = await scheduler.wait_for(report(), timeout=1.0)
+    assert virtual_inner is asyncio.current_task()
+    assert marker.get() == "set-inside"
+
+    await scheduler.wait_for(lock.acquire(), timeout=1.0)
+    lock.release()
+    assert scheduler.owned_tasks == frozenset()
+    assert scheduler.pending_timers == 0
+
+
+@pytest.mark.asyncio
+async def test_wait_for_deadline_cancels_plain_future_like_asyncio() -> None:
+    scheduler = _scheduler()
+    future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    waiter = scheduler.create_task(scheduler.wait_for(future, timeout=0.5))
+
+    await scheduler.advance(0.5)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await waiter
+    assert future.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_deadline_cuts_through_inner_anyio_shield_like_asyncio() -> None:
+    """``asyncio.timeout`` is not anyio-aware: its edge cancellation lands in a shielded body."""
+
+    scheduler = _scheduler()
+    marks: list[str] = []
+
+    async def body() -> None:
+        with anyio.CancelScope(shield=True):
+            await scheduler.sleep(0.5)
+            marks.append("shield-body-finished")
+        marks.append("after-shield")
+
+    waiter = scheduler.create_task(scheduler.wait_for(body(), timeout=0.2))
+    await scheduler.advance(1.0)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await waiter
+    assert marks == []
+
+
+@pytest.mark.asyncio
+async def test_wait_for_external_cancel_reaches_awaited_coroutine_and_is_not_a_timeout() -> None:
+    scheduler = _scheduler()
+    marks: list[str] = []
+
+    async def body() -> None:
+        try:
+            await scheduler.sleep(10.0)
+        except asyncio.CancelledError:
+            marks.append("inner-cancelled")
+            raise
+
+    async def outer() -> None:
+        try:
+            await scheduler.wait_for(body(), timeout=20.0)
+        except asyncio.CancelledError:
+            marks.append("outer-cancelled")
+            raise
+
+    task = scheduler.create_task(outer())
+    await scheduler.drain()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert marks == ["inner-cancelled", "outer-cancelled"]
+    assert scheduler.pending_timers == 0
+
+
+@pytest.mark.asyncio
+async def test_fail_after_yields_the_anyio_cancel_scope() -> None:
+    scheduler = _scheduler()
+
+    with scheduler.fail_after(1.0) as scope:
+        assert isinstance(scope, anyio.CancelScope)
+        await asyncio.sleep(0)
+
+    assert scope.cancel_called is False
+    assert scheduler.pending_timers == 0
+
+
+@pytest.mark.asyncio
+async def test_fail_after_lets_inner_anyio_shield_finish_like_anyio() -> None:
+    """The deadline cancels the scope, so a shielded child scope runs to completion first."""
+
+    scheduler = _scheduler()
+    marks: list[str] = []
+
+    async def body() -> None:
+        try:
+            with scheduler.fail_after(0.2):
+                with anyio.CancelScope(shield=True):
+                    await scheduler.sleep(0.5)
+                    marks.append("shield-body-finished")
+                await scheduler.sleep(0.5)
+                marks.append("after-shield")
+        except TimeoutError:
+            marks.append("TimeoutError")
+
+    task = scheduler.create_task(body())
+    await scheduler.advance(0.2)
+    assert marks == []
+    await scheduler.advance(0.3)
+
+    await task
+    assert marks == ["shield-body-finished", "TimeoutError"]
+
+
+@pytest.mark.asyncio
+async def test_fail_after_redelivers_cancellation_at_every_checkpoint_like_anyio() -> None:
+    scheduler = _scheduler()
+    marks: list[str] = []
+
+    async def body() -> None:
+        try:
+            with scheduler.fail_after(0.1):
+                try:
+                    await scheduler.sleep(1.0)
+                except asyncio.CancelledError:
+                    marks.append("swallowed-once")
+                await scheduler.sleep(1.0)
+                marks.append("not-redelivered")
+        except TimeoutError:
+            marks.append("TimeoutError")
+
+    task = scheduler.create_task(body())
+    await scheduler.advance(0.1)
+
+    await task
+    assert marks == ["swallowed-once", "TimeoutError"]
+
+
+@pytest.mark.asyncio
+async def test_drain_samples_pending_owned_task_callbacks() -> None:
+    scheduler = _scheduler()
+    blocked = asyncio.Event()
+    task = scheduler.create_task(blocked.wait())
+    await scheduler.drain()
+    baseline = scheduler.max_pending_owned_task_callbacks
+    assert baseline >= 1  # the scheduler's own ownership callback
+
+    for _ in range(3):
+        task.add_done_callback(lambda _task: None)
+    await scheduler.drain()
+
+    assert scheduler.max_pending_owned_task_callbacks == baseline + 3
+    blocked.set()
+    await task
 
 
 @pytest.mark.asyncio

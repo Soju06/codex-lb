@@ -16,19 +16,29 @@ Fidelity notes (each pinned by ``tests/simulation/test_virtual_time.py``):
   deadline, fires the timers due there, drains, and repeats until nothing is
   due at or before the target. Timers armed by resumed tasks fire within the
   same ``advance`` when their deadline is still at or before the target.
-* ``wait_for`` runs a coroutine in an *owned child task*. Real ``asyncio``
-  (3.12+) runs the coroutine inline in the caller task for ``timeout > 0``.
-  The child task is what lets the scheduler own the work; ``current_task()``
-  inside the awaited coroutine therefore differs from the real behavior.
-* A same-tick tie between the awaitable and its deadline prefers the
-  completed awaitable (real 3.14 raises ``TimeoutError``).
-* ``fail_after`` cancels the entering task once when its deadline fires;
-  ``anyio.CancelScope`` re-delivers the cancellation on every loop iteration
-  while the scope is active. No in-scope body swallows ``CancelledError``, so
-  the single delivery is sufficient, but it is a divergence.
+* ``wait_for`` has the shape of ``asyncio.wait_for`` on 3.12+: the awaitable is
+  awaited *inline* in the calling task under an ``asyncio.timeout``-style
+  deadline (``_VirtualTimeout`` mirrors ``asyncio.timeouts.Timeout`` on a
+  virtual timer). ``current_task()`` inside the awaited coroutine is the
+  caller, contextvar writes are visible to the caller, task-bound primitives
+  such as ``anyio.Lock`` keep working, a plain awaited future is cancelled on
+  expiry, and the deadline cuts through an ``anyio.CancelScope(shield=True)``
+  exactly as the real primitive does. A same-tick tie between the awaitable
+  and its deadline reports ``TimeoutError``, as CPython does when its timer
+  callback runs before the task's wakeup.
+* ``fail_after`` enters a real ``anyio.CancelScope`` and cancels *that scope*
+  when the virtual deadline fires, so anyio's own machinery delivers the
+  cancellation: an inner ``anyio.CancelScope(shield=True)`` finishes first,
+  the cancellation is re-delivered at every checkpoint while the scope is
+  active, and an external cancellation racing the expiry is kept. Only the
+  clock that decides *when* the scope is cancelled is virtual.
 * ``drain`` runs a fixed number of loop turns (``drain_rounds``). Quiescence is
   asserted by callers, so too small a round count fails loudly rather than
-  silently reordering events.
+  silently reordering events. Each round also samples the done-callback count
+  of every pending owned task (``max_pending_owned_task_callbacks``): a wait
+  loop that re-shields a still-pending task grows that count per cancelled
+  attempt (the 2026-08-30 event-loop livelock), while the fan-out helper keeps
+  it constant.
 """
 
 from __future__ import annotations
@@ -40,6 +50,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import TracebackType
 from typing import Any, TypeVar
+
+import anyio
 
 T = TypeVar("T")
 
@@ -94,8 +106,20 @@ class _Timer:
     result: Any = field(compare=False)
 
 
-class _VirtualFailAfter:
-    """Synchronous context manager returned by ``VirtualScheduler.fail_after``."""
+def _pending_callback_count(future: asyncio.Future[Any]) -> int:
+    callbacks = getattr(future, "_callbacks", None)
+    return len(callbacks) if callbacks is not None else 0
+
+
+class _VirtualTimeout:
+    """``asyncio.timeouts.Timeout`` on a virtual deadline.
+
+    Same shape as the CPython class ``asyncio.wait_for`` uses on 3.12+: the
+    deadline cancels the *entering task* once (an edge cancellation that any
+    awaited future or shielded scope in the body sees), and ``__exit__``
+    converts that cancellation into ``TimeoutError`` only when no other
+    cancellation request arrived in the meantime (``uncancel`` bookkeeping).
+    """
 
     def __init__(self, scheduler: VirtualScheduler, delay: float) -> None:
         self._scheduler = scheduler
@@ -106,16 +130,14 @@ class _VirtualFailAfter:
         self._expired = False
         self._exited = False
 
-    def __enter__(self) -> _VirtualFailAfter:
+    def __enter__(self) -> _VirtualTimeout:
         task = asyncio.current_task()
         if task is None:
-            raise RuntimeError("fail_after() must be entered from a running task")
+            raise RuntimeError("wait_for() must be awaited from a running task")
         self._task = task
         self._cancelling = task.cancelling()
         if self._delay <= 0:
-            # anyio cancels a scope whose deadline already passed at the next
-            # checkpoint; ``call_soon`` reaches the body at its first await.
-            asyncio.get_running_loop().call_soon(self._expire)
+            asyncio.get_running_loop().call_soon(self._on_timeout)
         else:
             self._timer = self._scheduler._arm(self._delay)
             self._timer.future.add_done_callback(self._on_timer)
@@ -123,9 +145,12 @@ class _VirtualFailAfter:
 
     def _on_timer(self, future: asyncio.Future[Any]) -> None:
         if not future.cancelled():
-            self._expire()
+            self._on_timeout()
 
-    def _expire(self) -> None:
+    def _on_timeout(self) -> None:
+        # ``_exited`` guards the tick where the awaitable completed and the
+        # body left the scope before this callback ran; CPython avoids the
+        # same stray cancellation by cancelling its timer handle on exit.
         if self._exited or self._task is None or self._task.done():
             return
         self._expired = True
@@ -140,13 +165,72 @@ class _VirtualFailAfter:
         self._exited = True
         if self._timer is not None:
             self._scheduler._disarm(self._timer)
-        if self._expired and exc_type is not None and issubclass(exc_type, asyncio.CancelledError):
+        if self._expired:
             assert self._task is not None
-            if self._task.uncancel() <= self._cancelling:
-                # Our deadline was the only outstanding cancellation.
-                raise TimeoutError from None
-            # An external cancellation raced the expiry: keep it.
+            if (
+                self._task.uncancel() <= self._cancelling
+                and exc_type is not None
+                and issubclass(exc_type, asyncio.CancelledError)
+            ):
+                raise TimeoutError from exc
         return False
+
+
+class _VirtualFailAfter:
+    """Synchronous context manager returned by ``VirtualScheduler.fail_after``.
+
+    ``anyio.fail_after`` is ``with CancelScope(deadline=...) as scope: yield``
+    followed by ``raise TimeoutError`` when the scope caught its own
+    cancellation at the deadline. This twin keeps that structure and only
+    replaces the deadline source: a virtual timer calls ``scope.cancel()``, so
+    shielding, per-checkpoint re-delivery, ``uncancel`` bookkeeping and the
+    treatment of a racing external cancellation are anyio's own.
+    """
+
+    def __init__(self, scheduler: VirtualScheduler, delay: float) -> None:
+        self._scheduler = scheduler
+        self._delay = delay
+        self._scope: anyio.CancelScope | None = None
+        self._timer: _Timer | None = None
+        self._expired = False
+        self._exited = False
+
+    def __enter__(self) -> anyio.CancelScope:
+        if asyncio.current_task() is None:
+            raise RuntimeError("fail_after() must be entered from a running task")
+        scope = anyio.CancelScope()
+        scope.__enter__()
+        self._scope = scope
+        if self._delay <= 0:
+            # anyio cancels a scope whose deadline already passed on entry; the
+            # host task then sees the cancellation at its first checkpoint.
+            self._expired = True
+            scope.cancel()
+        else:
+            self._timer = self._scheduler._arm(self._delay)
+            self._timer.future.add_done_callback(self._on_timer)
+        return scope
+
+    def _on_timer(self, future: asyncio.Future[Any]) -> None:
+        if future.cancelled() or self._exited or self._scope is None:
+            return
+        self._expired = True
+        self._scope.cancel()
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        self._exited = True
+        if self._timer is not None:
+            self._scheduler._disarm(self._timer)
+        assert self._scope is not None
+        swallowed = self._scope.__exit__(exc_type, exc, traceback)
+        if self._expired and self._scope.cancelled_caught:
+            raise TimeoutError
+        return bool(swallowed)
 
 
 class VirtualScheduler:
@@ -159,6 +243,7 @@ class VirtualScheduler:
         self._timers: list[_Timer] = []
         self._tasks: set[asyncio.Task[Any]] = set()
         self._sequence = 0
+        self.max_pending_owned_task_callbacks = 0
 
     # -- introspection -------------------------------------------------------
 
@@ -169,6 +254,13 @@ class VirtualScheduler:
     @property
     def pending_timers(self) -> int:
         return sum(1 for timer in self._timers if not timer.future.done())
+
+    def sample_owned_task_callbacks(self) -> int:
+        """Record and return the largest done-callback count on a pending owned task."""
+
+        count = max((_pending_callback_count(task) for task in self._tasks if not task.done()), default=0)
+        self.max_pending_owned_task_callbacks = max(self.max_pending_owned_task_callbacks, count)
+        return count
 
     # -- timers ---------------------------------------------------------------
 
@@ -204,45 +296,28 @@ class VirtualScheduler:
             self._disarm(timer)
 
     async def wait_for(self, awaitable: Awaitable[T], timeout: float | None) -> T:
-        if isinstance(awaitable, asyncio.Future):
-            task: asyncio.Future[T] = awaitable
-        else:
-            # Coroutines, ``shield`` futures, ``__anext__`` awaitables: exactly
-            # what ``asyncio.wait_for`` accepts. New tasks are owned.
-            task = asyncio.ensure_future(awaitable)
-            if isinstance(task, asyncio.Task):
-                self._own(task)
         if timeout is None:
-            return await task
+            return await awaitable
         if timeout <= 0:
-            if task.done():
-                return task.result()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            if task.cancelled():
-                raise asyncio.TimeoutError
-            return task.result()
-        timeout_task = self.create_task(self.sleep(timeout))
-        try:
-            done, pending = await asyncio.wait({task, timeout_task}, return_when=asyncio.FIRST_COMPLETED)
-            if task in done:
-                # Documented divergence: a same-tick tie prefers the result.
-                timeout_task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-                return task.result()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            if task.cancelled():
-                raise asyncio.TimeoutError
-            # Like CPython: an awaitable that finished while being cancelled
-            # still reports its own result or exception.
-            return task.result()
-        except asyncio.CancelledError:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            timeout_task.cancel()
-            await asyncio.gather(timeout_task, return_exceptions=True)
-            raise
+            # CPython special case: schedule, then cancel without ever running
+            # a not-yet-started coroutine. A task created here is owned.
+            future: asyncio.Future[T]
+            if isinstance(awaitable, asyncio.Future):
+                future = awaitable
+            else:
+                future = asyncio.ensure_future(awaitable)
+                if isinstance(future, asyncio.Task):
+                    self._own(future)
+            if future.done():
+                return future.result()
+            future.cancel()
+            await asyncio.gather(future, return_exceptions=True)
+            try:
+                return future.result()
+            except asyncio.CancelledError as exc:
+                raise TimeoutError from exc
+        with _VirtualTimeout(self, timeout):
+            return await awaitable
 
     @staticmethod
     def _wait_satisfied(done: set[asyncio.Future[Any]], fs: set[asyncio.Future[Any]], return_when: str) -> bool:
@@ -293,6 +368,7 @@ class VirtualScheduler:
 
     async def drain(self) -> None:
         for _ in range(self.drain_rounds):
+            self.sample_owned_task_callbacks()
             await asyncio.sleep(0)
 
     async def cancel_owned_tasks(self) -> None:

@@ -71,11 +71,20 @@ clock must be compared against that clock. `ProxyService._remaining_budget_secon
 module-level function of the same name stays wall-clock for the endpoints
 outside the simulation scope (compact, codex_control, file_ops, transcribe).
 
-Known virtual-scheduler divergences (all pinned by
-`tests/simulation/test_virtual_time.py`): `wait_for` runs a coroutine in an
-owned child task where real 3.12+ awaits it inline; a same-tick tie between
-an awaitable and its deadline prefers the result; `fail_after` cancels the
-entering task once where anyio re-delivers on every loop iteration.
+The virtual `wait_for` and `fail_after` keep the *shape* of the primitives
+they replace, not just their timing (pinned by
+`tests/simulation/test_virtual_time.py`): `wait_for` awaits the coroutine
+inline in the calling task under an `asyncio.timeout`-style virtual deadline
+(same `current_task()`, contextvar writes visible to the caller, task-bound
+primitives such as `anyio.Lock` usable across the call, a plain awaited future
+cancelled on expiry, an inner `anyio.CancelScope(shield=True)` cut through
+exactly like the real primitive), and `fail_after` enters a real
+`anyio.CancelScope` that the virtual deadline cancels, so anyio itself
+delivers the cancellation (inner shields finish first, re-delivery at every
+checkpoint, a racing external cancellation is kept). The one intentional
+difference from a wall clock is *when* the deadline fires; a same-tick tie
+between an awaitable and its deadline reports `TimeoutError`, as CPython does
+when its timer callback runs before the task's wakeup.
 
 ## Integration notes (WP2-WP4)
 

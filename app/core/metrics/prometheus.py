@@ -292,6 +292,23 @@ if PROMETHEUS_AVAILABLE:
         registry=REGISTRY,
         **_replica_gauge_kwargs,
     )
+    bridge_ring_heartbeat_last_success_timestamp_seconds = Gauge(
+        "codex_lb_bridge_ring_heartbeat_last_success_timestamp_seconds",
+        "Unix timestamp of the latest successful local bridge-ring heartbeat",
+        registry=REGISTRY,
+        **_replica_gauge_kwargs,
+    )
+    bridge_ring_heartbeat_failures_total = Counter(
+        "codex_lb_bridge_ring_heartbeat_failures_total",
+        "Total failed or timed-out local bridge-ring heartbeat attempts",
+        registry=REGISTRY,
+    )
+    bridge_ring_maintenance_total = Counter(
+        "codex_lb_bridge_ring_maintenance_total",
+        "Periodic bridge-ring maintenance observations by phase and outcome",
+        ["phase", "outcome"],
+        registry=REGISTRY,
+    )
     # Sibling workers enforce independent lease counters, so each worker can
     # admit its own pool capacity. Sum capacity across live workers (like the
     # inflight gauge) so the exported utilization ratio stays comparable.
@@ -525,6 +542,9 @@ else:
     stream_pool_capacity: GaugeLike | None = None
     stream_pool_inflight: GaugeLike | None = None
     cap_partition_replicas: GaugeLike | None = None
+    bridge_ring_heartbeat_last_success_timestamp_seconds: GaugeLike | None = None
+    bridge_ring_heartbeat_failures_total: CounterLike | None = None
+    bridge_ring_maintenance_total: CounterLike | None = None
     proxy_phase_latency_seconds: HistogramLike | None = None
     http_bridge_prewarm_total: CounterLike | None = None
     http_bridge_stuck_retire_total: CounterLike | None = None
@@ -573,6 +593,9 @@ __all__ = [
     "api_key_fair_share_rejections_total",
     "bridge_instance_mismatch_total",
     "bridge_forward_latency_seconds",
+    "bridge_ring_heartbeat_failures_total",
+    "bridge_ring_heartbeat_last_success_timestamp_seconds",
+    "bridge_ring_maintenance_total",
     "bridge_durable_recover_total",
     "bridge_drain_recovery_allowed_total",
     "bridge_first_turn_timeout_total",

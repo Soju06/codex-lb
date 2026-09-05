@@ -2,24 +2,26 @@
 
 The reviewed implementation was checkpointed at `da5baa0232af1c56ee96c8ba421d391e0c67732b` with backup ref `backup/isolate-ring-heartbeat-before-main-rebase-20260905`, then rebased onto `origin/main@0a726558a1b9994d4943c9c8cff295b267d879f0`.
 
-Reconciliation retained current-main shutdown cleanliness accounting, native-egress cleanup, bounded spool startup cleanup, and stale-operation abandonment. The heartbeat change now reuses `_await_task_deferring_cancellation()` from `app/core/utils/shared_future.py`; it does not restore the superseded cancellation module. Stale-operation abandonment runs in the bounded `durable_ownership` owner and is attempted even when ownership reconciliation fails. The existing lifespan shutdown regression now stubs the account-deletion scheduler so independently owned cancellation-safe shutdown is not pinned by an unrelated real database query.
+Reconciliation retained current-main shutdown cleanliness accounting, native-egress cleanup, bounded spool startup cleanup, and stale-operation abandonment. The heartbeat change reuses `_await_task_deferring_cancellation()` from `app/core/utils/shared_future.py`; it does not restore the superseded cancellation module. Heartbeat registration, renewal, and stale-marking use the existing background database pool while cap and durable maintenance retain the request pool. Stale-operation abandonment runs in the bounded `durable_ownership` owner, is attempted even when ownership reconciliation fails, and propagates protection/query failures into phase telemetry. An unsettled periodic owner now suppresses the SQLite clean marker. The existing lifespan shutdown regression stubs the account-deletion scheduler so independently owned cancellation-safe shutdown is not pinned by an unrelated real database query.
 
 ## Post-rebase verification evidence
 
 Passing:
 
-- 109 focused periodic-owner, ring lifecycle, health, metrics, SQLite ring-membership, and cap-partition tests.
+- 110 focused periodic-owner, ring lifecycle, health, metrics, SQLite ring-membership, and cap-partition tests.
 - 79 file-backed SQLite durable bridge-ring lifecycle tests.
-- 7 focused HTTP bridge maintenance/reconciliation tests.
-- All 49 `tests/unit/test_otel.py` lifespan and shutdown tests.
+- 77 database-session tests.
+- 9 focused HTTP bridge maintenance/reconciliation tests.
+- All 51 `tests/unit/test_otel.py` lifespan and shutdown tests.
 - 5 health integration/E2E tests.
 - 16 of 17 `tests/integration/test_health_and_errors.py` tests; the sole failure is the unchanged missing-built-dashboard-assets case below.
-- 978 of 979 `tests/unit/test_proxy_http_bridge.py` tests; the sole failure is the unchanged missing `file_account_pins` fixture case below.
+- 980 of 981 `tests/unit/test_proxy_http_bridge.py` tests; the sole failure is the unchanged missing `file_account_pins` fixture case below.
 - Repository Ruff lint and formatting (`1025 files already formatted`).
 - Repository `uv run ty check`.
 - Cancellation-safety architecture check.
 - Strict validation for `isolate-ring-heartbeat-from-maintenance`.
 - Repository-wide OpenSpec validation: 58 passed, 0 failed.
+- Pi review session `f017948d-2a42-4305-bbe3-06f6aa2e818e`; four concrete findings were fixed and the final re-review reported no actionable issues.
 
 Current-main baseline failures reproduced or confirmed separately:
 

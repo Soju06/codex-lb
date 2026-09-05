@@ -504,6 +504,8 @@ def validate_astra_request(
     """Validate Astra controls after model selection, preserving cache-prefix effort."""
     if payload.model.strip().lower() != "gpt-6-astra":
         return
+    if isinstance(payload, ResponsesCompactRequest) and has_astra_configuration_updates(payload):
+        raise ProxyInvalidRequestError("The compact endpoint does not support configuration updates.", param="input")
     if prepare_continuation and isinstance(payload, ResponsesRequest):
         prepare_astra_reasoning_policy_continuation(payload, api_key)
     validate_configuration_update_policy(payload, api_key, subscription=True)
@@ -536,10 +538,8 @@ def validate_astra_request(
         value = reasoning["effort"]
         _astra_wire_effort(value, param=f"{param}.reasoning.effort")
         has_updates = True
-    if not has_updates:
+    if not has_updates or not isinstance(payload, ResponsesRequest):
         return
-    if isinstance(payload, ResponsesCompactRequest):
-        raise ProxyInvalidRequestError("The compact endpoint does not support configuration updates.", param="input")
     if payload.truncation == "auto":
         raise ProxyInvalidRequestError(
             "Configuration updates cannot be combined with automatic truncation.", param="truncation"

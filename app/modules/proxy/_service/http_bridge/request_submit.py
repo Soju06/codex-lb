@@ -1596,7 +1596,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
             except (ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed):
                 # Late operation anchors revalidate restored Astra input.
-                # Client-policy failures must keep their 400/403 envelope.
+                # Client-policy failures must keep their 400/403 envelope
+                # and must not leave the already-created reservation hanging.
+                await self._release_websocket_request_state_reservation(request_state)
                 raise
             except Exception as exc:
                 session.closed = True

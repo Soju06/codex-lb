@@ -178,6 +178,12 @@ def test_astra_standalone_compact_rejects_updates():
         _apply_subscription_policy(request, None)
 
 
+def test_astra_compact_update_rejects_before_key_policy():
+    request = ResponsesCompactRequest.model_validate(_request("high").model_dump())
+    with pytest.raises(ProxyInvalidRequestError, match="compact endpoint"):
+        _apply_subscription_policy(request, _key(allowed=["low"]))
+
+
 def test_astra_compact_ultra_maps_to_max_at_serialization():
     request = ResponsesCompactRequest.model_validate(
         {

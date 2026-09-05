@@ -13,7 +13,7 @@ import app.modules.proxy.service as proxy_service
 from app.core.exceptions import ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
-from app.modules.api_keys.service import ApiKeyData
+from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     prepare_astra_reasoning_policy_continuation,
@@ -31,6 +31,7 @@ def _key(*, allowed: list[str] | None = None, enforced: str | None = None) -> Ap
             enforced_service_tier=None,
             enforced_reasoning_effort=enforced,
             allowed_reasoning_efforts=allowed,
+            allowed_models=None,
         ),
     )
 
@@ -336,3 +337,75 @@ async def test_websocket_create_rejects_disallowed_configuration_update(monkeypa
             openai_cache_affinity_max_age_seconds=300,
             api_key=key,
         )
+
+
+@pytest.mark.asyncio
+async def test_websocket_trims_full_resend_before_astra_reset(monkeypatch) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    key = _key(allowed=["high"])
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=key))
+    prepared = await service._prepare_websocket_response_create_request(
+        {
+            "type": "response.create",
+            "model": "gpt-6-astra",
+            "instructions": "",
+            "reasoning": {"effort": "high"},
+            "previous_response_id": "resp_stored",
+            "input": [
+                {"role": "assistant", "content": "prior answer"},
+                {"type": "function_call", "name": "shell", "call_id": "call_old", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_old", "output": "done"},
+                {"role": "user", "content": "next"},
+            ],
+        },
+        headers={},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=key,
+    )
+    forwarded = json.loads(prepared.text_data)["input"]
+    assert forwarded[0] == {"type": "configuration_update", "reasoning": {"effort": "high"}}
+    assert forwarded[1]["type"] == "function_call_output"
+    assert all(item.get("role") != "assistant" for item in forwarded if isinstance(item, dict))
+
+
+@pytest.mark.asyncio
+async def test_websocket_session_anchor_releases_reservation_on_astra_policy_error(monkeypatch) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    key = _key(allowed=["low"])
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="res_ws_policy",
+        key_id="astra-inherited-policy",
+        model="gpt-6-astra",
+    )
+    historical = [{"role": "user", "content": "First"}]
+    continuity = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=1,
+        last_completed_response_id="resp_session",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(historical),
+    )
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=key))
+    release = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_reservation", release)
+
+    with pytest.raises(ProxyReasoningEffortNotAllowed):
+        await service._prepare_websocket_response_create_request(
+            {
+                "type": "response.create",
+                "model": "gpt-6-astra",
+                "instructions": "",
+                "input": [*historical, {"role": "user", "content": "Continue"}],
+            },
+            headers={"session_id": "sid-astra-policy"},
+            codex_session_affinity=True,
+            openai_cache_affinity=False,
+            sticky_threads_enabled=False,
+            openai_cache_affinity_max_age_seconds=300,
+            api_key=key,
+            continuity_state=continuity,
+        )
+    release.assert_awaited_once_with(reservation)

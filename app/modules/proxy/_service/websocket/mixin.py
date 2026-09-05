@@ -3096,7 +3096,6 @@ class _WebSocketMixin:
             responses_payload,
             service_tier_was_enforced=service_tier_was_enforced,
         )
-        validate_astra_request(responses_payload, refreshed_api_key)
         # Judged on the full client input, before the websocket-specific
         # trimming and anchor injection below rewrite it — the same payload
         # the HTTP route evaluates for its source-selection gate.
@@ -3152,6 +3151,7 @@ class _WebSocketMixin:
                     previous_response_input_items
                 )
                 responses_payload = responses_payload.model_copy(update={"input": trimmed_input_items})
+        validate_astra_request(responses_payload, refreshed_api_key)
         full_resend_client_metadata = client_metadata
         if client_full_resend_retry_safe and client_full_resend_input_items is not None:
             if trusted_incremental_responses_lite and client_metadata is not None:
@@ -3266,7 +3266,7 @@ class _WebSocketMixin:
                 headers=headers,
                 session_id=session_id,
             )
-        except ProxyResponseError:
+        except (ProxyResponseError, AppError):
             await proxy._release_websocket_reservation(reservation)
             raise
         request_state.useragent = useragent

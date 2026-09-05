@@ -41,7 +41,7 @@ On main, small retained-WS/concurrency4 first-content medians were about11 ms bo
 
 A separate supported anchored-HTTP race was reproducible: after terminal/EOF, owner lookup could return no row before detached request-log persistence finished. Immediate follow-ups failed35/96 times; a100 ms delay or experimental existing-cache publication gave0/96. The publication experiment proves the missing same-process ownership seam, not a speedup or cross-replica guarantee. Installed CLI0.153.2 through real LB retained one upstream socket across prewarm, generation and a single incremental tool-output item (~1.8KB). Its direct-origin HTTP fallback instead sent full history without `previous_response_id`, so the anchored race cannot explain that normal fallback.
 
-Native HTTP fills queue and TTFT but leaves its existing first-upstream-event/created fields null. The [timing change](../../changes/observe-http-upstream-latency/proposal.md) fills those fields with the existing attempt origin. The interval before an upstream event can include local/network/provider work; created-to-content is not asserted to be pure model compute. Historical nulls remain null, and client receipt remains a distinct boundary.
+The main `aec4d7b` research baseline filled native HTTP queue and TTFT while leaving the existing first-upstream-event/created fields null. HTTP attempts now populate those fields from observed upstream events using the [existing attempt origin](spec.md#requirement-ttft-phase-timings-are-persisted-and-exported). The interval before an upstream event can include local/network/provider work; created-to-content is not asserted to be pure model compute. Historical nulls remain null, and client receipt remains a distinct boundary.
 
 Current saved-store read checks (~277MB,96,732 request logs,83,060 usage rows) found indexed request-path reads around0.95–2.33 ms with fresh SQLite connections. This does not reconstruct the old5.4GB store, historical contention or upstream overload. Earlier every-turn bridge churn in the synthetic run was a fixture startup-order error and was corrected before the quoted baseline. No native-helper performance, multi-replica timing or long-duration saturation result is claimed.
 
@@ -55,7 +55,7 @@ Current saved-store read checks (~277MB,96,732 request logs,83,060 usage rows) f
 
 #### prevent-ssl-starvation-false-reclaim
 
-PR2030 keeps main's shipped aiohttp cache and prepares DB-only completion-grace simplification and real-worker coverage; [database-backends](../database-backends/spec.md) owns the domain.
+PR2030 keeps main's shipped aiohttp cache and limits its correction to DB completion-grace simplification and real-worker coverage; [database-backends](../database-backends/spec.md) owns the domain.
 
 #### reuse-direct-wss-system-trust
 
@@ -73,4 +73,14 @@ Fill existing upstream-first-event and created fields while preserving attempt c
 
 Defer unused whole-body dumps when their consumers are inactive. Exact-body ablation measured preparation5.40→2.36 ms at1.06MB and46.02→18.85 ms at8.55MB; these are preparation-only measurements. [Outbound HTTP clients](../outbound-http-clients/spec.md) owns the unchanged wire/transport contract.
 
-Bridge batching, global client pooling, replica readiness changes, scheduler tuning, native IPC and database rewrites are deferred. After individual acceptance, one local integration build will combine these scoped fixes, test interactions and produce a reviewable wheel without installing or restarting the user's service. It is a validation result, not another feature or PR scope.
+Bridge batching, global client pooling, replica readiness changes, scheduler tuning, native IPC and database rewrites are deferred. The accepted changes are checked together as one local integration; combined validation is not an additional feature or PR scope.
+
+### HTTP event timing and owner provenance
+
+First-upstream-event, response-created, first-token and total latency use the same post-admission attempt origin; selection and admission remain queue time. Each attempt owns fresh timing state. Unobserved phases stay null and legitimate zero values remain zero. These fields record accepted events entering the service attempt, not socket-first-byte, downstream receipt or model-only execution. Later token frames retain the existing lazy/verbatim forwarding path.
+
+Timing depends on `publish-http-response-owner` for internal SSE provenance and inherits that branch through a normal merge. A generated failure event does not create upstream activity. A real upstream error remains activity even when normalization supplies a local response ID: owner publication rejects that ID, while timing observes the event. The owner scope defines both provenance flags and the producer formatter; timing does not duplicate them.
+
+The subsequent matched local study compared integration snapshot `ffef2a6` with contemporaneous main `5ad638b`, using the same scripted TLS origin and temporary data. Timing and instrumentation ran separately; failures and account populations remain part of the comparison. Its small fixture CA store does not measure normal host trust-loading costs. The API observer counts only `ssl.create_default_context` calls, excluding direct or implicit `SSLContext` construction; those counts do not establish comparative WSS reuse. The owning WSS lifecycle regression establishes reuse and refresh behavior. Exact-body preparation checks observed two removed encodes, with median preparation thread CPU of 5.599 to 2.467 ms for a 1,062,374-byte body and 47.415 to 18.947 ms for an 8,538,142-byte body. These intervals exclude HTTP wire serialization, network and server work.
+
+A separate installed CLI 0.153.4 witness retained one upstream socket for prewarm, generation and a real harmless tool continuation. Rejecting the first handshake with 426 led to a WebSocket retry, not an observed HTTP fallback. The 1,870-test combined acceptance used the real metrics dependency and checked owner/timing/provenance, body/consumer identity, WSS lifecycle and DB cleanup together. These local results do not establish native latency parity or resolve the attribution of historical minute-scale waits.

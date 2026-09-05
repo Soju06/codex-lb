@@ -12,8 +12,10 @@ of these paths, but several rely on short real sleeps and scheduler jitter.
 - Add a virtual-clock test harness that can drive selected proxy tests without
   wall-clock sleeps.
 - Add a seeded schedule checker for bridge-turn terminal and lease-release
-  invariants, plus a canary that proves the checker catches a planted
-  double-release bug.
+  invariants that drives the production terminal, detach and retry paths under
+  real injected cancellation, plus production-shaped canaries that prove the
+  checker catches planted double-release, lost-settlement, dropped-release,
+  retry-reacquisition and shield-leak bugs.
 
 ## Impact
 

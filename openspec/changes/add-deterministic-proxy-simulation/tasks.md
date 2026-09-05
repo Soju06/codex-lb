@@ -23,6 +23,14 @@
       streaming retry budgets, websocket receive and connect deadlines) through
       the owner's injected clock so no virtual deadline is compared against the
       wall clock.
+- [x] 1.10 Make the real scheduler's timing methods return the `asyncio`
+      coroutine itself (no wrapper frame per relayed event) and resolve the
+      collaborators once per bridge session / websocket connection instead of
+      per event.
+- [x] 1.11 Route the remaining turn-path spawn channels through the scheduler:
+      the reconnect abort `shield(<coroutine>)` sites, the grouped-terminal
+      persistence `gather`, and the deferring-cancellation helpers behind
+      `_release_websocket_response_create_gate`.
 
 ## 2. Deterministic tests
 
@@ -40,6 +48,21 @@
       complete, `wait` reports deadline-tick completions as done,
       `fail_after` raises `TimeoutError` and re-raises a racing external
       cancellation.
+- [x] 2.7 Give the virtual `wait_for` and `fail_after` the shape of the real
+      primitives: inline await under an `asyncio.timeout`-style deadline
+      (same task, contextvars, anyio shields cut through) and a real
+      `anyio.CancelScope` cancelled by the virtual timer (shields respected,
+      re-delivery per checkpoint).
+- [x] 2.8 Drive the production terminal handler, detach backstop and
+      pre-created retry in the property turn, deliver a real task
+      cancellation after the production claim, attribute each reservation
+      settlement to the production path that performed it, and assert
+      quiescence of every owned task.
+- [x] 2.9 Add the abandoned-shield oracle to the virtual scheduler and the
+      production-shaped canaries (double release on detach, lost abort
+      settlement, dropped reservation release, retry reacquisition,
+      re-shielded lease release) plus a coverage test over the settlement
+      paths and the injected cancellation.
 
 ## 3. Verification
 
@@ -53,3 +76,8 @@
       harness.
 - [x] 3.6 Compare each real adapter against the `asyncio`/`anyio` primitive it
       wraps (`tests/unit/test_clock_real_parity.py`).
+- [x] 3.7 Run production mutants against the property test (dropped terminal
+      claim, abort path skipping settlement, double admission release,
+      cancel-unsafe lease release, re-introduced shield leak all caught;
+      the surviving retry-ownership and non-bridge-path mutants are explained
+      in the change context).

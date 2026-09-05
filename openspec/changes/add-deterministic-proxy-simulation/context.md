@@ -27,22 +27,69 @@ surface with no consumer yet. It stays available for the next slice.
 The first schedule checker models the recurring lease and terminal-state bug
 class from the taxonomy: a bridge turn must reach exactly one terminal outcome
 and release response-create, API-key, and account leases exactly once even when
-admission, upstream terminal delivery, downstream cancellation, and retry
-attachment interleave.
+admission, upstream terminal delivery, downstream cancellation, a cancellation
+landing inside the settlement itself, and retry attachment interleave.
 
-The checker drives production code rather than a model of it. Release runs
-through `_release_websocket_response_create_ownership_for_cleanup` and
-`ProxyService._release_websocket_request_state_reservation`, and the admission
-wait contends for a permit on a real `WorkAdmissionController`. Every event in a
+The checker drives production code rather than a model of it. The terminal
+event runs `ProxyService._process_http_bridge_upstream_text` on a real
+`_HTTPBridgeSession` (production claim under `pending_lock`, publication,
+`_finalize_websocket_request_state`, `_release_websocket_response_create_gate`),
+the downstream cancel runs the detach backstop `_detach_http_bridge_request`,
+the retry runs `_retry_http_bridge_precreated_request`, and the admission wait
+contends for a permit on a real `WorkAdmissionController`. The recording service
+overrides only the repository boundaries (reservation release/settlement, the
+load balancer's health write, reconnect) and tags every reservation settlement
+with the production path that performed it, so "exactly one terminal outcome"
+means "exactly one production path settled the reservation". Every event in a
 schedule is a concurrent task with its own seeded virtual deadline, so equal
-deadlines produce real interleaving at the await points inside those helpers.
+deadlines produce real interleaving at the await points inside those paths.
 
-Its planted-bug canary releases the create ownership on the cancel path before
-the shared cleanup takes ownership of it, so a cancel racing an upstream
-terminal double-releases. That proves the checker fails a known bad state
-machine. The same checker also rejects a lost terminal claim, a dropped API-key
-reservation release, and a permit that is never handed back to the admission
-gate.
+The terminal frame is a `response.completed` without a response id on purpose:
+the anonymous-match claim leaves the request retryable-looking (no response id,
+still awaiting `response.created`) until finalization, which is the window the
+retry ownership guard protects, and it is the only terminal shape that reaches
+settlement without routing a pre-created request into the in-path precreated
+retry (`error`/`response.failed` do) or bumping `response_event_count` at claim
+time. The settlement cancellation is a real `Task.cancel()` delivered a seeded
+number of loop turns after the production claim, once per bookkeeping task:
+`_await_cancelled_task` cancels a child once and re-tracks a stubborn one with
+`cancel_task=False`, and anyio's shield does not stop a raw asyncio cancel, so a
+second cancellation into the shielded abort path is outside the modelled
+contract. Modelled lease releases suspend on a virtual timer, standing in for
+the DB writes they replace, so cancellations can land inside them.
+
+The canaries plant production-shaped bugs in overridable seams: a detach that
+releases the response-create admission it does not own, an abort path that
+never settles a claimed request (the same failure a never-recorded claim
+produces), a reservation release that silently does nothing, a post-settlement
+retry that reacquires ownership, and a lease release that re-shields a pending
+task. Each fails the checker at a deterministic seed with the invariant it
+violates. Run against production mutants, the checker catches a dropped
+terminal claim, an abort path that skips settlement, a double admission release
+in `_release_websocket_response_create_gate`, that helper awaiting the account
+lease release without the deferring wrapper, and a re-introduced
+`asyncio.shield` in `_await_task_deferring_cancellation`. Mutants it cannot see,
+by construction of this slice: a checkpoint in the websocket-transport cleanup
+helper (`_release_websocket_response_create_ownership_for_cleanup` is not on
+the bridge path), a checkpoint before `_release_websocket_reservation` in
+`_release_websocket_request_state_reservation` (the bridge finalizer settles
+through `_settle_stream_api_key_usage`; the helper is reached only by the
+detach, which is never cancelled, and by the abort path, after the cancellation
+was consumed), the detach's belt-and-braces reclaim of an `abandoned` claim
+(only reachable when the abort settlement itself raises), and the retry
+ownership guard (`request_is_retryable` masks it on every terminal shape; the
+guard is load-bearing for the stale-gate-holder and reader-failure funnels,
+the natural next slice).
+
+Known finding from the harness, out of scope for this change: with the pinned
+anyio 4.13.0, a raw cancellation of a task parked on an `anyio.Lock` that races
+the holder's `release()` in the same loop tick leaves the lock unowned with a
+stale waiter entry, and every later `acquire()` parks forever. Seven of the
+first 3000 production-turn seeds (340, 1079, 1590, 2010, 2331, 2589, 2744)
+wedge `pending_lock` this way after the injected reader cancellation; the
+default 200-seed run does not. anyio 4.14.0 fixed it upstream
+("Fixed asyncio Lock and Semaphore deadlocks caused by cancelled waiters left
+queued during release", #1145); the dependency bump is a separate decision.
 
 ## Takeover notes (PR A)
 

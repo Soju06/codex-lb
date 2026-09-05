@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from app.core.utils.cancellation import await_task_deferring_cancellation
+from app.core.utils.shared_future import _await_task_deferring_cancellation
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ class SupervisedPeriodicPhase:
             self._stop_within(timeout_seconds=max(timeout_seconds, 0.0)),
             name=f"periodic-{self.phase}-stop",
         )
-        stopped, cancellation = await await_task_deferring_cancellation(stop_task)
+        stopped, cancellation = await _await_task_deferring_cancellation(stop_task)
         if cancellation is not None:
             raise cancellation
         return stopped

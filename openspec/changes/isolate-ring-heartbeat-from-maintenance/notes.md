@@ -1,28 +1,36 @@
-## Implementation baseline
+## Integration baseline
 
-Implementation is currently stacked on reviewed cancellation-fix head `825ab217c4fd1cd3889f53b6f7ac7399547c5b44` because PR #1958 and the selected spool-cleanup lifecycle change have not merged. The final branch still requires task 1.1: rebase onto current `main`, inspect `app/main.py` and shutdown-test conflicts, and rerun validation.
+The reviewed implementation was checkpointed at `da5baa0232af1c56ee96c8ba421d391e0c67732b` with backup ref `backup/isolate-ring-heartbeat-before-main-rebase-20260905`, then rebased onto `origin/main@0a726558a1b9994d4943c9c8cff295b267d879f0`.
 
-## Verification evidence
+Reconciliation retained current-main shutdown cleanliness accounting, native-egress cleanup, bounded spool startup cleanup, and stale-operation abandonment. The heartbeat change now reuses `_await_task_deferring_cancellation()` from `app/core/utils/shared_future.py`; it does not restore the superseded cancellation module. Stale-operation abandonment runs in the bounded `durable_ownership` owner and is attempted even when ownership reconciliation fails. The existing lifespan shutdown regression now stubs the account-deletion scheduler so independently owned cancellation-safe shutdown is not pinned by an unrelated real database query.
 
-Passing on the stacked worktree:
+## Post-rebase verification evidence
 
-- 105 focused periodic-owner, ring lifecycle, health, metrics, SQLite ring-membership, and cap-partition tests.
-- 57 file-backed SQLite durable bridge-ring lifecycle tests.
-- 6 focused existing HTTP bridge maintenance/reconciliation tests.
-- 15 health integration/E2E tests; the remaining selected test failed only because built dashboard JavaScript assets are absent from this worktree.
-- Repository Ruff lint and formatting (`970 files already formatted`).
-- Repository `ty check`.
-- Proxy architecture and cancellation-safety checks.
+Passing:
+
+- 109 focused periodic-owner, ring lifecycle, health, metrics, SQLite ring-membership, and cap-partition tests.
+- 79 file-backed SQLite durable bridge-ring lifecycle tests.
+- 7 focused HTTP bridge maintenance/reconciliation tests.
+- All 49 `tests/unit/test_otel.py` lifespan and shutdown tests.
+- 5 health integration/E2E tests.
+- 16 of 17 `tests/integration/test_health_and_errors.py` tests; the sole failure is the unchanged missing-built-dashboard-assets case below.
+- 978 of 979 `tests/unit/test_proxy_http_bridge.py` tests; the sole failure is the unchanged missing `file_account_pins` fixture case below.
+- Repository Ruff lint and formatting (`1025 files already formatted`).
+- Repository `uv run ty check`.
+- Cancellation-safety architecture check.
 - Strict validation for `isolate-ring-heartbeat-from-maintenance`.
-- Required Pi review session `ebd3c19f-1f5f-467c-9a30-cb172b030d0f`; final re-review found no concrete remaining issues.
+- Repository-wide OpenSpec validation: 58 passed, 0 failed.
 
-Known unrelated baseline failures:
+Current-main baseline failures reproduced or confirmed separately:
 
-- `tests/unit/test_otel.py` has six lifespan tests that fail because those tests mock `init_db()` but use the real `SessionLocal`, then query missing `accounts`, `runtime_sentinels`, and `cache_invalidation` tables. The same six failures reproduce unchanged on dependency head `825ab217` without this change.
-- Repository-wide OpenSpec validation is 57/58 because `openspec/specs/model-source-routing/spec.md` lacks `## Purpose`.
-- `tests/integration/test_health_and_errors.py::test_assets_js_served_as_javascript_despite_poisoned_registry` requires a built frontend and failed with its existing “built dashboard assets missing” assertion.
+- `scripts/check_proxy_architecture.py` reports `service.py has 2601 lines; limit is 2600` on both this branch and unmodified `origin/main@0a726558`.
+- `tests/integration/test_health_and_errors.py::test_assets_js_served_as_javascript_despite_poisoned_registry` requires a frontend build and fails with `built dashboard assets missing`.
+- `tests/unit/test_proxy_http_bridge.py::test_stream_via_http_bridge_fails_closed_before_file_affinity_when_previous_response_owner_misses` reaches a real SQLite file-pin repository without the `file_account_pins` fixture table.
+
+The six historical `tests/unit/test_otel.py` database-mocking failures are resolved on current main; they are no longer listed as baselines.
 
 ## Verification still blocked
 
-- No local PostgreSQL or Docker daemon is available, so PostgreSQL-focused verification has not run.
-- No verified production database copy is available, so a candidate image and the database-copy soak in task 5.3 have not been attempted. No production database or service was touched.
+- No local PostgreSQL service is available, so PostgreSQL-focused verification has not run.
+- No verified production-sized database copy or approved Docker environment is available, so the candidate-image/database-copy soak in task 5.3 has not been attempted.
+- No production database, container, compose stack, or service was touched.

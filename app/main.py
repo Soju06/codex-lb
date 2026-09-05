@@ -77,7 +77,7 @@ from app.core.timeout_invariants import validate_runtime_timeout_invariants, val
 from app.core.usage.metadata_scheduler import build_metadata_refresh_scheduler
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
-from app.core.utils.cancellation import await_task_deferring_cancellation
+from app.core.utils.shared_future import _await_task_deferring_cancellation
 from app.core.utils.time import utcnow
 from app.db.session import (
     SessionLocal,
@@ -270,7 +270,7 @@ async def _run_owned_lifespan_shutdown(
             shutdown(),
             name="application-lifespan-shutdown",
         )
-        _, cancellation = await await_task_deferring_cancellation(shutdown_task)
+        _, cancellation = await _await_task_deferring_cancellation(shutdown_task)
     return cancellation
 
 
@@ -292,7 +292,7 @@ async def _shutdown_bridge_ring_membership(
         ),
         name="bridge-ring-membership-shutdown",
     )
-    stopped, cancellation = await await_task_deferring_cancellation(shutdown_task)
+    stopped, cancellation = await _await_task_deferring_cancellation(shutdown_task)
     return stopped, cancellation
 
 

@@ -8,6 +8,8 @@ The service MUST NOT publish a locally generated request/synthetic-error ID or a
 
 Provenance for locally generated terminals MUST remain internal to the SSE carrier, preserve the exact serialized event bytes and existing retry markers, and survive reattachment of the parsed payload.
 
+When normalization of an actual upstream error supplies a local response ID, that ID MUST remain ineligible for early ownership publication. The event MUST retain its upstream origin for timing observations.
+
 #### Scenario: Follow-up starts after response-created delivery
 - **GIVEN** two eligible accounts and an HTTP stream that has exposed its upstream response ID in `response.created` but has not completed
 - **WHEN** a same-process HTTP follow-up references that ID

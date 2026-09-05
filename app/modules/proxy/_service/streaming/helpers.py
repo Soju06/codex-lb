@@ -470,7 +470,7 @@ def _publish_http_response_owner(
 ) -> None:
     if event is None or event.response is None or not event.response.id or event_payload is None:
         return
-    if isinstance(block, ParsedSseBlock) and block.is_local:
+    if isinstance(block, ParsedSseBlock) and (block.is_local or block.response_id_is_local):
         return
     if event_payload.get(SYNTHETIC_TRANSPORT_FAILURE_MARKER):
         return

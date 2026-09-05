@@ -43,6 +43,7 @@ validated before upstream connection or send, using client-plane values.
 - **WHEN** a WebSocket continuation contains source-only controls or an invalid configuration_update
 - **THEN** canonical and equivalent Responses socket routes return the subscription invalid-request 400 before upstream connection or send
 - **AND** valid subscription continuations retain their owner and API-key reasoning policy
+- **AND** any preserved full-resend fallback is validated against the same subscription schema and refreshed API-key policy before it can be retained for replay
 - **AND** source-owned continuations without a recorded subscription owner retain the HTTP-transport fallback rather than subscription schema errors
 
 #### Scenario: Configuration updates cannot use standalone compaction

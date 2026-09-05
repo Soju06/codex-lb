@@ -12,8 +12,10 @@ from starlette.websockets import WebSocketDisconnect
 import app.modules.proxy.service as proxy_module
 from app.db.models import Account, ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from tests.integration.test_openai_compat_features import _make_auth_json
 from tests.integration.test_proxy_websocket_responses import (
+    _FakeUpstreamMessage,
     _SequencedUpstreamWebSocket,
     _websocket_response_batch,
 )
@@ -292,3 +294,125 @@ def test_websocket_owner_selection_preserves_key_policy(
     assert event["error"]["param"] == "input.0.reasoning.effort"
     connect.assert_not_awaited()
     assert client.portal.call(_reservation_statuses, app_instance) == []
+
+
+def test_websocket_subscription_owner_validates_proxy_injected_full_resend_before_fallback(
+    app_instance, source_and_subscription_owner, monkeypatch
+):
+    client, key, _ = source_and_subscription_owner
+    updated = client.patch("/api/api-keys/" + key["id"], json={"allowedReasoningEfforts": ["low"]})
+    assert updated.status_code == 200
+    connect = AsyncMock(side_effect=AssertionError("Invalid full resend reached upstream connect"))
+    reserve = AsyncMock(wraps=proxy_module.ProxyService._reserve_websocket_api_key_usage)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+
+    async def record_reserve(self, *args, **kwargs):
+        return await reserve(self, *args, **kwargs)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_reserve_websocket_api_key_usage", record_reserve)
+    session_id = "sid-astra-owner-full-resend"
+    historical_update = {"type": "configuration_update", "reasoning": {"effort": "high"}}
+    proxy_service = get_proxy_service_for_app(app_instance)
+    proxy_service._websocket_continuity_index[(session_id, key["id"])] = proxy_module._WebSocketContinuityState(
+        last_completed_response_id=_ANCHOR,
+        last_completed_input_count=1,
+        last_completed_input_prefix_fingerprint=proxy_module._fingerprint_input_items([historical_update]),
+    )
+
+    with client.websocket_connect(
+        "/backend-api/codex/responses",
+        headers={"Authorization": "Bearer " + key["key"], "session_id": session_id},
+    ) as ws:
+        ws.send_json(
+            {
+                "type": "response.create",
+                "model": "gpt-6-astra",
+                "instructions": "",
+                "reasoning": {"effort": "low"},
+                "input": [historical_update, {"role": "user", "content": "Continue"}],
+            }
+        )
+        event = ws.receive_json()
+
+    assert event["status"] == 403
+    assert event["error"]["code"] == "reasoning_effort_not_allowed"
+    assert event["error"]["param"] == "input.0.reasoning.effort"
+    connect.assert_not_awaited()
+    reserve.assert_not_awaited()
+    assert client.portal.call(_reservation_statuses, app_instance) == []
+
+
+def test_websocket_subscription_owner_replays_validated_proxy_injected_full_resend(
+    app_instance, source_and_subscription_owner, monkeypatch
+):
+    client, key, _ = source_and_subscription_owner
+    updated = client.patch("/api/api-keys/" + key["id"], json={"allowedReasoningEfforts": ["ultra"]})
+    assert updated.status_code == 200
+    stale_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "error",
+                            "status": 400,
+                            "error": {
+                                "type": "invalid_request_error",
+                                "code": "previous_response_not_found",
+                                "message": "Invalid previous_response_id.",
+                                "param": "previous_response_id",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            ]
+        ],
+    )
+    replay_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[_websocket_response_batch("resp_astra_owner_replayed")],
+    )
+    connect = AsyncMock(side_effect=[stale_upstream, replay_upstream])
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    session_id = "sid-astra-owner-valid-replay"
+    historical_update = {"type": "configuration_update", "reasoning": {"effort": "ultra"}}
+    proxy_service = get_proxy_service_for_app(app_instance)
+    proxy_service._websocket_continuity_index[(session_id, key["id"])] = proxy_module._WebSocketContinuityState(
+        last_completed_response_id=_ANCHOR,
+        last_completed_input_count=1,
+        last_completed_input_prefix_fingerprint=proxy_module._fingerprint_input_items([historical_update]),
+    )
+    full_input = [historical_update, {"role": "user", "content": "Continue"}]
+
+    with client.websocket_connect(
+        "/backend-api/codex/responses",
+        headers={"Authorization": "Bearer " + key["key"], "session_id": session_id},
+    ) as ws:
+        ws.send_json(
+            {
+                "type": "response.create",
+                "model": "gpt-6-astra",
+                "instructions": "",
+                "reasoning": {"effort": "ultra"},
+                "input": full_input,
+            }
+        )
+        assert ws.receive_json()["type"] == "response.created"
+        assert ws.receive_json()["type"] == "response.completed"
+
+    assert connect.await_count == 2
+    selected = json.loads(stale_upstream.sent_text[0])
+    assert selected["previous_response_id"] == _ANCHOR
+    assert selected["input"] == [
+        {"type": "configuration_update", "reasoning": {"effort": "max"}},
+        full_input[1],
+    ]
+    replay = json.loads(replay_upstream.sent_text[0])
+    assert "previous_response_id" not in replay
+    assert replay["input"] == [
+        {"type": "configuration_update", "reasoning": {"effort": "max"}},
+        full_input[1],
+    ]

@@ -33,7 +33,10 @@ emits these items (`core/src/session/input_queue.rs`).
   Resolve that ownership before choosing the WebSocket schema, so source-only
   controls such as top_logprobs cannot reach the subscription backend. Invalid
   requests fail before reservation; genuine source continuations still receive
-  the existing HTTP-transport fallback.
+  the existing HTTP-transport fallback. When direct WebSocket continuity has
+  retained a complete body for stale-anchor replay, validate that body too;
+  validating only the selected suffix can otherwise preserve a historical
+  configuration update that the refreshed key no longer allows.
 
 ## Owner-precedence baseline
 

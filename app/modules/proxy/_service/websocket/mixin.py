@@ -3262,6 +3262,12 @@ class _WebSocketMixin:
                 validate_configuration_update_policy(responses_payload, refreshed_api_key, subscription=False)
             else:
                 validate_astra_request(responses_payload, refreshed_api_key)
+                if original_full_resend_payload is not None:
+                    # The selected anchor body contains only the suffix. Its
+                    # stale-anchor fallback can resend the preserved prefix,
+                    # so that exact replay body must satisfy the same schema
+                    # and refreshed key policy before it is retained.
+                    validate_astra_request(original_full_resend_payload, refreshed_api_key)
         capability_route = await proxy._capability_router.route(
             capability_intent,
             api_key_id=refreshed_api_key.id if refreshed_api_key is not None else None,

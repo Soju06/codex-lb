@@ -47,3 +47,6 @@ usage. Carry a resolved subscription owner into routing; do not reclassify it
 as source-owned at connect time. Keep ordinary subscription preparation and
 original-history bookkeeping unchanged. This matches HTTP owner precedence
 without changing model-source routing or validating reconstructed wire values.
+If anchor injection preserves a complete fresh-replay body, validate both the
+selected suffix and that exact preserved body before reservation; a later
+stale-anchor retry must not widen the admitted subscription request.

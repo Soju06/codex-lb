@@ -927,12 +927,10 @@ async def _await_owned_websocket_task_after_reader_cancellation(
     timeout_seconds = _facade()._TASK_CANCEL_TIMEOUT_SECONDS if remaining is None else max(float(remaining), 0.0)
 
     try:
-        done, _ = await scheduler.wait_for(
-            asyncio.wait({task}),
+        done, _ = await scheduler.wait(
+            {task},
             timeout=timeout_seconds,
         )
-    except TimeoutError:
-        return
     except asyncio.CancelledError:
         raise
     if not done:
@@ -6664,10 +6662,7 @@ class _WebSocketMixin:
             if not finalization_task.done() and timeout_seconds > 0:
                 # Do not cancel the child at the bound: it is the sole owner of
                 # the claimed states and remains visible to lifespan draining.
-                try:
-                    await scheduler.wait_for(asyncio.wait({finalization_task}), timeout=timeout_seconds)
-                except TimeoutError:
-                    pass
+                await scheduler.wait({finalization_task}, timeout=timeout_seconds)
             raise
         return settlement_succeeded
 

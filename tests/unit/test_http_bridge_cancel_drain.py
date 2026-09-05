@@ -1342,3 +1342,70 @@ async def test_response_created_does_not_promote_in_progress_durable_anchor() ->
     assert refreshed is not None
     assert refreshed.latest_response_id == "resp_B_completed"
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_schedule_http_bridge_background_cleanup_is_scheduler_owned() -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()), scheduler=scheduler)
+    release = asyncio.Event()
+
+    async def cleanup() -> None:
+        await release.wait()
+
+    task = http_bridge_helpers._schedule_http_bridge_background_cleanup(
+        service,
+        cleanup(),
+        name="http-bridge-virtual-cleanup",
+        error_message="virtual cleanup failed",
+    )
+
+    assert task is not None
+    assert task.get_name() == "http-bridge-virtual-cleanup"
+    assert task in service._background_cleanup_tasks
+    assert task in scheduler.owned_tasks
+
+    await scheduler.cancel_owned_tasks()
+    await scheduler.drain()
+
+    assert task.cancelled()
+    assert task not in service._background_cleanup_tasks
+
+
+@pytest.mark.asyncio
+async def test_close_http_bridge_session_bounded_times_out_on_injected_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bounded close waits on the owner scheduler; the timeout branch keeps tracking the close."""
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()), scheduler=scheduler)
+    session = _make_http_bridge_session(deque(), queued_request_count=0)
+    release_close = asyncio.Event()
+
+    async def slow_close(_session: object) -> None:
+        await release_close.wait()
+
+    monkeypatch.setattr(service, "_close_http_bridge_session", slow_close)
+    bounded = scheduler.create_task(
+        http_bridge_helpers._close_http_bridge_session_bounded(service, session, reason="virtual-timeout")
+    )
+    await scheduler.drain()
+    assert not bounded.done()
+
+    await scheduler.advance(http_bridge_helpers._HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS)
+
+    assert bounded.done()
+    close_tasks = [
+        task for task in service._background_cleanup_tasks if task.get_name().startswith("http-bridge-close-")
+    ]
+    assert len(close_tasks) == 1
+    assert not close_tasks[0].done()
+
+    release_close.set()
+    await scheduler.drain()
+
+    assert close_tasks[0].done()
+    assert close_tasks[0] not in service._background_cleanup_tasks
+    assert scheduler.owned_tasks == frozenset()

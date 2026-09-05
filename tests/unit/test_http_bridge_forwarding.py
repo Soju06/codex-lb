@@ -34,12 +34,14 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeOwnerClient,
     _bridge_forward_signature,
     _bridge_forward_tools_bound_signature,
+    _iter_sse_event_blocks,
     _owner_forward_receive_timeout,
     _owner_forward_timeout,
+    _OwnerForwardStreamTimeoutError,
     build_owner_forward_headers,
     parse_forwarded_request,
 )
-from tests.simulation.virtual_time import VirtualClock
+from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 
 @pytest.fixture(autouse=True)
@@ -1562,3 +1564,52 @@ def test_build_owner_forward_headers_drops_connection_named_headers() -> None:
     assert "Connection" not in headers
     assert "connection" not in headers
     assert headers.get("x-request-id") == "req-123"
+
+
+@pytest.mark.asyncio
+async def test_iter_sse_event_blocks_receive_timeout_is_scheduler_owned() -> None:
+    """The per-chunk receive wait is bounded by the injected scheduler and clock.
+
+    Under raw ``asyncio.wait_for`` this test would need 45 real seconds to
+    reach the idle timeout; under the virtual scheduler it advances there.
+    """
+    clock = VirtualClock(monotonic_value=100.0)
+    scheduler = VirtualScheduler(clock)
+    release = asyncio.Event()
+
+    async def blocked_chunks(_: int) -> AsyncIterator[bytes]:
+        await release.wait()
+        yield b""
+
+    response = cast(
+        aiohttp.ClientResponse,
+        SimpleNamespace(content=SimpleNamespace(iter_chunked=blocked_chunks)),
+    )
+
+    async def collect() -> list[str]:
+        return [
+            block
+            async for block in _iter_sse_event_blocks(
+                response,
+                request_started_at=100.0,
+                proxy_request_budget_seconds=300.0,
+                stream_idle_timeout_seconds=45.0,
+                scheduler=scheduler,
+                clock=clock,
+            )
+        ]
+
+    reader = scheduler.create_task(collect())
+    await scheduler.drain()
+    assert not reader.done()
+
+    await scheduler.advance(44.0)
+    assert not reader.done()
+    await scheduler.advance(1.0)
+
+    with pytest.raises(_OwnerForwardStreamTimeoutError) as exc_info:
+        await reader
+    assert exc_info.value.error_code == "stream_idle_timeout"
+    await scheduler.cancel_owned_tasks()
+    assert scheduler.owned_tasks == frozenset()
+    assert scheduler.pending_timers == 0

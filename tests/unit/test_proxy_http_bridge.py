@@ -45620,3 +45620,474 @@ async def test_process_http_bridge_upstream_text_fast_path_only_frames_text_that
     assert "response.output_text.delta" in fast_path_event_types
     assert "response.reasoning_summary_text.delta" in fast_path_event_types
     assert "response.output_item.done" not in fast_path_event_types
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_claim_timeout_is_scheduler_owned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The durable claim CAS is bounded by the owner scheduler, not a wall-clock timer."""
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), scheduler=scheduler, clock=clock)
+    hard_session = _make_bridge_session(key_value="bridge-circuit-generation-virtual-timeout")
+    waiting = asyncio.Event()
+
+    async def never_claims(**_kwargs: Any) -> None:
+        await waiting.wait()
+
+    monkeypatch.setattr(service._durable_bridge, "claim_retry_circuit_generation", never_claims)
+    claim = scheduler.create_task(
+        service._claim_http_bridge_retry_circuit_generation(
+            key=hard_session.key,
+            captured=True,
+            generation=None,
+        )
+    )
+    await scheduler.drain()
+    assert not claim.done()
+
+    await scheduler.advance(http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS)
+
+    assert await claim is None, "a claim timeout is infrastructure trouble, not a confirmed CAS loss"
+    async with cast(Any, service)._http_bridge_retry_circuit_lock:
+        pass
+    await scheduler.cancel_owned_tasks()
+    assert scheduler.owned_tasks == frozenset()
+    assert scheduler.pending_timers == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_block_cooldown_follows_injected_clock() -> None:
+    """Cooldown arithmetic reads the owner clock: exact remaining seconds, no wall-clock drift."""
+    clock = VirtualClock(monotonic_value=1_000.0)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock)
+    hard_session = _make_bridge_session(key_value="bridge-circuit-block-virtual-clock")
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = (
+        http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+            consecutive_failures=2,
+            cooldown_until=clock.monotonic() + 30.0,
+            last_detail="stream_incomplete",
+            last_touched_monotonic=clock.monotonic(),
+        )
+    )
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
+
+    assert await service._http_bridge_precreated_retry_block(hard_session) == (30.0, "hard_key_cooldown")
+    clock.advance(12.5)
+    assert await service._http_bridge_precreated_retry_block(hard_session) == (17.5, "hard_key_cooldown")
+    clock.advance(17.5)
+    assert await service._http_bridge_precreated_retry_block(hard_session) == (0.0, "hard_key_cooldown")
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_ttl_purge_guard_reads_injected_wall_clock() -> None:
+    """The stale-row purge (#1891) ages the durable row against the injected wall clock.
+
+    A row older than one TTL is kept while its admission generation shows an
+    in-flight probe; past two TTLs it is purged with the fenced expectations.
+    """
+    clock = VirtualClock(epoch_value=2_000_000.0)
+    ttl = http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+
+    def persisted_row(age_seconds: float) -> SimpleNamespace:
+        return SimpleNamespace(
+            consecutive_failures=2,
+            cooldown_until_epoch=clock.time() + 60.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=clock.time() - age_seconds,
+            admission_generation=1,
+        )
+
+    kept_service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock)
+    kept_session = _make_bridge_session(key_value="bridge-circuit-virtual-ttl-kept")
+    kept_service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=persisted_row(ttl + 1.0)),
+        purge_retry_circuit=AsyncMock(),
+        clear_retry_circuit=AsyncMock(),
+        persist_retry_circuit=AsyncMock(),
+    )
+    await kept_service._load_http_bridge_retry_circuit(kept_session)
+    kept_service._durable_bridge.purge_retry_circuit.assert_not_awaited()
+    assert kept_session.key in cast(Any, kept_service)._http_bridge_retry_circuits
+
+    purged_service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock)
+    purged_session = _make_bridge_session(key_value="bridge-circuit-virtual-ttl-purged")
+    stale_row = persisted_row(2 * ttl + 1.0)
+    purged_service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=stale_row),
+        purge_retry_circuit=AsyncMock(),
+    )
+    assert await purged_service._http_bridge_precreated_retry_allowed(purged_session) is True
+    purged_service._durable_bridge.purge_retry_circuit.assert_awaited_once_with(
+        session_key_kind=purged_session.key.affinity_kind,
+        session_key_value=purged_session.key.affinity_key,
+        api_key_id=purged_session.key.api_key_id,
+        expected_updated_at_epoch=stale_row.updated_at_epoch,
+        expected_admission_generation=1,
+        expected_consecutive_failures=2,
+        fence_last_detail=True,
+        expected_last_detail="stream_incomplete",
+    )
+
+
+def test_http_bridge_quarantine_expires_on_injected_clock() -> None:
+    """Quarantine deadlines are armed, checked and pruned against the owner clock."""
+    clock = VirtualClock(monotonic_value=5_000.0)
+    service = SimpleNamespace(_clock=clock)
+    session = _make_bridge_session(key_value="quarantine-virtual-clock")
+    ttl = http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_TTL_SECONDS
+
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason="reattach_missing_response_created",
+    )
+
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    assert entry.quarantined_until == 5_000.0 + ttl
+    assert entry.last_touched_monotonic == 5_000.0
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is True
+
+    clock.advance(ttl - 1.0)
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is True
+
+    clock.advance(1.0)
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+    assert session.key not in http_bridge_quarantine_module._http_bridge_quarantine_registry(service)
+
+
+@pytest.mark.asyncio
+async def test_close_all_http_bridge_sessions_shutdown_task_is_scheduler_owned() -> None:
+    scheduler = _RecordingVirtualScheduler(VirtualClock())
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), scheduler=scheduler)
+
+    assert await asyncio.wait_for(service.close_all_http_bridge_sessions(), timeout=5.0) is True
+
+    assert "http-bridge-shutdown-close-all" in scheduler.task_names
+    assert scheduler.owned_tasks == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_fail_stale_http_bridge_pending_requests_partial_cleanup_is_scheduler_owned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = _RecordingVirtualScheduler(VirtualClock())
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), scheduler=scheduler)
+    wedged = _make_wedged_reattach_request_state(request_id="req-stale-wedged-owned")
+    session = _make_bridge_session(
+        key_value="quarantine-stale-gate-owned",
+        pending_requests=deque([wedged]),
+        queued_request_count=1,
+    )
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", AsyncMock())
+
+    await service._fail_stale_http_bridge_pending_requests(
+        session,
+        [wedged],
+        detail="response_create_gate_timeout_stuck_pending",
+    )
+
+    assert any(
+        name is not None and name.startswith("http-bridge-partial-cleanup-poison-settlement-")
+        for name in scheduler.task_names
+    )
+    assert scheduler.owned_tasks == frozenset()
+
+
+def test_prepare_response_bridge_request_state_stamps_started_at_from_owner_clock() -> None:
+    clock = VirtualClock(monotonic_value=2_500.0)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock)
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": "hi", "stream": True}
+    )
+
+    request_state, _text = service._prepare_response_bridge_request_state(
+        payload,
+        api_key=None,
+        api_key_reservation=None,
+        include_type_field=True,
+        attach_event_queue=True,
+        transport="http",
+        client_metadata=None,
+    )
+
+    assert request_state.started_at == 2_500.0
+
+
+@pytest.mark.asyncio
+async def test_iter_account_capacity_wait_sse_sleeps_on_injected_scheduler() -> None:
+    """Keepalive chunks of the capacity wait are timed by the owner scheduler and clock."""
+    clock = VirtualClock(monotonic_value=50.0)
+    scheduler = VirtualScheduler(clock)
+    frames: list[str] = []
+
+    async def collect() -> None:
+        async for frame in http_bridge_streaming_module._iter_account_capacity_wait_sse(
+            request_id="req-capacity-sse-virtual",
+            reason="account capacity",
+            sleep_seconds=25.0,
+            emit_keepalives=True,
+            scheduler=scheduler,
+            clock=clock,
+        ):
+            frames.append(frame)
+
+    collector = scheduler.create_task(collect())
+    await scheduler.drain()
+    assert len(frames) == 1
+    assert not collector.done()
+
+    await scheduler.advance(10.0)
+    assert len(frames) == 2
+    await scheduler.advance(10.0)
+    assert len(frames) == 3
+    assert not collector.done()
+    await scheduler.advance(5.0)
+
+    assert collector.done()
+    first = cast(dict[str, object], proxy_service.parse_sse_data_json(frames[0]))
+    assert first["status"] == "waiting_for_account_capacity"
+    assert first["retry_after_seconds"] == 25
+    assert cast(dict[str, object], proxy_service.parse_sse_data_json(frames[2]))["retry_after_seconds"] == 5
+    assert scheduler.pending_timers == 0
+
+
+@pytest.mark.asyncio
+async def test_persist_http_bridge_operation_event_terminal_tasks_are_scheduler_owned() -> None:
+    """Terminal append, delivery and settlement run in tasks the owner scheduler spawned."""
+    scheduler = _RecordingVirtualScheduler(VirtualClock())
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), scheduler=scheduler)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-terminal-owned",
+        response_id="resp-terminal-owned",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.operation_id = "op-terminal-owned"
+    session = _make_bridge_session(
+        key_value="terminal-owned",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.durable_session_id = "durable-terminal-owned"
+    session.durable_owner_epoch = 1
+    settle_terminal_event = AsyncMock()
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(
+            append_terminal_event=AsyncMock(return_value=SimpleNamespace(settlement_required=True)),
+            settle_terminal_event=settle_terminal_event,
+        ),
+    )
+    terminal_event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    enqueued = await http_bridge_upstream_events_module._persist_http_bridge_operation_event(
+        service,
+        session,
+        request_state,
+        'data: {"type":"response.completed"}\n\n',
+        terminal=True,
+        terminal_state="completed",
+        terminal_event_queue=terminal_event_queue,
+    )
+
+    assert enqueued is True
+    settle_terminal_event.assert_awaited_once()
+    assert terminal_event_queue.qsize() == 2
+    assert {
+        "http-bridge-terminal-append-op-terminal-owned",
+        "http-bridge-terminal-delivery-op-terminal-owned",
+        "http-bridge-terminal-settlement-op-terminal-owned",
+    } <= {name for name in scheduler.task_names if name is not None}
+    assert scheduler.owned_tasks == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_wait_before_http_bridge_model_capacity_retry_runs_on_injected_scheduler() -> None:
+    clock = VirtualClock(monotonic_value=100.0)
+    scheduler = VirtualScheduler(clock)
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-capacity-virtual",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=100.0,
+        transport="http",
+        bridge_request_deadline=145.0,
+        event_queue=event_queue,
+    )
+
+    waiter = scheduler.create_task(
+        http_bridge_upstream_events_module._wait_before_http_bridge_model_capacity_retry(
+            request_state,
+            emit_keepalives=True,
+            error_message="Selected model is at capacity. Please try a different model.",
+            scheduler=scheduler,
+            clock=clock,
+        )
+    )
+    await scheduler.drain()
+
+    assert not waiter.done()
+    assert request_state.account_capacity_waiting is True
+    assert request_state.account_capacity_wait_retry_after_seconds == 30.0
+    assert request_state.account_capacity_wait_started_at == 100.0
+    assert event_queue.qsize() == 1
+
+    await scheduler.advance(10.0)
+    assert event_queue.qsize() == 2
+    await scheduler.advance(19.0)
+    assert not waiter.done()
+    assert event_queue.qsize() == 3
+
+    await scheduler.advance(1.0)
+
+    assert await waiter is True
+    assert request_state.account_capacity_waiting is False
+    assert scheduler.pending_timers == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_eventless_timeout_signal_window_follows_injected_clock() -> None:
+    clock = VirtualClock(monotonic_value=10_000.0)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock)
+    account = SimpleNamespace(id="acc-eventless-timeouts-virtual")
+    session = cast(proxy_service._HTTPBridgeSession, SimpleNamespace(account=account))
+    record_errors = AsyncMock()
+    service._load_balancer.record_errors = record_errors
+    window = http_bridge_upstream_events_module._HTTP_BRIDGE_ACCOUNT_TIMEOUT_WINDOW_SECONDS
+
+    for _ in range(2):
+        await http_bridge_upstream_events_module._record_http_bridge_account_timeout_signal(service, session)
+    clock.advance(window + 1.0)
+    # The two earlier failures fell out of the evidence window: this one counts alone.
+    await http_bridge_upstream_events_module._record_http_bridge_account_timeout_signal(service, session)
+    record_errors.assert_not_awaited()
+
+    for _ in range(2):
+        await http_bridge_upstream_events_module._record_http_bridge_account_timeout_signal(service, session)
+    record_errors.assert_awaited_once_with(account, 2)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_http_bridge_recovery_settlement_retry_sleeps_on_service_scheduler() -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    renew_live_session = AsyncMock()
+    service = SimpleNamespace(
+        _scheduler=scheduler,
+        _durable_bridge=SimpleNamespace(renew_live_session=renew_live_session),
+    )
+
+    backoff = scheduler.create_task(
+        http_bridge_upstream_events_module._wait_for_http_bridge_recovery_settlement_retry(
+            service,
+            session_id="durable-settlement-backoff",
+            owner_epoch=3,
+            api_key_id=None,
+            delay_seconds=25.0,
+        )
+    )
+    await scheduler.drain()
+    assert not backoff.done()
+    renew_live_session.assert_not_awaited()
+
+    await scheduler.advance(10.0)
+    assert renew_live_session.await_count == 1
+    await scheduler.advance(10.0)
+    assert renew_live_session.await_count == 2
+    await scheduler.advance(5.0)
+
+    assert backoff.done()
+    assert renew_live_session.await_count == 3
+    assert scheduler.pending_timers == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_poison_settlement_is_scheduler_owned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = _RecordingVirtualScheduler(VirtualClock())
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), scheduler=scheduler)
+    session = _make_bridge_session(
+        key_value="bridge-anchor-poison-owned",
+        pending_requests=deque([_make_eventless_http_bridge_owner()]),
+        queued_request_count=1,
+    )
+    session.admission_waiter_count = 1
+    session.durable_session_id = "durable-anchor-poison-owned"
+    session.durable_owner_epoch = 3
+    service._durable_bridge = SimpleNamespace(
+        **_stateful_retry_circuit_persistence(),
+        rebind_session_account=AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
+
+    for failure_number in range(1, 3):
+        retired = await service._fail_http_bridge_reader_and_maybe_retire(
+            session,
+            error_code="stream_idle_timeout",
+            error_message="idle timeout",
+        )
+        assert retired is (failure_number == 2)
+
+    assert "http-bridge-reader-poison-settlement-durable-anchor-poison-owned" in scheduler.task_names
+    assert scheduler.owned_tasks == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_forward_http_bridge_request_to_owner_passes_owner_scheduler_and_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = VirtualClock(monotonic_value=10.0)
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), scheduler=scheduler, clock=clock)
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-b",
+        owner_endpoint="http://instance-b",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-owner-seams", None),
+    )
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    captured: dict[str, object] = {}
+
+    async def fake_stream_responses(**kwargs: object):
+        captured.update(kwargs)
+        if False:
+            yield ""
+        return
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_owner_client",
+        cast(Any, SimpleNamespace(stream_responses=fake_stream_responses)),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._forward_http_bridge_request_to_owner(
+            owner_forward=owner_forward,
+            payload=payload,
+            headers={"x-codex-session-id": "sid-owner-seams"},
+            api_key_reservation=None,
+            codex_session_affinity=True,
+            downstream_turn_state=None,
+            request_started_at=10.0,
+            proxy_api_authorization=None,
+        )
+    ]
+
+    assert chunks == []
+    assert captured["scheduler"] is scheduler
+    assert captured["clock"] is clock

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
@@ -27,7 +28,9 @@ import app.modules.model_sources.selection as source_selection
 import app.modules.proxy._service.websocket.mixin as ws_mixin
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.model_sources.selection import (
+    ResponsesModelSourceOwnership,
     effective_model_for_api_key,
+    resolve_responses_model_source_ownership,
     responses_model_is_source_owned,
 )
 from app.modules.proxy import service as proxy_service
@@ -72,6 +75,16 @@ def _request_state(model: str) -> ws_mixin._WebSocketRequestState:
     )
 
 
+def _service() -> proxy_service.ProxyService:
+    # ProxyService is concrete at runtime, but basedpyright cannot see the
+    # protocol attributes supplied by its assembled mixins.
+    return proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))  # pyright: ignore[reportAbstractUsage]
+
+
+def _websocket(socket: object) -> WebSocket:
+    return cast(WebSocket, socket)
+
+
 def test_effective_model_prefers_enforced_model() -> None:
     assert effective_model_for_api_key(None, "gpt-5.6-sol") == "gpt-5.6-sol"
     assert effective_model_for_api_key(_api_key(), "gpt-5.6-sol") == "gpt-5.6-sol"
@@ -93,13 +106,572 @@ async def test_source_ownership_fails_open_when_resolution_raises(monkeypatch: p
 
     monkeypatch.setattr(source_selection, "select_responses_model_source", boom)
 
+    assert (
+        await resolve_responses_model_source_ownership("qwen3.8-max", None)
+        is ResponsesModelSourceOwnership.LOOKUP_UNAVAILABLE
+    )
     assert await responses_model_is_source_owned("qwen3.8-max", None) is False
+
+
+@pytest.mark.asyncio
+async def test_source_resolution_failure_with_missing_owner_selects_subscription(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed source lookup must not turn an owner miss into a terminal 502."""
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    async def unavailable_source_catalog(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise RuntimeError("model_sources table is unavailable")
+
+    service = _service()
+    account = _make_account("acc_ws_source_lookup_fallback")
+    upstream = _QueuedTestUpstreamWebSocket(_completed_turn("resp_source_lookup_fallback"))
+    selection_calls = 0
+
+    async def select_subscription_account(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        nonlocal selection_calls
+        selection_calls += 1
+        return account
+
+    async def open_subscription_upstream(self, selected_account, headers, **kwargs):  # noqa: ANN001, ANN202
+        del self, headers, kwargs
+        assert selected_account.id == account.id
+        return selected_account, upstream
+
+    monkeypatch.setattr(source_selection, "select_responses_model_source", unavailable_source_catalog)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", select_subscription_account)
+    monkeypatch.setattr(proxy_service.ProxyService, "_try_open_websocket_connect_attempt", open_subscription_upstream)
+
+    payload = json.loads(_create_frame("qwen3.8-max"))
+    payload["previous_response_id"] = "resp_missing_owner_during_source_lookup_failure"
+    downstream = _Downstream([json.dumps(payload, separators=(",", ":"))])
+
+    await service.proxy_responses_websocket(
+        _websocket(downstream),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert selection_calls == 1, "an unavailable source lookup must fall back to subscription selection"
+    assert len(upstream.sent_text) == 1, "the subscription request must be forwarded upstream"
+    assert any("resp_source_lookup_fallback" in text for text in downstream.sent_text)
+    assert not any("previous_response_owner_unavailable" in text for text in downstream.sent_text)
+
+
+@pytest.mark.asyncio
+async def test_known_subscription_model_with_missing_owner_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A known subscription model must not guess an owner for a continuation."""
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    service = _service()
+    account = _make_account("acc_ws_known_subscription_owner_miss")
+    second_account = _make_account("acc_ws_known_subscription_owner_miss_second")
+    selection_calls = 0
+    list_selection_candidates = AsyncMock(return_value=(account, second_account))
+
+    async def no_source_catalog(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        return None
+
+    async def select_subscription_account(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        nonlocal selection_calls
+        selection_calls += 1
+        return account
+
+    monkeypatch.setattr(source_selection, "select_responses_model_source", no_source_catalog)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", select_subscription_account)
+
+    previous_response_id = "resp_known_subscription_owner_miss_9f0d2f"
+    payload = json.loads(_create_frame("gpt-5.6-sol"))
+    payload["previous_response_id"] = previous_response_id
+    downstream = _Downstream([json.dumps(payload, separators=(",", ":"))])
+
+    await service.proxy_responses_websocket(
+        _websocket(downstream),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert selection_calls == 0, "an unknown continuation owner must not fall through to account selection"
+    list_selection_candidates.assert_awaited_once()
+    assert list_selection_candidates.await_args is not None
+    assert list_selection_candidates.await_args.kwargs["account_ids"] is None
+    assert any("previous_response_owner_unavailable" in text for text in downstream.sent_text)
+    assert not any(previous_response_id in text for text in downstream.sent_text), (
+        "the raw previous_response_id must not be exposed in the sanitized error"
+    )
+
+
+@pytest.mark.asyncio
+async def test_known_subscription_model_candidate_lookup_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candidate lookup failure must keep the sanitized owner-miss contract."""
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    service = _service()
+
+    async def no_source_catalog(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        return None
+
+    monkeypatch.setattr(source_selection, "select_responses_model_source", no_source_catalog)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        service._load_balancer,
+        "list_selection_candidates",
+        AsyncMock(side_effect=RuntimeError("selection database unavailable")),
+    )
+
+    previous_response_id = "resp_known_subscription_candidate_lookup_failure"
+    payload = json.loads(_create_frame("gpt-5.6-sol"))
+    payload["previous_response_id"] = previous_response_id
+    downstream = _Downstream([json.dumps(payload, separators=(",", ":"))])
+
+    await service.proxy_responses_websocket(
+        _websocket(downstream),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert any("previous_response_owner_unavailable" in text for text in downstream.sent_text)
+    assert not any(previous_response_id in text for text in downstream.sent_text)
+
+
+@pytest.mark.asyncio
+async def test_turn_state_owner_skips_previous_response_candidate_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A known turn-state owner must remain authoritative when the response owner is missing."""
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    service = _service()
+    account = _make_account("acc_ws_turn_state_owner")
+    upstream = _QueuedTestUpstreamWebSocket(_completed_turn("resp_ws_turn_state_owner"))
+    selection_calls = 0
+
+    async def no_source_catalog(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        return None
+
+    async def select_subscription_account(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        nonlocal selection_calls
+        del self, args
+        selection_calls += 1
+        assert kwargs["preferred_account_id"] == account.id
+        return account
+
+    async def open_subscription_upstream(self, selected_account, headers, **kwargs):  # noqa: ANN001, ANN202
+        del self, headers, kwargs
+        assert selected_account.id == account.id
+        return selected_account, upstream
+
+    monkeypatch.setattr(source_selection, "select_responses_model_source", no_source_catalog)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=account.id))
+    list_selection_candidates = AsyncMock(side_effect=AssertionError("turn-state owner must skip candidate fallback"))
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", select_subscription_account)
+    monkeypatch.setattr(proxy_service.ProxyService, "_try_open_websocket_connect_attempt", open_subscription_upstream)
+
+    previous_response_id = "resp_ws_turn_state_owner_missing"
+    payload = json.loads(_create_frame("gpt-5.6-sol"))
+    payload["previous_response_id"] = previous_response_id
+    downstream = _Downstream([json.dumps(payload, separators=(",", ":"))])
+
+    await service.proxy_responses_websocket(
+        _websocket(downstream),
+        {"x-codex-turn-state": "turn_state_owner_authoritative"},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert selection_calls == 1
+    list_selection_candidates.assert_not_awaited()
+    assert len(upstream.sent_text) == 1
+    sent_payload = json.loads(upstream.sent_text[0])
+    assert sent_payload["previous_response_id"] == previous_response_id
+    assert not any("previous_response_owner_unavailable" in text for text in downstream.sent_text)
+
+
+@pytest.mark.asyncio
+async def test_known_subscription_model_owner_miss_uses_sole_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sole eligible account keeps the compatibility continuation fallback.
+
+    A missing request-log owner is ambiguous with multiple accounts, but the
+    historical subscription path remains safe when the filtered pool contains
+    exactly one account. Drive the complete WebSocket request path so the
+    assertion covers selection, upstream dispatch, and forwarding of the
+    continuation anchor at the transport boundary.
+    """
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    service = _service()
+    account = _make_account("acc_ws_sole_owner_miss")
+    upstream = _QueuedTestUpstreamWebSocket(_completed_turn("resp_ws_sole_owner_miss"))
+    stale_api_key = replace(
+        _api_key(),
+        account_assignment_scope_enabled=True,
+        assigned_account_ids=["acc_ws_stale_assignment"],
+    )
+    refreshed_api_key = replace(
+        stale_api_key,
+        assigned_account_ids=[account.id],
+    )
+    selection_calls = 0
+    selection_api_keys: list[ApiKeyData | None] = []
+    list_selection_candidates = AsyncMock(return_value=(account,))
+
+    async def no_source_catalog(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        return None
+
+    async def select_subscription_account(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        nonlocal selection_calls
+        selection_calls += 1
+        selection_api_keys.append(kwargs["api_key"])
+        return account
+
+    async def open_subscription_upstream(self, selected_account, headers, **kwargs):  # noqa: ANN001, ANN202
+        del self, headers, kwargs
+        assert selected_account.id == account.id
+        return selected_account, upstream
+
+    async def refresh_api_key(_api_key: ApiKeyData | None) -> ApiKeyData:
+        return refreshed_api_key
+
+    monkeypatch.setattr(source_selection, "select_responses_model_source", no_source_catalog)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", refresh_api_key)
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", select_subscription_account)
+    monkeypatch.setattr(proxy_service.ProxyService, "_try_open_websocket_connect_attempt", open_subscription_upstream)
+
+    previous_response_id = "resp_ws_missing_owner_sole_candidate"
+    payload = json.loads(_create_frame("gpt-5.6-sol"))
+    payload["previous_response_id"] = previous_response_id
+    downstream = _Downstream([json.dumps(payload, separators=(",", ":"))])
+
+    await service.proxy_responses_websocket(
+        _websocket(downstream),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=stale_api_key,
+    )
+
+    assert selection_calls == 1, "the sole eligible account must proceed through normal WebSocket selection"
+    list_selection_candidates.assert_awaited_once()
+    assert list_selection_candidates.await_args is not None
+    assert list_selection_candidates.await_args.kwargs["model"] == "gpt-5.6-sol"
+    assert list_selection_candidates.await_args.kwargs["account_ids"] == [account.id]
+    assert selection_api_keys == [refreshed_api_key], (
+        "the actual selector must receive the same refreshed assignment scope used for the sole-candidate count"
+    )
+    assert len(upstream.sent_text) == 1, "the continuation must be dispatched to the sole subscription account"
+    sent_payload = json.loads(upstream.sent_text[0])
+    assert sent_payload["previous_response_id"] == previous_response_id
+    assert any("resp_ws_sole_owner_miss" in text for text in downstream.sent_text)
+    assert not any("previous_response_owner_unavailable" in text for text in downstream.sent_text)
+
+
+@pytest.mark.asyncio
+async def test_terminal_compaction_owner_miss_uses_sole_subscription_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A compaction owner miss can use the one account in the subscription pool.
+
+    Terminal compaction is excluded from model-source routing but carries no
+    account pin of its own. When its previous-response owner lookup misses, a
+    sole subscription candidate is therefore safe to use; an input-file
+    request follows the stricter file-owner path instead.
+    """
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    service = _service()
+    account = _make_account("acc_ws_compaction_owner_miss")
+    previous_response_id = "resp_ws_compaction_owner_miss"
+    upstream = _TurnDrivenUpstream(
+        [_completed_turn("resp_ws_compaction_first"), _completed_turn("resp_ws_compaction_second")]
+    )
+    list_selection_candidates = AsyncMock(return_value=(account,))
+
+    async def connect_subscription_upstream(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN202
+        del self, args, kwargs
+        return account, upstream
+
+    second_payload = json.loads(_compaction_trigger_frame("qwen3.8-max"))
+    second_payload["previous_response_id"] = previous_response_id
+    downstream = _TurnSerializedDownstream(
+        [
+            _create_frame("gpt-5.6-sol"),
+            json.dumps(second_payload, separators=(",", ":")),
+        ]
+    )
+
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", connect_subscription_upstream)
+
+    await service.proxy_responses_websocket(
+        _websocket(downstream),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    list_selection_candidates.assert_awaited_once()
+    assert len(upstream.sent_text) == 2, "the compaction continuation must reach the subscription account"
+    sent_payload = json.loads(upstream.sent_text[1])
+    assert sent_payload["previous_response_id"] == previous_response_id
+    assert any("resp_ws_compaction_second" in text for text in downstream.sent_text)
+    assert not any("previous_response_owner_unavailable" in text for text in downstream.sent_text)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "synthesized_turn_state",
+        "preissued",
+        "codex_session_affinity",
+    ),
+    [
+        ("turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", False, True),
+        (None, True, True),
+        (None, True, False),
+        (None, False, True),
+        (None, False, False),
+    ],
+    ids=[
+        "current-proxy-marker",
+        "echoed-codex-proxy-marker",
+        "echoed-v1-proxy-marker",
+        "unregistered-shaped-codex",
+        "unregistered-shaped-v1",
+    ],
+)
+async def test_terminal_compaction_generated_turn_state_uses_shape_compatibility(
+    synthesized_turn_state: str | None,
+    preissued: bool,
+    codex_session_affinity: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Synthetic-shaped markers keep the sole-candidate compatibility fallback.
+
+    The marker can arrive from a different process or replica without a local
+    provenance record. Its shape is still enough to identify a generated
+    placeholder; blank and non-synthetic client markers remain covered by the
+    fail-closed tests below and in the integration WebSocket lane.
+    """
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    service = _service()
+    if preissued:
+        # v1/responses keeps a synthesized marker out of forwarded headers on
+        # the first handshake. Seed the compatibility shape for the reconnect
+        # cases; the resolver below must not require a process-local record.
+        preissued_headers = (
+            {} if not codex_session_affinity else {"x-codex-turn-state": "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+        )
+        service._websocket_continuity_state_for_request(
+            preissued_headers,
+            api_key=None,
+            codex_session_affinity=codex_session_affinity,
+            synthesized_turn_state="turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+    account = _make_account("acc_ws_compaction_spoofed_turn_state")
+    upstream = _QueuedTestUpstreamWebSocket(_completed_turn("resp_ws_compaction_spoofed_turn_state"))
+    list_selection_candidates = AsyncMock(return_value=(account,))
+
+    async def resolve_turn_state_owner(
+        *,
+        turn_state: str,
+        api_key: ApiKeyData | None,
+        fail_on_missing: bool,
+    ) -> str | None:
+        del api_key
+        assert turn_state == "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        if fail_on_missing:
+            raise proxy_service.ProxyResponseError(
+                502,
+                proxy_service.openai_error(
+                    "turn_state_owner_unavailable",
+                    "Turn-state owner account is unavailable; retry the logical turn.",
+                    error_type="server_error",
+                ),
+            )
+        return None
+
+    async def connect_subscription_upstream(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN202
+        del self, args, kwargs
+        return account, upstream
+
+    payload = json.loads(_compaction_trigger_frame("gpt-5.6-sol"))
+    payload["previous_response_id"] = "resp_ws_compaction_spoofed_owner_miss"
+    downstream = _Downstream([json.dumps(payload, separators=(",", ":"))])
+
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", resolve_turn_state_owner)
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", connect_subscription_upstream)
+
+    await service.proxy_responses_websocket(
+        _websocket(downstream),
+        {"x-codex-turn-state": "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        codex_session_affinity=codex_session_affinity,
+        openai_cache_affinity=False,
+        api_key=None,
+        synthesized_turn_state=synthesized_turn_state,
+    )
+
+    list_selection_candidates.assert_awaited_once()
+    assert len(upstream.sent_text) == 1
+    assert not any("turn_state_owner_unavailable" in text for text in downstream.sent_text)
+
+
+@pytest.mark.asyncio
+async def test_owner_miss_rebinds_existing_socket_to_refreshed_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sole owner-miss candidate must replace a stale shared socket.
+
+    A long-lived WebSocket can outlive an API-key assignment update.  The
+    first turn therefore opens on the handshake key's account, while the next
+    turn sees the refreshed assignment scope.  If the previous-response owner
+    lookup misses and the refreshed scope leaves one eligible account, the
+    continuation must retire the stale socket before dispatch; reusing it
+    would leak the request to an account that the current key no longer
+    permits.
+    """
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    service = _service()
+    stale_account = _make_account("acc_ws_stale_assignment")
+    refreshed_account = _make_account("acc_ws_fresh_assignment")
+    stale_api_key = replace(
+        _api_key(),
+        account_assignment_scope_enabled=True,
+        assigned_account_ids=[stale_account.id],
+    )
+    refreshed_api_key = replace(stale_api_key, assigned_account_ids=[refreshed_account.id])
+    stale_upstream = _TurnDrivenUpstream([_completed_turn("resp_ws_stale_account")])
+    refreshed_upstream = _TurnDrivenUpstream([_completed_turn("resp_ws_fresh_account")])
+    refresh_results = iter((stale_api_key, refreshed_api_key))
+    connect_calls: list[tuple[str | None, ApiKeyData | None]] = []
+
+    async def no_source_catalog(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        return None
+
+    async def refresh_api_key(_api_key: ApiKeyData | None) -> ApiKeyData:
+        return next(refresh_results)
+
+    async def connect_websocket(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        del self, args
+        request_state = kwargs["request_state"]
+        effective_api_key = kwargs["api_key"]
+        connect_calls.append((request_state.preferred_account_id, effective_api_key))
+        if len(connect_calls) == 1:
+            assert request_state.preferred_account_id is None
+            assert effective_api_key is stale_api_key
+            return stale_account, stale_upstream
+        assert request_state.preferred_account_id == refreshed_account.id
+        assert effective_api_key is refreshed_api_key
+        return refreshed_account, refreshed_upstream
+
+    list_selection_candidates = AsyncMock(return_value=(refreshed_account,))
+    monkeypatch.setattr(source_selection, "select_responses_model_source", no_source_catalog)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", refresh_api_key)
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._load_balancer, "list_selection_candidates", list_selection_candidates)
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", connect_websocket)
+
+    second_payload = json.loads(_create_frame("gpt-5.6-sol"))
+    second_previous_response_id = "resp_ws_missing_owner_rebind"
+    second_payload["previous_response_id"] = second_previous_response_id
+    downstream = _TurnSerializedDownstream(
+        [
+            _create_frame("gpt-5.6-sol"),
+            json.dumps(second_payload, separators=(",", ":")),
+        ]
+    )
+
+    await service.proxy_responses_websocket(
+        _websocket(downstream),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=stale_api_key,
+    )
+
+    assert connect_calls == [
+        (None, stale_api_key),
+        (refreshed_account.id, refreshed_api_key),
+    ]
+    list_selection_candidates.assert_awaited_once()
+    assert list_selection_candidates.await_args is not None
+    assert list_selection_candidates.await_args.kwargs["account_ids"] == [refreshed_account.id]
+    assert len(stale_upstream.sent_text) == 1, "the stale socket must carry only the first turn"
+    assert len(refreshed_upstream.sent_text) == 1, "the refreshed account must receive the continuation"
+    sent_payload = json.loads(refreshed_upstream.sent_text[0])
+    assert sent_payload["previous_response_id"] == second_previous_response_id
+    assert any("resp_ws_stale_account" in text for text in downstream.sent_text)
+    assert any("resp_ws_fresh_account" in text for text in downstream.sent_text)
+    assert not any("previous_response_owner_unavailable" in text for text in downstream.sent_text)
 
 
 async def _run_connect_guard(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    is_source_owned: bool,
+    is_source_owned: ResponsesModelSourceOwnership,
     api_key: ApiKeyData | None = None,
     request_state_api_key: ApiKeyData | None = None,
 ):
@@ -127,7 +699,7 @@ async def _run_connect_guard(
     settings = _make_proxy_settings()
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
-    monkeypatch.setattr(ws_mixin, "responses_model_is_source_owned", fake_is_source_owned)
+    monkeypatch.setattr(ws_mixin, "resolve_responses_model_source_ownership", fake_is_source_owned)
     monkeypatch.setattr(proxy_service.ProxyService, "_emit_websocket_connect_failure", fake_emit)
     monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", fake_select)
 
@@ -152,7 +724,10 @@ async def _run_connect_guard(
 
 @pytest.mark.asyncio
 async def test_connect_guard_fails_session_for_source_owned_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    account, upstream, emitted, selection_calls, _ = await _run_connect_guard(monkeypatch, is_source_owned=True)
+    account, upstream, emitted, selection_calls, _ = await _run_connect_guard(
+        monkeypatch,
+        is_source_owned=ResponsesModelSourceOwnership.SOURCE_OWNED,
+    )
 
     assert account is None
     assert upstream is None
@@ -164,7 +739,10 @@ async def test_connect_guard_fails_session_for_source_owned_model(monkeypatch: p
 
 @pytest.mark.asyncio
 async def test_connect_guard_ignores_subscription_models(monkeypatch: pytest.MonkeyPatch) -> None:
-    account, _upstream, emitted, selection_calls, _ = await _run_connect_guard(monkeypatch, is_source_owned=False)
+    account, _upstream, emitted, selection_calls, _ = await _run_connect_guard(
+        monkeypatch,
+        is_source_owned=ResponsesModelSourceOwnership.NOT_SOURCE_OWNED,
+    )
 
     assert account is None  # the stubbed selector returns no account
     assert selection_calls >= 1, "subscription models must proceed to account selection"
@@ -184,12 +762,81 @@ async def test_connect_guard_uses_the_per_request_api_key(monkeypatch: pytest.Mo
 
     *_, seen_api_keys = await _run_connect_guard(
         monkeypatch,
-        is_source_owned=True,
+        is_source_owned=ResponsesModelSourceOwnership.SOURCE_OWNED,
         api_key=session_key,
         request_state_api_key=refreshed_key,
     )
 
     assert seen_api_keys == [refreshed_key]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_result", "later_result"),
+    [
+        (
+            ResponsesModelSourceOwnership.LOOKUP_UNAVAILABLE,
+            ResponsesModelSourceOwnership.SOURCE_OWNED,
+        ),
+        (
+            ResponsesModelSourceOwnership.NOT_SOURCE_OWNED,
+            ResponsesModelSourceOwnership.LOOKUP_UNAVAILABLE,
+        ),
+    ],
+)
+async def test_websocket_source_ownership_cache_keeps_first_catalog_result(
+    monkeypatch: pytest.MonkeyPatch,
+    first_result: ResponsesModelSourceOwnership,
+    later_result: ResponsesModelSourceOwnership,
+) -> None:
+    """Both connect attempts must obey the first ownership result for the request."""
+    settings = _make_proxy_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = _request_state("qwen3.8-max")
+    results = iter((first_result, later_result))
+    resolver_calls = 0
+    emitted: list[dict[str, object]] = []
+    selection_calls = 0
+
+    async def sequenced_resolver(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal resolver_calls
+        resolver_calls += 1
+        return next(results)
+
+    async def fake_emit(self, websocket, **kwargs):  # noqa: ANN001
+        emitted.append(kwargs)
+
+    async def fake_select(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        nonlocal selection_calls
+        selection_calls += 1
+        return None
+
+    monkeypatch.setattr(ws_mixin, "resolve_responses_model_source_ownership", sequenced_resolver)
+    monkeypatch.setattr(proxy_service.ProxyService, "_emit_websocket_connect_failure", fake_emit)
+    monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", fake_select)
+
+    for _ in range(2):
+        account, upstream = await service._connect_proxy_websocket(
+            {},
+            sticky_key=None,
+            sticky_kind=None,
+            prefer_earlier_reset=False,
+            routing_strategy="capacity_weighted",
+            model=request_state.model,
+            request_state=request_state,
+            api_key=None,
+            client_send_lock=anyio.Lock(),
+            websocket=AsyncMock(),
+        )
+        assert account is None
+        assert upstream is None
+
+    assert request_state.source_model_ownership is first_result
+    assert resolver_calls == 1
+    assert selection_calls == 2
+    assert emitted == []
 
 
 def _text_frame(payload: dict[str, object]) -> SimpleNamespace:
@@ -296,10 +943,10 @@ async def test_first_turn_reaches_connect_guard_not_the_reuse_guard(
         connect_called = True
         return account, upstream
 
-    async def always_source_owned(*args, **kwargs) -> bool:  # noqa: ANN002, ANN003
-        return True
+    async def always_source_owned(*args, **kwargs) -> ResponsesModelSourceOwnership:  # noqa: ANN002, ANN003
+        return ResponsesModelSourceOwnership.SOURCE_OWNED
 
-    monkeypatch.setattr(ws_mixin, "responses_model_is_source_owned", always_source_owned)
+    monkeypatch.setattr(ws_mixin, "resolve_responses_model_source_ownership", always_source_owned)
     monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect)
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
 
@@ -342,11 +989,15 @@ async def test_reuse_guard_rejects_a_later_source_owned_turn(monkeypatch: pytest
 
     # Only the second turn's model is source-owned.
     async def source_owned_for_qwen(model, _api_key, *, raw_model=None):  # noqa: ANN001
-        return model == "qwen3.8-max"
+        return (
+            ResponsesModelSourceOwnership.SOURCE_OWNED
+            if model == "qwen3.8-max"
+            else ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+        )
 
     released = AsyncMock()
 
-    monkeypatch.setattr(ws_mixin, "responses_model_is_source_owned", source_owned_for_qwen)
+    monkeypatch.setattr(ws_mixin, "resolve_responses_model_source_ownership", source_owned_for_qwen)
     monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect)
     monkeypatch.setattr(proxy_service.ProxyService, "_release_websocket_request_state_reservation", released)
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
@@ -732,9 +1383,13 @@ async def test_reuse_guard_forwards_a_pinned_input_file_turn(db_setup, monkeypat
 
     # The second turn's model is source-owned, like the reuse-guard rejection test.
     async def source_owned_for_qwen(model, _api_key, *, raw_model=None):  # noqa: ANN001
-        return model == "qwen3.8-max"
+        return (
+            ResponsesModelSourceOwnership.SOURCE_OWNED
+            if model == "qwen3.8-max"
+            else ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+        )
 
-    monkeypatch.setattr(ws_mixin, "responses_model_is_source_owned", source_owned_for_qwen)
+    monkeypatch.setattr(ws_mixin, "resolve_responses_model_source_ownership", source_owned_for_qwen)
     monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect)
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
 
@@ -785,9 +1440,13 @@ async def test_reuse_guard_forwards_a_terminal_compaction_trigger_turn(
         return account, upstream
 
     async def source_owned_for_qwen(model, _api_key, *, raw_model=None):  # noqa: ANN001
-        return model == "qwen3.8-max"
+        return (
+            ResponsesModelSourceOwnership.SOURCE_OWNED
+            if model == "qwen3.8-max"
+            else ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+        )
 
-    monkeypatch.setattr(ws_mixin, "responses_model_is_source_owned", source_owned_for_qwen)
+    monkeypatch.setattr(ws_mixin, "resolve_responses_model_source_ownership", source_owned_for_qwen)
     monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect)
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,13 +30,18 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_SIGNATURE_HEADER,
     HTTP_BRIDGE_SIGNATURE_V2_HEADER,
     HTTP_BRIDGE_SIGNATURE_VERSION_HEADER,
+    HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER,
+    HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_SIGNATURE_HEADER,
     HTTP_BRIDGE_TARGET_INSTANCE_HEADER,
     HTTPBridgeForwardContext,
     HTTPBridgeOwnerClient,
+    _bridge_forward_body_digest,
     _bridge_forward_signature,
     _bridge_forward_tools_bound_signature,
     _owner_forward_receive_timeout,
     _owner_forward_timeout,
+    _sign_bridge_payload,
+    _structured_bridge_signing_payload,
     build_owner_forward_headers,
     parse_forwarded_request,
 )
@@ -122,6 +128,200 @@ def test_parse_forwarded_request_accepts_signed_internal_forward() -> None:
     assert forwarded.context == context
     assert forwarded.context.original_affinity_kind is None
     assert forwarded.context.original_affinity_key is None
+
+
+def test_parse_forwarded_request_round_trips_authenticated_synthesized_turn_state() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        synthesized_turn_state="http_turn_generated",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    assert headers[HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER] == "http_turn_generated"
+    assert headers[HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_SIGNATURE_HEADER]
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context == context
+
+
+@pytest.mark.parametrize("tamper", ["mutate", "strip_signature"])
+def test_parse_forwarded_request_rejects_unbound_synthesized_turn_state_marker(tamper: str) -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        synthesized_turn_state="http_turn_generated",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    if tamper == "mutate":
+        headers[HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER] = "http_turn_attacker"
+    else:
+        headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER)
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+@pytest.mark.parametrize("tamper", ["missing", "invalid"])
+def test_parse_forwarded_request_rejects_invalid_synthesized_turn_state_signature(tamper: str) -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        synthesized_turn_state="http_turn_generated",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    if tamper == "missing":
+        headers.pop(HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_SIGNATURE_HEADER)
+    else:
+        headers[HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_SIGNATURE_HEADER] = "invalid"
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+def test_parse_forwarded_request_accepts_marker_and_file_owner_with_pre_marker_v2_shape() -> None:
+    payload = _payload_with_file()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        synthesized_turn_state="http_turn_generated",
+        file_owner_account_id="acc-file-owner",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    body_digest = _bridge_forward_body_digest(payload.model_dump_for_forwarding())
+    pre_marker_v2_payload = _structured_bridge_signing_payload(
+        body_digest=body_digest,
+        context=context,
+        include_client_ip=True,
+        signature_version=None,
+        protocol="codex-lb-http-bridge-forward-tools-bound",
+        bind_synthesized_turn_state=False,
+    )
+    marker_signature_payload = _structured_bridge_signing_payload(
+        body_digest=body_digest,
+        context=context,
+        include_client_ip=True,
+        signature_version=None,
+        protocol="codex-lb-http-bridge-forward-synthesized-turn-state",
+        bind_synthesized_turn_state=True,
+    )
+    assert json.loads(pre_marker_v2_payload) == {
+        "body_digest": body_digest,
+        "client_ip": None,
+        "client_ip_present": False,
+        "codex_session_affinity": True,
+        "downstream_turn_state": "http_turn_generated",
+        "file_owner_account_id": "acc-file-owner",
+        "include_client_ip": True,
+        "origin_instance": "instance-a",
+        "original_affinity_key": None,
+        "original_affinity_kind": None,
+        "original_request_unanchored": False,
+        "protocol": "codex-lb-http-bridge-forward-tools-bound",
+        "reservation": None,
+        "signature_version": None,
+        "target_instance": "instance-b",
+    }
+    assert json.loads(marker_signature_payload)["synthesized_turn_state"] == "http_turn_generated"
+    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] == _sign_bridge_payload(pre_marker_v2_payload)
+    assert headers[HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_SIGNATURE_HEADER] == _sign_bridge_payload(
+        marker_signature_payload
+    )
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context == context
+
+
+@pytest.mark.parametrize("original_request_unanchored", [False, True])
+def test_build_owner_forward_headers_preserves_pre_marker_v2_signature_when_marker_absent(
+    original_request_unanchored: bool,
+) -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+        original_request_unanchored=original_request_unanchored,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    assert HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER not in headers
+    assert HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_SIGNATURE_HEADER not in headers
+    body_digest = _bridge_forward_body_digest(payload.model_dump_for_forwarding())
+    signature_version = "2" if original_request_unanchored else None
+    pre_marker_signing_payload = _structured_bridge_signing_payload(
+        body_digest=body_digest,
+        context=context,
+        include_client_ip=True,
+        signature_version=signature_version,
+        protocol="codex-lb-http-bridge-forward-tools-bound",
+        bind_synthesized_turn_state=False,
+    )
+    assert json.loads(pre_marker_signing_payload) == {
+        "body_digest": body_digest,
+        "client_ip": None,
+        "client_ip_present": False,
+        "codex_session_affinity": False,
+        "downstream_turn_state": None,
+        "file_owner_account_id": None,
+        "include_client_ip": True,
+        "origin_instance": "instance-a",
+        "original_affinity_key": None,
+        "original_affinity_kind": None,
+        "original_request_unanchored": original_request_unanchored,
+        "protocol": "codex-lb-http-bridge-forward-tools-bound",
+        "reservation": None,
+        "signature_version": signature_version,
+        "target_instance": "instance-b",
+    }
+    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] == _sign_bridge_payload(pre_marker_signing_payload)
+    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] == _bridge_forward_tools_bound_signature(
+        payload=payload,
+        context=context,
+        signature_version=signature_version,
+    )
 
 
 def test_parse_forwarded_request_preserves_signed_file_owner_proof() -> None:

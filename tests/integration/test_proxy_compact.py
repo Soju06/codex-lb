@@ -19,7 +19,7 @@ from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, StickySessionKind
+from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
@@ -172,6 +172,195 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
         row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
         assert row is not None
         assert row.status == "released"
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_owner_miss_releases_api_key_reservation(async_client, monkeypatch):
+    """An external compact owner miss settles the real API-key reservation."""
+    for raw_account_id, email in (
+        ("acc_compact_owner_miss_a", "compact-owner-miss-a@example.com"),
+        ("acc_compact_owner_miss_b", "compact-owner-miss-b@example.com"),
+    ):
+        response = await async_client.post(
+            "/api/accounts/import",
+            files={"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")},
+        )
+        assert response.status_code == 200
+
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings_response.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "compact-owner-miss-key",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000_000}],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    key = created.json()["key"]
+
+    owner_lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", owner_lookup)
+
+    async def fail_selection_candidates(self, **kwargs):  # noqa: ANN001, ANN003
+        del self, kwargs
+        raise RuntimeError("selection database unavailable")
+
+    monkeypatch.setattr(proxy_module.LoadBalancer, "list_selection_candidates", fail_selection_candidates)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "continue",
+            "input": [],
+            "previous_response_id": "resp_compact_owner_miss",
+        },
+    )
+
+    assert response.status_code == 502, response.text
+    error = response.json()["error"]
+    assert error["code"] == "previous_response_owner_unavailable"
+    assert error["message"] == "Previous response owner account is unavailable; retry later."
+    owner_lookup.assert_awaited_once()
+
+    async with SessionLocal() as session:
+        reservation_result = await session.execute(
+            select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id)
+        )
+        reservations = reservation_result.scalars().all()
+        assert len(reservations) == 1
+        assert reservations[0].status == "released"
+
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 0
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_blank_turn_state_blocks_sole_candidate_fallback(async_client, monkeypatch):
+    raw_account_id = "acc_compact_blank_turn_state"
+    email = "compact-blank-turn-state@example.com"
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")},
+    )
+    assert response.status_code == 200
+
+    compact_calls: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        compact_calls.append(account_id)
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "model": "gpt-5.1",
+                "output": [],
+            }
+        )
+
+    previous_owner_lookup = AsyncMock(return_value=None)
+    turn_state_owner_lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        previous_owner_lookup,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_compact_turn_state_owner",
+        turn_state_owner_lookup,
+    )
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers={"x-codex-turn-state": ""},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "continue",
+            "input": [],
+            "previous_response_id": "resp_compact_blank_turn_state",
+        },
+    )
+
+    assert response.status_code == 502, response.text
+    assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
+    assert compact_calls == []
+    previous_owner_lookup.assert_awaited_once()
+    turn_state_owner_lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "turn_state",
+    [
+        "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "http_turn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ],
+    ids=["client-turn-shape", "client-http-turn-shape"],
+)
+async def test_proxy_compact_unregistered_synthetic_turn_state_without_previous_response_uses_sole_candidate(
+    async_client,
+    monkeypatch,
+    turn_state: str,
+):
+    raw_account_id = "acc_compact_unregistered_turn_without_previous"
+    email = "compact-unregistered-turn-without-previous@example.com"
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")},
+    )
+    assert response.status_code == 200
+
+    compact_calls: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        compact_calls.append(account_id)
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "model": "gpt-5.1",
+                "output": [],
+            }
+        )
+
+    turn_state_owner_lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_compact_turn_state_owner",
+        turn_state_owner_lookup,
+    )
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers={"x-codex-turn-state": turn_state},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "continue",
+            "input": [],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["object"] == "response.compaction"
+    assert compact_calls == [raw_account_id]
+    turn_state_owner_lookup.assert_awaited_once()
+    assert turn_state_owner_lookup.await_args is not None
+    assert turn_state_owner_lookup.await_args.kwargs["fail_on_missing"] is False
 
 
 class _JsonResponse:
@@ -1564,14 +1753,11 @@ async def test_proxy_compact_preflight_permanent_refresh_settles_reservation(asy
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles_reservation(async_client, monkeypatch):
-    """Regression (route-level, forwarded bridge path): a compact request that
-    reaches the OWNER instance via the internal bridge forward — where
-    ``owns_reservation`` is false so ``compact_responses`` is the SOLE settler —
-    and whose preflight budget is exhausted MUST settle (release) the API-key
-    usage reservation before the forwarded stream emits the terminal
-    ``response.failed`` / ``upstream_request_timeout`` event, so held API-key
-    quota is not leaked.
+async def test_proxy_compact_forwarded_bridge_preflight_budget_preserves_origin_reservation(
+    async_client,
+    monkeypatch,
+):
+    """A rejected forwarded compact leaves reservation cleanup with the origin.
 
     This drives the REAL external surface, not a handcrafted service call: it
     POSTs a signed forwarded request to the internal bridge endpoint
@@ -1582,16 +1768,13 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
     ``api_key_reservation_override``, and ``_stream_responses`` extracts the
     terminal ``compaction_trigger`` and calls ``compact_responses`` with
     ``owns_reservation`` false — so ``_compact_or_stream_responses``'s ``finally``
-    does NOT release the reservation and ``compact_responses`` alone must settle
-    it. On this forwarded streaming surface the owner reports the failure as the
-    terminal SSE event rather than a direct JSON ``502`` envelope, but the
-    settlement invariant is the same: pre-fix the budget-exhausted terminal
-    raised via ``_raise_proxy_budget_exhausted`` without settling (through the
-    outer ``except ProxyResponseError`` handler and the log-only ``finally``),
-    leaving the reservation row ``reserved`` (leaked held quota); post-fix the
-    row is ``released``. PR #1254 fixed the sibling transport-failure /
-    permanent-refresh preflight raises but left the budget-exhausted terminal
-    out of scope; this completes that invariant.
+    does NOT release the reservation. A receiver error is deliberately not a
+    cleanup handoff: the origin sees the rejected forward and releases its own
+    reservation. The receiver therefore returns its normal startup-error JSON
+    and leaves the row reserved in this direct receiver-only test, proving that
+    it did not steal cleanup ownership. The origin-owned release path is covered
+    by the bridge's ``owner_forward_rejected`` handling in the surrounding
+    response flow.
     """
     import app.modules.proxy._service.compact as compact_module
     from app.core.config.settings import get_settings
@@ -1694,20 +1877,15 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
         headers=headers,
     )
 
-    # On the forwarded streaming surface the owner emits a terminal SSE failure
-    # event instead of a direct JSON 502 envelope, but it still settles the
-    # reservation before that failure reaches the caller.
-    assert response.status_code == 200, response.text
-    assert "text/event-stream" in response.headers.get("content-type", "")
-    assert "response.failed" in response.text
-    assert "upstream_request_timeout" in response.text
+    # The receiver rejects before acknowledging ownership, so the origin keeps
+    # cleanup responsibility and the receiver returns a direct 502.
+    assert response.status_code == 502, response.text
+    assert response.json()["error"]["code"] == "upstream_request_timeout"
 
     async with SessionLocal() as session:
         row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
         assert row is not None
-        assert row.status == "released", (
-            f"forwarded receiver leaked the reservation after terminal SSE failure; status={row.status!r}"
-        )
+        assert row.status == "reserved", f"forwarded receiver took origin cleanup ownership; status={row.status!r}"
 
 
 @pytest.mark.asyncio

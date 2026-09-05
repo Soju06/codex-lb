@@ -7,7 +7,7 @@ import json
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
-from typing import cast
+from typing import NotRequired, TypedDict, cast
 
 import aiohttp
 
@@ -56,6 +56,7 @@ HTTP_BRIDGE_RESERVATION_MODEL_HEADER = "x-codex-bridge-reservation-model"
 HTTP_BRIDGE_AFFINITY_KIND_HEADER = "x-codex-bridge-affinity-kind"
 HTTP_BRIDGE_AFFINITY_KEY_HEADER = "x-codex-bridge-affinity-key"
 HTTP_BRIDGE_FILE_OWNER_HEADER = "x-codex-bridge-file-owner"
+HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER = "x-codex-bridge-synthesized-turn-state"
 HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER = "x-codex-bridge-original-unanchored"
 HTTP_BRIDGE_SIGNATURE_VERSION_HEADER = "x-codex-bridge-signature-version"
 HTTP_BRIDGE_CLIENT_IP_HEADER = "x-codex-bridge-client-ip"
@@ -69,9 +70,15 @@ HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
 # domain-separates the *primary* signature for unanchored parallel requests,
 # #1169): this header carries its own full-context structured signature. Kept
 # as a one-release rolling-upgrade shim alongside the legacy primary
-# signature; see the ROLLOUT SHIM notes in ``build_owner_forward_headers`` and
+# signature; synthesized-marker provenance is carried by the additive header
+# below. See the ROLLOUT SHIM notes in ``build_owner_forward_headers`` and
 # ``parse_forwarded_request``.
 HTTP_BRIDGE_SIGNATURE_V2_HEADER = "x-codex-bridge-signature-v2"
+# Additive marker-provenance proof. Keep the existing v2 signature shape
+# unchanged so pre-marker owners can verify forwards that also carry a file
+# owner proof; updated owners authenticate this marker with the separate
+# header before allowing the synthesized-turn fallback.
+HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_SIGNATURE_HEADER = "x-codex-bridge-synthesized-turn-state-signature"
 _HTTP_BRIDGE_SIGNATURE_VERSION_V2 = "2"
 
 
@@ -81,6 +88,10 @@ class HTTPBridgeForwardContext:
     target_instance: str
     codex_session_affinity: bool
     downstream_turn_state: str | None
+    # This is a server-generated turn-state marker, not client continuity
+    # evidence.  It is carried separately so an owner can authorize the
+    # narrow sole-candidate fallback without trusting a client-shaped value.
+    synthesized_turn_state: str | None = None
     original_request_unanchored: bool = False
     original_affinity_kind: str | None = None
     original_affinity_key: str | None = None
@@ -107,6 +118,31 @@ class _OwnerForwardStreamTimeoutError(Exception):
         super().__init__(error_message)
         self.error_code = error_code
         self.error_message = error_message
+
+
+class _BridgeSigningReservation(TypedDict):
+    id: str
+    key_id: str
+    model: str
+
+
+class _BridgeSigningFields(TypedDict):
+    body_digest: str
+    client_ip: str | None
+    client_ip_present: bool
+    codex_session_affinity: bool
+    downstream_turn_state: str | None
+    file_owner_account_id: str | None
+    include_client_ip: bool
+    origin_instance: str
+    original_affinity_key: str | None
+    original_affinity_kind: str | None
+    original_request_unanchored: bool
+    protocol: str
+    reservation: _BridgeSigningReservation | None
+    signature_version: str | None
+    target_instance: str
+    synthesized_turn_state: NotRequired[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,6 +363,8 @@ def build_owner_forward_headers(
         )
     if context.downstream_turn_state:
         forwarded["x-codex-turn-state"] = context.downstream_turn_state
+    if context.synthesized_turn_state is not None:
+        forwarded[HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER] = context.synthesized_turn_state
     if context.reservation is not None:
         forwarded[HTTP_BRIDGE_RESERVATION_ID_HEADER] = context.reservation.reservation_id
         forwarded[HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER] = context.reservation.key_id
@@ -345,14 +383,24 @@ def build_owner_forward_headers(
         signature_version=signature_version,
     )
     # Additive tamper-proofing signature bound to the exact posted forwarding
-    # body; covers the full authenticated context (including the unanchored /
-    # signature-version domain) so it cannot be replayed against a different
-    # forward.
+    # body; its field shape remains pre-marker-compatible so older owners can
+    # verify marker-bearing forwards, including those with file-owner proof.
     forwarded[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = _bridge_forward_tools_bound_signature(
         payload=payload,
         context=context,
         signature_version=signature_version,
     )
+    if context.synthesized_turn_state is not None:
+        # Marker provenance is additive to the pre-marker-compatible v2
+        # signature. Older owners ignore this header; updated owners require
+        # it whenever the synthesized marker is present.
+        forwarded[HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_SIGNATURE_HEADER] = (
+            _bridge_forward_synthesized_turn_state_signature(
+                payload=payload,
+                context=context,
+                signature_version=signature_version,
+            )
+        )
     return forwarded
 
 
@@ -397,6 +445,7 @@ def parse_forwarded_request(
         target_instance=target_instance,
         codex_session_affinity=_bool_header(headers.get(HTTP_BRIDGE_CODEX_AFFINITY_HEADER)),
         downstream_turn_state=_optional_header(headers.get("x-codex-turn-state")),
+        synthesized_turn_state=_optional_header(headers.get(HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_HEADER)),
         original_request_unanchored=original_request_unanchored,
         original_affinity_kind=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KIND_HEADER)),
         original_affinity_key=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)),
@@ -424,6 +473,27 @@ def parse_forwarded_request(
             signature_version=signature_version,
         ),
     )
+    # The existing v2 signature deliberately keeps its pre-marker field shape
+    # for rolling-upgrade compatibility. A synthesized marker therefore needs
+    # its own additive proof; without it, an external caller could plant the
+    # marker on a valid v2/legacy-primary forward and unlock the
+    # single-candidate owner-miss fallback using spoofed client state.
+    synthesized_turn_state_signature = _optional_header(
+        headers.get(HTTP_BRIDGE_SYNTHESIZED_TURN_STATE_SIGNATURE_HEADER)
+    )
+    synthesized_turn_state_valid = context.synthesized_turn_state is not None and (
+        synthesized_turn_state_signature is not None
+        and hmac.compare_digest(
+            synthesized_turn_state_signature,
+            _bridge_forward_synthesized_turn_state_signature(
+                payload=payload,
+                context=context,
+                signature_version=signature_version,
+            ),
+        )
+    )
+    if context.synthesized_turn_state is not None and (not tools_bound_valid or not synthesized_turn_state_valid):
+        return None, _invalid_bridge_forward_signature_error()
     if tools_bound_valid:
         return HTTPBridgeForwardedRequest(context=context), None
     if context.file_owner_account_id is not None or extract_input_file_ids(payload.input):
@@ -614,7 +684,10 @@ def _bridge_forward_tools_bound_signature(
     never be confused with the primary signature, and reuses the same
     canonical structured encoding (covering the full authenticated context,
     including the unanchored / signature-version domain) so the binding also
-    carries #1169's isolation guarantees. Always authenticates ``client_ip``.
+    carries #1169's isolation guarantees. Its field set intentionally remains
+    pre-marker-compatible; synthesized-marker provenance uses the additive
+    ``_bridge_forward_synthesized_turn_state_signature``. Always authenticates
+    ``client_ip``.
     """
     body_digest = _bridge_forward_body_digest(payload.model_dump_for_forwarding())
     signing_payload = _structured_bridge_signing_payload(
@@ -623,6 +696,31 @@ def _bridge_forward_tools_bound_signature(
         include_client_ip=True,
         signature_version=signature_version,
         protocol="codex-lb-http-bridge-forward-tools-bound",
+    )
+    return _sign_bridge_payload(signing_payload)
+
+
+def _bridge_forward_synthesized_turn_state_signature(
+    *,
+    payload: ResponsesRequest,
+    context: HTTPBridgeForwardContext,
+    signature_version: str | None = None,
+) -> str:
+    """Authenticate the additive synthesized-turn marker proof.
+
+    The existing tools-bound v2 signature keeps its pre-marker shape for
+    mixed-version owners. This separate domain binds the marker to the exact
+    posted body and full forwarding context on updated receivers.
+    """
+
+    body_digest = _bridge_forward_body_digest(payload.model_dump_for_forwarding())
+    signing_payload = _structured_bridge_signing_payload(
+        body_digest=body_digest,
+        context=context,
+        include_client_ip=True,
+        signature_version=signature_version,
+        protocol="codex-lb-http-bridge-forward-synthesized-turn-state",
+        bind_synthesized_turn_state=True,
     )
     return _sign_bridge_payload(signing_payload)
 
@@ -639,36 +737,42 @@ def _structured_bridge_signing_payload(
     include_client_ip: bool,
     signature_version: str | None,
     protocol: str,
+    bind_synthesized_turn_state: bool = False,
 ) -> str:
     # Canonical structured encoding: object boundaries make field re-packing
     # impossible, the client-IP mode is itself authenticated, and ``protocol``
-    # domain-separates the primary and tamper-proofing signatures.
+    # domain-separates the primary, tamper-proofing, and marker-proof
+    # signatures. The optional marker field is emitted only for the dedicated
+    # marker-proof domain and only when a marker is present.
+    signing_fields: _BridgeSigningFields = {
+        "body_digest": body_digest,
+        "client_ip": context.client_ip if include_client_ip else None,
+        "client_ip_present": context.client_ip is not None,
+        "codex_session_affinity": context.codex_session_affinity,
+        "downstream_turn_state": context.downstream_turn_state,
+        "file_owner_account_id": context.file_owner_account_id,
+        "include_client_ip": include_client_ip,
+        "origin_instance": context.origin_instance,
+        "original_affinity_key": context.original_affinity_key,
+        "original_affinity_kind": context.original_affinity_kind,
+        "original_request_unanchored": context.original_request_unanchored,
+        "protocol": protocol,
+        "reservation": (
+            {
+                "id": context.reservation.reservation_id,
+                "key_id": context.reservation.key_id,
+                "model": context.reservation.model,
+            }
+            if context.reservation is not None
+            else None
+        ),
+        "signature_version": signature_version,
+        "target_instance": context.target_instance,
+    }
+    if bind_synthesized_turn_state and context.synthesized_turn_state is not None:
+        signing_fields["synthesized_turn_state"] = context.synthesized_turn_state
     return json.dumps(
-        {
-            "body_digest": body_digest,
-            "client_ip": context.client_ip if include_client_ip else None,
-            "client_ip_present": context.client_ip is not None,
-            "codex_session_affinity": context.codex_session_affinity,
-            "downstream_turn_state": context.downstream_turn_state,
-            "file_owner_account_id": context.file_owner_account_id,
-            "include_client_ip": include_client_ip,
-            "origin_instance": context.origin_instance,
-            "original_affinity_key": context.original_affinity_key,
-            "original_affinity_kind": context.original_affinity_kind,
-            "original_request_unanchored": context.original_request_unanchored,
-            "protocol": protocol,
-            "reservation": (
-                {
-                    "id": context.reservation.reservation_id,
-                    "key_id": context.reservation.key_id,
-                    "model": context.reservation.model,
-                }
-                if context.reservation is not None
-                else None
-            ),
-            "signature_version": signature_version,
-            "target_instance": context.target_instance,
-        },
+        signing_fields,
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),

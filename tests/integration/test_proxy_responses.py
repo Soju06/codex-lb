@@ -6,6 +6,7 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -818,6 +819,109 @@ async def test_proxy_responses_compaction_trigger_elides_required_tool_image_and
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_image_bypass_accepts_echoed_proxy_turn_state(async_client, monkeypatch):
+    """Image requests bypass the bridge but keep proxy-issued turn markers usable."""
+    email = "image-bypass-turn-state@example.com"
+    raw_account_id = "acc_image_bypass_turn_state"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    app_settings = Settings(
+        http_responses_session_bridge_enabled=True,
+        proxy_request_budget_seconds=75.0,
+        compact_request_budget_seconds=75.0,
+        transcription_request_budget_seconds=120.0,
+        upstream_compact_timeout_seconds=None,
+        upstream_stream_transport="auto",
+        http_downstream_transport_policy="always_websocket",
+        stream_idle_timeout_seconds=300.0,
+        proxy_token_refresh_limit=32,
+        proxy_upstream_websocket_connect_limit=64,
+        proxy_response_create_limit=64,
+        proxy_compact_response_create_limit=16,
+    )
+    dashboard_settings = DashboardSettings(
+        id=1,
+        sticky_threads_enabled=False,
+        upstream_stream_transport="auto",
+        http_downstream_transport_policy="always_websocket",
+        prohibit_fast_mode=False,
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        openai_cache_affinity_max_age_seconds=300,
+        import_without_overwrite=False,
+        totp_required_on_login=False,
+        api_key_auth_enabled=False,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+        http_responses_session_bridge_gateway_safe_mode=False,
+        sticky_reallocation_budget_threshold_pct=95.0,
+    )
+
+    class _SettingsCache:
+        async def get(self) -> DashboardSettings:
+            return dashboard_settings
+
+    upstream_calls: list[tuple[str | None, str | None]] = []
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
+        del payload, access_token, base_url, raise_for_status
+        upstream_calls.append((account_id, headers.get("x-codex-turn-state")))
+        assert kwargs.get("upstream_stream_transport_override") == "http"
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_image_bypass",'
+            '"object":"response","status":"completed","output":[],'
+            '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache())
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "Describe the image.",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "What is shown?"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,AA=="},
+                ],
+            }
+        ],
+        "stream": True,
+    }
+
+    first = await async_client.post("/backend-api/codex/responses", json=payload)
+    assert first.status_code == 200, first.text
+    first_turn_state = first.headers.get("x-codex-turn-state")
+    assert first_turn_state is not None
+    assert first_turn_state.startswith("http_turn_")
+
+    second = await async_client.post(
+        "/backend-api/codex/responses",
+        headers={"x-codex-turn-state": first_turn_state},
+        json=payload,
+    )
+    assert second.status_code == 200, second.text
+    assert second.headers.get("x-codex-turn-state") == first_turn_state
+    assert upstream_calls == [
+        (raw_account_id, None),
+        (raw_account_id, first_turn_state),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_compaction_trigger_preserves_conversation(async_client, monkeypatch):
     email = "compact-trigger-conversation@example.com"
     raw_account_id = "acc_compact_trigger_conversation"
@@ -1545,6 +1649,133 @@ async def test_v1_responses_missing_previous_response_owner_fails_closed_before_
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
     assert response.json()["error"]["message"] == "Previous response owner account is unavailable; retry later."
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_streaming_missing_previous_response_owner_returns_http_error(
+    async_client,
+    monkeypatch,
+):
+    for raw_account_id, email in (
+        ("acc_prev_http_stream_missing_owner_1", "prev-http-stream-missing-owner-1@example.com"),
+        ("acc_prev_http_stream_missing_owner_2", "prev-http-stream-missing-owner-2@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        raise AssertionError("missing previous_response_id owner must fail before upstream stream attempt")
+        if False:
+            yield ""
+
+    async def fake_resolve_owner(self, *, previous_response_id, api_key, session_id, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return None
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_resolve_owner)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "input": "continue",
+            "previous_response_id": "resp_prev_http_stream_missing_owner",
+            "stream": True,
+        },
+        headers={"session_id": "sid_prev_http_stream_missing_owner"},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
+    assert response.json()["error"]["message"] == "Previous response owner account is unavailable; retry later."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "turn_state",
+    [
+        "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "http_turn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "",
+    ],
+    ids=["client-turn-shape", "client-http-turn-shape", "blank-header"],
+)
+async def test_v1_responses_unresolved_synthetic_turn_state_uses_sole_candidate_but_blank_blocks(
+    async_client,
+    monkeypatch,
+    turn_state: str,
+):
+    raw_account_id = "acc_prev_http_unresolved_turn"
+    email = "prev-http-unresolved-turn@example.com"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    upstream_calls: list[str | None] = []
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        upstream_calls.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_crossed_turn_boundary"}}\n\n'
+
+    previous_owner_lookup = AsyncMock(return_value=None)
+    turn_state_owner_lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        previous_owner_lookup,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_compact_turn_state_owner",
+        turn_state_owner_lookup,
+    )
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "input": "continue",
+            "previous_response_id": "resp_prev_http_unresolved_turn",
+        },
+        headers={"x-codex-turn-state": turn_state},
+    )
+
+    previous_owner_lookup.assert_awaited()
+    if turn_state:
+        assert response.status_code == 200, response.text
+        assert response.json()["id"] == "resp_crossed_turn_boundary"
+        assert upstream_calls == [raw_account_id]
+        turn_state_owner_lookup.assert_awaited_once()
+        assert turn_state_owner_lookup.await_args is not None
+        assert turn_state_owner_lookup.await_args.kwargs["fail_on_missing"] is False
+    else:
+        assert response.status_code == 502, response.text
+        assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
+        assert upstream_calls == []
+        turn_state_owner_lookup.assert_not_awaited()
 
 
 @pytest.mark.asyncio

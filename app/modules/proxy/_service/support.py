@@ -39,6 +39,7 @@ from app.modules.api_keys.service import (
     ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,
 )
+from app.modules.model_sources.selection import ResponsesModelSourceOwnership
 from app.modules.proxy.affinity import _AffinityPolicy
 from app.modules.proxy.helpers import _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import (
@@ -1177,6 +1178,11 @@ class _WebSocketRequestState:
     # continuity index/request-log lookup. Identifier syntax is never used as
     # an ownership signal, so ``None`` leaves configured source routing intact.
     previous_response_owner_account_id: str | None = None
+    # Cache the first model-source ownership lookup for this response.create.
+    # A catalog failure is a distinct result: it preserves the pre-guard
+    # subscription-selection behavior and must not be re-resolved later in the
+    # same request with a different outcome.
+    source_model_ownership: ResponsesModelSourceOwnership | None = None
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None

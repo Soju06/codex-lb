@@ -44,12 +44,14 @@ from app.modules.api_keys.service import (
     ApiKeyUsageReservationData,
     LimitRuleInput,
 )
+from app.modules.model_sources.selection import ResponsesModelSourceOwnership
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy.affinity import _codex_session_selection_key
 from app.modules.proxy.capability_routing import (
     REQUIRED_CAPABILITY_HEADER,
     _capability_lineage_unavailable_error,
 )
+from app.modules.proxy.load_balancer import SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED
 
 pytestmark = pytest.mark.integration
 
@@ -740,7 +742,11 @@ def test_backend_responses_websocket_preserves_recorded_previous_response_accoun
         "_resolve_websocket_previous_response_owner",
         recorded_owner,
     )
-    monkeypatch.setattr(websocket_mixin_module, "responses_model_is_source_owned", fail_if_source_guard_runs)
+    monkeypatch.setattr(
+        websocket_mixin_module,
+        "resolve_responses_model_source_ownership",
+        fail_if_source_guard_runs,
+    )
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_select_websocket_connect_account",
@@ -794,7 +800,11 @@ def test_backend_responses_websocket_canonical_source_previous_response_requires
     async def configured_source(source_model, api_key, *, raw_model=None):
         del api_key, raw_model
         source_checks.append(source_model)
-        return source_model == model
+        return (
+            ResponsesModelSourceOwnership.SOURCE_OWNED
+            if source_model == model
+            else ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+        )
 
     async def fail_before_subscription_selection(*args, **kwargs):
         del args, kwargs
@@ -805,7 +815,11 @@ def test_backend_responses_websocket_canonical_source_previous_response_requires
         "_resolve_websocket_previous_response_owner",
         no_subscription_owner,
     )
-    monkeypatch.setattr(websocket_mixin_module, "responses_model_is_source_owned", configured_source)
+    monkeypatch.setattr(
+        websocket_mixin_module,
+        "resolve_responses_model_source_ownership",
+        configured_source,
+    )
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_select_websocket_connect_account",
@@ -2993,11 +3007,25 @@ def test_backend_responses_websocket_lite_marker_requires_previous_response_link
     async def fake_write_request_log(self, **kwargs):
         del self, kwargs
 
+    async def fake_resolve_previous_response_owner(
+        self, *, previous_response_id, api_key, session_id=None, surface, request_state=None
+    ):
+        del self, api_key, session_id, surface, request_state
+        if previous_response_id in {"resp_ws_lite_1", "resp_ws_lite_2"}:
+            return "acct_ws_lite_linkage"
+        assert previous_response_id == "resp_ws_other"
+        return None
+
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        fake_resolve_previous_response_owner,
+    )
 
     marker = "ws_request_header_x_openai_internal_codex_responses_lite"
     lite_request = {
@@ -3052,13 +3080,22 @@ def test_backend_responses_websocket_lite_marker_requires_previous_response_link
                 "openai-beta": "responses_websockets=2026-02-06",
             },
         ) as websocket:
-            for request in requests:
+            for index, request in enumerate(requests):
                 websocket.send_text(json.dumps(request))
-                events = [json.loads(websocket.receive_text()) for _ in range(2)]
-                assert [event["type"] for event in events] == ["response.created", "response.completed"]
+                if index == 2:
+                    event = json.loads(websocket.receive_text())
+                    assert event["type"] == "response.failed"
+                    assert event["response"]["error"]["code"] == "previous_response_owner_unavailable"
+                    assert event["response"]["error"]["message"] == (
+                        "Previous response owner account is unavailable; retry later."
+                    )
+                    assert "resp_ws_other" not in json.dumps(event)
+                else:
+                    events = [json.loads(websocket.receive_text()) for _ in range(2)]
+                    assert [event["type"] for event in events] == ["response.created", "response.completed"]
 
     sent_payloads = [json.loads(text) for text in fake_upstream.sent_text]
-    assert len(sent_payloads) == 5
+    assert len(sent_payloads) == 4
     assert cast(dict[str, object], sent_payloads[0]["client_metadata"])[marker] == "true"
     assert sent_payloads[0]["reasoning"] == {"context": "all_turns"}
     assert cast(dict[str, object], sent_payloads[1]["client_metadata"])[marker] == "true"
@@ -3066,13 +3103,11 @@ def test_backend_responses_websocket_lite_marker_requires_previous_response_link
     assert sent_payloads[1]["previous_response_id"] == "resp_ws_lite_1"
     assert marker not in cast(dict[str, object], sent_payloads[2].get("client_metadata", {}))
     assert sent_payloads[2]["reasoning"] == {"context": "last_turn", "effort": "high"}
-    assert sent_payloads[2]["previous_response_id"] == "resp_ws_other"
-    assert marker not in cast(dict[str, object], sent_payloads[3].get("client_metadata", {}))
-    assert sent_payloads[3]["reasoning"] == {"context": "last_turn", "effort": "high"}
-    assert "previous_response_id" not in sent_payloads[3]
-    assert cast(dict[str, object], sent_payloads[4]["client_metadata"])[marker] == "true"
-    assert sent_payloads[4]["reasoning"] == {"context": "all_turns", "effort": "high"}
-    assert sent_payloads[4]["previous_response_id"] == "resp_ws_lite_2"
+    assert "previous_response_id" not in sent_payloads[2]
+    assert cast(dict[str, object], sent_payloads[3]["client_metadata"])[marker] == "true"
+    assert sent_payloads[3]["reasoning"] == {"context": "all_turns", "effort": "high"}
+    assert sent_payloads[3]["previous_response_id"] == "resp_ws_lite_2"
+    assert "resp_ws_other" not in "".join(fake_upstream.sent_text)
 
 
 def test_backend_responses_websocket_lite_fresh_replay_drops_marker_after_previous_response_miss(
@@ -4501,6 +4536,11 @@ def test_backend_responses_websocket_echoes_existing_turn_state_header(app_insta
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_compact_turn_state_owner",
+        AsyncMock(return_value="acct_turn_state"),
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
 
     request_payload = {
@@ -4970,6 +5010,188 @@ def test_v1_responses_websocket_accepts_and_reuses_generated_turn_state(app_inst
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.PROMPT_CACHE
 
 
+@pytest.mark.parametrize("route", ["/backend-api/codex/responses", "/v1/responses"])
+def test_responses_websocket_compaction_accepts_unregistered_synthetic_turn_state(
+    app_instance,
+    monkeypatch,
+    route,
+):
+    """A generated marker remains compatible after local continuity eviction.
+
+    The first handshake issues a marker, then clearing the bounded local cache
+    models eviction, restart, or a reconnect landing on another replica. The
+    echoed marker is therefore unregistered when the compact continuation
+    arrives and must still use the sole-candidate compatibility path.
+    """
+    from app.dependencies import get_proxy_service_for_app
+
+    account = SimpleNamespace(id="acct_v1_turn_state_reconnect")
+    upstream = _FakeUpstreamWebSocket(_websocket_response_batch("resp_v1_turn_state_reconnect"))
+    candidate_lookups: list[str] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        del request
+        return None
+
+    async def no_previous_response_owner(self, **kwargs):
+        del self, kwargs
+        return None
+
+    async def no_turn_state_owner(self, *, turn_state, api_key, fail_on_missing):
+        del self, api_key
+        assert turn_state.startswith("turn_")
+        assert len(turn_state) == len("turn_") + 32
+        assert fail_on_missing is False
+        return None
+
+    async def one_candidate(self, *, model, **kwargs):
+        del self, kwargs
+        candidate_lookups.append(model)
+        return (account,)
+
+    async def connect_subscription_upstream(self, *args, request_state, **kwargs):
+        del self, args, kwargs
+        assert request_state.preferred_account_id == account.id
+        return account, upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        no_previous_response_owner,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_compact_turn_state_owner",
+        no_turn_state_owner,
+    )
+    monkeypatch.setattr(proxy_module.LoadBalancer, "list_selection_candidates", one_candidate)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_connect_proxy_websocket",
+        connect_subscription_upstream,
+    )
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [{"type": "compaction_trigger"}],
+        "previous_response_id": "resp_v1_unresolved_owner",
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect(route) as initial_websocket:
+            accepted_headers = {
+                key.decode(): value.decode()
+                for key, value in cast(list[tuple[bytes, bytes]], initial_websocket.extra_headers)
+            }
+            turn_state = accepted_headers["x-codex-turn-state"]
+
+        # The follow-up intentionally lands without the process-local state
+        # that the first handshake may have created.
+        get_proxy_service_for_app(app_instance)._websocket_continuity_index.clear()
+
+        with client.websocket_connect(
+            route,
+            headers={"x-codex-turn-state": turn_state},
+        ) as reconnect_websocket:
+            accepted_headers = {
+                key.decode(): value.decode()
+                for key, value in cast(list[tuple[bytes, bytes]], reconnect_websocket.extra_headers)
+            }
+            assert accepted_headers["x-codex-turn-state"] == turn_state
+            reconnect_websocket.send_text(json.dumps(request_payload))
+            created = json.loads(reconnect_websocket.receive_text())
+            completed = json.loads(reconnect_websocket.receive_text())
+
+    assert created["type"] == "response.created"
+    assert completed["type"] == "response.completed"
+    assert candidate_lookups == ["gpt-5.4"]
+    assert json.loads(upstream.sent_text[0])["previous_response_id"] == "resp_v1_unresolved_owner"
+
+
+@pytest.mark.parametrize("route", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("blank_turn_state", ["", "   "])
+def test_responses_websocket_blank_turn_state_is_client_input(
+    app_instance,
+    monkeypatch,
+    route,
+    blank_turn_state,
+):
+    account = SimpleNamespace(id="acct_blank_turn_state_fallback")
+    upstream = _FakeUpstreamWebSocket(_websocket_response_batch("resp_blank_turn_state_unexpected"))
+    candidate_lookups: list[str] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        del request
+        return None
+
+    async def no_previous_response_owner(self, **kwargs):
+        del self, kwargs
+        return None
+
+    async def no_source_owner(model, api_key, *, raw_model=None):
+        del model, api_key, raw_model
+        return ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+
+    async def one_candidate(*, model, **kwargs):
+        del kwargs
+        candidate_lookups.append(model)
+        return (account,)
+
+    async def connect_subscription_upstream(self, *args, request_state, **kwargs):
+        del self, args, request_state, kwargs
+        return account, upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        no_previous_response_owner,
+    )
+    monkeypatch.setattr(websocket_mixin_module, "resolve_responses_model_source_ownership", no_source_owner)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "list_selection_candidates", one_candidate)
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", connect_subscription_upstream)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "continue",
+        "input": [{"type": "input_text", "text": "next"}],
+        "previous_response_id": "resp_blank_turn_state_owner_miss",
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect(route, headers={"x-codex-turn-state": blank_turn_state}) as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            error = json.loads(websocket.receive_text())
+
+    assert error["type"] == "response.failed"
+    assert error["response"]["error"]["code"] == "previous_response_owner_unavailable"
+    assert candidate_lookups == []
+
+
 def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instance, monkeypatch):
     upstream_messages = [
         _FakeUpstreamMessage(
@@ -5183,11 +5405,22 @@ def test_backend_responses_websocket_forwards_previous_response_id(app_instance,
     async def fake_write_request_log(self, **kwargs):
         del self, kwargs
 
+    async def fake_resolve_previous_response_owner(
+        self, *, previous_response_id, api_key, session_id=None, surface, request_state=None
+    ):
+        del self, previous_response_id, api_key, session_id, surface, request_state
+        return "acct_ws_prev"
+
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        fake_resolve_previous_response_owner,
+    )
 
     request_payload = {
         "type": "response.create",
@@ -5711,11 +5944,22 @@ def test_backend_responses_websocket_trims_replayed_tool_call_items_with_previou
     async def fake_write_request_log(self, **kwargs):
         del self, kwargs
 
+    async def fake_resolve_previous_response_owner(
+        self, *, previous_response_id, api_key, session_id=None, surface, request_state=None
+    ):
+        del self, previous_response_id, api_key, session_id, surface, request_state
+        return "acct_ws_tool_output"
+
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        fake_resolve_previous_response_owner,
+    )
 
     request_payload = {
         "type": "response.create",
@@ -5819,11 +6063,22 @@ def test_v1_responses_websocket_forwards_previous_response_id(app_instance, monk
     async def fake_write_request_log(self, **kwargs):
         del self, kwargs
 
+    async def fake_resolve_previous_response_owner(
+        self, *, previous_response_id, api_key, session_id=None, surface, request_state=None
+    ):
+        del self, previous_response_id, api_key, session_id, surface, request_state
+        return "acct_ws_v1_prev"
+
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        fake_resolve_previous_response_owner,
+    )
 
     request_payload = {
         "type": "response.create",
@@ -6576,6 +6831,13 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
         assert request_state.previous_response_id == "resp_ws_prev_anchor"
         return SimpleNamespace(id="acct_ws_prev_connect_failure")
 
+    async def fake_resolve_previous_response_owner(
+        self, *, previous_response_id, api_key, session_id=None, surface, request_state=None
+    ):
+        del self, api_key, session_id, surface, request_state
+        assert previous_response_id == "resp_ws_prev_anchor"
+        return "acct_ws_prev_connect_failure"
+
     async def fake_try_open_websocket_connect_attempt(
         self,
         account,
@@ -6602,6 +6864,11 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        fake_resolve_previous_response_owner,
+    )
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_select_websocket_connect_account",
@@ -6945,8 +7212,9 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
         self, *, previous_response_id, api_key, session_id=None, surface, request_state=None
     ):
         del request_state
-        del self, previous_response_id, api_key, session_id, surface
-        return None
+        del self, api_key, session_id, surface
+        assert previous_response_id == "resp_ws_prev_anchor"
+        return "acct_ws_prev_followup"
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
@@ -7094,8 +7362,9 @@ def test_backend_responses_websocket_masks_top_level_previous_response_not_found
         self, *, previous_response_id, api_key, session_id=None, surface, request_state=None
     ):
         del request_state
-        del self, previous_response_id, api_key, session_id, surface
-        return None
+        del self, api_key, session_id, surface
+        assert previous_response_id == "resp_chatgpt_prev_anchor"
+        return "acct_ws_chatgpt_prev_top_level"
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
@@ -7202,10 +7471,22 @@ def test_backend_responses_websocket_masks_pretty_previous_response_not_found_fr
         )
         return SimpleNamespace(id="acct_ws_pretty_prev_mask"), upstream_socket
 
+    async def fake_resolve_previous_response_owner(
+        self, *, previous_response_id, api_key, session_id=None, surface, request_state=None
+    ):
+        del self, api_key, session_id, surface, request_state
+        assert previous_response_id == "resp_chatgpt_pretty_prev_anchor"
+        return "acct_ws_pretty_prev_mask"
+
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        fake_resolve_previous_response_owner,
+    )
 
     with TestClient(app_instance) as client:
         with client.websocket_connect("/backend-api/codex/responses") as websocket:
@@ -11167,10 +11448,6 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
         assert request_state.previous_response_id == "resp_ws_prev_anchor_client"
         assert request_state.fresh_upstream_request_is_retry_safe is True
         assert request_state.fresh_upstream_request_text is not None
-        request_state.previous_response_owner_lookup_source = "request_logs"
-        request_state.previous_response_owner_lookup_outcome = "hit"
-        request_state.previous_response_owner_requested_at = owner_requested_at
-        request_state.previous_response_owner_session_id = request_state.session_id
         return SimpleNamespace(id="acct_ws_prev_connect_failure")
 
     async def fake_try_open_websocket_connect_attempt(
@@ -11200,6 +11477,18 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
         del self
         log_calls.append(kwargs)
 
+    async def fake_resolve_previous_response_owner(
+        self, *, previous_response_id, api_key, session_id=None, surface, request_state=None
+    ):
+        del self, api_key, session_id, surface
+        assert previous_response_id == "resp_ws_prev_anchor_client"
+        assert request_state is not None
+        request_state.previous_response_owner_lookup_source = "request_logs"
+        request_state.previous_response_owner_lookup_outcome = "hit"
+        request_state.previous_response_owner_requested_at = owner_requested_at
+        request_state.previous_response_owner_session_id = request_state.session_id
+        return "acct_ws_prev_connect_failure"
+
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
@@ -11224,6 +11513,11 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
         lambda *args, **kwargs: asyncio.sleep(0),
     )
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        fake_resolve_previous_response_owner,
+    )
 
     caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
 
@@ -12280,7 +12574,7 @@ def test_backend_responses_websocket_trusted_capability_empty_pool_fails_closed_
     assert upstream_opened is False
 
 
-def test_backend_responses_websocket_durable_capability_model_rejection_keeps_typed_empty_pool(
+def test_backend_responses_websocket_durable_capability_model_rejection_surfaces_original_error(
     app_instance,
     monkeypatch,
 ):
@@ -12358,8 +12652,8 @@ def test_backend_responses_websocket_durable_capability_model_rejection_keeps_ty
             )
         return proxy_module.AccountSelection(
             account=None,
-            error_message="No accounts marked as authorized for security work",
-            error_code="no_security_work_authorized_accounts",
+            error_message="All accounts marked as authorized for security work were excluded",
+            error_code=SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
         )
 
     async def open_model_rejecting_upstream(self, account, headers, **_kwargs):
@@ -12400,15 +12694,14 @@ def test_backend_responses_websocket_durable_capability_model_rejection_keeps_ty
             headers={"Authorization": "Bearer capability-model-rejection"},
         ) as websocket:
             websocket.send_text(json.dumps(request))
-            warning = json.loads(websocket.receive_text())
             terminal = json.loads(websocket.receive_text())
 
-    assert warning["warning"]["code"] == "no_security_work_authorized_accounts"
-    assert warning["warning"]["action"] == "fail_closed_capability_routing"
-    assert "did not fall back to an ordinary account" in warning["warning"]["message"]
     assert terminal["type"] == "error"
-    assert terminal["status"] == 503
-    assert terminal["error"]["code"] == "no_security_work_authorized_accounts"
+    assert terminal["status"] == 400
+    assert terminal["error"]["code"] == "invalid_request_error"
+    assert terminal["error"]["message"] == (
+        "The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account."
+    )
     assert selection_requirements == [True, True]
     assert selection_exclusions == [set(), {"acct_ws_capability_model_rejection"}]
     assert opened_account_ids == ["acct_ws_capability_model_rejection"]

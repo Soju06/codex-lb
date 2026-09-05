@@ -1855,6 +1855,7 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
         target_instance="owner-b",
         codex_session_affinity=True,
         downstream_turn_state="http_turn_generated",
+        synthesized_turn_state="http_turn_generated",
         original_request_unanchored=True,
         original_affinity_kind="session",
         original_affinity_key="sid-abc",
@@ -1905,6 +1906,7 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
         f"internal_bridge_responses must pass enforce_openai_sdk_contract=False; got kwargs={kwargs!r}"
     )
     assert kwargs.get("forwarded_downstream_turn_state") == "http_turn_generated"
+    assert kwargs.get("forwarded_synthesized_turn_state") == "http_turn_generated"
     assert kwargs.get("forwarded_original_request_unanchored") is True
     assert kwargs.get("forwarded_legacy_signature") is False
     forwarded_headers = kwargs.get("forwarded_headers")

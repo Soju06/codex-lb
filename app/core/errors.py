@@ -118,6 +118,8 @@ SYNTHETIC_TRANSPORT_FAILURE_MARKER = "_codex_lb_synthetic_transport_failure"
 SYNTHETIC_TRANSPORT_FAILURE_CODES = frozenset(
     {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
 )
+PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE = "previous_response_owner_unavailable"
+PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE = "Previous response owner account is unavailable; retry later."
 
 
 def openai_error(

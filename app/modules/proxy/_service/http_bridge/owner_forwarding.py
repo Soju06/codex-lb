@@ -397,6 +397,7 @@ class _HTTPBridgeOwnerForwardingMixin:
         downstream_turn_state: str | None,
         request_started_at: float,
         proxy_api_authorization: str | None,
+        synthesized_turn_state: str | None = None,
         file_owner_account_id: str | None = None,
         client_ip: str | None = None,
     ) -> AsyncIterator[str]:
@@ -419,6 +420,7 @@ class _HTTPBridgeOwnerForwardingMixin:
             reservation=api_key_reservation,
             codex_session_affinity=codex_session_affinity,
             downstream_turn_state=forwarded_turn_state,
+            synthesized_turn_state=synthesized_turn_state,
             original_request_unanchored=(
                 recovery_forward
                 or (

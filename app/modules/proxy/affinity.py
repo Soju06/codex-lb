@@ -400,6 +400,18 @@ def _sticky_key_from_turn_state_header(headers: Mapping[str, str]) -> str | None
     return stripped or None
 
 
+def _turn_state_header_present(headers: Mapping[str, str]) -> bool:
+    """Return whether the request physically carries a turn-state header.
+
+    Header value normalization intentionally maps blank values to ``None`` for
+    affinity selection.  Continuity security still needs to distinguish a
+    missing header from a present-but-blank client value, so callers can avoid
+    treating an explicit blank as proxy-generated provenance.
+    """
+
+    return any(key.lower() == "x-codex-turn-state" for key in headers)
+
+
 def _bare_codex_session_affinity(
     headers: Mapping[str, str],
     *,
@@ -621,9 +633,12 @@ def _websocket_continuity_aliases_from_headers(
     return tuple(dict.fromkeys(aliases))
 
 
-# Pattern matching turn-state values synthesized by the helpers below.
-# A 32-char lowercase hex (uuid4().hex) suffix follows the prefix.
-_SYNTHESIZED_TURN_STATE_PATTERN = re.compile(r"^(?:http_)?turn_[0-9a-f]{32}$")
+# Pattern matching the proxy's continuity marker shapes. The production
+# helpers append a 32-char lowercase hex suffix, but tests, older clients, and
+# persisted bridge aliases may carry a readable suffix across reconnects.
+# Compatibility is intentionally shape-based: the sole-candidate bound and
+# independent owner/file-pin checks remain the authorization boundary.
+_SYNTHESIZED_TURN_STATE_PATTERN = re.compile(r"^(?:http_)?turn_[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
 def _is_synthesized_turn_state(value: str) -> bool:

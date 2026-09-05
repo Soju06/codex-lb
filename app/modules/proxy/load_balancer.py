@@ -187,6 +187,7 @@ _ADDITIONAL_QUOTA_ROUTING_POLICIES = _ACCOUNT_ROUTING_POLICIES | frozenset({"inh
 OPPORTUNISTIC_BURN_WINDOW_CLOSED = "opportunistic_burn_window_closed"
 CONTINUITY_OWNER_UNAVAILABLE = "continuity_owner_unavailable"
 CONTINUITY_OWNER_POLICY_CONFLICT = "continuity_owner_policy_conflict"
+SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED = "security_work_authorized_accounts_exhausted"
 _AMBIGUOUS_CONVERSATION_OWNER_CODE = "conversation_owner_unavailable"
 _AMBIGUOUS_CONVERSATION_OWNER_MESSAGE = "Conversation owner cannot be determined from the eligible account pool"
 
@@ -277,6 +278,62 @@ def _required_continuity_owner_failure(
     return CONTINUITY_OWNER_POLICY_CONFLICT, "Required continuity owner is outside the eligible account policy"
 
 
+def _apply_selection_account_filters(
+    selection_inputs: _SelectionInputs,
+    *,
+    exclude_account_ids: Collection[str] | None = None,
+    require_security_work_authorized: bool = False,
+) -> _SelectionInputs:
+    """Apply security authorization and retry exclusions shared by selection and owner-miss checks."""
+    if require_security_work_authorized:
+        # Filter owner candidates before deciding ambiguity, even if routing is empty.
+        security_scope_accounts = (
+            selection_inputs.runtime_accounts
+            if selection_inputs.runtime_accounts is not None
+            else [*selection_inputs.effective_continuity_owner_candidates, *selection_inputs.accounts]
+        )
+        security_authorized_account_ids = frozenset(
+            account.id for account in security_scope_accounts if bool(account.security_work_authorized)
+        )
+        authorized_mutation_account_ids = (
+            selection_inputs.effective_sticky_mutation_authority_account_ids & security_authorized_account_ids
+        )
+        owner_candidates = selection_inputs.effective_continuity_owner_candidates
+        authorized_owner_candidates = [account for account in owner_candidates if account.security_work_authorized]
+        authorized_accounts = [account for account in selection_inputs.accounts if account.security_work_authorized]
+        if selection_inputs.accounts and not authorized_accounts:
+            return replace(
+                selection_inputs,
+                accounts=[],
+                latest_primary={},
+                latest_secondary={},
+                continuity_owner_candidates=authorized_owner_candidates,
+                sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
+                error_message="No accounts marked as authorized for security work",
+                error_code="no_security_work_authorized_accounts",
+            )
+        selection_inputs = replace(
+            selection_inputs,
+            accounts=authorized_accounts,
+            continuity_owner_candidates=authorized_owner_candidates,
+            sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
+        )
+    excluded_ids = set(exclude_account_ids or ())
+    if excluded_ids and selection_inputs.accounts:
+        filtered_accounts = [account for account in selection_inputs.accounts if account.id not in excluded_ids]
+        if require_security_work_authorized and not filtered_accounts:
+            return replace(
+                selection_inputs,
+                accounts=[],
+                latest_primary={},
+                latest_secondary={},
+                error_message="All accounts marked as authorized for security work were excluded",
+                error_code=SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
+            )
+        selection_inputs = replace(selection_inputs, accounts=filtered_accounts)
+    return selection_inputs
+
+
 SelectionInputs = _SelectionInputs
 
 
@@ -289,6 +346,42 @@ class LoadBalancer:
         self._account_locks: dict[str, asyncio.Lock] = {}
         self._account_locks_registry_lock = asyncio.Lock()
         self._selection_inputs_cache = get_account_selection_cache()
+
+    async def list_selection_candidates(
+        self,
+        *,
+        model: str | None,
+        service_tier: str | None = None,
+        additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
+        exclude_account_ids: Collection[str] | None = None,
+        require_security_work_authorized: bool = False,
+    ) -> tuple[Account, ...]:
+        """Return request-policy candidates without acquiring a lease.
+
+        This side-effect-free seam shares selection's model, scope, quota,
+        security, and exclusion filters.
+        """
+
+        selection_inputs = await self._load_selection_inputs(
+            model=model,
+            service_tier=service_tier,
+            additional_limit_name=additional_limit_name,
+            account_ids=account_ids,
+        )
+        selection_inputs = _apply_selection_account_filters(
+            selection_inputs,
+            exclude_account_ids=exclude_account_ids,
+            require_security_work_authorized=require_security_work_authorized,
+        )
+        # Preserve paused/quota-filtered owners for owner-miss cardinality.
+        excluded_ids = set(exclude_account_ids or ())
+        owner_candidates = (
+            account
+            for account in selection_inputs.effective_continuity_owner_candidates
+            if account.id not in excluded_ids
+        )
+        return tuple(_clone_account(account) for account in owner_candidates)
 
     async def release_account_lease(self, lease: AccountLease | None) -> None:
         if lease is None:
@@ -583,102 +676,11 @@ class LoadBalancer:
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
             )
-            if require_security_work_authorized:
-                # Ownership scope and routing availability are separate. Even
-                # an already-empty routing pool must have its owner candidates
-                # security-filtered before conversation ambiguity is decided.
-                security_scope_accounts = (
-                    selection_inputs.runtime_accounts
-                    if selection_inputs.runtime_accounts is not None
-                    else [
-                        *selection_inputs.effective_continuity_owner_candidates,
-                        *selection_inputs.accounts,
-                    ]
-                )
-                security_authorized_account_ids = frozenset(
-                    account.id for account in security_scope_accounts if bool(account.security_work_authorized)
-                )
-                authorized_mutation_account_ids = (
-                    selection_inputs.effective_sticky_mutation_authority_account_ids & security_authorized_account_ids
-                )
-                authorized_owner_candidates = [
-                    account
-                    for account in selection_inputs.effective_continuity_owner_candidates
-                    if bool(account.security_work_authorized)
-                ]
-                authorized_accounts = [
-                    account for account in selection_inputs.accounts if bool(account.security_work_authorized)
-                ]
-                if selection_inputs.accounts and not authorized_accounts:
-                    return _SelectionInputs(
-                        accounts=[],
-                        latest_primary={},
-                        latest_secondary={},
-                        latest_monthly=selection_inputs.latest_monthly,
-                        continuity_owner_candidates=authorized_owner_candidates,
-                        sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
-                        quota_planner_settings=selection_inputs.quota_planner_settings,
-                        runtime_accounts=selection_inputs.runtime_accounts,
-                        error_message="No accounts marked as authorized for security work",
-                        error_code="no_security_work_authorized_accounts",
-                    )
-                selection_inputs = _SelectionInputs(
-                    accounts=authorized_accounts,
-                    latest_primary=selection_inputs.latest_primary,
-                    latest_secondary=selection_inputs.latest_secondary,
-                    latest_monthly=selection_inputs.latest_monthly,
-                    continuity_owner_candidates=authorized_owner_candidates,
-                    sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
-                    quota_planner_settings=selection_inputs.quota_planner_settings,
-                    runtime_accounts=selection_inputs.runtime_accounts,
-                    error_message=selection_inputs.error_message,
-                    error_code=selection_inputs.error_code,
-                    ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
-                    ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
-                    persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
-                    routing_policy_override=selection_inputs.routing_policy_override,
-                    quota_admitted_catalog_omission_account_ids=(
-                        selection_inputs.quota_admitted_catalog_omission_account_ids
-                    ),
-                )
-            if excluded_ids and selection_inputs.accounts:
-                filtered_accounts = [account for account in selection_inputs.accounts if account.id not in excluded_ids]
-                if require_security_work_authorized and not filtered_accounts:
-                    return _SelectionInputs(
-                        accounts=[],
-                        latest_primary={},
-                        latest_secondary={},
-                        latest_monthly=selection_inputs.latest_monthly,
-                        continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
-                        sticky_mutation_authority_account_ids=(
-                            selection_inputs.effective_sticky_mutation_authority_account_ids
-                        ),
-                        quota_planner_settings=selection_inputs.quota_planner_settings,
-                        runtime_accounts=selection_inputs.runtime_accounts,
-                        error_message="No accounts marked as authorized for security work",
-                        error_code="no_security_work_authorized_accounts",
-                    )
-                selection_inputs = _SelectionInputs(
-                    accounts=filtered_accounts,
-                    latest_primary=selection_inputs.latest_primary,
-                    latest_secondary=selection_inputs.latest_secondary,
-                    latest_monthly=selection_inputs.latest_monthly,
-                    continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
-                    sticky_mutation_authority_account_ids=(
-                        selection_inputs.effective_sticky_mutation_authority_account_ids
-                    ),
-                    quota_planner_settings=selection_inputs.quota_planner_settings,
-                    runtime_accounts=selection_inputs.runtime_accounts,
-                    error_message=selection_inputs.error_message,
-                    error_code=selection_inputs.error_code,
-                    ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
-                    ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
-                    persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
-                    routing_policy_override=selection_inputs.routing_policy_override,
-                    quota_admitted_catalog_omission_account_ids=(
-                        selection_inputs.quota_admitted_catalog_omission_account_ids
-                    ),
-                )
+            selection_inputs = _apply_selection_account_filters(
+                selection_inputs,
+                exclude_account_ids=excluded_ids,
+                require_security_work_authorized=require_security_work_authorized,
+            )
             if required_continuity_owner:
                 assert required_account_id is not None
                 failure = _required_continuity_owner_failure(

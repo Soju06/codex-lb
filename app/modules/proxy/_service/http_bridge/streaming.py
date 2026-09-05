@@ -248,6 +248,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_for_responses_request,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
+    _turn_state_header_present,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import (
@@ -909,6 +910,7 @@ class _HTTPBridgeStreamingMixin:
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         suppress_text_done_events: bool = False,
         downstream_turn_state: str | None = None,
+        synthesized_turn_state: str | None = None,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
         forwarded_legacy_signature: bool = False,
@@ -934,6 +936,7 @@ class _HTTPBridgeStreamingMixin:
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
             downstream_turn_state=downstream_turn_state,
+            synthesized_turn_state=synthesized_turn_state,
             forwarded_request=forwarded_request,
             forwarded_original_request_unanchored=forwarded_original_request_unanchored,
             forwarded_legacy_signature=forwarded_legacy_signature,
@@ -960,6 +963,7 @@ class _HTTPBridgeStreamingMixin:
         api_key_reservation: ApiKeyUsageReservationData | None,
         suppress_text_done_events: bool,
         downstream_turn_state: str | None = None,
+        synthesized_turn_state: str | None = None,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
         forwarded_legacy_signature: bool = False,
@@ -1054,6 +1058,7 @@ class _HTTPBridgeStreamingMixin:
                 rewritten_file_account_id=rewritten_file_account_id,
                 file_account_resolution_complete=True,
                 upstream_stream_transport_override=force_upstream_stream_transport,
+                synthesized_turn_state=synthesized_turn_state,
                 client_ip=client_ip,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             ):
@@ -1081,6 +1086,7 @@ class _HTTPBridgeStreamingMixin:
                     queue_limit=runtime_config.queue_limit,
                     prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
                     downstream_turn_state=downstream_turn_state,
+                    synthesized_turn_state=synthesized_turn_state,
                     forwarded_request=forwarded_request,
                     forwarded_original_request_unanchored=forwarded_original_request_unanchored,
                     forwarded_legacy_signature=forwarded_legacy_signature,
@@ -1210,6 +1216,7 @@ class _HTTPBridgeStreamingMixin:
             rewritten_file_account_id=rewritten_file_account_id,
             file_account_resolution_complete=True,
             upstream_stream_transport_override="http",
+            synthesized_turn_state=synthesized_turn_state,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         ):
@@ -1232,6 +1239,7 @@ class _HTTPBridgeStreamingMixin:
         queue_limit: int,
         prompt_cache_idle_ttl_seconds: float | None = None,
         downstream_turn_state: str | None = None,
+        synthesized_turn_state: str | None = None,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
         forwarded_legacy_signature: bool = False,
@@ -1343,7 +1351,8 @@ class _HTTPBridgeStreamingMixin:
             lifecycle.settlement_confirmed = True
             await self._drain_deferred_account_error_backoffs(lifecycle.pending_backoffs)
 
-        incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
+        raw_incoming_turn_state_header = _sticky_key_from_turn_state_header(headers)
+        incoming_turn_state_header = raw_incoming_turn_state_header if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
         explicit_prompt_cache_key = _prompt_cache_key_from_request_model(payload)
         had_prompt_cache_key = explicit_prompt_cache_key is not None
@@ -1355,6 +1364,7 @@ class _HTTPBridgeStreamingMixin:
             openai_cache_affinity_max_age_seconds=dashboard_settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=dashboard_settings.sticky_threads_enabled,
             api_key=api_key,
+            synthesized_turn_state=synthesized_turn_state,
         )
         sticky_key_source = "none"
         if affinity.codex_session_source == "thread_header":
@@ -1978,6 +1988,39 @@ class _HTTPBridgeStreamingMixin:
             and request_state.preferred_account_id == continuity_preferred_account_id
         )
         file_required_preferred_account = rewritten_file_account_id is not None
+        if (
+            required_continuity_owner_missing
+            and request_state.previous_response_id is not None
+            and request_state.preferred_account_id is None
+            and rewritten_file_account_id is None
+            and not durable_owner_missing
+            and not model_transition_owner_missing
+            and (
+                not _turn_state_header_present(headers)
+                or (synthesized_turn_state is not None and raw_incoming_turn_state_header == synthesized_turn_state)
+            )
+        ):
+            selection_account_ids = (
+                api_key.assigned_account_ids
+                if api_key is not None and api_key.account_assignment_scope_enabled
+                else None
+            )
+            try:
+                selection_candidates = await self._load_balancer.list_selection_candidates(
+                    model=effective_payload.model,
+                    service_tier=request_state.requested_service_tier,
+                    additional_limit_name=None,
+                    account_ids=selection_account_ids,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to list HTTP bridge owner-miss candidates request_id=%s",
+                    request_id,
+                )
+                selection_candidates = ()
+            if len(selection_candidates) == 1:
+                request_state.preferred_account_id = selection_candidates[0].id
+                required_continuity_owner_missing = False
         if proxy_injected_previous_response_id:
             request_state.proxy_injected_previous_response_id = True
             request_state.proxy_injected_anchor_had_full_resend_payload = payload_looks_like_full_resend
@@ -2357,6 +2400,7 @@ class _HTTPBridgeStreamingMixin:
                     api_key_reservation=api_key_reservation,
                     codex_session_affinity=codex_session_affinity,
                     downstream_turn_state=downstream_turn_state,
+                    synthesized_turn_state=synthesized_turn_state,
                     file_owner_account_id=rewritten_file_account_id,
                     request_started_at=request_state.started_at,
                     proxy_api_authorization=proxy_api_authorization,

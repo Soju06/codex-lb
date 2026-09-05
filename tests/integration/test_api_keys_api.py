@@ -2077,6 +2077,135 @@ async def test_backend_codex_responses_recorded_previous_response_owner_skips_mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["/backend-api/codex/responses", "/v1/responses"])
+async def test_responses_recorded_turn_state_owner_skips_model_source(async_client, monkeypatch, route):
+    model = f"external-responses-turn-state-owner-{route.rsplit('/', 1)[-1]}"
+    turn_state = f"turn_responses_owner_{route.rsplit('/', 1)[-1]}"
+    await _create_model_source(
+        async_client,
+        name=f"turn-state-owner-{route.rsplit('/', 1)[-1]}",
+        model=model,
+        supports_responses=True,
+    )
+    account_id = await _import_account(
+        async_client,
+        f"acct-turn-state-owner-{route.rsplit('/', 1)[-1]}",
+        f"turn-state-owner-{route.rsplit('/', 1)[-1]}@example.com",
+    )
+    observed: dict[str, object] = {}
+    owner_lookups: list[tuple[str, bool]] = []
+
+    async def fail_source(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("recorded subscription-owned turn state must not use source routing")
+
+    async def fake_stream_responses(request, payload, context, api_key, **kwargs):
+        del request, context, api_key, kwargs
+        observed["model"] = payload.model
+        observed["turn_state"] = payload.model_extra.get("x-codex-turn-state") if payload.model_extra else None
+        return JSONResponse({"ok": True})
+
+    async def fake_turn_state_owner(self, *, turn_state, api_key, fail_on_missing):
+        del self
+        assert api_key is None
+        owner_lookups.append((turn_state, fail_on_missing))
+        return account_id
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fail_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fake_stream_responses)
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_compact_turn_state_owner", fake_turn_state_owner)
+
+    payload = {
+        "model": model,
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+        "stream": True,
+    }
+    if route.startswith("/backend-api"):
+        payload["instructions"] = "continue"
+    response = await async_client.post(route, headers={"x-codex-turn-state": turn_state}, json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert owner_lookups == [(turn_state, False)]
+    assert observed == {"model": model, "turn_state": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["/backend-api/codex/responses", "/v1/responses"])
+async def test_responses_recorded_owner_overrides_disabled_model_source(async_client, monkeypatch, route):
+    model = f"external-disabled-source-owner-{route.rsplit('/', 1)[-1]}"
+    previous_response_id = f"resp_disabled_source_owner_{route.rsplit('/', 1)[-1]}"
+    source_id = await _create_model_source(
+        async_client,
+        name=f"disabled-{route.rsplit('/', 1)[-1]}",
+        model=model,
+        supports_responses=True,
+    )
+    disabled = await async_client.patch(f"/api/model-sources/{source_id}", json={"isEnabled": False})
+    assert disabled.status_code == 200
+    assert disabled.json()["isEnabled"] is False
+    account_id = await _import_account(
+        async_client,
+        f"acct-disabled-owner-{route.rsplit('/', 1)[-1]}",
+        f"disabled-owner-{route.rsplit('/', 1)[-1]}@example.com",
+    )
+    competing_account_id = await _import_account(
+        async_client,
+        f"acct-disabled-owner-competing-{route.rsplit('/', 1)[-1]}",
+        f"disabled-owner-competing-{route.rsplit('/', 1)[-1]}@example.com",
+    )
+    assert competing_account_id != account_id
+    async with SessionLocal() as session:
+        await RequestLogsRepository(session).add_log(
+            account_id=account_id,
+            request_id=previous_response_id,
+            model=model,
+            input_tokens=None,
+            output_tokens=None,
+            latency_ms=None,
+            status="success",
+            error_code=None,
+        )
+    observed: dict[str, object] = {}
+
+    async def fail_source(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("a recorded subscription owner must bypass a disabled model source")
+
+    async def fake_stream_responses(payload, _headers, _access_token, _account_id, **kwargs):
+        observed["model"] = payload.model
+        observed["previous_response_id"] = payload.previous_response_id
+        observed["account_id"] = kwargs["codex_lb_account_id"]
+        event = {
+            "type": "response.completed",
+            "response": {"id": "resp_owner", "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}},
+        }
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fail_source)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream_responses)
+
+    payload = {
+        "model": model,
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+        "previous_response_id": previous_response_id,
+        "stream": True,
+    }
+    if route.startswith("/backend-api"):
+        payload["instructions"] = "continue"
+    async with async_client.stream("POST", route, json=payload) as response:
+        body = [line async for line in response.aiter_lines() if line]
+
+    assert response.status_code == 200
+    assert any("response.completed" in line for line in body)
+    assert observed == {
+        "model": model,
+        "previous_response_id": previous_response_id,
+        "account_id": account_id,
+    }
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_file_pinned_payload_skips_model_source(async_client, monkeypatch):
     model = "external-v1-responses-file-pin"
     await _create_model_source(

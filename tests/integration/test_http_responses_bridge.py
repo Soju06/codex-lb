@@ -12637,7 +12637,7 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
-    headers = {"x-codex-turn-state": "turn-sse-failure"} if prime_reused_session else {}
+    headers = {"x-codex-turn-state": "http_turn_sse_failure"} if prime_reused_session else {}
     if prime_reused_session:
         prime = await async_client.post(
             "/v1/responses",
@@ -16108,7 +16108,7 @@ async def test_v1_responses_http_bridge_quarantined_unsafe_full_resend_dispatche
     # anchor injection this regression guards against.
     session_headers = {
         "x-codex-session-id": "quarantine-unsafe-suffix-reattach",
-        "x-codex-turn-state": "quarantine-unsafe-suffix-turn",
+        "x-codex-turn-state": "http_turn_quarantine_unsafe_suffix",
     }
     historical_input = [
         {"role": "user", "content": [{"type": "input_text", "text": "leading question"}]},

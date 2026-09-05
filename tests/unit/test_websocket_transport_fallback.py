@@ -428,18 +428,25 @@ def _pre_submit_error() -> ProxyResponseError:
     return exc
 
 
-async def _collect_bridge_stream(service: Any, *, api_key_reservation: Any = None) -> list[str]:
+async def _collect_bridge_stream(
+    service: Any,
+    *,
+    api_key_reservation: Any = None,
+    headers: dict[str, str] | None = None,
+    synthesized_turn_state: str | None = None,
+) -> list[str]:
     return [
         chunk
         async for chunk in service._stream_http_bridge_or_retry(
             _bridge_payload(),
-            {},
+            headers or {},
             codex_session_affinity=True,
             propagate_http_errors=True,
             openai_cache_affinity=False,
             api_key=None,
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=False,
+            synthesized_turn_state=synthesized_turn_state,
         )
     ]
 
@@ -450,6 +457,7 @@ async def test_http_bridge_bypassed_when_upstream_transport_pinned_http(
 ) -> None:
     service = _bridge_service(monkeypatch, dashboard_transport="http")
     retry_calls: list[dict[str, Any]] = []
+    synthesized_turn_state = "http_turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
     async def record_stream_with_retry(*_args: object, **kwargs: object):
         retry_calls.append(cast(dict[str, Any], kwargs))
@@ -462,11 +470,16 @@ async def test_http_bridge_bypassed_when_upstream_transport_pinned_http(
     monkeypatch.setattr(service, "_stream_with_retry", record_stream_with_retry)
     monkeypatch.setattr(service, "_stream_via_http_bridge", bridge_must_not_run)
 
-    chunks = await _collect_bridge_stream(service)
+    chunks = await _collect_bridge_stream(
+        service,
+        headers={"x-codex-turn-state": synthesized_turn_state},
+        synthesized_turn_state=synthesized_turn_state,
+    )
 
     assert chunks == ['data: {"type":"response.completed"}\n\n']
     assert len(retry_calls) == 1
     assert retry_calls[0]["upstream_stream_transport_override"] == "http"
+    assert retry_calls[0]["synthesized_turn_state"] == synthesized_turn_state
 
 
 @pytest.mark.asyncio

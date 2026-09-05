@@ -996,7 +996,13 @@ def _prepare_websocket_request_state_for_auth_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
-    _clear_websocket_request_error_overrides(request_state)
+    # Auth replay can exhaust the authorized pool. Keep the security error
+    # that initiated that retry so the missing-pool handler can return it.
+    if not (
+        request_state.require_security_work_authorized
+        and request_state.error_code_override == _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE
+    ):
+        _clear_websocket_request_error_overrides(request_state)
     return request_text
 
 

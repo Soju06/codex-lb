@@ -25,7 +25,11 @@ from app.core.clients.proxy import (
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
-from app.core.errors import openai_error
+from app.core.errors import (
+    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
+    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
+    openai_error,
+)
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
@@ -54,6 +58,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
     _thread_codex_session_affinity,
+    _turn_state_header_present,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import (
@@ -67,6 +72,7 @@ from app.modules.proxy.helpers import (
     classify_upstream_failure,
 )
 from app.modules.proxy.load_balancer import (
+    SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
     AccountConcurrencyCaps,
     AccountLease,
     AccountSelection,
@@ -791,164 +797,10 @@ class _CompactMixin:
         route_fallback_used: bool | None = None
         route_fail_closed_reason: str | None = None
         settlement_attempted = False
-
-        async def settle_compact_usage(
-            *,
-            api_key: ApiKeyData | None,
-            api_key_reservation: ApiKeyUsageReservationData | None,
-            response: CompactResponsePayload | None,
-            request_service_tier: str | None,
-        ) -> None:
-            nonlocal settlement_attempted
-            if settlement_attempted:
-                return
-            if forwarded_request and response is None:
-                # A forwarded receiver has not transferred cleanup ownership
-                # until its successful HTTP 200. Every error before that
-                # acknowledgement remains the origin's single release path.
-                return
-            settlement_attempted = True
-            await proxy._settle_compact_api_key_usage(
-                api_key=api_key,
-                api_key_reservation=api_key_reservation,
-                response=response,
-                request_service_tier=request_service_tier,
-            )
-
-        proxy._raise_for_unsupported_input_image_references(payload)
-        try:
-            rewritten_file_account_id = await proxy._resolve_forwarded_file_account_for_responses(
-                payload,
-                headers,
-                forwarded_file_owner_account_id=forwarded_file_owner_account_id,
-                require_forwarded_file_owner=forwarded_request,
-            )
-        except ProxyResponseError:
-            if not forwarded_request and api_key is not None and api_key_reservation is not None:
-                try:
-                    await settle_compact_usage(
-                        api_key=api_key,
-                        api_key_reservation=api_key_reservation,
-                        response=None,
-                        request_service_tier=_service_tier_from_compact_payload(payload),
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to settle compact API key reservation after owner lookup failure",
-                        exc_info=True,
-                    )
-            raise
-        except asyncio.CancelledError:
-            if not forwarded_request and api_key is not None and api_key_reservation is not None:
-                try:
-                    await settle_compact_usage(
-                        api_key=api_key,
-                        api_key_reservation=api_key_reservation,
-                        response=None,
-                        request_service_tier=_service_tier_from_compact_payload(payload),
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to settle compact API key reservation after cancelled owner lookup",
-                        exc_info=True,
-                    )
-            raise
-        settings = await _service_get_settings_cache().get()
-        concurrency_caps = effective_account_concurrency_caps(settings)
-        prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
-        affinity = _sticky_key_for_compact_request(
-            payload,
-            headers,
-            codex_session_affinity=codex_session_affinity,
-            openai_cache_affinity=openai_cache_affinity,
-            openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
-            sticky_threads_enabled=settings.sticky_threads_enabled,
-            api_key=api_key,
-        )
-        sticky_key_source = "none"
-        if affinity.codex_session_source == "thread_header":
-            # The payload cache hint remains unchanged; diagnostics must not
-            # imply that it supplied the internal thread-local routing key.
-            sticky_key_source = "thread_header"
-        elif affinity.kind == StickySessionKind.CODEX_SESSION:
-            if _sticky_key_from_turn_state_header(headers) is not None:
-                sticky_key_source = "turn_state_header"
-            elif _sticky_key_from_session_header(headers) is not None:
-                sticky_key_source = "session_header"
-            else:
-                sticky_key_source = "payload"
-        elif affinity.key:
-            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
-        _maybe_log_proxy_request_shape(
-            "compact",
-            payload,
-            headers,
-            sticky_kind=affinity.kind.value if affinity.kind is not None else None,
-            sticky_key_source=sticky_key_source,
-            prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
-        )
-        routing_strategy = _routing_strategy(settings)
-        turn_state_owner_account_id: str | None = None
-        turn_state = _sticky_key_from_turn_state_header(headers)
-        if turn_state is not None:
-            turn_state_owner_account_id = await proxy._resolve_compact_turn_state_owner(
-                turn_state=turn_state,
-                api_key=api_key,
-                fail_on_missing=not _is_synthesized_turn_state(turn_state),
-            )
-        previous_response_id = getattr(payload, "previous_response_id", None)
-        previous_response_preferred_account_id: str | None = None
-        previous_response_lookup_session_id: str | None = None
-        if isinstance(previous_response_id, str) and previous_response_id.strip():
-            previous_response_id = previous_response_id.strip()
-            previous_response_lookup_session_id = _owner_lookup_session_id_from_headers(headers)
-            previous_response_preferred_account_id = await proxy._resolve_websocket_previous_response_owner(
-                previous_response_id=previous_response_id,
-                api_key=api_key,
-                session_id=previous_response_lookup_session_id,
-                surface="compact",
-            )
-            if previous_response_preferred_account_id is None:
-                selection_inputs = await proxy._load_balancer._load_selection_inputs(
-                    model=payload.model,
-                    additional_limit_name=None,
-                    account_ids=api_key.assigned_account_ids
-                    if api_key is not None and api_key.account_assignment_scope_enabled
-                    else None,
-                )
-                if len(selection_inputs.accounts) != 1:
-                    message = "Previous response owner account is unavailable; retry later."
-                    _record_continuity_fail_closed(
-                        surface="compact",
-                        reason="owner_account_unavailable",
-                        previous_response_id=previous_response_id,
-                        session_id=previous_response_lookup_session_id,
-                        upstream_error_code="owner_lookup_miss",
-                    )
-                    raise ProxyResponseError(
-                        502,
-                        openai_error(
-                            "previous_response_owner_unavailable",
-                            message,
-                            error_type="server_error",
-                        ),
-                    )
-
-        # File pins are account ownership, not locality. Resolved turn-state or
-        # previous-response owners above still take precedence (and conflicts
-        # fail closed), while process-session/prompt-cache hints never hide a
-        # known file owner.
-        preferred_account_id = resolve_required_account_id(
-            ("turn state", turn_state_owner_account_id),
-            ("previous response", previous_response_preferred_account_id),
-            ("input file", rewritten_file_account_id),
-        )
         deferred_stream_health: list[tuple[Account, Any, str, int | None]] = []
         deferred_http_500_health: list[tuple[Account, ProxyResponseError, int]] = []
         deferred_proxy_health: list[tuple[Account, ProxyResponseError]] = []
         deferred_permanent_health: list[tuple[Account, str]] = []
-        settlement_attempted = False
 
         async def flush_deferred_health() -> None:
             stream_pending = list(deferred_stream_health)
@@ -1014,6 +866,13 @@ class _CompactMixin:
             request_service_tier: str | None,
         ) -> None:
             nonlocal settlement_attempted
+            if settlement_attempted:
+                return
+            if forwarded_request and response is None:
+                # A forwarded receiver has not transferred cleanup ownership
+                # until its successful HTTP 200. Every error before that
+                # acknowledgement remains the origin's single release path.
+                return
             settlement_attempted = True
             settlement_error: ProxyResponseError | None = None
             try:
@@ -1065,6 +924,197 @@ class _CompactMixin:
             if settlement_error is not None:
                 raise settlement_error
 
+        async def settle_compact_usage_before_owner_exit(log_message: str) -> None:
+            """Settle a pre-selection reservation before propagating an owner error."""
+            if forwarded_request or api_key is None or api_key_reservation is None:
+                return
+            try:
+                await settle_compact_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=None,
+                    request_service_tier=_service_tier_from_compact_payload(payload),
+                )
+            except ProxyResponseError as exc:
+                if exc.failure_phase == "usage_settlement" and exc.reservation_released:
+                    # The fail-safe release is confirmed. Preserve the original
+                    # owner error instead of replacing it with a cleanup warning.
+                    logger.warning(log_message, exc_info=True)
+                    return
+                raise
+
+        try:
+            proxy._raise_for_unsupported_input_image_references(payload)
+            rewritten_file_account_id = await proxy._resolve_forwarded_file_account_for_responses(
+                payload,
+                headers,
+                forwarded_file_owner_account_id=forwarded_file_owner_account_id,
+                require_forwarded_file_owner=forwarded_request,
+            )
+        except asyncio.CancelledError:
+            await settle_compact_usage_before_owner_exit(
+                "Failed to settle compact API key reservation after cancelled owner lookup"
+            )
+            raise
+        except Exception:
+            await settle_compact_usage_before_owner_exit(
+                "Failed to settle compact API key reservation after owner lookup failure"
+            )
+            raise
+        settings = await _service_get_settings_cache().get()
+        concurrency_caps = effective_account_concurrency_caps(settings)
+        prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
+        affinity = _sticky_key_for_compact_request(
+            payload,
+            headers,
+            codex_session_affinity=codex_session_affinity,
+            openai_cache_affinity=openai_cache_affinity,
+            openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
+            sticky_threads_enabled=settings.sticky_threads_enabled,
+            api_key=api_key,
+        )
+        sticky_key_source = "none"
+        if affinity.codex_session_source == "thread_header":
+            # The payload cache hint remains unchanged; diagnostics must not
+            # imply that it supplied the internal thread-local routing key.
+            sticky_key_source = "thread_header"
+        elif affinity.kind == StickySessionKind.CODEX_SESSION:
+            if _sticky_key_from_turn_state_header(headers) is not None:
+                sticky_key_source = "turn_state_header"
+            elif _sticky_key_from_session_header(headers) is not None:
+                sticky_key_source = "session_header"
+            else:
+                sticky_key_source = "payload"
+        elif affinity.key:
+            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        _maybe_log_proxy_request_shape(
+            "compact",
+            payload,
+            headers,
+            sticky_kind=affinity.kind.value if affinity.kind is not None else None,
+            sticky_key_source=sticky_key_source,
+            prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
+        )
+        routing_strategy = _routing_strategy(settings)
+        turn_state_owner_account_id: str | None = None
+        turn_state_header_present = _turn_state_header_present(headers)
+        turn_state = _sticky_key_from_turn_state_header(headers)
+        synthesized_turn_state = turn_state is not None and _is_synthesized_turn_state(turn_state)
+        try:
+            if turn_state is not None:
+                turn_state_owner_account_id = await proxy._resolve_compact_turn_state_owner(
+                    turn_state=turn_state,
+                    api_key=api_key,
+                    fail_on_missing=not synthesized_turn_state,
+                )
+            previous_response_id = getattr(payload, "previous_response_id", None)
+            previous_response_preferred_account_id: str | None = None
+            owner_miss_fallback_account_id: str | None = None
+            previous_response_lookup_session_id: str | None = None
+            if isinstance(previous_response_id, str) and previous_response_id.strip():
+                previous_response_id = previous_response_id.strip()
+                previous_response_lookup_session_id = _owner_lookup_session_id_from_headers(headers)
+                previous_response_preferred_account_id = await proxy._resolve_websocket_previous_response_owner(
+                    previous_response_id=previous_response_id,
+                    api_key=api_key,
+                    session_id=previous_response_lookup_session_id,
+                    surface="compact",
+                )
+            if (
+                isinstance(previous_response_id, str)
+                and previous_response_id.strip()
+                and previous_response_preferred_account_id is None
+                and turn_state_owner_account_id is None
+            ):
+                # File pins and unresolved client turn-state are hard
+                # continuity boundaries. Header normalization maps blanks
+                # to None, so preserve physical presence for this decision.
+                if rewritten_file_account_id is not None or (turn_state_header_present and not synthesized_turn_state):
+                    selection_candidates: tuple[Account, ...] = ()
+                else:
+                    # Preserve the compatibility fallback for an owner miss
+                    # when exactly one eligible subscription account remains.
+                    # An account-scoped API key narrows the candidate set before
+                    # the count; an unscoped key uses the normal model pool. A
+                    # missing owner with multiple or zero candidates still fails
+                    # closed because selection would otherwise guess an account.
+                    try:
+                        selection_candidates = await proxy._load_balancer.list_selection_candidates(
+                            model=payload.model,
+                            service_tier=_service_tier_from_compact_payload(payload),
+                            additional_limit_name=None,
+                            account_ids=(
+                                api_key.assigned_account_ids
+                                if api_key is not None and api_key.account_assignment_scope_enabled
+                                else None
+                            ),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to list compact owner-miss candidates request_id=%s",
+                            request_id,
+                        )
+                        selection_candidates = ()
+                if len(selection_candidates) != 1:
+                    await settle_compact_usage_before_owner_exit(
+                        "Failed to settle compact API key reservation after previous-response owner fail-closed"
+                    )
+                    message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
+                    _record_continuity_fail_closed(
+                        surface="compact",
+                        reason="owner_account_unavailable",
+                        previous_response_id=previous_response_id,
+                        session_id=previous_response_lookup_session_id,
+                        upstream_error_code="owner_lookup_miss",
+                    )
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
+                            message,
+                            error_type="server_error",
+                        ),
+                    )
+                owner_miss_fallback_account_id = selection_candidates[0].id
+        except asyncio.CancelledError:
+            await settle_compact_usage_before_owner_exit(
+                "Failed to settle compact API key reservation after cancelled owner lookup"
+            )
+            raise
+        except Exception:
+            await settle_compact_usage_before_owner_exit(
+                "Failed to settle compact API key reservation after owner lookup failure"
+            )
+            raise
+
+        # File pins are account ownership, not locality. Resolved turn-state or
+        # previous-response owners above still take precedence (and conflicts
+        # fail closed), while process-session/prompt-cache hints never hide a
+        # known file owner.
+        try:
+            preferred_account_id = resolve_required_account_id(
+                ("turn state", turn_state_owner_account_id),
+                ("previous response", previous_response_preferred_account_id),
+                ("input file", rewritten_file_account_id),
+            )
+        except asyncio.CancelledError:
+            await settle_compact_usage_before_owner_exit(
+                "Failed to settle compact API key reservation after cancelled owner conflict resolution"
+            )
+            raise
+        except Exception:
+            await settle_compact_usage_before_owner_exit(
+                "Failed to settle compact API key reservation after owner conflict resolution"
+            )
+            raise
+
+        if owner_miss_fallback_account_id is not None:
+            preferred_account_id = resolve_required_account_id(
+                ("resolved owner", preferred_account_id),
+                ("sole owner-miss candidate", owner_miss_fallback_account_id),
+            )
+
         async def settle_on_terminal_exit() -> None:
             if settlement_attempted:
                 return
@@ -1075,12 +1125,17 @@ class _CompactMixin:
                     response=None,
                     request_service_tier=request_service_tier,
                 )
-            except Exception:
-                logger.warning(
-                    "Failed to settle compact reservation after unexpected exit request_id=%s",
-                    request_id,
-                    exc_info=True,
-                )
+            except ProxyResponseError as exc:
+                if exc.failure_phase == "usage_settlement" and exc.reservation_released:
+                    # The reservation is known to be released; keep the
+                    # original terminal error as the externally visible one.
+                    logger.warning(
+                        "Compact reservation settlement failed after fail-safe release request_id=%s",
+                        request_id,
+                        exc_info=True,
+                    )
+                    return
+                raise
 
         async def record_or_defer_proxy_health(
             failed_account: Account,
@@ -1276,10 +1331,27 @@ class _CompactMixin:
             # account.
             owner_quota_failover_eligible = False
             require_security_work_authorized = False
+            # A security-work retry can consume the normal compact account
+            # budget on the ordinary account and the final authorized account
+            # before the selector reports that the authorized pool is
+            # exhausted. Reserve one bounded extra iteration for that
+            # transition back to ordinary failover; ordinary compact retries
+            # keep their existing account-attempt budget.
+            security_fallback_attempt_available = False
             estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
                 estimate_api_key_request_usage(payload)
             )
-            for _account_attempt in range(_compact_max_account_attempts()):
+            account_attempt = 0
+            while account_attempt < _compact_max_account_attempts() or security_fallback_attempt_available:
+                # The authorized retry pool gets at most one iteration beyond
+                # the normal compact account budget.  Consume that allowance
+                # as soon as the extra iteration starts; otherwise each
+                # authorized-account failure leaves the flag set and can keep
+                # the loop running past the bounded fallback budget.
+                if security_fallback_attempt_available and account_attempt >= _compact_max_account_attempts():
+                    security_fallback_attempt_available = False
+                _account_attempt = account_attempt
+                account_attempt += 1
                 selection = await proxy._select_account_with_budget_compatible(
                     deadline,
                     request_id=request_id,
@@ -1302,7 +1374,11 @@ class _CompactMixin:
                 if not account:
                     if (
                         require_security_work_authorized
-                        and selection.error_code == _no_security_work_authorized_accounts_code()
+                        and selection.error_code
+                        in (
+                            _no_security_work_authorized_accounts_code(),
+                            SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
+                        )
                         and last_exc is not None
                     ):
                         logger.info(
@@ -1311,6 +1387,7 @@ class _CompactMixin:
                             request_id,
                         )
                         require_security_work_authorized = False
+                        security_fallback_attempt_available = False
                         selection = await proxy._select_account_with_budget_compatible(
                             deadline,
                             request_id=request_id,
@@ -1974,6 +2051,7 @@ class _CompactMixin:
                                 last_exc = exc
                                 excluded_account_ids.add(account.id)
                                 require_security_work_authorized = True
+                                security_fallback_attempt_available = True
                                 transient_exhausted = True
                                 break
                             await settle_compact_usage(

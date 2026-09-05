@@ -297,3 +297,10 @@ stream. Predispatch failures and cancellation release origin-owned reservations;
 accepted or delivery-ambiguous owner forwards retain their settlement owner.
 Context bindings do not span yields because startup probes and consumers may
 advance the stream from different tasks.
+## HTTP response ownership before delivery
+
+An HTTP response can expose its upstream ID before the detached request-log write finishes. The stream now publishes each authoritative lifecycle ID to the existing bounded process cache before delivering that event, beginning with `response.created` when present. An immediate follow-up can resolve the selected account while the original stream or its log write is still pending. This is same-process owner readiness; it does not promise that an unfinished response is already usable by the upstream provider.
+
+The cache retains its existing API-key partition, session-first lookup and same-key fallback. Durable lookup and unknown-owner rejection remain the miss path. Publication adds no synchronous persistence barrier, registry or cross-replica readiness guarantee, and does not strengthen session identifiers into a new authorization boundary.
+
+Local failure events and locally assigned response IDs are separate facts. `ParsedSseBlock.is_local` identifies generated events; `response_id_is_local` excludes a generated ID even when SDK normalization wraps a real upstream error. These flags remain outside serialized event bytes and survive parsed-payload reattachment. Thus an oversized-frame failure cannot invent an upstream owner, while a real upstream error with a locally assigned ID remains a valid event for timing. The shared HTTP/direct/routed WebSocket normalizer and this provenance contract are owned here; HTTP timing consumes them through the owner dependency. Existing durable-log behavior is unchanged. See the [ownership requirement](spec.md#requirement-observed-http-response-ids-publish-same-process-ownership-before-delivery).

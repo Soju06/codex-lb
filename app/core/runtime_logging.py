@@ -19,9 +19,10 @@ from app.core.utils.request_id import get_request_id
 
 _SENSITIVE_LOG_VALUE_PATTERNS = (
     re.compile(r"(?i)(password|passwd|pwd|token|secret|api[_-]?key)(\s*[=:]\s*)([^\s,&]+)"),
-    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=:-]+"),
     re.compile(r"(?i)(authorization\s*[=:]\s*)(?!\s*bearer\b)([^,&]+)"),
 )
+_LINE_BREAKS = re.compile(r"(\r\n|\n|\r)")
 # RFC 7617 ``Basic <base64>`` token: a reversible encoding of ``user:password``
 # that aiohttp reprs verbatim (``ClientHttpProxyError.request_info.headers``
 # carries the CONNECT ``Proxy-Authorization`` header). Applied to every record
@@ -36,7 +37,7 @@ _BASIC_TOKEN_PRECHECKS = ("Basic ", "basic ", "BASIC ")
 _REDACTION_FAILED_PLACEHOLDER = "[REDACTED: log redaction failed]"
 _JSON_SENSITIVE_LOG_VALUE_PATTERN = re.compile(
     r'(?i)("(?:password|passwd|pwd|token|secret|api[_-]?key|authorization)"\s*:\s*")'
-    r'(?:\\.|[^"\\])*(")'
+    r'(?:\\.|[^"\\])*("|(?=\Z))'
 )
 # ``scheme://user:pass@`` userinfo, e.g. aiohttp ConnectionKey proxy URL reprs.
 # RFC 3986 userinfo never contains ``/``, ``?`` or ``#``, so a bare host
@@ -87,7 +88,7 @@ def _redact_log_value(value: str | None) -> str | None:
     return _redact_secret_patterns(_USERINFO_PATTERN.sub(_redact_userinfo, collapsed))
 
 
-def _redact_secret_patterns(text: str) -> str:
+def _redact_secret_patterns_on_line(text: str) -> str:
     redacted = _JSON_SENSITIVE_LOG_VALUE_PATTERN.sub(_redact_json_secret, text)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[0].sub(_redact_keyed_secret, redacted)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[1].sub(_redact_bearer_token, redacted)
@@ -96,6 +97,15 @@ def _redact_secret_patterns(text: str) -> str:
     # Last, so ``'Proxy-Authorization': 'Basic [REDACTED]'`` keeps the scheme
     # the token passes above already exposed.
     return _PYTHON_REPR_SENSITIVE_LOG_VALUE_PATTERN.sub(_redact_python_repr_secret, redacted)
+
+
+def _redact_secret_patterns(text: str) -> str:
+    if "\n" not in text and "\r" not in text:
+        return _redact_secret_patterns_on_line(text)
+    return "".join(
+        _redact_secret_patterns_on_line(part) if index % 2 == 0 else part
+        for index, part in enumerate(_LINE_BREAKS.split(text))
+    )
 
 
 def redact_rendered_log_text(text: str, *, keyed_secrets: bool = True) -> str:
@@ -139,7 +149,8 @@ def _redact_keyed_secret(match: re.Match[str]) -> str:
 
 
 def _redact_json_secret(match: re.Match[str]) -> str:
-    return f"{match.group(1)}{_LOG_REDACTION}{match.group(2)}"
+    closer = match.group(2) or ""
+    return f"{match.group(1)}{_LOG_REDACTION}{closer}"
 
 
 def _redact_python_repr_secret(match: re.Match[str]) -> str:

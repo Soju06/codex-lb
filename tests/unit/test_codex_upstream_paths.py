@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
+import json
+import logging
 import socket
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import pytest
+from aiohttp import web
 from aiohttp.client_reqrep import ConnectionKey
+from aiohttp.test_utils import TestServer
 
 import app.core.clients.proxy as proxy_module
 from app.core.clients.codex import CodexClient, CodexRequestResult, CodexTransportError, CodexWebSocketResult
@@ -1590,3 +1595,107 @@ async def test_routed_stream_tolerates_response_without_release(route: ResolvedU
     ]
 
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transport", "trace_payload", "expected_preparation_dumps"),
+    [("http", False, 0), ("http", True, 1), ("auto", False, 1)],
+    ids=["no-payload-consumer", "raw-payload-trace", "auto-size-budget"],
+)
+async def test_stream_responses_python_http_prepares_only_consumed_json(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    transport: str,
+    trace_payload: bool,
+    expected_preparation_dumps: int,
+) -> None:
+    # Representative full-history tool output from the Responses request shape;
+    # large non-ASCII content makes both unused whole-body encodes observable.
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "Summarize the repository inspection.",
+            "stream": True,
+            "input": [
+                {"role": "user", "content": "Inspect the repository."},
+                {
+                    "type": "function_call",
+                    "call_id": "call_inspection",
+                    "name": "exec_command",
+                    "arguments": '{"cmd":"git status --short"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_inspection",
+                    "output": "Repository inspection: café / 東京\n" * 32768,
+                },
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}},
+                }
+            ],
+        }
+    )
+    expected_payload = payload.to_payload()
+    expected_body = json.dumps(expected_payload).encode("utf-8")
+    assert len(expected_body) > 1_000_000
+    upstream_bodies: list[bytes] = []
+    terminal = 'data: {"type":"response.completed","response":{"id":"resp_preparation"}}\n\n'
+
+    async def respond(request: web.Request) -> web.Response:
+        upstream_bodies.append(await request.read())
+        return web.Response(text=terminal, content_type="text/event-stream")
+
+    origin = web.Application(client_max_size=4 * 1024 * 1024)
+    origin.router.add_post("/codex/responses", respond)
+    settings = proxy_module.get_settings().model_copy(
+        update={
+            "upstream_stream_transport": transport,
+            "max_sse_event_bytes": 2 * 1024 * 1024,
+            "image_inline_fetch_enabled": False,
+            "trace_channels": frozenset({"upstream_payload"}) if trace_payload else frozenset(),
+        }
+    )
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_module, "discover_native_egress_client", lambda: None)
+    # Observe only this owning module's JSON calls, leaving aiohttp's real
+    # request serializer and all preparation/stream code unchanged.
+    preparation_json = MagicMock(wraps=json)
+    monkeypatch.setattr(proxy_module, "json", preparation_json)
+    caplog.set_level(logging.INFO, logger=proxy_module.__name__)
+
+    async with TestServer(origin) as server, aiohttp.ClientSession() as session:
+        events = [
+            event
+            async for event in stream_responses(
+                payload,
+                {"originator": "codex_cli_rs"},
+                "access",
+                None,
+                session=session,
+                base_url=str(server.make_url("/")),
+            )
+        ]
+
+    assert events == [terminal]
+    assert len(upstream_bodies) == 1
+    assert hashlib.sha256(upstream_bodies[0]).digest() == hashlib.sha256(expected_body).digest()
+    full_body_dumps = sum(
+        isinstance(call.args[0], dict) and call.args[0].get("model") == payload.model
+        for call in preparation_json.dumps.call_args_list
+    )
+    trace_records = [record for record in caplog.records if record.msg.startswith("upstream_request_payload ")]
+    if trace_payload:
+        assert len(trace_records) == 1
+        trace_args = trace_records[0].args
+        assert isinstance(trace_args, tuple)
+        traced_json = trace_args[-1]
+        assert isinstance(traced_json, str)
+        assert json.loads(traced_json) == expected_payload
+    else:
+        assert trace_records == []
+    assert full_body_dumps == expected_preparation_dumps

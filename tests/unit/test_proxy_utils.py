@@ -42351,7 +42351,8 @@ async def test_compact_second_401_failover_settles_before_account_health(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_compact_permanent_refresh_fails_over_after_settlement(monkeypatch):
+@pytest.mark.parametrize("error_code", ["invalid_api_key", "token_revoked"])
+async def test_compact_permanent_refresh_settles_before_mark_permanent(monkeypatch, error_code):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -42386,7 +42387,7 @@ async def test_compact_permanent_refresh_fails_over_after_settlement(monkeypatch
         if account_id == account_a.chatgpt_account_id:
             raise proxy_module.ProxyResponseError(
                 401,
-                openai_error("token_revoked", "token revoked", error_type="authentication_error"),
+                openai_error(error_code, "token expired"),
                 failure_phase="status",
             )
         return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
@@ -42414,7 +42415,8 @@ async def test_compact_permanent_refresh_fails_over_after_settlement(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_compact_permanent_refresh_preserves_file_owner(monkeypatch):
+@pytest.mark.parametrize("error_code", ["invalid_api_key", "token_revoked"])
+async def test_compact_pinned_permanent_refresh_remains_owner_bound(monkeypatch, error_code):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -42449,7 +42451,7 @@ async def test_compact_permanent_refresh_preserves_file_owner(monkeypatch):
         if account_id == account.chatgpt_account_id:
             raise proxy_module.ProxyResponseError(
                 401,
-                openai_error("token_revoked", "token revoked", error_type="authentication_error"),
+                openai_error(error_code, "token expired"),
                 failure_phase="status",
             )
         return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})

@@ -51,9 +51,7 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import stream_responses as core_stream_responses  # noqa: F401
 from app.core.clients.proxy import thread_goal_request as core_thread_goal_request
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
-from app.core.clients.proxy_websocket import (
-    UpstreamWebSocket as UpstreamWebSocket,
-)
+from app.core.clients.proxy_websocket import UpstreamWebSocket as UpstreamWebSocket
 from app.core.clients.proxy_websocket import (
     connect_live_websocket as connect_live_websocket,
 )

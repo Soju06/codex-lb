@@ -44,6 +44,8 @@ from app.modules.accounts.schemas import (
     AccountTrendsResponse,
     AccountUpdateRequest,
     AccountUpdateResponse,
+    AccountUsageLimitUpdateRequest,
+    AccountUsageLimitUpdateResponse,
     AccountUsageResetConsumeRequest,
     AccountUsageResetConsumeResponse,
     AccountUsageResetCreditsResponse,
@@ -435,6 +437,40 @@ async def update_account_routing_policy(
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountRoutingPolicyUpdateResponse(account_id=account_id, routing_policy=payload.routing_policy)
+
+
+@router.put("/{account_id}/usage-limit", response_model=AccountUsageLimitUpdateResponse)
+async def update_account_usage_limit(
+    request: Request,
+    account_id: str,
+    payload: AccountUsageLimitUpdateRequest,
+    _write_access=Depends(require_dashboard_write_access),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountUsageLimitUpdateResponse:
+    percent_was_provided = "percent" in payload.model_fields_set
+    configuration = await context.service.set_usage_limit(
+        account_id,
+        enabled=payload.enabled,
+        percent=payload.percent,
+        update_percent=percent_was_provided,
+    )
+    if configuration is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    AuditService.log_async(
+        "account_usage_limit_updated",
+        actor_ip=request.client.host if request.client else None,
+        details={
+            "account_id": account_id,
+            "enabled": configuration.enabled,
+            "percent": configuration.percent,
+            "percent_was_provided": percent_was_provided,
+        },
+    )
+    return AccountUsageLimitUpdateResponse(
+        account_id=account_id,
+        enabled=configuration.enabled,
+        percent=configuration.percent,
+    )
 
 
 @router.delete("/{account_id}", response_model=AccountDeleteResponse)

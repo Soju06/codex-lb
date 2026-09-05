@@ -44,6 +44,7 @@ from app.core.auth.dependencies import (
     validate_usage_api_key,
 )
 from app.core.auth.refresh import RefreshError
+from app.core.balancer import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
 from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import (
@@ -306,7 +307,7 @@ from app.modules.proxy.schemas import (
     WarmupSkippedAccount,
     WarmupSubmittedAccount,
 )
-from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
+from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
     RateLimitResetCreditsData,
@@ -8444,16 +8445,12 @@ async def _opportunistic_admission_denial(
     )
     if selection.account is not None:
         return None
-    if selection.error_code == USAGE_LIMIT_REACHED:
+    if selection.error_code in {USAGE_LIMIT_REACHED, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE}:
+        status_code, error_payload = selection_failure_response(selection)
         return _logged_error_json_response(
             request,
-            429,
-            openai_error(
-                USAGE_LIMIT_REACHED,
-                selection.error_message or "Usage limit reached",
-                error_type=USAGE_LIMIT_REACHED,
-                resets_at=selection.resets_at,
-            ),
+            status_code,
+            error_payload,
         )
     message = selection.error_message or "opportunistic burn window closed"
     if not message.startswith("opportunistic burn window closed"):

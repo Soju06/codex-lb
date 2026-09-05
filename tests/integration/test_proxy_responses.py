@@ -25,7 +25,7 @@ from app.db.session import SessionLocal
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
 from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.usage.repository import AdditionalUsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -1052,6 +1052,76 @@ async def test_proxy_responses_routes_spark_when_fresh_quota_overrides_account_c
     assert event["type"] == "response.completed"
     assert seen_payload["model"] == "gpt-5.3-codex-spark"
     assert seen_payload["selected_account_id"] == raw_account_id
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_spark_additional_quota_does_not_bypass_account_usage_limit(
+    async_client,
+    monkeypatch,
+) -> None:
+    email = "spark-account-usage-limited@example.com"
+    raw_account_id = "acc_spark_account_usage_limited"
+    account_id = generate_unique_account_id(raw_account_id, email)
+    auth_json = _make_auth_json(raw_account_id, email, plan_type="pro")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        usage = UsageRepository(session)
+        await usage.add_entry(
+            account_id=account_id,
+            window="primary",
+            used_percent=10.0,
+            reset_at=None,
+            window_minutes=300,
+            recorded_at=utcnow(),
+        )
+        additional_usage = AdditionalUsageRepository(session)
+        await additional_usage.add_entry(
+            account_id=account_id,
+            limit_name="GPT-5.3-Codex-Spark",
+            metered_feature="codex_bengalfox",
+            window="primary",
+            used_percent=1.0,
+            reset_at=None,
+            window_minutes=300,
+            recorded_at=utcnow(),
+        )
+
+    changed = await async_client.put(
+        f"/api/accounts/{account_id}/usage-limit",
+        json={"enabled": True, "percent": 10.0},
+    )
+    assert changed.status_code == 200
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: SimpleNamespace(account_plans={account_id: "pro"}),
+            account_ids_for_model=lambda _model: frozenset(),
+            plan_types_for_model=lambda _model: frozenset({"pro"}),
+        ),
+    )
+
+    async def fail_stream(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("account usage limit must reject before upstream dispatch")
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_stream)
+
+    payload = {"model": "gpt-5.3-codex-spark", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"] == {
+        "message": "All otherwise available accounts have reached their usage limit or lack current usage data",
+        "type": "server_error",
+        "code": "account_usage_limit_reached",
+    }
 
 
 @pytest.mark.asyncio

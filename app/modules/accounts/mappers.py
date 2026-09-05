@@ -27,7 +27,7 @@ from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
     get_rate_limit_reset_credits_store,
 )
-from app.modules.usage.mappers import usage_history_to_window_row
+from app.modules.usage.mappers import evaluate_account_usage_limit, usage_history_to_window_row
 
 _ACCOUNT_ROUTING_POLICIES = frozenset({"burn_first", "normal", "preserve"})
 _RESET_CREDITS_INELIGIBLE_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.DEACTIVATED})
@@ -116,6 +116,13 @@ def _account_to_summary(
         primary_usage,
         secondary_usage,
     )
+    usage_limit_state = evaluate_account_usage_limit(
+        account,
+        primary=primary_usage,
+        secondary=secondary_usage,
+        monthly=monthly_usage,
+        refresh_interval_seconds=_usage_refresh_interval_seconds(),
+    )
 
     if monthly_usage is not None and usage_core.capacity_for_plan(plan_type, "monthly") is None:
         monthly_usage = None
@@ -153,11 +160,12 @@ def _account_to_summary(
     status_seed = account.status
     allow_missing_runtime_reset_recovery = False
     long_quota_usage = monthly_usage or effective_secondary_usage
+    long_quota_used_percent = _normalize_used_percent(long_quota_usage)
     long_quota_available = (
         long_quota_usage is not None
         and _usage_entry_is_recent_enough(long_quota_usage.recorded_at)
-        and long_quota_usage.used_percent is not None
-        and float(long_quota_usage.used_percent) < 100.0
+        and long_quota_used_percent is not None
+        and float(long_quota_used_percent) < 100.0
     )
     if usage_core.capacity_for_plan(plan_type, "primary") == 0.0:
         primary_window_minutes = (
@@ -263,6 +271,9 @@ def _account_to_summary(
         plan_type=plan_type,
         status=effective_status.value,
         routing_policy=_normalize_account_routing_policy(account.routing_policy),
+        usage_limit_enabled=bool(account.usage_limit_enabled),
+        usage_limit_percent=account.usage_limit_percent,
+        usage_limit_state=usage_limit_state,
         security_work_authorized=bool(account.security_work_authorized),
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
@@ -484,7 +495,7 @@ def _token_expiry(token: str | None) -> datetime | None:
 def _normalize_used_percent(entry: UsageHistory | None) -> float | None:
     if not entry:
         return None
-    return entry.used_percent
+    return usage_history_to_window_row(entry).used_percent
 
 
 def _extract_credit_status(

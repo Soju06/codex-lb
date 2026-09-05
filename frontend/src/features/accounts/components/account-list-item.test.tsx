@@ -167,6 +167,20 @@ describe("AccountListItem", () => {
     expect(screen.getByText("Normal")).toBeInTheDocument();
   });
 
+  it("shows a reached usage limit for an otherwise active account", () => {
+    const account = createAccountSummary({
+      status: "active",
+      usageLimitEnabled: true,
+      usageLimitPercent: 10,
+      usageLimitState: "reached",
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("Limit reached")).toBeInTheDocument();
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
+  });
+
   it("hides routing policy badges for accounts that require operator recovery", () => {
     const { rerender } = render(
       <AccountListItem

@@ -2247,3 +2247,18 @@ def test_mark_sqlite_shutdown_clean_is_inert_for_non_sqlite_backends(monkeypatch
     session_module.mark_sqlite_shutdown_clean()
 
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_sqlite_watchdog_never_reconnects_an_invalidated_transaction_during_rollback(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'invalidated-watchdog.db'}")
+    session_module._install_sqlite_long_write_watchdog(engine.sync_engine)
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(sa_text("SELECT 1"))
+            await connection.invalidate()
+            assert connection.invalidated
+            await connection.rollback()
+            assert (await connection.execute(sa_text("SELECT 1"))).scalar_one() == 1
+    finally:
+        await engine.dispose()

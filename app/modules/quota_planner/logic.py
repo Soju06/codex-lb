@@ -8,7 +8,12 @@ from datetime import time as dt_time
 from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.core.balancer import AccountState, RoutingCost, RoutingCostsByAccount
+from app.core.balancer import (
+    AccountState,
+    RoutingCost,
+    RoutingCostsByAccount,
+    account_usage_limit_blocks_selection,
+)
 from app.db.models import AccountStatus
 
 FIVE_HOUR_WINDOW_SECONDS = 5 * 60 * 60
@@ -199,7 +204,9 @@ def plan_shadow_actions(
     active_resets = [
         float(state.primary_reset_at)
         for state in states
-        if state.primary_reset_at is not None and _is_active_window(state, current_ts)
+        if state.primary_reset_at is not None
+        and not account_usage_limit_blocks_selection(state)
+        and _is_active_window(state, current_ts)
     ]
     for state in states:
         if not _is_warmup_candidate(state, current_ts):
@@ -352,6 +359,8 @@ def simulate_pool(
     warmups = planned_warmups or []
     active_windows: list[tuple[float, float, float]] = []
     for state in states:
+        if account_usage_limit_blocks_selection(state):
+            continue
         if state.status not in {AccountStatus.ACTIVE, AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED}:
             continue
         if _is_active_window(state, current_ts):
@@ -564,6 +573,8 @@ def _is_cold_window(state: AccountState, current_ts: float) -> bool:
 
 def _is_warmup_candidate(state: AccountState, current_ts: float) -> bool:
     if state.status != AccountStatus.ACTIVE:
+        return False
+    if account_usage_limit_blocks_selection(state):
         return False
     if _plannable_window_seconds(state) is None:
         return False

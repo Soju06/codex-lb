@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from app.core.balancer import AccountState
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.quota_planner.logic import (
@@ -20,8 +22,81 @@ from app.modules.quota_planner.logic import (
     simulate_pool,
 )
 from app.modules.quota_planner.repository import DemandBin, QuotaPlannerRepository, _to_db_naive_utc
+from app.modules.quota_planner.warmup import QuotaWarmupService, WarmupExecutionResult
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.asyncio
+async def test_deferred_warmup_cleanup_preserves_cancellation_when_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = object.__new__(QuotaWarmupService)
+    cleanup_started = asyncio.Event()
+    allow_cleanup_to_fail = asyncio.Event()
+
+    async def fail_cleanup(
+        _service: QuotaWarmupService,
+        *,
+        decision_id: str,
+        reason: str,
+        reservation_id: str | None,
+        claim_executed_at: datetime,
+        claim_lease_expires_at: datetime,
+    ) -> WarmupExecutionResult:
+        del decision_id, reason, reservation_id, claim_executed_at, claim_lease_expires_at
+        cleanup_started.set()
+        await allow_cleanup_to_fail.wait()
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(QuotaWarmupService, "_skip_claimed_warmup", fail_cleanup)
+    cleanup_task = asyncio.create_task(
+        service._skip_claimed_warmup_deferring_cancellation(
+            decision_id="decision-cleanup-failure",
+            reason="account_usage_limit_authorization_cancelled",
+            reservation_id=None,
+            claim_executed_at=datetime(2026, 1, 1),
+            claim_lease_expires_at=datetime(2026, 1, 1, 0, 5),
+        )
+    )
+    await cleanup_started.wait()
+    cleanup_task.cancel()
+    await asyncio.sleep(0)
+    cleanup_task.cancel()
+    allow_cleanup_to_fail.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup_task
+
+
+@pytest.mark.asyncio
+async def test_deferred_warmup_cleanup_propagates_failure_without_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = object.__new__(QuotaWarmupService)
+
+    async def fail_cleanup(
+        _service: QuotaWarmupService,
+        *,
+        decision_id: str,
+        reason: str,
+        reservation_id: str | None,
+        claim_executed_at: datetime,
+        claim_lease_expires_at: datetime,
+    ) -> WarmupExecutionResult:
+        del decision_id, reason, reservation_id, claim_executed_at, claim_lease_expires_at
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(QuotaWarmupService, "_skip_claimed_warmup", fail_cleanup)
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await service._skip_claimed_warmup_deferring_cancellation(
+            decision_id="decision-cleanup-failure-no-cancel",
+            reason="account_usage_limit_authorization_failed",
+            reservation_id=None,
+            claim_executed_at=datetime(2026, 1, 1),
+            claim_lease_expires_at=datetime(2026, 1, 1, 0, 5),
+        )
 
 
 def _forecast(
@@ -239,6 +314,69 @@ def test_plan_shadow_actions_skips_weekly_only_accounts() -> None:
     assert {action.account_id for action in actions} == {"cold-5h"}
 
 
+@pytest.mark.parametrize(
+    "usage_limit_state",
+    [AccountUsageLimitState.REACHED, AccountUsageLimitState.DATA_UNAVAILABLE],
+)
+def test_plan_shadow_actions_skips_accounts_blocked_by_usage_limit(
+    usage_limit_state: AccountUsageLimitState,
+) -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+        prewarm_enabled=True,
+        prewarm_lead_minutes=300,
+        max_warmups_per_day=2,
+        min_expected_gain=1.0,
+    )
+    now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
+    peak_at = datetime(2026, 5, 18, 13, 0, tzinfo=timezone.utc)
+    states = [
+        AccountState(
+            "policy-blocked",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            primary_reset_at=int(peak_at.timestamp()),
+            primary_window_minutes=300,
+            usage_limit_state=usage_limit_state,
+        ),
+        AccountState(
+            "policy-available",
+            AccountStatus.ACTIVE,
+            used_percent=0.0,
+            primary_window_minutes=300,
+            usage_limit_state=AccountUsageLimitState.AVAILABLE,
+        ),
+        AccountState(
+            "policy-disabled",
+            AccountStatus.ACTIVE,
+            used_percent=0.0,
+            primary_window_minutes=300,
+            usage_limit_state=AccountUsageLimitState.DISABLED,
+        ),
+    ]
+
+    actions = plan_shadow_actions(
+        settings=settings,
+        states=states,
+        demand_forecast=_forecast(now, peak_at=peak_at),
+        now=now,
+    )
+
+    baseline_actions = plan_shadow_actions(
+        settings=settings,
+        states=states[1:],
+        demand_forecast=_forecast(now, peak_at=peak_at),
+        now=now,
+    )
+
+    assert {action.account_id for action in actions} == {"policy-available", "policy-disabled"}
+    assert actions == baseline_actions
+
+
 def test_plan_shadow_actions_uses_observed_window_duration() -> None:
     settings = PlannerSettings(
         mode="shadow",
@@ -432,6 +570,37 @@ def test_simulation_sums_capacity_for_matching_reset_epochs() -> None:
 
     assert simulation.served_units == pytest.approx(120.0)
     assert simulation.unmet_demand == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    "usage_limit_state",
+    [AccountUsageLimitState.REACHED, AccountUsageLimitState.DATA_UNAVAILABLE],
+)
+def test_simulate_pool_excludes_accounts_blocked_by_usage_limit(
+    usage_limit_state: AccountUsageLimitState,
+) -> None:
+    now = datetime(2026, 5, 18, 9, 0, tzinfo=timezone.utc)
+    forecast = _forecast(now, peak_at=now, peak_units=60.0, hours=1)
+    states = [
+        AccountState(
+            "policy-blocked",
+            AccountStatus.ACTIVE,
+            used_percent=0.0,
+            primary_reset_at=int((now + timedelta(hours=1)).timestamp()),
+            primary_window_minutes=300,
+            usage_limit_state=usage_limit_state,
+        )
+    ]
+
+    simulation = simulate_pool(
+        settings=PlannerSettings(),
+        states=states,
+        demand_forecast=forecast,
+        now=now,
+    )
+
+    assert simulation.served_units == pytest.approx(0.0)
+    assert simulation.unmet_demand == pytest.approx(60.0)
 
 
 def test_simulate_pool_does_not_use_future_warmup_before_start() -> None:

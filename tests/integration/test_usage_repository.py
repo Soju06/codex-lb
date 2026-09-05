@@ -1196,6 +1196,41 @@ async def test_trends_by_bucket_uses_latest_sample_window_metadata(db_setup):
 
 
 @pytest.mark.asyncio
+async def test_trends_by_bucket_excludes_no_data_placeholders(db_setup):
+    recorded_at = datetime(2026, 1, 1, 12, 0, 0)
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc_placeholder_trend"))
+        await repo.add_entry(
+            "acc_placeholder_trend",
+            40.0,
+            window="primary",
+            reset_at=9999,
+            window_minutes=300,
+            recorded_at=recorded_at,
+        )
+        await repo.add_entry(
+            "acc_placeholder_trend",
+            0.0,
+            window="primary",
+            reset_at=None,
+            window_minutes=None,
+            recorded_at=recorded_at + timedelta(minutes=5),
+        )
+
+        trends = await repo.trends_by_bucket(
+            since=recorded_at - timedelta(minutes=1),
+            bucket_seconds=86400,
+            window="primary",
+        )
+
+    assert len(trends) == 1
+    assert trends[0].samples == 1
+    assert trends[0].avg_used_percent == pytest.approx(40.0)
+
+
+@pytest.mark.asyncio
 async def test_trends_by_bucket_sqlite_avoids_window_function_for_latest_metadata(db_setup):
     recorded_at = datetime(2026, 1, 1, 12, 0, 0)
     statements: list[str] = []
@@ -1752,3 +1787,74 @@ async def test_list_quota_keys_postgres_loose_scan_matches_distinct(db_setup):
     assert "codex_spark" in since_keys
     emitted_sql = "\n".join(statements).lower()
     assert "distinct" not in emitted_sql
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", ["primary", "secondary"])
+@pytest.mark.parametrize(
+    ("middle_reset", "middle_minutes", "expected"),
+    [(None, None, 1.0), (None, 0, 1.0), (None, -1, 1.0), (None, 300, 71.0), (1234567890, None, 71.0)],
+    ids=["missing", "zero-window", "negative-window", "measured-zero-window", "measured-zero-reset"],
+)
+async def test_positive_demand_deltas_filter_unknown_before_lag(
+    db_setup,
+    window,
+    middle_reset,
+    middle_minutes,
+    expected,
+):
+    now = utcnow()
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("delta-quality"))
+        repo = UsageRepository(session)
+        for index, (used, reset, minutes) in enumerate(
+            [
+                (70.0, 1234567890, 10080),
+                (0.0, middle_reset, middle_minutes),
+                (71.0, 1234567890, 10080),
+            ]
+        ):
+            await repo.add_entry(
+                "delta-quality",
+                used,
+                window=window,
+                recorded_at=now + timedelta(seconds=index),
+                reset_at=reset,
+                window_minutes=minutes,
+            )
+        result = await repo.positive_used_percent_deltas_by_account(
+            {"delta-quality": window},
+            since=now - timedelta(seconds=1),
+            until=now + timedelta(seconds=3),
+        )
+        assert result == {"delta-quality": expected}
+
+
+@pytest.mark.asyncio
+async def test_history_and_aggregates_share_measurement_quality_rules(db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("history-quality"))
+        repo = UsageRepository(session)
+        for index, (used, minutes) in enumerate([(70, 300), (0, None), (71, 300), (0, 300)]):
+            await repo.add_entry(
+                "history-quality",
+                used,
+                window="primary",
+                window_minutes=minutes,
+                recorded_at=now + timedelta(seconds=index),
+            )
+        history = await repo.history_since("history-quality", "primary", now)
+        bulk = await repo.bulk_history_since(["history-quality"], "primary", now)
+        aggregate = await repo.aggregate_since(now, "primary")
+        assert [row.used_percent for row in history] == [70, 71, 0]
+        assert [row.used_percent for row in bulk["history-quality"]] == [70, 71, 0]
+        assert len(aggregate) == 1
+        assert aggregate[0].samples == 3
+        assert aggregate[0].used_percent_avg == 47
+        # Current authorization must still see explicit unknowns, not silently
+        # fall back to an older measured sample.
+        await repo.add_entry("history-quality", 0, window="primary", recorded_at=now + timedelta(seconds=4))
+        snapshot = await repo.account_usage_limit_snapshot("history-quality")
+        assert snapshot is not None and snapshot.primary is not None
+        assert snapshot.primary.used_percent is None

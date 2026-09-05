@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
 
+from app.core.balancer.logic import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import (  # noqa: F401
@@ -89,6 +90,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_key_strength,
     _http_bridge_payload_looks_like_full_resend,
     _http_bridge_precreated_retry_failure_error,
+    _http_bridge_previous_response_owner_unavailable_error,
     _http_bridge_prewarm_enabled,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
@@ -230,10 +232,12 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
 )
-from app.modules.proxy.load_balancer import effective_account_concurrency_caps
+from app.modules.proxy.load_balancer import AccountSelection, effective_account_concurrency_caps
+from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
 )
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 
 logger = logging.getLogger("app.modules.proxy.service")
 
@@ -412,13 +416,46 @@ def _http_bridge_hard_continuity_full_history_recovery_error() -> OpenAIErrorEnv
     )
 
 
+def _http_bridge_usage_limit_authorization_failed_error() -> ProxyResponseError:
+    return ProxyResponseError(
+        503,
+        openai_error(
+            "account_usage_limit_authorization_failed",
+            "Unable to verify account usage limit; retry later.",
+            error_type="server_error",
+        ),
+    )
+
+
+def _ensure_http_bridge_session_owner_authorized(
+    session: "_HTTPBridgeSession",
+    owner_authorization: OwnerAuthorization,
+) -> None:
+    if owner_authorization.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
+        raise _http_bridge_usage_limit_authorization_failed_error()
+    if owner_authorization.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE:
+        session.upstream_control.reconnect_requested = True
+        session.upstream_control.retire_after_drain = True
+        raise _http_bridge_previous_response_owner_unavailable_error()
+    if owner_authorization.allowed:
+        return
+    session.upstream_control.reconnect_requested = True
+    session.upstream_control.retire_after_drain = True
+    status_code, error_payload = selection_failure_response(
+        AccountSelection(
+            account=None,
+            error_message=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
+            error_code=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
+        )
+    )
+    raise ProxyResponseError(status_code, error_payload)
+
+
 async def _rollback_http_bridge_recovery_turn_state_registration(
     service: Any,
     receipt: DurableBridgeAliasRegistrationReceipt,
 ) -> tuple[bool, asyncio.CancelledError | None]:
-    rollback_task = asyncio.create_task(
-        service._durable_bridge.rollback_recovery_turn_state_registration(receipt=receipt)
-    )
+    rollback_task = asyncio.create_task(service._rollback_http_bridge_recovery_turn_state_registration(receipt))
     return await _await_task_deferring_cancellation(rollback_task)
 
 
@@ -1907,16 +1944,18 @@ class _HTTPBridgeRequestSubmitMixin:
             # critical section (issue #1971) — and only when the reacquire can
             # actually run: a session already holding its lease never depended
             # on a settings read to admit a turn.
-            fair_share_threshold_pct = (
-                await self._http_bridge_fair_share_threshold_pct(session) if needs_stream_lease else 0
-            )
-            async with session.pending_lock:
-                await self._ensure_http_bridge_session_stream_lease_locked(
-                    session,
-                    request_state=request_state,
-                    fair_share_threshold_pct=fair_share_threshold_pct,
-                )
-        except BaseException:
+            fair_share_threshold_pct = 0
+            if needs_stream_lease:
+                fair_share_threshold_pct = await self._http_bridge_fair_share_threshold_pct(session)
+                owner_authorization = await self._fresh_http_bridge_owner_authorization(session)
+                async with session.pending_lock:
+                    await self._ensure_http_bridge_session_stream_lease_locked(
+                        session,
+                        request_state=request_state,
+                        fair_share_threshold_pct=fair_share_threshold_pct,
+                        owner_authorization=owner_authorization,
+                    )
+        except BaseException as exc:
             # Recovery claims are made before admission. If reacquiring an
             # idle session's stream lease fails, no upstream frame can have
             # been sent; restore that claim before propagating the admission
@@ -1934,6 +1973,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
             )
             await _await_task_deferring_cancellation(cleanup_task)
+            if isinstance(exc, ProxyResponseError) and not owned_unanchored_handoff:
+                if session.upstream_control.retire_after_drain and not session.upstream_close_attempted:
+                    await self._retire_http_bridge_after_drain_if_ready(session)
             raise
         try:
             await self._maybe_prewarm_http_bridge_session(
@@ -1955,14 +1997,24 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
             )
             await _await_task_deferring_cancellation(cleanup_task)
+            if (
+                not owned_unanchored_handoff
+                and session.upstream_control.retire_after_drain
+                and not session.upstream_close_attempted
+            ):
+                await self._retire_http_bridge_after_drain_if_ready(session)
             raise
         try:
-            # Reuses the pre-prewarm snapshot: the registered admission waiter
-            # kept the lease from idle release, so this reacquire is a no-op
-            # unless the session closed mid-prewarm — a fresh refresh here
-            # could only stall an otherwise admissible request on a
-            # TTL-expired settings read (issue #1971).
+            # The fair-share snapshot remains reusable across prewarm, but the
+            # account policy is re-read immediately before queue admission.
+            owner_authorization = await self._fresh_http_bridge_owner_authorization(session)
             async with session.pending_lock:
+                await self._ensure_http_bridge_session_stream_lease_locked(
+                    session,
+                    request_state=request_state,
+                    fair_share_threshold_pct=fair_share_threshold_pct,
+                    owner_authorization=owner_authorization,
+                )
                 if session.queued_request_count >= queue_limit:
                     _log_http_bridge_event(
                         "bridge_queue_full",
@@ -1981,11 +2033,6 @@ class _HTTPBridgeRequestSubmitMixin:
                             error_type="rate_limit_error",
                         ),
                     )
-                await self._ensure_http_bridge_session_stream_lease_locked(
-                    session,
-                    request_state=request_state,
-                    fair_share_threshold_pct=fair_share_threshold_pct,
-                )
                 session.queued_request_count += 1
                 if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                     session.unanchored_reservation_id = None
@@ -2003,6 +2050,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
             )
             await _await_task_deferring_cancellation(cleanup_task)
+            if (
+                not owned_unanchored_handoff
+                and session.upstream_control.retire_after_drain
+                and not session.upstream_close_attempted
+            ):
+                await self._retire_http_bridge_after_drain_if_ready(session)
             raise
         try:
             text_data = await self._inline_http_bridge_image_urls(text_data, request_state)
@@ -2338,6 +2391,8 @@ class _HTTPBridgeRequestSubmitMixin:
                                 ),
                                 retry_after_seconds=suppressed_retry_after_seconds,
                             )
+                    owner_authorization = await self._fresh_http_bridge_owner_authorization(session)
+                    _ensure_http_bridge_session_owner_authorized(session, owner_authorization)
                     async with session.pending_lock:
                         session.pending_requests.append(request_state)
                         session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
@@ -2383,16 +2438,18 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.recovery_attempt_dispatched = True
                     request_state.operation_dispatched = request_state.operation_id is not None
                     session.last_used_at = _service_time().monotonic()
-                except asyncio.CancelledError:
+                except BaseException as exc:
                     if recovery_receipt is not None and not upstream_send_started:
-                        session.closed = True
-                        session.upstream_control.reconnect_requested = True
-                        session.upstream_control.retire_after_drain = True
+                        if isinstance(exc, asyncio.CancelledError):
+                            session.closed = True
+                            session.upstream_control.reconnect_requested = True
+                            session.upstream_control.retire_after_drain = True
+                        rollback_cancellation: asyncio.CancelledError | None = None
                         async with session.recovery_alias_lock:
                             try:
                                 (
                                     rolled_back,
-                                    _rollback_cancellation,
+                                    rollback_cancellation,
                                 ) = await _rollback_http_bridge_recovery_turn_state_registration(
                                     self,
                                     recovery_receipt,
@@ -2400,10 +2457,13 @@ class _HTTPBridgeRequestSubmitMixin:
                             except Exception:
                                 rolled_back = False
                                 logger.warning(
-                                    "Failed to roll back cancelled HTTP bridge recovery alias",
+                                    "Failed to roll back HTTP bridge recovery alias before dispatch",
                                     exc_info=True,
                                 )
                             if not rolled_back:
+                                session.closed = True
+                                session.upstream_control.reconnect_requested = True
+                                session.upstream_control.retire_after_drain = True
                                 _record_continuity_fail_closed(
                                     surface="http_bridge",
                                     reason="recovery_alias_rollback_failed",
@@ -2411,6 +2471,11 @@ class _HTTPBridgeRequestSubmitMixin:
                                     session_id=request_state.session_id,
                                     upstream_error_code="bridge_continuity_persistence_failed",
                                 )
+                        if rollback_cancellation is not None:
+                            session.closed = True
+                            session.upstream_control.reconnect_requested = True
+                            session.upstream_control.retire_after_drain = True
+                            raise rollback_cancellation
                     raise
         except ProxyResponseError:
             await self._cleanup_http_bridge_submit_interruption(
@@ -2662,6 +2727,8 @@ class _HTTPBridgeRequestSubmitMixin:
                         )
                         gate_acquired = False
                         return
+                    owner_authorization = await self._fresh_http_bridge_owner_authorization(session)
+                    _ensure_http_bridge_session_owner_authorized(session, owner_authorization)
                     async with session.pending_lock:
                         session.pending_requests.append(warmup_state)
                     request_enqueued = True
@@ -2955,12 +3022,32 @@ class _HTTPBridgeRequestSubmitMixin:
             return 0
         return _api_key_fair_share_threshold_pct_from_settings(await _service_get_settings_cache().get())
 
+    async def _fresh_http_bridge_owner_authorization(
+        self: Any,
+        session: "_HTTPBridgeSession",
+    ) -> OwnerAuthorization:
+        load_balancer = getattr(self, "_load_balancer", None)
+        if load_balancer is None:
+            return OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)
+        try:
+            return await load_balancer.authorize_account_fresh(session.account.id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Failed to authorize HTTP bridge request against account usage limit account_id=%s",
+                session.account.id,
+                exc_info=True,
+            )
+            raise _http_bridge_usage_limit_authorization_failed_error()
+
     async def _ensure_http_bridge_session_stream_lease_locked(
         self: Any,
         session: "_HTTPBridgeSession",
         *,
         request_state: _WebSocketRequestState | None = None,
         fair_share_threshold_pct: int | None = None,
+        owner_authorization: OwnerAuthorization,
     ) -> None:
         """Reacquire the account stream lease for a session idled between turns.
 
@@ -2979,6 +3066,10 @@ class _HTTPBridgeRequestSubmitMixin:
         admission again. Denial raises the standard local-cap envelope so the
         existing recoverable capacity wait applies.
 
+        An idle session is revalidated before reacquiring its lease. Every turn,
+        including one whose session still holds a lease, is then revalidated
+        immediately before queue admission and again at the dispatch boundary.
+
         The lease stays per-session (one upstream stream): a session that
         already holds a lease admits further queued turns without acquiring
         another, because those turns multiplex over the session's single
@@ -2991,10 +3082,11 @@ class _HTTPBridgeRequestSubmitMixin:
         fair-share denial raises the standard local-cap envelope with the
         fair-share code so the recoverable capacity wait applies.
         """
-        if session.account_lease is not None or session.closed:
-            return
         load_balancer = getattr(self, "_load_balancer", None)
         if load_balancer is None:
+            return
+        _ensure_http_bridge_session_owner_authorized(session, owner_authorization)
+        if session.account_lease is not None or session.closed:
             return
         api_key_id = session.key.api_key_id
         if api_key_id is None:

@@ -233,6 +233,14 @@ def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
     point; a live sampler is not needed to attribute it.
     """
 
+    def _live_connection_info(conn: object) -> dict[str, object] | None:
+        # Connection.info may reconnect an invalidated driver connection. A
+        # cancelled statement requires rollback first; diagnostics must never
+        # prevent that rollback with PendingRollbackError or ResourceClosedError.
+        if getattr(conn, "invalidated", False) or getattr(conn, "closed", False):
+            return None
+        return getattr(conn, "info", None)
+
     @event.listens_for(engine, "after_cursor_execute")
     def _track_write_statements(
         conn: object,
@@ -250,7 +258,7 @@ def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
         stripped = statement.lstrip().lower()
         if not stripped.startswith(_SQLITE_WRITE_STATEMENT_PREFIXES):
             return
-        info = getattr(conn, "info", None)
+        info = _live_connection_info(conn)
         if info is None:
             return
         preview = statement[:_SQLITE_WATCHDOG_STATEMENT_PREVIEW_CHARS]
@@ -285,7 +293,7 @@ def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
         # report and finalize it at the first proof the DBAPI transaction ended:
         # the connection's next transaction beginning, or the connection going
         # back to the pool.
-        info = getattr(conn, "info", None)
+        info = _live_connection_info(conn)
         if info is None:
             return
         started_at = info.pop("sqlite_write_started_at", None)
@@ -313,7 +321,7 @@ def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
 
     @event.listens_for(engine, "begin")
     def _finalize_on_next_begin(conn: object) -> None:
-        info = getattr(conn, "info", None)
+        info = _live_connection_info(conn)
         if info is not None:
             _finalize_pending_report(info)
 
@@ -329,7 +337,7 @@ def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
         # rollback; the pending report marked at the commit event must not
         # claim a durable commit that never happened.
         connection = getattr(exception_context, "connection", None)
-        info = getattr(connection, "info", None) if connection is not None else None
+        info = _live_connection_info(connection) if connection is not None else None
         if info is None:
             return
         pending = info.get("sqlite_write_pending_report")

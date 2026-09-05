@@ -220,6 +220,7 @@ async def test_delete_api_marks_and_hides_immediately(async_client, db_setup):
     assert (await async_client.put(f"{base}/alias", json={"alias": "ghost"})).status_code == 404
     assert (await async_client.put(f"{base}/limit-warmup", json={"enabled": True})).status_code == 404
     assert (await async_client.put(f"{base}/routing-policy", json={"routingPolicy": "preserve"})).status_code == 404
+    assert (await async_client.put(f"{base}/usage-limit", json={"enabled": True, "percent": 10})).status_code == 404
 
 
 def _fake_id_token(payload: dict) -> str:

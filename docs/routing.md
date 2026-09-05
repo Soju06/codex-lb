@@ -47,6 +47,45 @@ When enabled and several accounts are otherwise eligible, selection is restricte
 
 Limit warm-up sends **one small real request** (using the configured warm-up model and prompt) to an opted-in account when one of its quota windows is confirmed to have newly reset, verifying that the account responds. It consumes a small amount of quota. The optional staggered idle mode additionally pre-starts the 5h window of idle opted-in accounts before traffic arrives; the configured cooldown applies to these staggered idle probes, while ordinary reset-confirmed probes fire once per confirmed reset. Accounts opt in individually (`Enable warm-up` in account actions); the last attempt's result, model, and time are shown on the account list entry.
 
+## Reserve quota on individual accounts
+
+On the **Accounts** page, an account can have an optional maximum-used
+percentage. For example, a limit of `10%` reserves roughly 90% of that
+account's standard quota for direct use.
+
+When enabled, the limit is a hard routing gate for every strategy, including
+sticky and single-account routing. Codex LB stops selecting the account once a
+current standard quota window reports usage at or above the configured
+percentage. It also stops selecting the account when current usage data is
+missing or stale (fail-closed) until a fresh observation restores eligibility.
+The account's upstream status is not changed.
+
+You can disable a configured limit without forgetting its percentage, or remove
+it to clear the value. Because upstream usage is observed after requests finish,
+delayed reporting and requests already in flight can move actual usage past the
+displayed limit before the gate sees it.
+
+The cap also applies to new turns on existing HTTP/WebSocket connections and to
+public, limit-reset, and quota-planner warmups. A continuation that requires a
+capped owner is rejected rather than silently moved to another account. An
+unavailable or deleted owner is reported separately from a reached cap.
+
+An enabled `100%` limit is **not** the same as disabling the feature: it still
+requires current telemetry and blocks at 100%. Missing telemetry is not treated
+as a real zero-percent measurement in usage history or demand calculations.
+
+After a save, the account list refreshes authoritative data. Older outstanding
+reads cannot revert the acknowledged policy, and overlapping policy edits are
+applied in order. Fresh owner checks read committed configuration directly;
+ordinary selection on another replica may briefly retain cached inputs until
+invalidation or cache expiry. Work already dispatched is not cancelled.
+
+`account_usage_limit_reached` means the local policy blocks the account (because
+the cap is reached or current telemetry is unavailable).
+`account_usage_limit_authorization_failed` means the local authorization read
+could not be completed; retry after the database/service recovers. It is not an
+upstream HTTP response.
+
 ---
 
 *Specs: [account-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-routing) · [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture) · [usage-refresh-policy](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/usage-refresh-policy)*

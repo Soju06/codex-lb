@@ -101,6 +101,27 @@ _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]
 _LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset(
     {"account_response_create_cap", "account_stream_cap", "api_key_stream_fair_share"}
 )
+_LOCAL_PROXY_ERROR_CODES = frozenset(
+    {
+        "bridge_owner_forward_failed",
+        "bridge_instance_mismatch",
+        "bridge_owner_unreachable",
+        "preferred_account_unavailable",
+        "previous_response_owner_unavailable",
+        "insufficient_image_quota",
+        "ip_forbidden",
+        "no_accounts",
+        "no_plan_support_for_model",
+        "additional_quota_data_unavailable",
+        "account_usage_limit_reached",
+        "account_usage_limit_authorization_failed",
+        "no_additional_quota_eligible_accounts",
+        "payload_too_large",
+        "proxy_overloaded",
+        "upstream_request_timeout",
+        "upstream_unavailable",
+    }
+)
 _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE = "account_model_unsupported"
 _PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar(
     "propagated_capacity_startup_wait",

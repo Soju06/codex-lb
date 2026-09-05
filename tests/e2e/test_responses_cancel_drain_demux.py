@@ -14,8 +14,11 @@ import anyio
 import pytest
 
 from app.core.clients.proxy_websocket import UpstreamWebSocket
+from app.core.config.settings import Settings
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.db.models import AccountStatus
 from app.modules.proxy import service as proxy_service
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 
 pytestmark = pytest.mark.e2e
 
@@ -182,8 +185,20 @@ def _make_session(upstream: _CancelThenRetryUpstreamWebSocket) -> proxy_service.
 
 
 @pytest.mark.asyncio
-async def test_cancelled_http_bridge_stream_retires_before_retry_can_share_upstream() -> None:
+async def test_cancelled_http_bridge_stream_retires_before_retry_can_share_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=Settings())),
+    )
+    service._load_balancer.authorize_account_fresh = AsyncMock(
+        return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+    )
+    service._load_balancer.acquire_account_lease = AsyncMock(return_value=cast(Any, object()))
+    service._load_balancer.release_account_lease = AsyncMock()
     service._finalize_websocket_request_state = cast(Any, AsyncMock())
     upstream = _CancelThenRetryUpstreamWebSocket()
     session = _make_session(upstream)

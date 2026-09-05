@@ -76,11 +76,16 @@ class _QueuedSnapshot:
     snapshot: LiveRateLimitSnapshot
 
 
-def _fingerprint(snapshot: LiveRateLimitSnapshot) -> tuple[object, ...]:
+def _fingerprint(
+    snapshot: LiveRateLimitSnapshot,
+    *,
+    exact_usage: bool = False,
+) -> tuple[object, ...]:
     def window_key(window: LiveUsageWindow | None) -> tuple[object, ...] | None:
         if window is None:
             return None
-        return (round(window.used_percent, 2), window.window_minutes, window.reset_at)
+        used_percent = window.used_percent if exact_usage else round(window.used_percent, 2)
+        return (used_percent, window.window_minutes, window.reset_at)
 
     return (
         window_key(snapshot.primary),
@@ -107,7 +112,7 @@ class LiveUsageIngestor:
     ) -> None:
         self._queue: asyncio.Queue[_QueuedSnapshot] = asyncio.Queue(maxsize=max(1, queue_size))
         self._write_min_interval_seconds = write_min_interval_seconds
-        self._last_write: dict[str, tuple[tuple[object, ...], float]] = {}
+        self._last_write: dict[str, tuple[LiveRateLimitSnapshot, float]] = {}
         self._consumer: asyncio.Task[None] | None = None
         self._dropped = 0
         self._last_cache_invalidation = 0.0
@@ -121,7 +126,7 @@ class LiveUsageIngestor:
         chatgpt_account_id: str | None = None,
     ) -> None:
         item = _QueuedSnapshot(account_id=account_id, chatgpt_account_id=chatgpt_account_id, snapshot=snapshot)
-        if account_id is not None and self._should_skip(account_id, snapshot):
+        if account_id is not None and self._should_skip(account_id, snapshot, exact_usage=True):
             return
         try:
             self._queue.put_nowait(item)
@@ -160,12 +165,21 @@ class LiveUsageIngestor:
                 except asyncio.CancelledError:
                     pass
 
-    def _should_skip(self, account_id: str, snapshot: LiveRateLimitSnapshot) -> bool:
-        last = self._last_write.get(account_id)
-        if last is None:
+    def _should_skip(
+        self,
+        account_id: str,
+        snapshot: LiveRateLimitSnapshot,
+        *,
+        exact_usage: bool,
+    ) -> bool:
+        previous = self._last_write.get(account_id)
+        if previous is None:
             return False
-        fingerprint, written_at = last
-        if fingerprint != _fingerprint(snapshot):
+        previous_snapshot, written_at = previous
+        if _fingerprint(previous_snapshot, exact_usage=exact_usage) != _fingerprint(
+            snapshot,
+            exact_usage=exact_usage,
+        ):
             return False
         return time.monotonic() - written_at < self._write_min_interval_seconds
 
@@ -240,23 +254,28 @@ class LiveUsageIngestor:
             )
 
         async with get_background_session() as session:
-            account_id = await UsageRepository(session).settle_live_account_snapshot(
+            usage_repo = UsageRepository(session)
+            settlement = await usage_repo.settle_live_account_snapshot(
                 account_id=item.account_id,
                 chatgpt_account_id=item.chatgpt_account_id,
                 windows=windows,
-                should_skip=lambda resolved: self._should_skip(resolved, snapshot),
+                should_skip=lambda resolved, usage_limit_enabled: self._should_skip(
+                    resolved,
+                    snapshot,
+                    exact_usage=usage_limit_enabled,
+                ),
             )
-        if account_id is None:
+        if settlement is None:
             return
-        self._last_write[account_id] = (_fingerprint(snapshot), time.monotonic())
+        account_id = settlement.account_id
+        self._last_write[account_id] = (snapshot, time.monotonic())
         await self._invalidate_caches_throttled()
 
     async def _invalidate_caches_throttled(self) -> None:
         # Invalidations are throttled, but every write must still be covered:
         # a write inside the throttle window schedules one trailing
-        # invalidation at window expiry, so cached selection inputs and
-        # downstream x-codex-* headers are stale for at most the throttle
-        # interval rather than the header cache TTL.
+        # invalidation at window expiry, so selection and header caches lag a
+        # committed observation by at most this fixed bound.
         now = time.monotonic()
         remaining = _CACHE_INVALIDATION_MIN_INTERVAL_SECONDS - (now - self._last_cache_invalidation)
         if remaining <= 0:

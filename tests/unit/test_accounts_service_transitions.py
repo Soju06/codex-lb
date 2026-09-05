@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from app.db.models import AccountStatus
+from app.modules.accounts.repository import AccountUsageLimitConfiguration
 from app.modules.accounts.service import AccountsService, AccountStateTransitionError
 
 pytestmark = pytest.mark.unit
@@ -79,3 +80,34 @@ async def test_reactivate_account_rejects_reauth_required_account() -> None:
         await service.reactivate_account(_ACCOUNT_ID)
 
     repo.update_status_if_current.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_usage_limit_invalidates_local_and_peer_selection_caches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = AsyncMock()
+    configuration = AccountUsageLimitConfiguration(enabled=True, percent=10.0)
+    repo.update_usage_limit.return_value = configuration
+    cache = Mock()
+    bump = AsyncMock()
+    monkeypatch.setattr("app.modules.accounts.service.get_account_selection_cache", lambda: cache)
+    monkeypatch.setattr("app.modules.accounts.service.bump_cache_invalidation_local", bump)
+    service = AccountsService(repo=repo)
+
+    result = await service.set_usage_limit(
+        _ACCOUNT_ID,
+        enabled=True,
+        percent=10.0,
+        update_percent=True,
+    )
+
+    assert result == configuration
+    repo.update_usage_limit.assert_awaited_once_with(
+        _ACCOUNT_ID,
+        enabled=True,
+        percent=10.0,
+        update_percent=True,
+    )
+    cache.invalidate.assert_called_once_with(propagate=False)
+    bump.assert_awaited_once_with("account_selection")

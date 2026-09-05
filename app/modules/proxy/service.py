@@ -561,6 +561,7 @@ from app.modules.proxy._service.streaming.retry import (
 )
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _LOCAL_PROXY_ERROR_CODES,  # noqa: F401
     _REQUEST_TRANSPORT_WEBSOCKET,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
@@ -2195,27 +2196,6 @@ def _proxy_response_error_code(exc: ProxyResponseError) -> str | None:
     if error is None:
         return None
     return _normalize_error_code(error.code, error.type)
-
-
-_LOCAL_PROXY_ERROR_CODES = frozenset(
-    {
-        "bridge_owner_forward_failed",
-        "bridge_instance_mismatch",
-        "bridge_owner_unreachable",
-        "preferred_account_unavailable",
-        "previous_response_owner_unavailable",
-        "insufficient_image_quota",
-        "ip_forbidden",
-        "no_accounts",
-        "no_plan_support_for_model",
-        "additional_quota_data_unavailable",
-        "no_additional_quota_eligible_accounts",
-        "payload_too_large",
-        "proxy_overloaded",
-        "upstream_request_timeout",
-        "upstream_unavailable",
-    }
-)
 
 
 def _request_log_failure_metadata(

@@ -21,7 +21,12 @@ from app.core.auth import (
 )
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.auth.refresh import RefreshError
-from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
+from app.core.cache.invalidation import (
+    NAMESPACE_ACCOUNT_SELECTION,
+    NAMESPACE_API_KEY,
+    bump_cache_invalidation_local,
+    get_cache_invalidation_poller,
+)
 from app.core.clients.http import lease_http_session
 from app.core.clients.usage import (
     ConsumeRateLimitResetCreditResponse,
@@ -42,7 +47,7 @@ from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.deletion import request_account_deletion_run
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
-from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.repository import AccountsRepository, AccountUsageLimitConfiguration
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAdditionalWindow,
@@ -76,6 +81,7 @@ from app.modules.usage.additional_quota_keys import (
     get_additional_display_label_for_quota_key,
     get_additional_quota_routing_policy,
 )
+from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater
 
@@ -677,6 +683,25 @@ class AccountsService:
             get_account_selection_cache().invalidate()
         return result
 
+    async def set_usage_limit(
+        self,
+        account_id: str,
+        *,
+        enabled: bool,
+        percent: float | None,
+        update_percent: bool,
+    ) -> AccountUsageLimitConfiguration | None:
+        result = await self._repo.update_usage_limit(
+            account_id,
+            enabled=enabled,
+            percent=percent,
+            update_percent=update_percent,
+        )
+        if result is not None:
+            get_account_selection_cache().invalidate(propagate=False)
+            await bump_cache_invalidation_local(NAMESPACE_ACCOUNT_SELECTION)
+        return result
+
     async def delete_account(self, account_id: str, *, delete_history: bool = False) -> bool:
         # Fast path: stamp the pending-deletion marker (terminal status, hidden
         # from listings, sticky/bridge cleanup) and return in milliseconds; the
@@ -804,8 +829,8 @@ class AccountsService:
         primary_entry = await self._usage_repo.latest_entry_for_account(account_id, window="primary")
         secondary_entry = await self._usage_repo.latest_entry_for_account(account_id, window="secondary")
         return (
-            primary_entry.used_percent if primary_entry is not None else None,
-            secondary_entry.used_percent if secondary_entry is not None else None,
+            usage_history_to_window_row(primary_entry).used_percent if primary_entry is not None else None,
+            usage_history_to_window_row(secondary_entry).used_percent if secondary_entry is not None else None,
         )
 
     async def _send_probe_request(

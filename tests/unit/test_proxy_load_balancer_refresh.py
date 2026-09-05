@@ -1441,7 +1441,8 @@ async def test_select_account_preserves_leased_runtime_for_removed_accounts() ->
 
 
 @pytest.mark.asyncio
-async def test_round_robin_does_not_serialize_concurrent_selection(monkeypatch) -> None:
+@pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "new-sticky-sessions"])
+async def test_round_robin_does_not_serialize_concurrent_selection(monkeypatch, sticky: bool) -> None:
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     account_a = _make_account("acc-round-robin-a", "a@example.com")
@@ -1516,14 +1517,18 @@ async def test_round_robin_does_not_serialize_concurrent_selection(monkeypatch) 
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
     start = asyncio.Event()
 
-    async def pick_account() -> str:
+    async def pick_account(sticky_key: str | None) -> str:
         await start.wait()
-        selection = await balancer.select_account(routing_strategy="round_robin")
+        selection = await balancer.select_account(
+            routing_strategy="round_robin",
+            sticky_key=sticky_key,
+            sticky_kind=StickySessionKind.CODEX_SESSION if sticky_key is not None else None,
+        )
         assert selection.account is not None
         return selection.account.id
 
-    first = asyncio.create_task(pick_account())
-    second = asyncio.create_task(pick_account())
+    first = asyncio.create_task(pick_account("round-robin-sticky-1" if sticky else None))
+    second = asyncio.create_task(pick_account("round-robin-sticky-2" if sticky else None))
     start.set()
     selected_ids = await asyncio.gather(first, second)
 

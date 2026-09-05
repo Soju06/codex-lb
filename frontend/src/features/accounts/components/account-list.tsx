@@ -22,9 +22,24 @@ import {
   type AccountSortMode,
 } from "@/features/accounts/sorting";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
-import { formatSlug } from "@/utils/formatters";
+import {
+  getAccountDisplayStatus,
+  type AccountDisplayStatus,
+} from "@/utils/account-status";
 
-const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota_exceeded", "reauth_required", "deactivated"];
+const STATUS_FILTER_OPTIONS = [
+  "all",
+  "active",
+  "paused",
+  "limited",
+  "exceeded",
+  "limitReached",
+  "usageUnavailable",
+  "reauth",
+  "deactivated",
+] as const satisfies readonly (AccountDisplayStatus | "all")[];
+
+type AccountStatusFilter = (typeof STATUS_FILTER_OPTIONS)[number];
 
 export type AccountListProps = {
   accounts: AccountSummary[];
@@ -51,7 +66,7 @@ export function AccountList({
 }: AccountListProps) {
   const { t } = useTranslation();
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<AccountStatusFilter>("all");
   const [helpOpen, setHelpOpen] = useState(false);
   const [chooserOpen, setChooserOpen] = useState(false);
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
@@ -60,7 +75,10 @@ export function AccountList({
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return sortAccountsForDisplay(accounts, quotaDisplay, activeSortMode).filter((account) => {
-      if (statusFilter !== "all" && account.status !== statusFilter) {
+      if (
+        statusFilter !== "all" &&
+        getAccountDisplayStatus(account.status, account.usageLimitState) !== statusFilter
+      ) {
         return false;
       }
       if (!needle) {
@@ -88,7 +106,10 @@ export function AccountList({
             className="h-8 pl-8"
           />
         </div>
-        <Select value={statusFilter} onValueChange={setStatusFilter}>
+        <Select
+          value={statusFilter}
+          onValueChange={(value) => setStatusFilter(value as AccountStatusFilter)}
+        >
           <SelectTrigger
             size="sm"
             className="w-full min-w-0"
@@ -99,7 +120,9 @@ export function AccountList({
           <SelectContent>
             {STATUS_FILTER_OPTIONS.map((option) => (
               <SelectItem key={option} value={option}>
-                {option === "all" ? t("accounts.list.allStatuses") : t(`accounts.statusFilters.${option}`, { defaultValue: formatSlug(option) })}
+                {option === "all"
+                  ? t("accounts.list.allStatuses")
+                  : t(`common.status.${option}`)}
               </SelectItem>
             ))}
           </SelectContent>

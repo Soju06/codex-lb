@@ -106,6 +106,13 @@ const AccountRoutingPolicyPayloadSchema = z.object({
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]),
 });
 
+const AccountUsageLimitPayloadSchema = z
+  .object({
+    enabled: z.boolean(),
+    percent: z.number().gt(0).max(100).nullable().optional(),
+  })
+  .refine((value) => !value.enabled || value.percent != null);
+
 const SettingsPayloadSchema = z.looseObject({
   stickyThreadsEnabled: z.boolean().optional(),
   upstreamStreamTransport: z
@@ -972,6 +979,44 @@ export const handlers = [
       return HttpResponse.json({
         accountId,
         routingPolicy: account.routingPolicy,
+      });
+    },
+  ),
+
+  http.put(
+    "/api/accounts/:accountId/usage-limit",
+    async ({ params, request }) => {
+      const accountId = String(params.accountId);
+      const account = findAccount(accountId);
+      if (!account) {
+        return HttpResponse.json(
+          {
+            error: { code: "account_not_found", message: "Account not found" },
+          },
+          { status: 404 },
+        );
+      }
+      const payload = await parseJsonBody(request, AccountUsageLimitPayloadSchema);
+      if (!payload) {
+        return HttpResponse.json(
+          {
+            error: {
+              code: "validation_error",
+              message: "Invalid account usage limit payload",
+            },
+          },
+          { status: 422 },
+        );
+      }
+      account.usageLimitEnabled = payload.enabled;
+      if (payload.percent !== undefined) {
+        account.usageLimitPercent = payload.percent;
+      }
+      account.usageLimitState = payload.enabled ? "available" : "disabled";
+      return HttpResponse.json({
+        accountId,
+        enabled: account.usageLimitEnabled,
+        percent: account.usageLimitPercent ?? null,
       });
     },
   ),

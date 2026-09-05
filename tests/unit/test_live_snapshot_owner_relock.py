@@ -8,6 +8,7 @@ from app.db.account_identity_lock import lock_postgresql_account_identities
 from app.modules.usage import repository as usage_repository_module
 from app.modules.usage.repository import (
     LiveSnapshotOwnerIdentityRelockError,
+    LiveSnapshotSettlement,
     UsageRepository,
     UsageWindowWrite,
 )
@@ -23,6 +24,7 @@ def _identity_result(account_id: str | None, chatgpt_account_id: str | None = No
         result.one_or_none.return_value = MagicMock(
             id=account_id,
             chatgpt_account_id=chatgpt_account_id,
+            usage_limit_enabled=True,
         )
     return result
 
@@ -37,12 +39,12 @@ def _postgresql_session(results: list[MagicMock]) -> MagicMock:
     return session
 
 
-async def _settle(session: MagicMock) -> str | None:
+async def _settle(session: MagicMock) -> LiveSnapshotSettlement | None:
     return await UsageRepository(session).settle_live_account_snapshot(
         account_id="acc-selected",
         chatgpt_account_id="workspace-x",
         windows=[UsageWindowWrite(window="primary", used_percent=25.0)],
-        should_skip=lambda _account_id: False,
+        should_skip=lambda _account_id, _usage_limit_enabled: False,
     )
 
 
@@ -62,7 +64,7 @@ async def test_postgresql_live_snapshot_same_identity_does_not_relock(
 
     resolved = await _settle(session)
 
-    assert resolved == "acc-selected"
+    assert resolved == LiveSnapshotSettlement(account_id="acc-selected", usage_limit_enabled=True)
     identity_lock.assert_awaited_once_with(session, ("workspace-x",))
     session.rollback.assert_not_awaited()
     session.commit.assert_awaited_once()
@@ -85,7 +87,7 @@ async def test_postgresql_live_snapshot_relocks_once_for_current_owner_identity(
 
     resolved = await _settle(session)
 
-    assert resolved == "acc-selected"
+    assert resolved == LiveSnapshotSettlement(account_id="acc-selected", usage_limit_enabled=True)
     assert identity_lock.await_args_list == [
         call(session, ("workspace-x",)),
         call(session, ("workspace-x", "workspace-y")),

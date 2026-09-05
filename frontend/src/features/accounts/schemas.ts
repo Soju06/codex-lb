@@ -65,6 +65,13 @@ export const AccountAdditionalQuotaSchema = z.object({
   secondaryWindow: AccountAdditionalWindowSchema.nullable().optional(),
 });
 
+export const AccountUsageLimitStateSchema = z.enum([
+  "disabled",
+  "available",
+  "reached",
+  "data_unavailable",
+]);
+
 export const AccountSummarySchema = z.object({
   accountId: z.string(),
   chatgptAccountId: z.string().nullable().optional(),
@@ -76,6 +83,9 @@ export const AccountSummarySchema = z.object({
   seatType: z.string().nullable().optional(),
   planType: z.string(),
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]).optional(),
+  usageLimitEnabled: z.boolean().optional(),
+  usageLimitPercent: z.number().gt(0).max(100).nullable().optional(),
+  usageLimitState: AccountUsageLimitStateSchema.optional(),
   status: z.string(),
   securityWorkAuthorized: z.boolean().optional(),
   usage: AccountUsageSchema.nullable().optional(),
@@ -263,6 +273,27 @@ export const AccountRoutingPolicyUpdateResponseSchema = z.object({
   routingPolicy: AccountRoutingPolicySchema,
 });
 
+export const AccountUsageLimitUpdateRequestSchema = z
+  .object({
+    enabled: z.boolean(),
+    percent: z.number().gt(0).max(100).nullable().optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.enabled && value.percent == null) {
+      context.addIssue({
+        code: "custom",
+        path: ["percent"],
+        message: "A percentage is required when the usage limit is enabled",
+      });
+    }
+  });
+
+export const AccountUsageLimitUpdateResponseSchema = z.object({
+  accountId: z.string(),
+  enabled: z.boolean(),
+  percent: z.number().gt(0).max(100).nullable(),
+});
+
 export const AccountUpdateRequestSchema = z.object({
   securityWorkAuthorized: z.boolean().optional(),
 });
@@ -343,6 +374,10 @@ export type ConsumeRateLimitResetCreditResponse = z.infer<
   typeof ConsumeRateLimitResetCreditResponseSchema
 >;
 export type AccountRoutingPolicy = z.infer<typeof AccountRoutingPolicySchema>;
+export type AccountUsageLimitState = z.infer<typeof AccountUsageLimitStateSchema>;
+export type AccountUsageLimitUpdateRequest = z.infer<
+  typeof AccountUsageLimitUpdateRequestSchema
+>;
 export type AccountAliasResponse = z.infer<typeof AccountAliasResponseSchema>;
 export type AccountLimitWarmupStatus = z.infer<
   typeof AccountLimitWarmupStatusSchema

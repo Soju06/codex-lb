@@ -13,6 +13,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { AccountUsageLimitControl } from "@/features/accounts/components/account-usage-limit-control";
 import {
   Select,
   SelectContent,
@@ -24,6 +25,7 @@ import { Switch } from "@/components/ui/switch";
 import type {
   AccountRoutingPolicy,
   AccountSummary,
+  AccountUsageLimitUpdateRequest,
 } from "@/features/accounts/schemas";
 import { formatSingleUnitRemaining } from "@/utils/formatters";
 
@@ -45,6 +47,10 @@ export type AccountActionsProps = {
     accountId: string,
     routingPolicy: AccountRoutingPolicy,
   ) => void;
+  onUsageLimitChange: (
+    accountId: string,
+    update: AccountUsageLimitUpdateRequest,
+  ) => void;
 };
 
 export function AccountActions({
@@ -62,6 +68,7 @@ export function AccountActions({
   onSecurityWorkAuthorizedChange,
   onLimitWarmupChange,
   onRoutingPolicyChange,
+  onUsageLimitChange,
 }: AccountActionsProps) {
   const { t } = useTranslation();
   const showOperatorRecoveryAction =
@@ -112,6 +119,13 @@ export function AccountActions({
           </Select>
         </div>
       ) : null}
+
+      <AccountUsageLimitControl
+        account={account}
+        busy={busy}
+        readOnly={readOnly}
+        onChange={onUsageLimitChange}
+      />
 
       <label
         htmlFor={`security-work-authorized-${account.accountId}`}

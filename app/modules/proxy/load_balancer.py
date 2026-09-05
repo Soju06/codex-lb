@@ -85,13 +85,15 @@ from app.modules.proxy._load_balancer.model_eligibility import (
 from app.modules.proxy._load_balancer.model_eligibility import (
     _mapped_model_has_registry_entry as _mapped_model_has_registry_entry_impl,
 )
+from app.modules.proxy._load_balancer.owner_authorization import load_fresh_owner_authorization
+from app.modules.proxy._load_balancer.selection_inputs import SelectionInputs as _SelectionInputs
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
     SelectionInputsProtocol,
     StickySelectionRequest,
     _account_cap_error_code,
     _clone_account,
-    _filter_states_for_account_caps,
+    _filter_states_for_usage_limit_and_account_caps,
     _select_account_preferring_budget_safe,
     _StickySelectionOutcome,
     run_sticky_selection_path,
@@ -152,13 +154,15 @@ from app.modules.proxy.fair_share import (
     evaluate_stream_fair_share,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
+from app.modules.proxy.selection_errors import OPPORTUNISTIC_BURN_WINDOW_CLOSED
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
     get_additional_quota_definition,
     get_additional_quota_routing_policy,
 )
-from app.modules.usage.mappers import usage_history_to_window_row
+from app.modules.usage.authorization import OwnerAuthorization
+from app.modules.usage.mappers import evaluate_account_usage_limit, usage_history_to_window_row
 
 if TYPE_CHECKING:
     from app.modules.accounts.repository import AccountsRepository
@@ -184,7 +188,6 @@ NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
 _ROUTING_POLICY_NORMAL = "normal"
 _ACCOUNT_ROUTING_POLICIES = frozenset({_ROUTING_POLICY_NORMAL, ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE})
 _ADDITIONAL_QUOTA_ROUTING_POLICIES = _ACCOUNT_ROUTING_POLICIES | frozenset({"inherit"})
-OPPORTUNISTIC_BURN_WINDOW_CLOSED = "opportunistic_burn_window_closed"
 CONTINUITY_OWNER_UNAVAILABLE = "continuity_owner_unavailable"
 CONTINUITY_OWNER_POLICY_CONFLICT = "continuity_owner_policy_conflict"
 _AMBIGUOUS_CONVERSATION_OWNER_CODE = "conversation_owner_unavailable"
@@ -219,42 +222,6 @@ class _AdditionalLimitFilterResult:
     latest_secondary: dict[str, AdditionalUsageHistory]
     error_code: str | None = None
     error_message: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _SelectionInputs(SelectionInputsProtocol):
-    accounts: list[Account]
-    latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
-    latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
-    latest_monthly: dict[str, UsageHistory]
-    # Resolve ownership before transient routing filters; keep that stronger
-    # candidate pool alongside the effective routing pool.
-    continuity_owner_candidates: list[Account] | None = None
-    # Sticky mutation authority precedes model/service-tier eligibility; keep
-    # it separate because a model-ineligible account can still own the raw row
-    # this authenticated request may retire.
-    sticky_mutation_authority_account_ids: frozenset[str] | None = None
-    quota_planner_settings: PlannerSettings = PlannerSettings()
-    runtime_accounts: list[Account] | None = None
-    error_message: str | None = None
-    error_code: str | None = None
-    ignore_standard_quota_account_ids: frozenset[str] = frozenset()
-    ignore_standard_quota_status: bool = False
-    persist_standard_quota_status: bool = True
-    routing_policy_override: str | None = None
-    quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
-
-    @property
-    def effective_continuity_owner_candidates(self) -> list[Account]:
-        if self.continuity_owner_candidates is None:
-            return self.accounts
-        return self.continuity_owner_candidates
-
-    @property
-    def effective_sticky_mutation_authority_account_ids(self) -> frozenset[str]:
-        if self.sticky_mutation_authority_account_ids is None:
-            return frozenset(account.id for account in self.effective_continuity_owner_candidates)
-        return self.sticky_mutation_authority_account_ids
 
 
 def _required_continuity_owner_failure(
@@ -354,6 +321,11 @@ class LoadBalancer:
                 return 0, 0, 0.0
             return runtime.inflight_response_creates, runtime.inflight_streams, runtime.leased_tokens
 
+    async def authorize_account_fresh(self, account_id: str) -> OwnerAuthorization:
+        return await load_fresh_owner_authorization(
+            self._repo_factory, account_id, refresh_interval_seconds=_usage_refresh_interval_seconds()
+        )
+
     def _acquire_account_lease_locked(
         self,
         account_id: str,
@@ -390,6 +362,11 @@ class LoadBalancer:
         _record_account_lease_acquired(kind)
         _record_account_inflight_leases(account_id, runtime)
         return lease
+
+    def _record_account_selection_locked(self, account_id: str) -> None:
+        runtime = self._runtime.setdefault(account_id, RuntimeState())
+        runtime.last_selected_at = time.time()
+        runtime.version += 1
 
     def _account_lease_allowed_locked(
         self,
@@ -576,7 +553,10 @@ class LoadBalancer:
         owner_restricted_selection = required_account_is_ownership_constraint or required_continuity_owner
         sticky_selection_may_resolve_owner = sticky_key is not None and sticky_kind == StickySessionKind.CODEX_SESSION
 
-        async def load_selection_inputs() -> _SelectionInputs:
+        async def load_selection_inputs() -> tuple[_SelectionInputs, int]:
+            # Stamp the snapshot before loading so any invalidation during the
+            # load or later selection work remains visible to the final gate.
+            selection_inputs_generation = self._selection_inputs_cache.generation
             selection_inputs = await self._load_selection_inputs(
                 model=model,
                 service_tier=service_tier,
@@ -610,73 +590,45 @@ class LoadBalancer:
                     account for account in selection_inputs.accounts if bool(account.security_work_authorized)
                 ]
                 if selection_inputs.accounts and not authorized_accounts:
-                    return _SelectionInputs(
+                    selection_inputs = replace(
+                        selection_inputs,
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
-                        latest_monthly=selection_inputs.latest_monthly,
                         continuity_owner_candidates=authorized_owner_candidates,
                         sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
-                        quota_planner_settings=selection_inputs.quota_planner_settings,
-                        runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
                         error_code="no_security_work_authorized_accounts",
                     )
-                selection_inputs = _SelectionInputs(
+                    return selection_inputs, selection_inputs_generation
+                selection_inputs = replace(
+                    selection_inputs,
                     accounts=authorized_accounts,
-                    latest_primary=selection_inputs.latest_primary,
-                    latest_secondary=selection_inputs.latest_secondary,
-                    latest_monthly=selection_inputs.latest_monthly,
                     continuity_owner_candidates=authorized_owner_candidates,
                     sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
-                    quota_planner_settings=selection_inputs.quota_planner_settings,
-                    runtime_accounts=selection_inputs.runtime_accounts,
-                    error_message=selection_inputs.error_message,
-                    error_code=selection_inputs.error_code,
-                    ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
-                    ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
-                    persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
-                    routing_policy_override=selection_inputs.routing_policy_override,
-                    quota_admitted_catalog_omission_account_ids=(
-                        selection_inputs.quota_admitted_catalog_omission_account_ids
-                    ),
                 )
             if excluded_ids and selection_inputs.accounts:
                 filtered_accounts = [account for account in selection_inputs.accounts if account.id not in excluded_ids]
                 if require_security_work_authorized and not filtered_accounts:
-                    return _SelectionInputs(
+                    selection_inputs = replace(
+                        selection_inputs,
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
-                        latest_monthly=selection_inputs.latest_monthly,
                         continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
                         sticky_mutation_authority_account_ids=(
                             selection_inputs.effective_sticky_mutation_authority_account_ids
                         ),
-                        quota_planner_settings=selection_inputs.quota_planner_settings,
-                        runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
                         error_code="no_security_work_authorized_accounts",
                     )
-                selection_inputs = _SelectionInputs(
+                    return selection_inputs, selection_inputs_generation
+                selection_inputs = replace(
+                    selection_inputs,
                     accounts=filtered_accounts,
-                    latest_primary=selection_inputs.latest_primary,
-                    latest_secondary=selection_inputs.latest_secondary,
-                    latest_monthly=selection_inputs.latest_monthly,
                     continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
                     sticky_mutation_authority_account_ids=(
                         selection_inputs.effective_sticky_mutation_authority_account_ids
-                    ),
-                    quota_planner_settings=selection_inputs.quota_planner_settings,
-                    runtime_accounts=selection_inputs.runtime_accounts,
-                    error_message=selection_inputs.error_message,
-                    error_code=selection_inputs.error_code,
-                    ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
-                    ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
-                    persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
-                    routing_policy_override=selection_inputs.routing_policy_override,
-                    quota_admitted_catalog_omission_account_ids=(
-                        selection_inputs.quota_admitted_catalog_omission_account_ids
                     ),
                 )
             if required_continuity_owner:
@@ -687,7 +639,7 @@ class LoadBalancer:
                 )
                 if failure is not None:
                     error_code, error_message = failure
-                    return replace(
+                    selection_inputs = replace(
                         selection_inputs,
                         accounts=[],
                         latest_primary={},
@@ -695,9 +647,10 @@ class LoadBalancer:
                         error_message=error_message,
                         error_code=error_code,
                     )
-            return selection_inputs
+                    return selection_inputs, selection_inputs_generation
+            return selection_inputs, selection_inputs_generation
 
-        selection_inputs = await load_selection_inputs()
+        selection_inputs, selection_inputs_generation = await load_selection_inputs()
         caps = concurrency_caps or effective_account_concurrency_caps()
         circuit_breaker_open = _is_upstream_circuit_breaker_open()
         if circuit_breaker_open:
@@ -843,6 +796,7 @@ class LoadBalancer:
                     api_key_id=api_key_id,
                     api_key_stream_fair_share_threshold_pct=api_key_stream_fair_share_threshold_pct,
                     selection_inputs=selection_inputs,
+                    selection_inputs_generation=selection_inputs_generation,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
                     allow_usage_exhaustion_error=allow_usage_exhaustion_error,
@@ -917,6 +871,7 @@ class LoadBalancer:
                     api_key_id=api_key_id,
                     api_key_stream_fair_share_threshold_pct=api_key_stream_fair_share_threshold_pct,
                     selection_inputs=selection_inputs,
+                    selection_inputs_generation=selection_inputs_generation,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
                     allow_usage_exhaustion_error=allow_usage_exhaustion_error,
@@ -1110,6 +1065,7 @@ class LoadBalancer:
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
+        clone_cached: bool = True,
     ) -> _SelectionInputs:
         mapped_limit_name = _gated_limit_name_for_model(model)
         effective_limit_name = additional_limit_name or mapped_limit_name
@@ -1130,7 +1086,7 @@ class LoadBalancer:
         )
         cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
-            return _clone_selection_inputs(cached)
+            return _clone_selection_inputs(cached) if clone_cached else cached
 
         load_generation = self._selection_inputs_cache.generation
 
@@ -1322,8 +1278,6 @@ class LoadBalancer:
             latest_monthly = await repos.usage.latest_by_account(window="monthly")
             if effective_limit_name:
                 model_allowed_plans = get_model_registry().plan_types_for_model(model) if model else None
-                latest_primary = additional_filter.latest_primary
-                latest_secondary = additional_filter.latest_secondary
                 quota_scoped_account_ids = frozenset(
                     account.id
                     for account in accounts
@@ -1361,6 +1315,16 @@ class LoadBalancer:
                 latest_monthly={account_id: clone_row(entry) for account_id, entry in latest_monthly.items()},
                 continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
                 sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
+                standard_latest_primary={
+                    account_id: clone_row(entry)
+                    for account_id, entry in standard_latest_primary.items()
+                    if account_id in ignore_standard_quota_account_ids
+                },
+                standard_latest_secondary={
+                    account_id: clone_row(entry)
+                    for account_id, entry in standard_latest_secondary.items()
+                    if account_id in ignore_standard_quota_account_ids
+                },
                 quota_planner_settings=quota_planner_settings,
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
                 ignore_standard_quota_account_ids=ignore_standard_quota_account_ids,
@@ -1407,18 +1371,21 @@ class LoadBalancer:
                 latest_primary=selection_inputs.latest_primary,
                 latest_secondary=selection_inputs.latest_secondary,
                 latest_monthly=selection_inputs.latest_monthly,
+                standard_latest_primary=selection_inputs.standard_latest_primary,
+                standard_latest_secondary=selection_inputs.standard_latest_secondary,
                 runtime=self._runtime,
                 routing_policy_override=selection_inputs.routing_policy_override,
                 ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
                 encryptor=self._encryptor,
             )
-            selection_states = _filter_states_for_account_caps(
+            selection_states, account_caps_exhausted = _filter_states_for_usage_limit_and_account_caps(
                 states,
                 lease_kind=lease_kind,
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
+                traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
             )
-            if not selection_states and states:
+            if account_caps_exhausted:
                 logger.warning(
                     "Account cap exhausted during opportunistic admission lease_kind=%s reason=%s candidates=%s",
                     lease_kind,
@@ -1455,7 +1422,7 @@ class LoadBalancer:
             return AccountSelection(
                 account=None,
                 error_message=result.error_message,
-                error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
+                error_code=result.error_code or OPPORTUNISTIC_BURN_WINDOW_CLOSED,
             )
         account = account_map.get(result.account.account_id)
         if account is None:
@@ -1611,6 +1578,8 @@ class LoadBalancer:
             latest_primary=selection_inputs.latest_primary,
             latest_secondary=selection_inputs.latest_secondary,
             latest_monthly=selection_inputs.latest_monthly,
+            standard_latest_primary=selection_inputs.standard_latest_primary,
+            standard_latest_secondary=selection_inputs.standard_latest_secondary,
             runtime=self._runtime,
             routing_policy_override=selection_inputs.routing_policy_override,
             ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
@@ -2082,12 +2051,25 @@ class LoadBalancer:
         await self._persist_state(accounts_repo, account, state)
 
 
+def _standard_usage_entry(
+    request_priority: Mapping[str, UsageHistory | AdditionalUsageHistory],
+    retained_standard: Mapping[str, UsageHistory] | None,
+    account_id: str,
+) -> UsageHistory | None:
+    priority_entry = request_priority.get(account_id)
+    if isinstance(priority_entry, UsageHistory):
+        return priority_entry
+    return retained_standard.get(account_id) if retained_standard is not None else None
+
+
 def _build_states(
     *,
     accounts: Iterable[Account],
     latest_primary: Mapping[str, UsageHistory | AdditionalUsageHistory],
     latest_secondary: Mapping[str, UsageHistory | AdditionalUsageHistory],
     latest_monthly: Mapping[str, UsageHistory],
+    standard_latest_primary: Mapping[str, UsageHistory] | None = None,
+    standard_latest_secondary: Mapping[str, UsageHistory] | None = None,
     runtime: dict[str, RuntimeState],
     routing_policy_override: str | None = None,
     ignore_standard_quota_account_ids: frozenset[str] = frozenset(),
@@ -2114,6 +2096,13 @@ def _build_states(
                 if account.status == AccountStatus.REAUTH_REQUIRED and encryptor is not None
                 else None
             ),
+        )
+        state.usage_limit_state = evaluate_account_usage_limit(
+            account,
+            primary=_standard_usage_entry(latest_primary, standard_latest_primary, account.id),
+            secondary=_standard_usage_entry(latest_secondary, standard_latest_secondary, account.id),
+            monthly=latest_monthly.get(account.id),
+            refresh_interval_seconds=_usage_refresh_interval_seconds(),
         )
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
             state.routing_policy = routing_policy_override
@@ -2314,8 +2303,8 @@ def _state_from_account(
     long_window_quota_available = (
         effective_secondary_entry is not None
         and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
-        and effective_secondary_entry.used_percent is not None
-        and float(effective_secondary_entry.used_percent) < 100.0
+        and secondary_used is not None
+        and float(secondary_used) < 100.0
     )
     effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
 
@@ -2426,8 +2415,8 @@ def _state_from_account(
         and effective_blocked_at is None
         and effective_secondary_entry is not None
         and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
-        and effective_secondary_entry.used_percent is not None
-        and float(effective_secondary_entry.used_percent) < 100.0
+        and secondary_used is not None
+        and float(secondary_used) < 100.0
         and effective_secondary_entry.reset_at is not None
         and float(effective_secondary_entry.reset_at) > effective_runtime_reset
     ):
@@ -2598,7 +2587,7 @@ def _normalize_usage_inputs(
     now_epoch: int,
 ) -> _NormalizedUsageInputs:
     """Normalize persisted usage for routing and explicit probe settlement."""
-    primary_used = primary_entry.used_percent if primary_entry else None
+    primary_used = usage_history_to_window_row(primary_entry).used_percent if primary_entry else None
     primary_reset = primary_entry.reset_at if primary_entry else None
     primary_window_minutes = primary_entry.window_minutes if primary_entry else None
     effective_secondary_entry = secondary_entry
@@ -2619,7 +2608,9 @@ def _normalize_usage_inputs(
         primary_reset = None
         primary_window_minutes = None
 
-    secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
+    secondary_used = (
+        usage_history_to_window_row(effective_secondary_entry).used_percent if effective_secondary_entry else None
+    )
     secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
 
     # Expired rows describe prior windows. Zero derived values without
@@ -2828,18 +2819,20 @@ def _rate_limited_freshness_entry(
     # still at 100%. While the primary sample still claims an active window,
     # or omits reset metadata entirely, its freshness keeps gating recovery.
     primary_window_expired = primary_entry.reset_at is not None and float(primary_entry.reset_at) <= time.time()
-    long_window_available = long_window_entry.used_percent is not None and float(long_window_entry.used_percent) < 100.0
+    long_window_used_percent = usage_history_to_window_row(long_window_entry).used_percent
+    long_window_available = long_window_used_percent is not None and float(long_window_used_percent) < 100.0
     if primary_window_expired and long_window_available and long_window_entry.recorded_at > primary_entry.recorded_at:
         return long_window_entry
     return primary_entry
 
 
 def _usage_entry_is_recent_available(entry: _UsageWindowEntry | None) -> bool:
+    used_percent = usage_history_to_window_row(entry).used_percent if entry is not None else None
     return (
         entry is not None
         and _usage_entry_is_recent_enough(entry.recorded_at)
-        and entry.used_percent is not None
-        and float(entry.used_percent) < 100.0
+        and used_percent is not None
+        and float(used_percent) < 100.0
     )
 
 
@@ -2958,6 +2951,12 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
             if selection_inputs.sticky_mutation_authority_account_ids is None
             else frozenset(selection_inputs.sticky_mutation_authority_account_ids)
         ),
+        standard_latest_primary={
+            account_id: clone_row(entry) for account_id, entry in selection_inputs.standard_latest_primary.items()
+        },
+        standard_latest_secondary={
+            account_id: clone_row(entry) for account_id, entry in selection_inputs.standard_latest_secondary.items()
+        },
         quota_planner_settings=selection_inputs.quota_planner_settings,
         runtime_accounts=(
             None

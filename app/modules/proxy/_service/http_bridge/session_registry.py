@@ -248,6 +248,62 @@ class _HTTPBridgeSessionRegistryMixin:
             reversible=True,
         )
 
+    async def _rollback_http_bridge_recovery_turn_state_registration(
+        self: _HTTPBridgeServiceProtocol,
+        receipt: DurableBridgeAliasRegistrationReceipt,
+    ) -> bool:
+        rolled_back = await self._durable_bridge.rollback_recovery_turn_state_registration(receipt=receipt)
+        if not rolled_back:
+            return False
+
+        async with self._http_bridge_lock:
+            current_session = next(
+                (
+                    candidate
+                    for candidate in self._http_bridge_sessions.values()
+                    if candidate.durable_session_id == receipt.session_id
+                    and candidate.durable_owner_epoch == receipt.owner_epoch
+                ),
+                None,
+            )
+            if current_session is None:
+                return True
+            alias_key = _http_bridge_turn_state_alias_key(
+                receipt.alias_value,
+                current_session.key.api_key_id,
+            )
+            if self._http_bridge_turn_state_index.get(alias_key) != current_session.key:
+                # A newer live registration owns the alias. The durable rollback
+                # is fenced, so the local index must preserve that newer owner.
+                return True
+
+            current_session.downstream_turn_state_aliases.discard(receipt.alias_value)
+            current_session.turn_state_alias_registration_generations.pop(receipt.alias_value, None)
+            if current_session.downstream_turn_state == receipt.alias_value:
+                current_session.downstream_turn_state = receipt.previous_latest_turn_state
+
+            previous_session = next(
+                (
+                    candidate
+                    for candidate in self._http_bridge_sessions.values()
+                    if candidate.durable_session_id == receipt.previous_alias_session_id
+                    and candidate.durable_owner_epoch == receipt.previous_alias_owner_epoch
+                    and candidate.account.id == receipt.previous_alias_account_id
+                    and not candidate.closed
+                ),
+                None,
+            )
+            if previous_session is None:
+                self._http_bridge_turn_state_index.pop(alias_key, None)
+                return True
+
+            _track_alias_registration(previous_session, receipt.alias_value, turn_state=True)
+            previous_session.downstream_turn_state_aliases.add(receipt.alias_value)
+            if previous_session.downstream_turn_state is None:
+                previous_session.downstream_turn_state = receipt.alias_value
+            self._http_bridge_turn_state_index[alias_key] = previous_session.key
+        return True
+
     async def _register_http_bridge_turn_state_core(
         self: _HTTPBridgeServiceProtocol,
         session: _HTTPBridgeSession,

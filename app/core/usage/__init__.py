@@ -297,7 +297,7 @@ def _has_real_quota_metadata(row: UsageWindowRow) -> bool:
     return row.window_minutes is not None and row.window_minutes > 0 and row.reset_at is not None
 
 
-def _is_no_data_placeholder(row: UsageWindowRow) -> bool:
+def is_no_data_placeholder(row: UsageWindowRow) -> bool:
     """A no-data placeholder is the absence of a measurement, not 0% used.
 
     Such rows (no positive window duration AND no reset deadline) are written
@@ -339,9 +339,9 @@ def _should_prefer_primary_row(primary_row: UsageWindowRow, secondary_row: Usage
     # 0% used, so it must never displace a real weekly sample (otherwise the
     # dashboard jumps to 100% remaining every refresh).
     primary_has_real = _has_real_quota_metadata(primary_row)
-    if primary_has_real and _is_no_data_placeholder(secondary_row):
+    if primary_has_real and is_no_data_placeholder(secondary_row):
         return True
-    if _has_real_quota_metadata(secondary_row) and _is_no_data_placeholder(primary_row):
+    if _has_real_quota_metadata(secondary_row) and is_no_data_placeholder(primary_row):
         return False
 
     # Both real or both placeholder (same fetch / indeterminate ordering):

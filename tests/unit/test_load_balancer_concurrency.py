@@ -1681,7 +1681,9 @@ async def test_unbound_recovery_probe_selects_when_no_healthy_peer() -> None:
     assert selected.lease is not None
     probing_runtime = balancer._runtime[probing.id]
     assert probing_runtime.inflight_streams == 1
-    assert probing_runtime.version == 23
+    # The provisional lease no longer records a selection before admission;
+    # only the committed probe reservation advances the runtime generation.
+    assert probing_runtime.version == 22
     assert probing_runtime.health_version == 7
 
     await balancer.release_account_lease(selected.lease)
@@ -2803,6 +2805,34 @@ async def test_bare_codex_stream_avoids_owner_at_response_create_cap() -> None:
 
     assert selected.account is not None
     assert selected.account.id == alternate.id
+    assert sticky_repo.account_id == owner.id
+
+    for lease in [*create_leases, selected.lease]:
+        await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+async def test_bare_codex_stream_does_not_spill_to_usage_limited_account() -> None:
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("cap-second-stage-usage-limited")
+    assert alternate is not None
+    alternate.usage_limit_enabled = True
+    alternate.usage_limit_percent = 10.0
+    create_leases = [await balancer.acquire_account_lease(owner.id, kind="response_create") for _ in range(4)]
+    raw_session = "bare-session-second-stage-usage-limited"
+    sticky_repo.account_ids_by_key = {_codex_session_selection_key(raw_session): owner.id}
+
+    selected = await balancer.select_account(
+        sticky_key=_codex_session_selection_key(raw_session),
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        spill_bare_session_on_account_cap=True,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == owner.id
     assert sticky_repo.account_id == owner.id
 
     for lease in [*create_leases, selected.lease]:
@@ -4477,6 +4507,43 @@ async def test_api_key_fair_share_sticky_path_denies_with_stable_code_and_preser
     assert denied.error_message is not None
     assert "fair share" in denied.error_message
     assert sticky_repo.account_id == account_a.id
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_hard_sticky_usage_limit_takes_precedence_over_pool_fair_share() -> None:
+    sticky_repo = _StubStickySessionsRepository()
+    balancer, accounts, _ = _make_fair_share_pool(
+        "acc-fair-share-hard-owner-limit",
+        account_count=3,
+        sticky_repo=sticky_repo,
+    )
+    owner, peer_a, peer_b = accounts
+    owner.usage_limit_enabled = True
+    owner.usage_limit_percent = 10.0
+    sticky_repo.account_id = owner.id
+
+    # Only the two policy-eligible peers contribute fair-share capacity.
+    # Heavy is already at its share and light keeps that peer pool congested.
+    await _grab_stream(balancer, peer_a.id, "heavy")
+    await _grab_stream(balancer, peer_b.id, "heavy")
+    await _grab_stream(balancer, peer_a.id, "light")
+
+    denied = await balancer.select_account(
+        sticky_key="fair-share-hard-owner-limit-session",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+        concurrency_caps=_FAIR_SHARE_CAPS,
+        api_key_id="heavy",
+        api_key_stream_fair_share_threshold_pct=50,
+    )
+
+    assert denied.account is None
+    assert denied.lease is None
+    assert denied.error_code == "account_usage_limit_reached"
+    assert sticky_repo.account_id == owner.id
     assert sticky_repo.deleted == []
     assert sticky_repo.upserts == []
 

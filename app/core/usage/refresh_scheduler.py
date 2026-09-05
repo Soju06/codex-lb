@@ -286,6 +286,8 @@ class UsageRefreshScheduler:
                             monthly_entries=warmup_after_monthly,
                             secondary_entries=after_secondary,
                         ),
+                        usage_limit_secondary=after_secondary,
+                        usage_limit_monthly=after_monthly,
                         previous_plan_types=previous_plan_types,
                         refresh_started_at=refresh_started_at,
                         usage_refresh_interval_seconds=self.interval_seconds,

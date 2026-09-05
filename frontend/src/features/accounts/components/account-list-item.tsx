@@ -14,7 +14,7 @@ import type {
   AccountRoutingPolicy,
   AccountSummary,
 } from "@/features/accounts/schemas";
-import { normalizeStatus } from "@/utils/account-status";
+import { getAccountDisplayStatus, normalizeStatus } from "@/utils/account-status";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import {
   formatDateTimeInline,
@@ -43,6 +43,7 @@ export function AccountListItem({
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const dateDisplayFormat = useDateDisplayFormatStore((s) => s.dateDisplayFormat);
   const status = normalizeStatus(account.status);
+  const displayStatus = getAccountDisplayStatus(account.status, account.usageLimitState);
   const title = account.displayName || account.email;
   const titleIsEmail = isEmailLabel(title, account.email);
   const emailSubtitle = account.displayName && account.displayName !== account.email
@@ -87,7 +88,7 @@ export function AccountListItem({
     : t("accounts.listItem.noAttempts");
   const availableResetCredits = account.availableResetCredits ?? 0;
   const resetBadgeLabel = availableResetCredits > 99 ? "99+" : String(availableResetCredits);
-  const statusEligibilityHint = status === "active" ? t("accounts.listItem.statusActiveHint") : undefined;
+  const statusEligibilityHint = displayStatus === "active" ? t("accounts.listItem.statusActiveHint") : undefined;
 
   return (
     <button
@@ -131,7 +132,7 @@ export function AccountListItem({
             aria-label={t("accounts.actions.trustedAccess")}
           />
         ) : null}
-        <StatusBadge status={status} title={statusEligibilityHint} />
+        <StatusBadge status={displayStatus} title={statusEligibilityHint} />
       </div>
       <div
         className={cn(

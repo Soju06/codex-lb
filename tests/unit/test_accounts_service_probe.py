@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from app.core.crypto import TokenEncryptor
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import (
     DEFAULT_PROBE_MODEL,
@@ -43,8 +43,15 @@ def _make_account(status: AccountStatus = AccountStatus.ACTIVE) -> Account:
     )
 
 
-def _make_usage_row(used_percent: float, account_id: str = _ACCOUNT_ID) -> Any:
-    return SimpleNamespace(used_percent=used_percent, account_id=account_id)
+def _make_usage_row(used_percent: float, *, window: str, account_id: str = _ACCOUNT_ID) -> UsageHistory:
+    return UsageHistory(
+        account_id=account_id,
+        recorded_at=datetime(2026, 5, 17),
+        window=window,
+        used_percent=used_percent,
+        reset_at=1_800_000_000,
+        window_minutes=300 if window == "primary" else 10_080,
+    )
 
 
 def _build_service(
@@ -58,8 +65,8 @@ def _build_service(
     repo.get_by_id.return_value = account
 
     usage_repo = AsyncMock()
-    primary_entry = _make_usage_row(primary_pct) if primary_pct is not None else None
-    secondary_entry = _make_usage_row(secondary_pct) if secondary_pct is not None else None
+    primary_entry = _make_usage_row(primary_pct, window="primary") if primary_pct is not None else None
+    secondary_entry = _make_usage_row(secondary_pct, window="secondary") if secondary_pct is not None else None
 
     async def _latest_entry_for_account(requested_account_id: str, *, window: str) -> Any:
         if requested_account_id != _ACCOUNT_ID:

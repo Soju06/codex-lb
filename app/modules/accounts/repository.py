@@ -122,6 +122,12 @@ class AccountRequestUsageSummary:
     total_cost_usd: float
 
 
+@dataclass(frozen=True, slots=True)
+class AccountUsageLimitConfiguration:
+    enabled: bool
+    percent: float | None
+
+
 # The account-listing request-usage summary dedupes and re-aggregates the
 # un-folded raw tail on every dashboard accounts load, and the displayed
 # lifetime totals tolerate short staleness. Cache the merged summaries per
@@ -987,6 +993,38 @@ class AccountsRepository:
             )
             await self._session.commit()
             return result.scalar_one_or_none() is not None
+
+    async def update_usage_limit(
+        self,
+        account_id: str,
+        *,
+        enabled: bool,
+        percent: float | None,
+        update_percent: bool,
+    ) -> AccountUsageLimitConfiguration | None:
+        async with sqlite_writer_section():
+            statement = (
+                update(Account)
+                .where(Account.id == account_id)
+                .where(Account.delete_requested_at.is_(None))
+                .values(usage_limit_enabled=enabled)
+            )
+            if update_percent:
+                statement = statement.values(usage_limit_percent=percent)
+            result = await self._session.execute(
+                statement.returning(
+                    Account.usage_limit_enabled,
+                    Account.usage_limit_percent,
+                )
+            )
+            row = result.one_or_none()
+            await self._session.commit()
+            if row is None:
+                return None
+            return AccountUsageLimitConfiguration(
+                enabled=bool(row.usage_limit_enabled),
+                percent=row.usage_limit_percent,
+            )
 
     async def begin_delete(self, account_id: str, *, delete_history: bool = False) -> bool:
         """Mark an account for background deletion; commits in milliseconds.

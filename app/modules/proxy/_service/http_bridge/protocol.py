@@ -114,6 +114,10 @@ class _HTTPBridgeServiceProtocol(Protocol):
         *,
         reversible: bool,
     ) -> tuple[bool, DurableBridgeAliasRegistrationReceipt | None]: ...
+    async def _rollback_http_bridge_recovery_turn_state_registration(
+        self,
+        receipt: DurableBridgeAliasRegistrationReceipt,
+    ) -> bool: ...
     async def _register_http_bridge_previous_response_id_impl(
         self,
         session: _HTTPBridgeSession,

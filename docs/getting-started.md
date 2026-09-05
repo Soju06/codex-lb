@@ -8,7 +8,7 @@ codex-lb runs with zero configuration — every setting has a working default, a
 # Docker (recommended)
 docker volume create codex-lb-data
 docker run -d --name codex-lb \
-  -p 2455:2455 \
+  -p 2455:2455 -p 1455:1455 \
   -v codex-lb-data:/var/lib/codex-lb \
   ghcr.io/soju06/codex-lb:latest
 
@@ -20,8 +20,6 @@ nix run github:Soju06/codex-lb
 ```
 
 Open [localhost:2455](http://localhost:2455) → Add account → Done.
-
-For Docker account setup or reauthentication, choose device-code sign-in (recommended) or paste the browser's final localhost callback URL into the dialog. Port 1455 is deliberately not published, leaving it available for Codex Desktop login.
 
 Next: point your coding agent at codex-lb — see [Client Setup](client-setup.md).
 
@@ -46,7 +44,7 @@ Open the dashboard → enter the token + new password → done. The token is sha
 ```bash
 docker run -d --name codex-lb \
   -e CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN=your-secret-token \
-  -p 2455:2455 \
+  -p 2455:2455 -p 1455:1455 \
   -v codex-lb-data:/var/lib/codex-lb \
   ghcr.io/soju06/codex-lb:latest
 ```

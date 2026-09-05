@@ -42,7 +42,7 @@ docker volume create codex-lb-data
 docker network inspect codex-lb-net >/dev/null 2>&1 || docker network create codex-lb-net
 docker run -d --name codex-lb \
   --network codex-lb-net \
-  -p 2455:2455 \
+  -p 2455:2455 -p 1455:1455 \
   -v codex-lb-data:/var/lib/codex-lb \
   ghcr.io/soju06/codex-lb:latest
 
@@ -54,8 +54,6 @@ nix run github:Soju06/codex-lb
 ```
 
 Open [localhost:2455](http://localhost:2455) → Add account → Done.
-
-With Docker, use device-code sign-in (recommended) or paste the final localhost callback URL into the dialog when adding or reauthenticating an account. Port 1455 is intentionally not published so it remains available to Codex Desktop.
 
 Accessing the dashboard remotely for the first time? You need a one-time bootstrap token —
 see [Getting started](https://soju06.github.io/codex-lb/getting-started/).

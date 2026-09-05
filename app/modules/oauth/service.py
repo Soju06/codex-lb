@@ -8,7 +8,7 @@ import time
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Coroutine
+from typing import Awaitable, Callable
 
 from aiohttp import web
 from sqlalchemy import select
@@ -64,15 +64,11 @@ from app.modules.proxy.account_cache import (
 )
 
 _async_sleep = asyncio.sleep
-_browser_flow_expiry_sleep = asyncio.sleep
-_callback_server_stop_retry_sleep = asyncio.sleep
-_browser_flow_clock = time.time
 logger = logging.getLogger(__name__)
 _SUCCESS_TEMPLATE = Path(__file__).resolve().parent / "templates" / "oauth_success.html"
 _TERMINAL_OAUTH_STATUSES = {"error", "success"}
 _MAX_RETAINED_TERMINAL_OAUTH_FLOWS = 16
 _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS = 15 * 60
-_CALLBACK_SERVER_STOP_MAX_ATTEMPTS = 3
 _ACCOUNT_IDENTITY_CONFLICT_MESSAGE = (
     "Multiple accounts match the authenticated identity. Remove duplicate accounts and retry OAuth."
 )
@@ -81,19 +77,6 @@ _REAUTH_SEAT_MISMATCH_MESSAGE = (
     "No changes were made. Sign out of ChatGPT (or use a private window), then re-run "
     "reauthentication and log in as the exact account that needs repair."
 )
-
-
-def _consume_callback_server_start_result(task: asyncio.Task[bool]) -> None:
-    if not task.cancelled():
-        task.exception()
-
-
-def _log_callback_server_stop_result(task: asyncio.Task[None]) -> None:
-    if task.cancelled():
-        return
-    error = task.exception()
-    if error is not None:
-        logger.error("OAuth callback server stop failed", exc_info=error)
 
 
 async def _has_active_proxy_bindings(session: AsyncSession) -> bool:
@@ -134,10 +117,6 @@ class ReauthSeatMismatchError(Exception):
         )
 
 
-class _BrowserOAuthFlowRetiredError(RuntimeError):
-    """A concurrent store reset retired a browser start before publication."""
-
-
 @dataclass
 class OAuthState:
     flow_id: str | None = None
@@ -163,11 +142,9 @@ class OAuthStateStore:
         self._flows: dict[str, OAuthState] = {}
         self._state_token_index: dict[str, str] = {}
         self._callback_server: OAuthCallbackServer | None = None
-        self._callback_server_start_task: asyncio.Task[bool] | None = None
         self._callback_server_stop_task: asyncio.Task[None] | None = None
         self._browser_flow_expiry_task: asyncio.Task[None] | None = None
-        self._terminal_transition_tasks: set[asyncio.Task[bool]] = set()
-        self._generation = 0
+        self._browser_flow_expiry_changed = asyncio.Event()
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -229,157 +206,30 @@ class OAuthStateStore:
         return any(flow.method == "browser" and flow.status == "pending" for flow in self._flows.values())
 
     def next_pending_browser_flow_expiry_locked(self) -> float | None:
-        deadlines = [
-            flow.expires_at
-            for flow in self._flows.values()
-            if flow.method == "browser" and flow.status == "pending" and flow.expires_at is not None
-        ]
-        return min(deadlines, default=None)
-
-    def cancel_browser_flow_expiry_task_locked(self) -> asyncio.Task[None] | None:
-        task = self._browser_flow_expiry_task
-        if task is None:
-            return None
-        self._browser_flow_expiry_task = None
-        if task is asyncio.current_task():
-            return None
-        if not task.done():
-            task.cancel()
-        return task
-
-    def start_callback_server_stop_locked(self, server: OAuthCallbackServer) -> asyncio.Task[None]:
-        stop_task = self._callback_server_stop_task
-        if stop_task is not None and not stop_task.done():
-            return stop_task
-        stop_task = asyncio.create_task(
-            self._stop_callback_server(server),
-            name="oauth-callback-server-stop",
+        return min(
+            (
+                flow.expires_at
+                for flow in self._flows.values()
+                if flow.method == "browser" and flow.status == "pending" and flow.expires_at is not None
+            ),
+            default=None,
         )
-        stop_task.add_done_callback(_log_callback_server_stop_result)
-        self._callback_server_stop_task = stop_task
-        return stop_task
-
-    def start_callback_server_start_locked(self, server: OAuthCallbackServer) -> asyncio.Task[bool]:
-        start_task = asyncio.create_task(
-            self._start_callback_server(server),
-            name="oauth-callback-server-start",
-        )
-        start_task.add_done_callback(_consume_callback_server_start_result)
-        self._callback_server_start_task = start_task
-        return start_task
-
-    def start_terminal_transition(self, operation: Coroutine[Any, Any, bool]) -> asyncio.Task[bool]:
-        task = asyncio.create_task(operation, name="oauth-terminal-transition")
-        self._terminal_transition_tasks.add(task)
-
-        def settle(done_task: asyncio.Task[bool]) -> None:
-            self._terminal_transition_tasks.discard(done_task)
-            if done_task.cancelled():
-                return
-            error = done_task.exception()
-            if error is not None:
-                logger.error("OAuth terminal transition failed", exc_info=error)
-
-        task.add_done_callback(settle)
-        return task
-
-    async def _start_callback_server(self, server: OAuthCallbackServer) -> bool:
-        current_task = asyncio.current_task()
-        started = False
-        cleanup_succeeded = False
-        try:
-            await server.start()
-            started = True
-            return True
-        except OSError:
-            return False
-        finally:
-            if not started:
-                try:
-                    await server.stop()
-                    cleanup_succeeded = True
-                except Exception:
-                    logger.exception("failed to clean up OAuth callback server after start failure")
-            async with self._lock:
-                if not started and self._callback_server is server:
-                    if cleanup_succeeded:
-                        self._callback_server = None
-                    else:
-                        # Keep a partially started listener owned and retry its
-                        # cleanup outside this startup task.
-                        self.start_callback_server_stop_locked(server)
-                if self._callback_server_start_task is current_task:
-                    self._callback_server_start_task = None
-
-    async def _stop_callback_server(self, server: OAuthCallbackServer) -> None:
-        current_task = asyncio.current_task()
-        stopped = False
-        try:
-            async with self._lock:
-                start_task = self._callback_server_start_task if self._callback_server is server else None
-            if start_task is not None and start_task is not current_task:
-                try:
-                    await asyncio.shield(start_task)
-                except asyncio.CancelledError:
-                    # Propagate cancellation of this stop owner even if the
-                    # startup task happened to be canceled at the same time.
-                    # Only consume cancellation that came solely from the
-                    # shielded startup task itself.
-                    if current_task is None or current_task.cancelling() or not start_task.cancelled():
-                        raise
-                except Exception:
-                    pass
-            for attempt in range(_CALLBACK_SERVER_STOP_MAX_ATTEMPTS):
-                try:
-                    await server.stop()
-                    stopped = True
-                    break
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    if attempt + 1 >= _CALLBACK_SERVER_STOP_MAX_ATTEMPTS:
-                        raise
-                    logger.exception("OAuth callback server stop failed; retrying")
-                    await _callback_server_stop_retry_sleep(1)
-        finally:
-            async with self._lock:
-                if stopped and self._callback_server is server:
-                    self._callback_server = None
-                # A cancelled stop must keep the live listener and its owner
-                # visible so a later start/reset cannot publish a replacement
-                # over an untracked socket. Transient failures retry above.
-                if self._callback_server_stop_task is current_task and (stopped or self._callback_server is not server):
-                    self._callback_server_stop_task = None
 
     async def reset(self) -> None:
         server: OAuthCallbackServer | None = None
-        start_task: asyncio.Task[bool] | None = None
-        stop_task: asyncio.Task[None] | None = None
-        expiry_task: asyncio.Task[None] | None = None
-        terminal_tasks: list[asyncio.Task[bool]] = []
         async with self._lock:
-            expiry_task = self.cancel_browser_flow_expiry_task_locked()
-            server = self._cleanup_locked(clear_callback_server=False)
-            start_task = self._callback_server_start_task
-            stop_task = self._callback_server_stop_task
-            terminal_tasks = list(self._terminal_transition_tasks)
+            expiry_task = self._browser_flow_expiry_task
+            self._browser_flow_expiry_task = None
+            if expiry_task is not None:
+                expiry_task.cancel()
+            server = self._cleanup_locked()
             self._state = OAuthState(status="idle")
-            if server is not None:
-                stop_task = self.start_callback_server_stop_locked(server)
         if expiry_task is not None:
             await asyncio.gather(expiry_task, return_exceptions=True)
-        if terminal_tasks:
-            await asyncio.gather(
-                *(asyncio.shield(task) for task in terminal_tasks),
-                return_exceptions=True,
-            )
-        if stop_task is not None:
-            await asyncio.shield(stop_task)
-        elif start_task is not None:
-            await asyncio.shield(start_task)
+        if server is not None:
+            await server.stop()
 
     def _cleanup_locked(self, *, clear_callback_server: bool = True) -> OAuthCallbackServer | None:
-        self._generation += 1
         for flow in self._flows.values():
             task = flow.poll_task
             if task and not task.done():
@@ -389,6 +239,7 @@ class OAuthStateStore:
             self._callback_server = None
         self._flows.clear()
         self._state_token_index.clear()
+        self._browser_flow_expiry_changed.set()
         return server
 
     def prune_terminal_flows_locked(self) -> None:
@@ -406,7 +257,7 @@ class OAuthStateStore:
             self.remove_flow_locked(flow)
 
     def prune_expired_pending_browser_flows_locked(self) -> None:
-        now = _browser_flow_clock()
+        now = time.time()
         expired_flows = [
             flow
             for flow in self._flows.values()
@@ -563,15 +414,7 @@ class OauthService:
             device_auth_id=record.device_auth_id,
             user_code=record.user_code,
             interval_seconds=record.interval_seconds,
-            expires_at=(
-                naive_utc_to_epoch(record.expires_at)
-                if record.expires_at is not None
-                else (
-                    _browser_flow_clock() + _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS
-                    if record.method == "browser" and record.status == "pending"
-                    else None
-                )
-            ),
+            expires_at=naive_utc_to_epoch(record.expires_at) if record.expires_at is not None else None,
             finished_at=naive_utc_to_epoch(record.finished_at) if record.finished_at is not None else None,
         )
 
@@ -580,8 +423,6 @@ class OauthService:
         *,
         flow_id: str | None = None,
         state_token: str | None = None,
-        expected_generation: int | None = None,
-        hydrate_missing: bool = True,
     ) -> OAuthFlowRecord | None:
         """Single authoritative reconciliation gate: make the local in-memory
         ``OAuthState`` agree with the shared DB BEFORE any local-state-based
@@ -603,23 +444,8 @@ class OauthService:
           verifier / device code can never be reused past the TTL.
         """
 
-        reconcile_generation = expected_generation if expected_generation is not None else self._store._generation
         record = await self._load_flow_record(flow_id=flow_id, state_token=state_token)
-        expiry_task: asyncio.Task[None] | None = None
-        retired_expiry_task: asyncio.Task[None] | None = None
         async with self._store.lock:
-            if self._store._generation != reconcile_generation:
-                return record
-            if (
-                record is not None
-                and record.status == "pending"
-                and record.method == "browser"
-                and record.expires_at is not None
-                and naive_utc_to_epoch(record.expires_at) <= _browser_flow_clock()
-            ):
-                # The durable read was live when queried but expired before we
-                # acquired the local ownership lock. Do not resurrect it.
-                record = None
             local = self._store.get_flow_locked(flow_id) if flow_id is not None else None
             if local is None and state_token is not None:
                 local = self._store.get_flow_by_state_token_locked(state_token)
@@ -627,27 +453,19 @@ class OauthService:
                 # No live durable row (absent or expired-pending): a local
                 # non-terminal flow is stale and MUST NOT be acted on.
                 if local is not None and local.status not in _TERMINAL_OAUTH_STATUSES:
-                    removed_browser_flow = local.method == "browser"
                     self._store.remove_flow_locked(local)
-                    if removed_browser_flow:
-                        expiry_task, _ = self._begin_callback_server_stop_if_idle_locked()
-            elif record.status in _TERMINAL_OAUTH_STATUSES:
-                if local is None and hydrate_missing:
-                    local = self._record_to_state(record)
-                    self._store.remember_flow_locked(local)
-                elif local is not None and local.status != record.status:
+                return None
+            if record.status in _TERMINAL_OAUTH_STATUSES:
+                if local is None:
+                    self._store.remember_flow_locked(self._record_to_state(record))
+                elif local.status != record.status:
                     self._store.set_flow_status_locked(local, status=record.status, error_message=record.error_message)
-                if local is not None and local.method == "browser":
-                    expiry_task, _ = self._begin_callback_server_stop_if_idle_locked()
-            elif local is None and hydrate_missing:
-                # Durable pending: hydrate a flow this replica never saw.
-                local = self._record_to_state(record)
-                self._store.remember_flow_locked(local)
-                if local.method == "browser":
-                    retired_expiry_task = self._restart_browser_flow_expiry_task_locked()
-        tasks_to_drain = [task for task in (expiry_task, retired_expiry_task) if task is not None]
-        if tasks_to_drain:
-            await asyncio.gather(*tasks_to_drain, return_exceptions=True)
+                return record
+            # Durable pending: hydrate a flow this replica never saw.
+            if local is None:
+                self._store.remember_flow_locked(self._record_to_state(record))
+            if record.method == "browser":
+                self._ensure_browser_flow_expiry_task_locked()
         return record
 
     async def start_oauth(self, request: OauthStartRequest) -> OauthStartResponse:
@@ -658,15 +476,11 @@ class OauthService:
             if accounts:
                 server: OAuthCallbackServer | None = None
                 stop_task: asyncio.Task[None] | None = None
-                expiry_task: asyncio.Task[None] | None = None
                 async with self._store.lock:
-                    expiry_task = self._store.cancel_browser_flow_expiry_task_locked()
                     server = self._store._cleanup_locked(clear_callback_server=False)
                     self._store._state = OAuthState(status="success")
                     if server is not None:
                         stop_task = self._start_callback_server_stop_locked(server)
-                if expiry_task is not None:
-                    await asyncio.gather(expiry_task, return_exceptions=True)
                 if server is not None and stop_task is not None:
                     await self._finish_callback_server_stop(server, stop_task)
                 return OauthStartResponse(method="browser")
@@ -742,24 +556,36 @@ class OauthService:
             return OauthCompleteResponse(status="pending")
 
     async def _start_browser_flow(self, *, intended_account_id: str | None = None) -> OauthStartResponse:
-        async with self._store.lock:
-            store_generation = self._store._generation
+        await self._wait_for_callback_server_stop()
 
         flow_id = secrets.token_urlsafe(12)
         code_verifier, code_challenge = generate_pkce_pair()
         state_token = secrets.token_urlsafe(16)
         authorization_url = build_authorization_url(state=state_token, code_challenge=code_challenge)
         settings = get_settings()
-        expires_at = _browser_flow_clock() + _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS
-        flow = OAuthState(
-            flow_id=flow_id,
-            status="pending",
-            method="browser",
-            state_token=state_token,
-            code_verifier=code_verifier,
-            intended_account_id=intended_account_id,
-            expires_at=expires_at,
-        )
+        callback_server: OAuthCallbackServer | None = None
+
+        expires_at = time.time() + _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS
+        async with self._store.lock:
+            self._store.remember_flow_locked(
+                OAuthState(
+                    flow_id=flow_id,
+                    status="pending",
+                    method="browser",
+                    state_token=state_token,
+                    code_verifier=code_verifier,
+                    intended_account_id=intended_account_id,
+                    expires_at=expires_at,
+                )
+            )
+            if self._store._callback_server is None:
+                callback_server = OAuthCallbackServer(
+                    self._handle_callback,
+                    host=settings.oauth_callback_host,
+                    port=OAUTH_CALLBACK_PORT,
+                )
+                self._store._callback_server = callback_server
+
         await self._persist_flow_record(
             OAuthFlowRecord(
                 flow_id=flow_id,
@@ -772,46 +598,16 @@ class OauthService:
             )
         )
 
-        start_task: asyncio.Task[bool] | None = None
-        retired_expiry_task: asyncio.Task[None] | None = None
-        while True:
-            await self._wait_for_callback_server_stop()
-            async with self._store.lock:
-                if self._store._generation != store_generation:
-                    raise _BrowserOAuthFlowRetiredError(
-                        "browser OAuth flow retired by store reset before listener startup"
-                    )
-                # A stop can be registered after the wait above and before this
-                # lock is acquired. Never attach a new flow to that retiring
-                # listener; retry after the registered stop has completed.
-                if self._store._callback_server_stop_task is not None:
-                    continue
-                self._store.remember_flow_locked(flow)
-                callback_server = self._store._callback_server
-                start_task = self._store._callback_server_start_task
-                if callback_server is None:
-                    callback_server = OAuthCallbackServer(
-                        self._handle_callback,
-                        host=settings.oauth_callback_host,
-                        port=OAUTH_CALLBACK_PORT,
-                    )
-                    self._store._callback_server = callback_server
-                    start_task = self._store.start_callback_server_start_locked(callback_server)
-                # ``expires_at`` is computed before the durable insert. Two
-                # concurrent inserts can therefore publish out of order, so
-                # always re-arm the single owner to recompute the true earliest
-                # local deadline.
-                retired_expiry_task = self._restart_browser_flow_expiry_task_locked()
-                break
-
-        if retired_expiry_task is not None:
-            await asyncio.gather(retired_expiry_task, return_exceptions=True)
-        if start_task is not None:
-            await asyncio.shield(start_task)
+        if callback_server is not None:
+            try:
+                await callback_server.start()
+            except OSError:
+                async with self._store.lock:
+                    if self._store._callback_server is callback_server:
+                        self._store._callback_server = None
 
         async with self._store.lock:
-            if self._store.get_flow_locked(flow_id) is not flow:
-                raise _BrowserOAuthFlowRetiredError("browser OAuth flow retired during callback listener startup")
+            self._ensure_browser_flow_expiry_task_locked()
 
         return OauthStartResponse(
             flow_id=flow_id,
@@ -819,6 +615,36 @@ class OauthService:
             authorization_url=authorization_url,
             callback_url=OAUTH_REDIRECT_URI,
         )
+
+    def _ensure_browser_flow_expiry_task_locked(self) -> None:
+        """Wake the store's single timer, including for an earlier hydrated TTL."""
+        self._store._browser_flow_expiry_changed.set()
+        task = self._store._browser_flow_expiry_task
+        if task is None or task.done():
+            self._store._browser_flow_expiry_task = asyncio.create_task(self._expire_browser_flows())
+
+    async def _expire_browser_flows(self) -> None:
+        """Run existing idle-listener cleanup at pending browser deadlines."""
+        current = asyncio.current_task()
+        changed = self._store._browser_flow_expiry_changed
+        try:
+            while True:
+                async with self._store.lock:
+                    expires_at = self._store.next_pending_browser_flow_expiry_locked()
+                    if expires_at is None:
+                        self._store._browser_flow_expiry_task = None
+                        return
+                    changed.clear()
+                try:
+                    await asyncio.wait_for(changed.wait(), timeout=max(0, expires_at - time.time()))
+                except TimeoutError:
+                    await self._stop_callback_server_if_idle()
+        except Exception:
+            logger.exception("Browser OAuth expiry cleanup failed")
+        finally:
+            async with self._store.lock:
+                if self._store._browser_flow_expiry_task is current:
+                    self._store._browser_flow_expiry_task = None
 
     async def manual_callback(self, callback_url: str, flow_id: str | None = None) -> ManualCallbackResponse:
         """Process an OAuth callback URL pasted manually by the user.
@@ -885,11 +711,9 @@ class OauthService:
                 route=route,
                 allow_direct_egress=route is None,
             )
-            await self._persist_tokens_and_set_success(
-                tokens,
-                flow_id=flow.flow_id,
-                intended_account_id=flow.intended_account_id,
-            )
+            await self._persist_tokens(tokens, intended_account_id=flow.intended_account_id)
+            await self._set_success(flow.flow_id)
+            asyncio.create_task(self._stop_callback_server_if_idle())
             return ManualCallbackResponse(status="success")
         except OAuthError as exc:
             # Loser race: a concurrent callback may have committed success for the
@@ -1029,11 +853,8 @@ class OauthService:
                 route=route,
                 allow_direct_egress=route is None,
             )
-            await self._persist_tokens_and_set_success(
-                tokens,
-                flow_id=flow.flow_id,
-                intended_account_id=flow.intended_account_id,
-            )
+            await self._persist_tokens(tokens, intended_account_id=flow.intended_account_id)
+            await self._set_success(flow.flow_id)
             html = _success_html()
         except OAuthError as exc:
             # Loser race: honor a durable success committed by a concurrent
@@ -1057,6 +878,7 @@ class OauthService:
                 else _error_html(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE)
             )
 
+        asyncio.create_task(self._stop_callback_server_if_idle())
         return self._html_response(html)
 
     async def _poll_device_tokens(self, flow_id: str | None, context: "DevicePollContext") -> None:
@@ -1084,11 +906,8 @@ class OauthService:
                     consumed = await self._consume_device_slot(flow_id)
                     if not consumed:
                         return
-                    await self._persist_tokens_and_set_success(
-                        tokens,
-                        flow_id=flow_id,
-                        intended_account_id=context.intended_account_id,
-                    )
+                    await self._persist_tokens(tokens, intended_account_id=context.intended_account_id)
+                    await self._set_success(flow_id)
                     return
                 await _async_sleep(context.interval_seconds)
             # Code expired: only the slot holder may record the terminal error.
@@ -1256,103 +1075,18 @@ class OauthService:
         if poller is not None:
             await poller.bump(NAMESPACE_API_KEY)
 
-    async def _commit_tokens_and_success(
-        self,
-        tokens: OAuthTokens,
-        *,
-        flow_id: str | None,
-        intended_account_id: str | None,
-        expected_generation: int,
-    ) -> bool:
-        await self._persist_tokens(tokens, intended_account_id=intended_account_id)
-        if flow_id is None:
-            async with self._store.lock:
-                if self._store._generation == expected_generation:
-                    self._store.state.status = "success"
-                    self._store.state.error_message = None
-            return True
-        return await self._commit_terminal_status(
-            flow_id,
-            status="success",
-            error_message=None,
-            expected_generation=expected_generation,
-        )
-
-    async def _persist_tokens_and_set_success(
-        self,
-        tokens: OAuthTokens,
-        *,
-        flow_id: str | None,
-        intended_account_id: str | None,
-    ) -> None:
-        expected_generation = self._store._generation
-        task = self._store.start_terminal_transition(
-            self._commit_tokens_and_success(
-                tokens,
-                flow_id=flow_id,
-                intended_account_id=intended_account_id,
-                expected_generation=expected_generation,
-            )
-        )
-        await asyncio.shield(task)
-
-    async def _commit_terminal_status(
-        self,
-        flow_id: str,
-        *,
-        status: str,
-        error_message: str | None,
-        expected_generation: int,
-    ) -> bool:
-        applied = await self._persist_flow_status(
-            flow_id,
-            status=status,
-            error_message=error_message,
-        )
-        if status != "success" and not applied:
-            # A racing winner may already have committed durable success. This
-            # owned task must reconcile too: its request waiter may be canceled
-            # before ``_finalize_callback_error`` gets another chance.
-            await self._reconcile_flow_from_durable(
-                flow_id=flow_id,
-                expected_generation=expected_generation,
-                hydrate_missing=False,
-            )
-            return False
-
-        expiry_task: asyncio.Task[None] | None = None
+    async def _set_success(self, flow_id: str | None = None) -> None:
         async with self._store.lock:
-            if self._store._generation != expected_generation:
-                return True
             flow = self._store.get_flow_locked(flow_id)
             if flow is not None:
-                self._store.set_flow_status_locked(
-                    flow,
-                    status=status,
-                    error_message=error_message,
-                )
-                if flow.method == "browser":
-                    expiry_task, _ = self._begin_callback_server_stop_if_idle_locked()
-        if expiry_task is not None:
-            await asyncio.gather(expiry_task, return_exceptions=True)
-        return True
-
-    async def _set_success(self, flow_id: str | None = None) -> None:
-        if flow_id is None:
-            async with self._store.lock:
+                self._store.set_flow_status_locked(flow, status="success", error_message=None)
+            elif flow_id is None:
                 self._store.state.status = "success"
                 self._store.state.error_message = None
-            return
-        expected_generation = self._store._generation
-        task = self._store.start_terminal_transition(
-            self._commit_terminal_status(
-                flow_id,
-                status="success",
-                error_message=None,
-                expected_generation=expected_generation,
-            )
-        )
-        await asyncio.shield(task)
+        if flow_id is not None:
+            # Durable, cross-replica status: the originating replica reads this
+            # on its next status poll instead of its stale in-memory pending.
+            await self._persist_flow_status(flow_id, status="success", error_message=None)
 
     async def _set_error(self, message: str, flow_id: str | None = None) -> bool:
         """Record a terminal error. Returns whether the durable error was applied.
@@ -1371,16 +1105,14 @@ class OauthService:
                     self._store.state.status = "error"
                     self._store.state.error_message = message
             return True
-        expected_generation = self._store._generation
-        task = self._store.start_terminal_transition(
-            self._commit_terminal_status(
-                flow_id,
-                status="error",
-                error_message=message,
-                expected_generation=expected_generation,
-            )
-        )
-        return await asyncio.shield(task)
+        applied = await self._persist_flow_status(flow_id, status="error", error_message=message)
+        if not applied:
+            return False
+        async with self._store.lock:
+            flow = self._store.get_flow_locked(flow_id)
+            if flow is not None:
+                self._store.set_flow_status_locked(flow, status="error", error_message=message)
+        return True
 
     async def _finalize_callback_error(self, message: str, *, flow_id: str | None) -> str:
         """Record a terminal error for a browser/manual-callback flow and return
@@ -1391,102 +1123,52 @@ class OauthService:
 
         if await self._set_error(message, flow_id=flow_id):
             return "error"
-        # The owned error transition already reconciled local state. This read
-        # only decides the response and must not rehydrate a reset store.
-        record = await self._load_flow_record(flow_id=flow_id) if flow_id is not None else None
+        record = await self._reconcile_flow_from_durable(flow_id=flow_id) if flow_id is not None else None
         if record is not None and record.status == "success":
             return "success"
         return "error"
 
     def _start_callback_server_stop_locked(self, server: OAuthCallbackServer) -> asyncio.Task[None]:
-        return self._store.start_callback_server_stop_locked(server)
-
-    def _begin_callback_server_stop_if_idle_locked(
-        self,
-    ) -> tuple[asyncio.Task[None] | None, asyncio.Task[None] | None]:
-        if self._store.has_pending_browser_flows_locked():
-            return None, None
-        expiry_task = self._store.cancel_browser_flow_expiry_task_locked()
-        server = self._store._callback_server
-        stop_task = self._start_callback_server_stop_locked(server) if server is not None else None
-        return expiry_task, stop_task
-
-    def _restart_browser_flow_expiry_task_locked(self) -> asyncio.Task[None] | None:
-        retired_task = self._store.cancel_browser_flow_expiry_task_locked()
-        self._store._browser_flow_expiry_task = asyncio.create_task(
-            self._expire_pending_browser_flows(),
-            name="oauth-browser-flow-expiry",
-        )
-        return retired_task
-
-    async def _expire_pending_browser_flows(self) -> None:
-        current_task = asyncio.current_task()
-        if current_task is None:
-            return
-        try:
-            while True:
-                server: OAuthCallbackServer | None = None
-                stop_task: asyncio.Task[None] | None = None
-                async with self._store.lock:
-                    if self._store._browser_flow_expiry_task is not current_task:
-                        return
-                    if not self._store.has_pending_browser_flows_locked():
-                        server = self._store._callback_server
-                        if server is None:
-                            self._store._browser_flow_expiry_task = None
-                            return
-                        stop_task = self._start_callback_server_stop_locked(server)
-                    else:
-                        deadline = self._store.next_pending_browser_flow_expiry_locked()
-                        if deadline is None:
-                            self._store._browser_flow_expiry_task = None
-                            return
-
-                if server is not None and stop_task is not None:
-                    await self._finish_callback_server_stop(server, stop_task)
-                    return
-
-                await _browser_flow_expiry_sleep(max(deadline - _browser_flow_clock(), 0))
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("browser OAuth flow expiry task failed")
-        finally:
-            async with self._store.lock:
-                if self._store._browser_flow_expiry_task is current_task:
-                    self._store._browser_flow_expiry_task = None
+        stop_task = self._store._callback_server_stop_task
+        if stop_task is not None and not stop_task.done():
+            return stop_task
+        stop_task = asyncio.create_task(server.stop())
+        self._store._callback_server_stop_task = stop_task
+        return stop_task
 
     async def _finish_callback_server_stop(
         self,
         server: OAuthCallbackServer,
         stop_task: asyncio.Task[None],
     ) -> None:
-        del server
-        await asyncio.shield(stop_task)
+        try:
+            await asyncio.shield(stop_task)
+        finally:
+            async with self._store.lock:
+                if self._store._callback_server is server:
+                    self._store._callback_server = None
+                if self._store._callback_server_stop_task is stop_task:
+                    self._store._callback_server_stop_task = None
 
     async def _wait_for_callback_server_stop(self) -> None:
         while True:
             async with self._store.lock:
                 stop_task = self._store._callback_server_stop_task
-                if stop_task is not None and stop_task.done():
-                    server = self._store._callback_server
-                    if server is None:
-                        self._store._callback_server_stop_task = None
-                        return
-                    stop_task = self._start_callback_server_stop_locked(server)
             if stop_task is None:
                 return
             await asyncio.shield(stop_task)
 
     async def _stop_callback_server_if_idle(self) -> None:
+        server: OAuthCallbackServer | None = None
         stop_task: asyncio.Task[None] | None = None
-        expiry_task: asyncio.Task[None] | None = None
         async with self._store.lock:
-            expiry_task, stop_task = self._begin_callback_server_stop_if_idle_locked()
-        if expiry_task is not None:
-            await asyncio.gather(expiry_task, return_exceptions=True)
-        if stop_task is not None:
-            await asyncio.shield(stop_task)
+            if self._store.has_pending_browser_flows_locked():
+                return
+            server = self._store._callback_server
+            if server:
+                stop_task = self._start_callback_server_stop_locked(server)
+        if server and stop_task:
+            await self._finish_callback_server_stop(server, stop_task)
 
     @staticmethod
     def _html_response(html: str) -> web.Response:

@@ -47,8 +47,8 @@ def _oauth_flow_schema(db_setup):
 _injected_oauth_stores: list[oauth_module.OAuthStateStore] = []
 
 
-async def _drain_oauth_store(store: oauth_module.OAuthStateStore) -> None:
-    """Reset an OAuth store AND await its tasks to completion.
+async def _drain_global_oauth_store() -> None:
+    """Reset the module-global OAuth store AND await its tasks to completion.
 
     ``_OAUTH_STORE.reset()`` cancels poll tasks but does not await them, so a
     cancelled (or still-pending) device poller can keep running into the next
@@ -61,28 +61,22 @@ async def _drain_oauth_store(store: oauth_module.OAuthStateStore) -> None:
     as unrelated "Task exception was never retrieved" noise in a later test.
     """
 
+    store = oauth_module._OAUTH_STORE
     async with store.lock:
         tasks = [
             flow.poll_task for flow in store._flows.values() if flow.poll_task is not None and not flow.poll_task.done()
         ]
-        start_task = getattr(store, "_callback_server_start_task", None)
-        if start_task is not None and not start_task.done():
-            tasks.append(start_task)
         stop_task = store._callback_server_stop_task
         if stop_task is not None and not stop_task.done():
             tasks.append(stop_task)
-        expiry_task = getattr(store, "_browser_flow_expiry_task", None)
-        if expiry_task is not None and not expiry_task.done():
-            tasks.append(expiry_task)
     await store.reset()
+    for injected_store in _injected_oauth_stores:
+        await injected_store.reset()
+    _injected_oauth_stores.clear()
     for task in tasks:
         task.cancel()
         with contextlib.suppress(Exception, asyncio.CancelledError):
             await task
-
-
-async def _drain_global_oauth_store() -> None:
-    await _drain_oauth_store(oauth_module._OAUTH_STORE)
 
 
 @pytest.fixture(autouse=True)
@@ -95,12 +89,8 @@ async def _isolate_global_oauth_store():
     order-dependent "different victim per run" flake of issue #1794.
     """
 
-    _injected_oauth_stores.clear()
     await _drain_global_oauth_store()
     yield
-    for store in _injected_oauth_stores:
-        await _drain_oauth_store(store)
-    _injected_oauth_stores.clear()
     await _drain_global_oauth_store()
 
 
@@ -1152,355 +1142,94 @@ async def test_only_expired_pending_browser_flow_no_longer_keeps_callback_server
         assert oauth_module._OAUTH_STORE.state.status == "idle"
 
 
+async def _wait_for_browser_flow_removal(store: oauth_module.OAuthStateStore, flow_id: str) -> None:
+    async with asyncio.timeout(5):
+        while flow_id in store._flows:
+            await asyncio.sleep(0.01)
+
+
 @pytest.mark.asyncio
 async def test_abandoned_browser_flow_expiry_releases_callback_port_without_followup_request(
-    monkeypatch,
-    unused_tcp_port,
+    monkeypatch, unused_tcp_port, async_client
 ):
-    sleep_started = asyncio.Event()
-    release_expiry = asyncio.Event()
-    server_stopped = asyncio.Event()
-    observed_delays: list[float] = []
-    clock = [1_000.0]
-
-    async def controlled_expiry_sleep(delay: float) -> None:
-        observed_delays.append(delay)
-        sleep_started.set()
-        await release_expiry.wait()
-
-    async def immediate_stop_retry(_delay: float) -> None:
-        await asyncio.sleep(0)
-
-    original_stop = oauth_module.OAuthCallbackServer.stop
-    stop_attempts = 0
-
-    async def observing_stop(server: oauth_module.OAuthCallbackServer) -> None:
-        nonlocal stop_attempts
-        stop_attempts += 1
-        if stop_attempts == 1:
-            raise OSError("transient cleanup failure")
-        await original_stop(server)
-        server_stopped.set()
-
     monkeypatch.setattr(oauth_module, "OAUTH_CALLBACK_PORT", unused_tcp_port)
-    monkeypatch.setattr(oauth_module, "_PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS", 10)
-    monkeypatch.setattr(oauth_module, "_browser_flow_clock", lambda: clock[0])
-    monkeypatch.setattr(oauth_module, "_browser_flow_expiry_sleep", controlled_expiry_sleep, raising=False)
-    monkeypatch.setattr(oauth_module, "_callback_server_stop_retry_sleep", immediate_stop_retry)
-    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "stop", observing_stop)
+    monkeypatch.setattr(oauth_module, "_PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS", 0.25)
+    stopped = asyncio.Event()
+    original_stop = oauth_module.OAuthCallbackServer.stop
 
-    async with SessionLocal() as session:
-        service = oauth_module.OauthService(AccountsRepository(session))
-        response = await service._start_browser_flow()
+    async def observe_stop(server):
+        await original_stop(server)
+        stopped.set()
 
-    assert response.flow_id is not None
-    await asyncio.wait_for(sleep_started.wait(), timeout=1)
-    assert observed_delays and observed_delays[0] >= 0
-
-    reader, writer = await asyncio.open_connection("127.0.0.1", unused_tcp_port)
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "stop", observe_stop)
+    response = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert response.status_code == 200
+    flow_id = response.json()["flowId"]
+    _, writer = await asyncio.open_connection("127.0.0.1", unused_tcp_port)
     writer.close()
     await writer.wait_closed()
-    del reader
 
-    async with oauth_module._OAUTH_STORE.lock:
-        expiry_task = oauth_module._OAUTH_STORE._browser_flow_expiry_task
-    assert expiry_task is not None
+    # Only the deadline can trigger cleanup: no status, callback, or new start.
+    await asyncio.wait_for(stopped.wait(), timeout=5)
+    store = oauth_module._OAUTH_STORE
+    assert flow_id not in store._flows
+    assert store._state_token_index == {}
+    with pytest.raises(OSError):
+        await asyncio.open_connection("127.0.0.1", unused_tcp_port)
 
-    # Let the real wall-clock deadline pass, then wake only the owned expiry
-    # task. No callback, status, completion, reset, or second start prompts the
-    # cleanup under test.
-    clock[0] += 10
-    release_expiry.set()
-    await asyncio.wait_for(server_stopped.wait(), timeout=1)
-    await asyncio.wait_for(asyncio.shield(expiry_task), timeout=1)
-    assert stop_attempts == 2
+    # A fresh listener can immediately acquire the released port.
+    async def handler(_request):
+        return web.Response(text="ok")
 
-    async with oauth_module._OAUTH_STORE.lock:
-        assert response.flow_id not in oauth_module._OAUTH_STORE._flows
-        assert oauth_module._OAUTH_STORE._state_token_index == {}
-        assert oauth_module._OAUTH_STORE.state.status == "idle"
-        assert oauth_module._OAUTH_STORE._callback_server is None
-
-    async def close_probe(_reader: asyncio.StreamReader, probe_writer: asyncio.StreamWriter) -> None:
-        probe_writer.close()
-
-    probe = await asyncio.start_server(close_probe, "127.0.0.1", unused_tcp_port)
-    probe.close()
-    await probe.wait_closed()
+    replacement = oauth_module.OAuthCallbackServer(handler, port=unused_tcp_port)
+    try:
+        await replacement.start()
+    finally:
+        await replacement.stop()
 
 
 @pytest.mark.asyncio
-async def test_browser_callback_error_returns_response_then_releases_callback_port(
-    monkeypatch,
-    unused_tcp_port,
-):
-    server_stopped = asyncio.Event()
-    original_stop = oauth_module.OAuthCallbackServer.stop
-    stop_attempts = 0
-
-    async def immediate_stop_retry(_delay: float) -> None:
-        await asyncio.sleep(0)
-
-    async def observing_stop(server: oauth_module.OAuthCallbackServer) -> None:
-        nonlocal stop_attempts
-        stop_attempts += 1
-        if stop_attempts == 1:
-            raise OSError("transient terminal cleanup failure")
-        await original_stop(server)
-        server_stopped.set()
-
+async def test_overlapping_browser_flows_keep_listener_until_final_expiry(monkeypatch, unused_tcp_port, async_client):
     monkeypatch.setattr(oauth_module, "OAUTH_CALLBACK_PORT", unused_tcp_port)
-    monkeypatch.setattr(oauth_module, "_callback_server_stop_retry_sleep", immediate_stop_retry)
-    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "stop", observing_stop)
+    monkeypatch.setattr(oauth_module, "_PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS", 0.25)
+    first = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert first.status_code == 200
+    monkeypatch.setattr(oauth_module, "_PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS", 1)
+    second = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    assert second.status_code == 200
+    store = oauth_module._OAUTH_STORE
+    await _wait_for_browser_flow_removal(store, first.json()["flowId"])
+    assert second.json()["flowId"] in store._flows
+    _, writer = await asyncio.open_connection("127.0.0.1", unused_tcp_port)
+    writer.close()
+    await writer.wait_closed()
 
-    store = oauth_module.OAuthStateStore()
-    service = _make_replica_service(store)
-    start = await service._start_browser_flow()
-    state_token = _oauth_state_token(start.authorization_url or "")
-    async with store.lock:
-        expiry_task = store._browser_flow_expiry_task
-    assert expiry_task is not None
-
-    async with ClientSession() as client:
-        async with client.get(
-            f"http://127.0.0.1:{unused_tcp_port}/auth/callback",
-            params={"error": "access_denied", "state": state_token},
-        ) as response:
-            assert response.status == 200
-            assert "Authorization failed" in await response.text()
-
-    await asyncio.wait_for(server_stopped.wait(), timeout=1)
-    assert stop_attempts == 2
-    assert expiry_task.done()
-    assert expiry_task.cancelled()
-    async with store.lock:
-        flow = store.get_flow_locked(start.flow_id)
-        assert flow is not None and flow.status == "error"
-        assert store._callback_server is None
-        assert store._callback_server_stop_task is None
-        assert store._browser_flow_expiry_task is None
-
-    async def close_probe(_reader: asyncio.StreamReader, probe_writer: asyncio.StreamWriter) -> None:
-        probe_writer.close()
-
-    probe = await asyncio.start_server(close_probe, "127.0.0.1", unused_tcp_port)
-    probe.close()
-    await probe.wait_closed()
+    await _wait_for_browser_flow_removal(store, second.json()["flowId"])
+    async with asyncio.timeout(5):
+        while store._callback_server is not None:
+            await asyncio.sleep(0.01)
+    with pytest.raises(OSError):
+        await asyncio.open_connection("127.0.0.1", unused_tcp_port)
 
 
 @pytest.mark.asyncio
-async def test_overlapping_browser_flows_keep_listener_until_final_expiry(monkeypatch):
-    clock = [2_000.0]
-    sleep_calls: asyncio.Queue[tuple[float, asyncio.Event]] = asyncio.Queue()
-    servers: list[FakeCallbackServer] = []
-    first_persist_started = asyncio.Event()
-    release_first_persist = asyncio.Event()
+async def test_hydrated_browser_flow_rearms_earlier_deadline_and_reset_drains_task(monkeypatch):
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", AsyncMock())
+    source = _make_replica_service(oauth_module.OAuthStateStore())
+    replica = _make_replica_service(oauth_module.OAuthStateStore())
+    later = await replica._start_browser_flow()
+    monkeypatch.setattr(oauth_module, "_PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS", 0.25)
+    earlier = await source._start_browser_flow()
+    assert earlier.flow_id is not None
+    assert (await replica.oauth_status(earlier.flow_id)).status == "pending"
 
-    async def controlled_expiry_sleep(delay: float) -> None:
-        release = asyncio.Event()
-        await sleep_calls.put((delay, release))
-        await release.wait()
-
-    class FakeCallbackServer:
-        def __init__(self, *_, **__) -> None:
-            self.start_count = 0
-            self.stop_count = 0
-            servers.append(self)
-
-        async def start(self) -> None:
-            self.start_count += 1
-
-        async def stop(self) -> None:
-            self.stop_count += 1
-
-    monkeypatch.setattr(oauth_module, "OAuthCallbackServer", FakeCallbackServer)
-    monkeypatch.setattr(oauth_module, "_PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS", 100)
-    monkeypatch.setattr(oauth_module, "_browser_flow_clock", lambda: clock[0])
-    monkeypatch.setattr(oauth_module, "_browser_flow_expiry_sleep", controlled_expiry_sleep)
-
-    store = oauth_module.OAuthStateStore()
-    service = _make_replica_service(store)
-    original_persist = service._persist_flow_record
-    persist_calls = 0
-
-    async def persist_out_of_order(record: oauth_module.OAuthFlowRecord) -> None:
-        nonlocal persist_calls
-        persist_calls += 1
-        if persist_calls == 1:
-            first_persist_started.set()
-            await release_first_persist.wait()
-        await original_persist(record)
-
-    monkeypatch.setattr(service, "_persist_flow_record", persist_out_of_order)
-
-    # The earlier-deadline flow stalls in persistence. The later flow publishes
-    # first and initially arms the watchdog for its own later deadline.
-    first_task = asyncio.create_task(service._start_browser_flow())
-    await asyncio.wait_for(first_persist_started.wait(), timeout=1)
-    clock[0] += 10
-    second = await service._start_browser_flow()
-    later_delay, _retired_release = await asyncio.wait_for(sleep_calls.get(), timeout=1)
-    assert later_delay == pytest.approx(100)
-    async with store.lock:
-        later_expiry_task = store._browser_flow_expiry_task
-    assert later_expiry_task is not None
-
-    # Publishing the older flow second must replace/re-arm the one watchdog so
-    # port cleanup follows the true earliest absolute deadline.
-    release_first_persist.set()
-    first = await asyncio.wait_for(first_task, timeout=1)
-    first_delay, release_first_deadline = await asyncio.wait_for(sleep_calls.get(), timeout=1)
-    assert first_delay == pytest.approx(90)
-    async with store.lock:
-        shared_expiry_task = store._browser_flow_expiry_task
-    assert shared_expiry_task is not None
-    assert shared_expiry_task is not later_expiry_task
-    assert later_expiry_task.done() and later_expiry_task.cancelled()
-    assert len(servers) == 1
-    assert servers[0].start_count == 1
-
-    clock[0] += 90
-    release_first_deadline.set()
-    second_delay, release_second_deadline = await asyncio.wait_for(sleep_calls.get(), timeout=1)
-    assert second_delay == pytest.approx(10)
-    async with store.lock:
-        assert first.flow_id not in store._flows
-        assert second.flow_id in store._flows
-        assert store._callback_server is servers[0]
-    assert servers[0].stop_count == 0
-
-    clock[0] += 10
-    release_second_deadline.set()
-    await asyncio.wait_for(asyncio.shield(shared_expiry_task), timeout=1)
-
-    async with store.lock:
-        assert store._flows == {}
-        assert store._state_token_index == {}
-        assert store._callback_server is None
-        assert store._browser_flow_expiry_task is None
-    assert servers[0].stop_count == 1
-
-
-@pytest.mark.asyncio
-async def test_browser_success_keeps_shared_listener_then_stops_after_final_flow(monkeypatch):
-    sleep_started = asyncio.Event()
-    server_stopped = asyncio.Event()
-    servers: list[FakeCallbackServer] = []
-    first_account_persist_started = asyncio.Event()
-    release_first_account_persist = asyncio.Event()
-
-    async def parked_expiry_sleep(_delay: float) -> None:
-        sleep_started.set()
-        await asyncio.Event().wait()
-
-    class FakeCallbackServer:
-        def __init__(self, *_, **__) -> None:
-            self.stop_count = 0
-            servers.append(self)
-
-        async def start(self) -> None:
-            return None
-
-        async def stop(self) -> None:
-            self.stop_count += 1
-            server_stopped.set()
-
-    monkeypatch.setattr(oauth_module, "OAuthCallbackServer", FakeCallbackServer)
-    monkeypatch.setattr(oauth_module, "_browser_flow_expiry_sleep", parked_expiry_sleep)
-
-    async def fake_exchange_authorization_code(**_) -> OAuthTokens:
-        return OAuthTokens(
-            access_token="access-token",
-            refresh_token="refresh-token",
-            id_token=_encode_jwt(
-                {
-                    "email": "lifecycle@example.com",
-                    "chatgpt_account_id": "acc_lifecycle",
-                    "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
-                }
-            ),
-        )
-
-    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
-
-    store = oauth_module.OAuthStateStore()
-    service = _make_replica_service(store)
-    persist_calls = 0
-
-    async def gated_persist_tokens(tokens: OAuthTokens, *, intended_account_id: str | None = None) -> None:
-        nonlocal persist_calls
-        del tokens, intended_account_id
-        persist_calls += 1
-        if persist_calls == 1:
-            first_account_persist_started.set()
-            await asyncio.wait_for(release_first_account_persist.wait(), timeout=5)
-
-    monkeypatch.setattr(service, "_persist_tokens", gated_persist_tokens)
-    first = await service._start_browser_flow()
-    await asyncio.wait_for(sleep_started.wait(), timeout=1)
-    second = await service._start_browser_flow()
-    async with store.lock:
-        shared_expiry_task = store._browser_flow_expiry_task
-    assert shared_expiry_task is not None
-
-    state_token = _oauth_state_token(first.authorization_url or "")
-    first_callback = asyncio.create_task(
-        service.manual_callback(
-            f"http://localhost:1455/auth/callback?code=first-code&state={state_token}",
-            flow_id=first.flow_id,
-        )
-    )
-    await asyncio.wait_for(first_account_persist_started.wait(), timeout=1)
-
-    # The request can disappear after the account write, but the durable +
-    # local terminal transition remains process-owned. Until durable success
-    # commits, the local flow and listener stay pending/live.
-    first_callback.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first_callback
-    async with store.lock:
-        local_first = store.get_flow_locked(first.flow_id)
-        assert local_first is not None and local_first.status == "pending"
-        assert store._callback_server is servers[0]
-        assert store._browser_flow_expiry_task is shared_expiry_task
-        terminal_tasks = list(store._terminal_transition_tasks)
-    assert len(terminal_tasks) == 1 and not terminal_tasks[0].done()
-
-    release_first_account_persist.set()
-    assert await asyncio.wait_for(asyncio.shield(terminal_tasks[0]), timeout=1)
-    async with store.lock:
-        local_first = store.get_flow_locked(first.flow_id)
-        local_second = store.get_flow_locked(second.flow_id)
-        assert local_first is not None and local_first.status == "success"
-        assert local_second is not None and local_second.status == "pending"
-        assert store._callback_server is servers[0]
-        assert store._browser_flow_expiry_task is shared_expiry_task
-    assert servers[0].stop_count == 0
-
-    second_state_token = _oauth_state_token(second.authorization_url or "")
-    second_result = await service.manual_callback(
-        f"http://localhost:1455/auth/callback?code=second-code&state={second_state_token}",
-        flow_id=second.flow_id,
-    )
-    assert second_result.status == "success"
-    await asyncio.wait_for(server_stopped.wait(), timeout=1)
-    assert shared_expiry_task.done() and shared_expiry_task.cancelled()
-    async with store.lock:
-        assert store._callback_server is None
-        assert store._browser_flow_expiry_task is None
-    assert servers[0].stop_count == 1
-
-    # Retired work is identity-guarded and cannot affect a replacement.
-    sleep_started.clear()
-    replacement = await service._start_browser_flow()
-    await asyncio.wait_for(sleep_started.wait(), timeout=1)
-    async with store.lock:
-        replacement_expiry_task = store._browser_flow_expiry_task
-        assert replacement.flow_id in store._flows
-        assert store._callback_server is servers[1]
-    assert replacement_expiry_task is not None
-    assert replacement_expiry_task is not shared_expiry_task
-    assert not replacement_expiry_task.done()
+    await _wait_for_browser_flow_removal(replica._store, earlier.flow_id)
+    assert later.flow_id in replica._store._flows
+    task = replica._store._browser_flow_expiry_task
+    assert task is not None and not task.done()
+    await replica._store.reset()
+    assert task.done()
+    assert replica._store._browser_flow_expiry_task is None
 
 
 @pytest.mark.asyncio
@@ -1534,186 +1263,28 @@ async def test_callback_access_log_omits_code_and_state(caplog, unused_tcp_port)
 
 
 @pytest.mark.asyncio
-async def test_callback_server_remains_owned_when_stop_waiter_cancels_or_stop_fails(monkeypatch):
+async def test_callback_server_remains_reserved_until_stop_completes():
     stop_started = asyncio.Event()
     release_stop = asyncio.Event()
-    first_stop_finished = asyncio.Event()
-    retry_started = asyncio.Event()
-    release_retry = asyncio.Event()
-    cleanup_finished = asyncio.Event()
-    new_start_waiting = asyncio.Event()
-    replacements: list[ReplacementCallbackServer] = []
-
-    async def controlled_stop_retry(delay: float) -> None:
-        assert delay == 1
-        retry_started.set()
-        await release_retry.wait()
 
     class FakeCallbackServer:
-        def __init__(self) -> None:
-            self.running = True
-            self.stop_count = 0
-
         async def stop(self) -> None:
-            self.stop_count += 1
-            if self.stop_count == 1:
-                stop_started.set()
-                await release_stop.wait()
-                first_stop_finished.set()
-                raise OSError("first cleanup failed")
-            self.running = False
-            cleanup_finished.set()
-
-    class ReplacementCallbackServer:
-        def __init__(self, *_, **__) -> None:
-            self.started = False
-            replacements.append(self)
-
-        async def start(self) -> None:
-            self.started = True
-
-        async def stop(self) -> None:
-            return None
+            stop_started.set()
+            await release_stop.wait()
 
     fake_server = FakeCallbackServer()
-    monkeypatch.setattr(oauth_module, "_callback_server_stop_retry_sleep", controlled_stop_retry)
     async with SessionLocal() as session:
         service = oauth_module.OauthService(AccountsRepository(session))
         async with oauth_module._OAUTH_STORE.lock:
             oauth_module._OAUTH_STORE._callback_server = cast(oauth_module.OAuthCallbackServer, fake_server)
 
-        stop_waiter = asyncio.create_task(service._stop_callback_server_if_idle())
+        stop_task = asyncio.create_task(service._stop_callback_server_if_idle())
         await stop_started.wait()
         assert oauth_module._OAUTH_STORE._callback_server is fake_server
 
-        # Canceling one waiter cannot cancel or un-own the process task.
-        stop_waiter.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await stop_waiter
-        async with oauth_module._OAUTH_STORE.lock:
-            owner = oauth_module._OAUTH_STORE._callback_server_stop_task
-        assert owner is not None and not owner.done()
-
         release_stop.set()
-        await asyncio.wait_for(first_stop_finished.wait(), timeout=1)
-        await asyncio.wait_for(retry_started.wait(), timeout=1)
-        assert fake_server.running
-        assert oauth_module._OAUTH_STORE._callback_server is fake_server
-
-        # A new start cannot publish a replacement while autonomous retry still
-        # owns the live listener after the transient failure.
-        original_wait = service._wait_for_callback_server_stop
-
-        async def observing_wait() -> None:
-            new_start_waiting.set()
-            await original_wait()
-
-        monkeypatch.setattr(oauth_module, "OAuthCallbackServer", ReplacementCallbackServer)
-        monkeypatch.setattr(service, "_wait_for_callback_server_stop", observing_wait)
-        start_task = asyncio.create_task(service._start_browser_flow())
-        try:
-            await asyncio.wait_for(new_start_waiting.wait(), timeout=1)
-            await asyncio.sleep(0)
-            assert not start_task.done()
-            assert replacements == []
-
-            release_retry.set()
-            await asyncio.wait_for(cleanup_finished.wait(), timeout=1)
-            await asyncio.wait_for(asyncio.shield(owner), timeout=1)
-            response = await asyncio.wait_for(start_task, timeout=1)
-        finally:
-            release_retry.set()
-            if not start_task.done():
-                start_task.cancel()
-            with contextlib.suppress(Exception, asyncio.CancelledError):
-                await start_task
-
-        assert response.method == "browser"
-        assert fake_server.stop_count == 2
-        assert not fake_server.running
-        assert len(replacements) == 1 and replacements[0].started
-        assert oauth_module._OAUTH_STORE._callback_server is replacements[0]
-
-
-@pytest.mark.asyncio
-async def test_persistent_callback_server_stop_failure_is_bounded_and_retriable(monkeypatch, caplog):
-    retry_delays: list[float] = []
-    should_fail = True
-
-    async def immediate_retry(delay: float) -> None:
-        retry_delays.append(delay)
-        await asyncio.sleep(0)
-
-    class FakeCallbackServer:
-        def __init__(self) -> None:
-            self.stop_count = 0
-
-        async def stop(self) -> None:
-            self.stop_count += 1
-            if should_fail:
-                raise OSError("persistent cleanup failure")
-
-    store = oauth_module.OAuthStateStore()
-    service = _make_replica_service(store)
-    server = FakeCallbackServer()
-    caplog.set_level(logging.ERROR, logger=oauth_module.__name__)
-    monkeypatch.setattr(oauth_module, "_callback_server_stop_retry_sleep", immediate_retry)
-    async with store.lock:
-        store._callback_server = cast(oauth_module.OAuthCallbackServer, server)
-
-    with pytest.raises(OSError, match="persistent cleanup failure"):
-        await asyncio.wait_for(service._stop_callback_server_if_idle(), timeout=1)
-
-    assert server.stop_count == oauth_module._CALLBACK_SERVER_STOP_MAX_ATTEMPTS
-    assert retry_delays == [1] * (oauth_module._CALLBACK_SERVER_STOP_MAX_ATTEMPTS - 1)
-    assert any(record.getMessage() == "OAuth callback server stop failed" for record in caplog.records)
-    async with store.lock:
-        first_owner = store._callback_server_stop_task
-        assert first_owner is not None and first_owner.done()
-        assert store._callback_server is server
-
-    should_fail = False
-    await asyncio.wait_for(service._wait_for_callback_server_stop(), timeout=1)
-
-    assert server.stop_count == oauth_module._CALLBACK_SERVER_STOP_MAX_ATTEMPTS + 1
-    async with store.lock:
-        assert store._callback_server is None
-        assert store._callback_server_stop_task is None
-
-
-@pytest.mark.asyncio
-async def test_callback_server_stop_owner_propagates_simultaneous_start_cancellation():
-    start_entered = asyncio.Event()
-
-    class FakeCallbackServer:
-        def __init__(self) -> None:
-            self.stop_count = 0
-
-        async def start(self) -> None:
-            start_entered.set()
-            await asyncio.Event().wait()
-
-        async def stop(self) -> None:
-            self.stop_count += 1
-
-    store = oauth_module.OAuthStateStore()
-    server = FakeCallbackServer()
-    async with store.lock:
-        store._callback_server = cast(oauth_module.OAuthCallbackServer, server)
-        start_task = store.start_callback_server_start_locked(cast(oauth_module.OAuthCallbackServer, server))
-        stop_task = store.start_callback_server_stop_locked(cast(oauth_module.OAuthCallbackServer, server))
-
-    await asyncio.wait_for(start_entered.wait(), timeout=1)
-    await asyncio.sleep(0)
-    start_task.cancel()
-    stop_task.cancel()
-    await asyncio.gather(start_task, stop_task, return_exceptions=True)
-
-    assert start_task.cancelled()
-    assert stop_task.cancelled()
-    # Startup owns its partial-start cleanup. The canceled stop owner must not
-    # swallow its cancellation and enter the retry loop for a second cleanup.
-    assert server.stop_count == 1
+        await stop_task
+        assert oauth_module._OAUTH_STORE._callback_server is None
 
 
 @pytest.mark.asyncio
@@ -2177,13 +1748,10 @@ async def test_existing_account_cleanup_releases_store_lock_before_callback_serv
 
 
 @pytest.mark.asyncio
-async def test_new_browser_flow_rechecks_stop_registered_after_initial_wait(monkeypatch):
-    first_wait_returned = asyncio.Event()
-    release_first_wait = asyncio.Event()
-    second_wait_started = asyncio.Event()
+async def test_new_browser_flow_waits_for_stopping_callback_server_before_reusing_slot(monkeypatch):
     stop_started = asyncio.Event()
     release_stop = asyncio.Event()
-    replacement_servers: list[ReplacementCallbackServer] = []
+    started_servers: list[object] = []
 
     class StoppingCallbackServer:
         async def stop(self) -> None:
@@ -2193,340 +1761,35 @@ async def test_new_browser_flow_rechecks_stop_registered_after_initial_wait(monk
     class ReplacementCallbackServer:
         def __init__(self, *_, **__) -> None:
             self.started = False
-            replacement_servers.append(self)
 
         async def start(self) -> None:
             self.started = True
+            started_servers.append(self)
 
         async def stop(self) -> None:
             return None
 
-    store = oauth_module.OAuthStateStore()
-    service = _make_replica_service(store)
-    stopping_server = StoppingCallbackServer()
-    async with store.lock:
-        store._callback_server = cast(oauth_module.OAuthCallbackServer, stopping_server)
+    async with SessionLocal() as session:
+        service = oauth_module.OauthService(AccountsRepository(session))
+        stopping_server = StoppingCallbackServer()
+        async with oauth_module._OAUTH_STORE.lock:
+            oauth_module._OAUTH_STORE._callback_server = cast(oauth_module.OAuthCallbackServer, stopping_server)
 
-    original_wait = service._wait_for_callback_server_stop
-    wait_calls = 0
+        monkeypatch.setattr(oauth_module, "OAuthCallbackServer", ReplacementCallbackServer)
+        stop_task = asyncio.create_task(service._stop_callback_server_if_idle())
+        await stop_started.wait()
 
-    async def gated_wait() -> None:
-        nonlocal wait_calls
-        wait_calls += 1
-        if wait_calls == 1:
-            await original_wait()
-            first_wait_returned.set()
-            await release_first_wait.wait()
-            return
-        second_wait_started.set()
-        await original_wait()
-
-    monkeypatch.setattr(oauth_module, "OAuthCallbackServer", ReplacementCallbackServer)
-    monkeypatch.setattr(service, "_wait_for_callback_server_stop", gated_wait)
-
-    start_task = asyncio.create_task(service._start_browser_flow())
-    stop_operation: asyncio.Task[None] | None = None
-    retry_waiter: asyncio.Task[bool] | None = None
-    try:
-        await asyncio.wait_for(first_wait_returned.wait(), timeout=1)
-
-        stop_operation = asyncio.create_task(service._stop_callback_server_if_idle())
-        await asyncio.wait_for(stop_started.wait(), timeout=1)
-        release_first_wait.set()
-
-        retry_waiter = asyncio.create_task(second_wait_started.wait())
-        done, _ = await asyncio.wait(
-            {retry_waiter, start_task},
-            timeout=1,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        retried_before_stop_completed = retry_waiter in done and retry_waiter.result()
-
+        start_task = asyncio.create_task(service._start_browser_flow())
+        await asyncio.sleep(0)
         release_stop.set()
+
         response = await asyncio.wait_for(start_task, timeout=1)
-        await asyncio.wait_for(stop_operation, timeout=1)
-    finally:
-        release_first_wait.set()
-        release_stop.set()
-        for task in (retry_waiter, start_task, stop_operation):
-            if task is not None and not task.done():
-                task.cancel()
-            if task is not None:
-                with contextlib.suppress(Exception, asyncio.CancelledError):
-                    await task
+        await stop_task
 
-    assert retried_before_stop_completed
-    assert response.method == "browser"
-    assert len(replacement_servers) == 1
-    assert replacement_servers[0].started
-    async with store.lock:
-        assert store._callback_server is replacement_servers[0]
-
-
-@pytest.mark.asyncio
-async def test_cancelled_browser_start_and_resets_wait_for_owned_cleanup(monkeypatch):
-    start_entered = asyncio.Event()
-    release_start = asyncio.Event()
-    second_stop_started = asyncio.Event()
-    release_second_stop = asyncio.Event()
-    servers: list[FailingStartCallbackServer] = []
-
-    class FailingStartCallbackServer:
-        def __init__(self, *_, **__) -> None:
-            self.running = True
-            self.stop_count = 0
-            servers.append(self)
-
-        async def start(self) -> None:
-            start_entered.set()
-            await release_start.wait()
-            raise OSError("partial listener start failed")
-
-        async def stop(self) -> None:
-            self.stop_count += 1
-            if self.stop_count == 2:
-                second_stop_started.set()
-                await release_second_stop.wait()
-            self.running = False
-
-    monkeypatch.setattr(oauth_module, "OAuthCallbackServer", FailingStartCallbackServer)
-    store = oauth_module.OAuthStateStore()
-    service = _make_replica_service(store)
-    request_task = asyncio.create_task(service._start_browser_flow())
-    first_reset: asyncio.Task[None] | None = None
-    second_reset: asyncio.Task[None] | None = None
-    try:
-        await asyncio.wait_for(start_entered.wait(), timeout=1)
-        async with store.lock:
-            listener_start_task = store._callback_server_start_task
-            expiry_task = store._browser_flow_expiry_task
-            assert store._callback_server is servers[0]
-            assert len(store._flows) == 1
-        assert listener_start_task is not None
-        assert expiry_task is not None
-
-        request_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await request_task
-
-        # Reset must wait for the store-owned startup even though its request
-        # was canceled.
-        first_reset = asyncio.create_task(store.reset())
-        await asyncio.sleep(0)
-        assert not first_reset.done()
-
-        release_start.set()
-        await asyncio.wait_for(second_stop_started.wait(), timeout=1)
-        assert listener_start_task.done() and listener_start_task.result() is False
-
-        # The failed start's first cleanup already cleared the server pointer;
-        # a second reset must still see and await the registered stop owner.
-        async with store.lock:
-            assert store._callback_server is None
-            owned_stop = store._callback_server_stop_task
-        assert owned_stop is not None and not owned_stop.done()
-        second_reset = asyncio.create_task(store.reset())
-        await asyncio.sleep(0)
-        assert not first_reset.done()
-        assert not second_reset.done()
-
-        release_second_stop.set()
-        await asyncio.wait_for(first_reset, timeout=1)
-        await asyncio.wait_for(second_reset, timeout=1)
-        async with store.lock:
-            assert store._flows == {}
-            assert store._callback_server is None
-            assert store._callback_server_start_task is None
-            assert store._callback_server_stop_task is None
-            assert store._browser_flow_expiry_task is None
-        assert expiry_task.done() and expiry_task.cancelled()
-        assert not servers[0].running
-        assert servers[0].stop_count == 2
-    finally:
-        release_start.set()
-        release_second_stop.set()
-        for task in (request_task, first_reset, second_reset):
-            if task is not None and not task.done():
-                task.cancel()
-            if task is not None:
-                with contextlib.suppress(Exception, asyncio.CancelledError):
-                    await task
-
-
-@pytest.mark.asyncio
-async def test_store_reset_during_browser_persistence_prevents_late_listener_publish(monkeypatch):
-    persist_entered = asyncio.Event()
-    release_persist = asyncio.Event()
-    created_servers = 0
-
-    class CountingCallbackServer:
-        def __init__(self, *_, **__) -> None:
-            nonlocal created_servers
-            created_servers += 1
-
-        async def start(self) -> None:
-            return None
-
-        async def stop(self) -> None:
-            return None
-
-    monkeypatch.setattr(oauth_module, "OAuthCallbackServer", CountingCallbackServer)
-    store = oauth_module.OAuthStateStore()
-    service = _make_replica_service(store)
-    original_persist = service._persist_flow_record
-
-    async def gated_persist(record: oauth_module.OAuthFlowRecord) -> None:
-        persist_entered.set()
-        await release_persist.wait()
-        await original_persist(record)
-
-    monkeypatch.setattr(service, "_persist_flow_record", gated_persist)
-    request_task = asyncio.create_task(service.start_oauth(oauth_module.OauthStartRequest(force_method="browser")))
-    try:
-        await asyncio.wait_for(persist_entered.wait(), timeout=1)
-        await store.reset()
-        release_persist.set()
-        with pytest.raises(oauth_module._BrowserOAuthFlowRetiredError, match="store reset"):
-            await asyncio.wait_for(request_task, timeout=1)
-
-        assert created_servers == 0
-        async with store.lock:
-            assert store._flows == {}
-            assert store._callback_server is None
-            assert store._callback_server_start_task is None
-            assert store._callback_server_stop_task is None
-            assert store._browser_flow_expiry_task is None
-    finally:
-        release_persist.set()
-        if not request_task.done():
-            request_task.cancel()
-            with contextlib.suppress(Exception, asyncio.CancelledError):
-                await request_task
-
-
-@pytest.mark.asyncio
-async def test_store_reset_waits_for_owned_terminal_transition_without_republishing(monkeypatch):
-    persist_entered = asyncio.Event()
-    release_persist = asyncio.Event()
-    server_stopped = asyncio.Event()
-
-    async def parked_expiry_sleep(_delay: float) -> None:
-        await asyncio.Event().wait()
-
-    class FakeCallbackServer:
-        def __init__(self, *_, **__) -> None:
-            pass
-
-        async def start(self) -> None:
-            return None
-
-        async def stop(self) -> None:
-            server_stopped.set()
-
-    monkeypatch.setattr(oauth_module, "OAuthCallbackServer", FakeCallbackServer)
-    monkeypatch.setattr(oauth_module, "_browser_flow_expiry_sleep", parked_expiry_sleep)
-    store = oauth_module.OAuthStateStore()
-    service = _make_replica_service(store)
-    start = await service._start_browser_flow()
-
-    async def gated_persist_status(*_args, **_kwargs) -> bool:
-        persist_entered.set()
-        await release_persist.wait()
-        return True
-
-    monkeypatch.setattr(service, "_persist_flow_status", gated_persist_status)
-    terminal_waiter = asyncio.create_task(service._set_success(start.flow_id))
-    reset_task: asyncio.Task[None] | None = None
-    try:
-        await asyncio.wait_for(persist_entered.wait(), timeout=1)
-        async with store.lock:
-            expiry_task = store._browser_flow_expiry_task
-            assert len(store._terminal_transition_tasks) == 1
-        assert expiry_task is not None
-
-        reset_task = asyncio.create_task(store.reset())
-        await asyncio.sleep(0)
-        assert not reset_task.done()
-
-        release_persist.set()
-        await asyncio.wait_for(terminal_waiter, timeout=1)
-        await asyncio.wait_for(reset_task, timeout=1)
-
-        assert expiry_task.done() and expiry_task.cancelled()
-        assert server_stopped.is_set()
-        async with store.lock:
-            assert store._flows == {}
-            assert store._callback_server is None
-            assert store._callback_server_start_task is None
-            assert store._callback_server_stop_task is None
-            assert store._browser_flow_expiry_task is None
-            assert store._terminal_transition_tasks == set()
-    finally:
-        release_persist.set()
-        for task in (terminal_waiter, reset_task):
-            if task is not None and not task.done():
-                task.cancel()
-            if task is not None:
-                with contextlib.suppress(Exception, asyncio.CancelledError):
-                    await task
-
-
-@pytest.mark.asyncio
-async def test_partial_callback_listener_start_failure_is_cleaned_and_remains_manual(monkeypatch):
-    clock = [3_000.0]
-    sleep_started = asyncio.Event()
-    release_expiry = asyncio.Event()
-    servers: list[PartiallyStartingCallbackServer] = []
-
-    async def controlled_expiry_sleep(_delay: float) -> None:
-        sleep_started.set()
-        await release_expiry.wait()
-
-    class PartiallyStartingCallbackServer:
-        def __init__(self, *_, **__) -> None:
-            self.running = False
-            self.stop_count = 0
-            servers.append(self)
-
-        async def start(self) -> None:
-            self.running = True
-            raise OSError("callback port unavailable")
-
-        async def stop(self) -> None:
-            self.running = False
-            self.stop_count += 1
-
-    monkeypatch.setattr(oauth_module, "OAuthCallbackServer", PartiallyStartingCallbackServer)
-    monkeypatch.setattr(oauth_module, "_PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS", 10)
-    monkeypatch.setattr(oauth_module, "_browser_flow_clock", lambda: clock[0])
-    monkeypatch.setattr(oauth_module, "_browser_flow_expiry_sleep", controlled_expiry_sleep)
-    store = oauth_module.OAuthStateStore()
-    service = _make_replica_service(store)
-
-    response = await service._start_browser_flow()
-    await asyncio.wait_for(sleep_started.wait(), timeout=1)
-
-    assert response.method == "browser"
-    assert not servers[0].running
-    assert servers[0].stop_count == 1
-    async with store.lock:
-        flow = store.get_flow_locked(response.flow_id)
-        assert flow is not None and flow.status == "pending"
-        assert store._callback_server is None
-        assert store._callback_server_start_task is None
-        assert store._callback_server_stop_task is None
-        expiry_task = store._browser_flow_expiry_task
-    assert expiry_task is not None
-
-    # Manual paste remains available until the flow TTL, then local state is
-    # pruned even though no callback listener exists.
-    clock[0] += 10
-    release_expiry.set()
-    await asyncio.wait_for(asyncio.shield(expiry_task), timeout=1)
-    async with store.lock:
-        assert response.flow_id not in store._flows
-        assert store._browser_flow_expiry_task is None
-        assert store._callback_server_stop_task is None
+        assert response.method == "browser"
+        assert len(started_servers) == 1
+        async with oauth_module._OAUTH_STORE.lock:
+            assert oauth_module._OAUTH_STORE._callback_server is started_servers[0]
 
 
 @pytest.mark.asyncio
@@ -2605,8 +1868,7 @@ def _make_replica_service(store: "oauth_module.OAuthStateStore") -> oauth_module
 
     from contextlib import asynccontextmanager
 
-    if store not in _injected_oauth_stores:
-        _injected_oauth_stores.append(store)
+    _injected_oauth_stores.append(store)
 
     @asynccontextmanager
     async def _repo_factory():
@@ -2668,45 +1930,11 @@ async def test_browser_oauth_flow_completes_on_replica_that_did_not_start_it(mon
     async with replica_b._store.lock:
         assert replica_b._store.get_flow_by_state_token_locked(state_token) is None
 
-    # A status read that began before reset may still return the durable result,
-    # but it must not repopulate the process-local store after reset completes.
-    load_started = asyncio.Event()
-    release_load = asyncio.Event()
-    original_load = replica_b._load_flow_record
-    gate_load = True
-
-    async def gated_load(**kwargs):
-        nonlocal gate_load
-        if gate_load:
-            gate_load = False
-            load_started.set()
-            await asyncio.wait_for(release_load.wait(), timeout=5)
-        return await original_load(**kwargs)
-
-    monkeypatch.setattr(replica_b, "_load_flow_record", gated_load)
-    stale_status_task = asyncio.create_task(replica_b.oauth_status(start.flow_id))
-    await asyncio.wait_for(load_started.wait(), timeout=1)
-    await replica_b._store.reset()
-    release_load.set()
-    assert (await asyncio.wait_for(stale_status_task, timeout=1)).status == "pending"
-    async with replica_b._store.lock:
-        assert replica_b._store.get_flow_locked(start.flow_id) is None
-        assert replica_b._store._browser_flow_expiry_task is None
-
-    # Hydrating a durable pending browser flow also gives it local deadline
-    # ownership, even on a replica that did not open the callback listener.
-    pending_b = await replica_b.oauth_status(start.flow_id)
-    assert pending_b.status == "pending"
-    async with replica_b._store.lock:
-        hydrated_expiry_task = replica_b._store._browser_flow_expiry_task
-    assert hydrated_expiry_task is not None and not hydrated_expiry_task.done()
-
     result = await replica_b.manual_callback(
         f"http://localhost:1455/auth/callback?code=cross-code&state={state_token}",
         flow_id=start.flow_id,
     )
     assert result.status == "success"
-    assert hydrated_expiry_task.done() and hydrated_expiry_task.cancelled()
 
     expected_account_id = generate_unique_account_id(raw_account_id, email)
     async with SessionLocal() as session:
@@ -2717,6 +1945,34 @@ async def test_browser_oauth_flow_completes_on_replica_that_did_not_start_it(mon
     # authoritative success written by replica B to the shared DB.
     status_a = await replica_a.oauth_status(start.flow_id)
     assert status_a.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_oauth_status_reads_completion_written_by_another_replica(monkeypatch):
+    """A flow started on replica A and marked success in the shared DB by another
+    replica is reported as success by A's status poll, not its stale pending."""
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+
+    replica_a = _make_replica_service(oauth_module.OAuthStateStore())
+    start = await replica_a.start_oauth(oauth_module.OauthStartRequest(force_method="browser"))
+    assert start.flow_id is not None
+
+    # Replica A's in-memory view is still pending.
+    async with replica_a._store.lock:
+        local = replica_a._store.get_flow_locked(start.flow_id)
+        assert local is not None and local.status == "pending"
+
+    # Another replica writes the terminal status directly to the shared DB.
+    async with SessionLocal() as session:
+        repo = oauth_module.OAuthFlowRepository(session, TokenEncryptor())
+        assert await repo.set_status(start.flow_id, status="success", error_message=None)
+
+    status = await replica_a.oauth_status(start.flow_id)
+    assert status.status == "success"
 
 
 def test_is_expired_pending_normalizes_tz_aware_expiry():
@@ -3183,11 +2439,6 @@ async def test_entry_points_honor_durable_terminal_over_local_pending(monkeypatc
     async def fake_callback_server_start(self) -> None:
         return None
 
-    server_stopped = asyncio.Event()
-
-    async def fake_callback_server_stop(self) -> None:
-        server_stopped.set()
-
     async def fake_oauth_route():
         return None
 
@@ -3212,7 +2463,6 @@ async def test_entry_points_honor_durable_terminal_over_local_pending(monkeypatc
         await asyncio.Event().wait()
 
     monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
-    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "stop", fake_callback_server_stop)
     monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
     monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
     monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
@@ -3228,7 +2478,6 @@ async def test_entry_points_honor_durable_terminal_over_local_pending(monkeypatc
     async with replica._store.lock:
         local = replica._store.get_flow_locked(start.flow_id)
         assert local is not None and local.status == "pending"
-        expiry_task = replica._store._browser_flow_expiry_task
 
     # Another replica writes the durable terminal success.
     async with SessionLocal() as session:
@@ -3258,15 +2507,6 @@ async def test_entry_points_honor_durable_terminal_over_local_pending(monkeypatc
     async with replica._store.lock:
         local = replica._store.get_flow_locked(start.flow_id)
         assert local is not None and local.status == "success"
-
-    if force_method == "browser":
-        assert expiry_task is not None
-        await asyncio.wait_for(server_stopped.wait(), timeout=1)
-        assert expiry_task.done() and expiry_task.cancelled()
-        async with replica._store.lock:
-            assert replica._store._callback_server is None
-            assert replica._store._callback_server_stop_task is None
-            assert replica._store._browser_flow_expiry_task is None
 
     # The consumed authorization / device code was never re-exchanged.
     assert exchange_calls == []

@@ -467,16 +467,35 @@ Public Responses endpoints MUST NOT return an OpenAI-shaped `previous_response_n
 - **AND** the missing `previous_response_id` is not exposed in the response body
 
 ### Requirement: Public /v1 responses SSE stream emits only OpenAI Responses contract events
-When serving streaming `POST /v1/responses`, the service MUST emit only event types defined by the OpenAI Responses SSE contract (the `response.*` and `error` families) on the public stream. The service MUST drop any vendor-internal event types — specifically, any event whose `type` begins with `codex.` (for example `codex.rate_limits`) — before they reach the public stream. The `/backend-api/codex/*` routes are NOT subject to this requirement and MUST continue forwarding these events unchanged.
+
+When serving streaming `POST /v1/responses`, the service MUST forward a
+string-valued event type only when it is exactly `error` or begins with
+`response.`. Other string-valued event types MUST be dropped before they reach
+the public stream. OpenAI-shaped backend requests with public contract
+enforcement enabled MUST follow the same filtering rule. Native Codex requests
+with public contract enforcement disabled MUST retain upstream vendor events.
 
 #### Scenario: Codex-internal rate-limit event is dropped before response.created
-- **WHEN** the upstream Codex backend emits `codex.rate_limits` before `response.created` for a streaming `/v1/responses` request
-- **THEN** the public stream MUST NOT contain the `codex.rate_limits` event
-- **AND** the first event the public stream emits MUST be `response.created`
+
+- **WHEN** upstream emits `codex.rate_limits` before `response.created` for a streaming `/v1/responses` request
+- **THEN** the public stream MUST NOT contain `codex.rate_limits`
+- **AND** its first event MUST be `response.created`
+
+#### Scenario: Timing diagnostics are filtered without losing text or completion
+
+- **WHEN** upstream emits `responsesapi.websocket_timing` before, between, or after standard response events
+- **THEN** a public-contract stream MUST NOT contain that diagnostic
+- **AND** standard text deltas and completion events MUST remain in order
+
+#### Scenario: OpenAI-shaped backend request filters vendor events
+
+- **WHEN** an OpenAI-shaped `/backend-api/codex/responses` request enables public contract enforcement
+- **THEN** its response stream MUST apply the public event-family filtering rule
 
 #### Scenario: Codex-internal events on the Codex CLI route are preserved
-- **WHEN** the upstream emits `codex.rate_limits` for a `POST /backend-api/codex/responses` request
-- **THEN** the response stream forwards the `codex.rate_limits` event to the Codex CLI client unchanged
+
+- **WHEN** a native `/backend-api/codex/responses` request disables public contract enforcement
+- **THEN** the response stream MUST retain `codex.rate_limits` and `responsesapi.websocket_timing` in upstream order
 
 ### Requirement: Streamed /v1 responses terminal output is backfilled from item events
 When serving streaming `POST /v1/responses`, if the upstream's terminal `response.completed` or `response.incomplete` event carries `output` as missing or as an empty list, the service MUST reconstruct `output` from the `response.output_item.done` events emitted earlier in the same stream before yielding the terminal SSE event. The reconstructed `output` MUST preserve the `output_index` ordering and the raw item payloads. When the terminal `response.completed` / `response.incomplete` already carries a non-empty `output`, the service MUST forward it unchanged.

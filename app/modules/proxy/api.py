@@ -8828,12 +8828,12 @@ async def _normalize_public_responses_stream(
     Args:
         stream: the upstream SSE event blocks (post-error-conversion).
         enforce_openai_sdk_contract: when True (the default, used for /v1),
-            apply OpenAI Responses SSE contract enforcement: drop Codex
-            vendor events (codex.*), backfill terminal output from streamed
+            apply OpenAI Responses SSE contract enforcement: drop events
+            outside response.* and error, backfill terminal output from streamed
             item events, and synthesize a leading response.created event
             when the upstream stream's first standard event is not
             response.created. When False (used for /backend-api/codex/*,
-            which feeds the Codex CLI), all events including codex.* are
+            which feeds the Codex CLI), all events including vendor events are
             forwarded verbatim and no synthesis happens — the Codex CLI
             relies on the upstream's native event shape.
     """
@@ -9391,16 +9391,16 @@ def _normalize_public_stream_payload(
             normalized_payload = dict(payload)
             normalized_payload["part"] = normalized_part
             return normalized_payload, None
-    # Drop Codex-internal vendor events on the public /v1 surface only. The
-    # upstream Codex backend emits non-standard events (notably
-    # ``codex.rate_limits``, which is throttled per rate-limit window and so
-    # leaks intermittently before ``response.created``). The OpenAI Responses
-    # SSE contract does not define any ``codex.*`` event type, and the OpenAI
-    # SDK's stream parser raises ``RuntimeError`` if any other event arrives
-    # first. The Codex CLI routes under ``/backend-api/codex/*`` legitimately
-    # consume these events and pass ``enforce_openai_sdk_contract=False`` so
-    # they continue to forward unchanged.
-    if enforce_openai_sdk_contract and isinstance(event_type, str) and event_type.startswith("codex."):
+    # Public Responses streams accept the response.* and error families.
+    # Upstream diagnostics such as codex.rate_limits and
+    # responsesapi.websocket_timing break strict event deserializers.
+    # Native Codex requests disable this contract and retain vendor events.
+    if (
+        enforce_openai_sdk_contract
+        and isinstance(event_type, str)
+        and event_type != "error"
+        and not event_type.startswith("response.")
+    ):
         return None, None
     if event_type == "error" or (enforce_openai_sdk_contract and event_type == "response.failed"):
         if event_type == "error":

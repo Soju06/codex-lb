@@ -16,6 +16,14 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 
 ## Constraints
 
+- Public-contract SSE filtering uses the `response.*` and `error` families, so
+  diagnostics such as `responsesapi.websocket_timing` cannot interrupt strict
+  client event deserializers. For example, a timing diagnostic between a text
+  delta and `response.completed` is removed while both standard events remain.
+  Native Codex requests retain vendor events; OpenAI-shaped backend requests
+  follow public filtering. This does not normalize string-valued
+  `response.instructions` or establish full IntelliJ compatibility (Refs #1934).
+
 - Upstream limitations determine available modalities, tool output, and overflow handling.
 - `store=true` is rejected; responses are not persisted.
 - `include` values must be on the documented allowlist.

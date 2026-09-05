@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
 from collections.abc import Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast
@@ -131,6 +130,7 @@ from app.modules.proxy._service.api_key_usage import (
 from app.modules.proxy._service.api_key_usage import (
     _estimated_lease_tokens_from_request_usage_budget as _estimated_lease_tokens_from_request_usage_budget,
 )
+from app.modules.proxy._service.clock_budget import _ClockBudgetMixin, _remaining_budget_seconds  # noqa: F401
 from app.modules.proxy._service.codex_control import _CodexControlMixin
 from app.modules.proxy._service.compact import _CompactMixin
 from app.modules.proxy._service.compact import (
@@ -916,6 +916,7 @@ class ProxyService(
     _WebSocketMixin,
     _HTTPBridgeRetryCircuitMixin,
     _HTTPBridgeMixin,
+    _ClockBudgetMixin,
 ):
     def __init__(
         self,
@@ -950,9 +951,6 @@ class ProxyService(
         self._http_bridge_lock = anyio.Lock()
         self._work_admission: WorkAdmissionController | None = None
         self._request_log_tasks: set[asyncio.Task[None]] = set()
-
-    def _remaining_budget_seconds(self, deadline: float) -> float:
-        return max(0.0, deadline - self._clock.monotonic())
 
     def _get_work_admission(self) -> WorkAdmissionController:
         if self._work_admission is None:
@@ -1275,7 +1273,9 @@ class ProxyService(
     ) -> None:
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
         if bridge_session is not None:
-            timeout_seconds = _http_bridge_admission_timeout_seconds(request_state, timeout_seconds, get_settings())
+            timeout_seconds = _http_bridge_admission_timeout_seconds(
+                request_state, timeout_seconds, get_settings(), now=self._clock.monotonic()
+            )
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = self._clock.monotonic()
         if account_id is not None:
@@ -2348,10 +2348,6 @@ def _sticky_reallocation_primary_budget_threshold_pct(settings: DashboardSetting
 def _sticky_reallocation_secondary_budget_threshold_pct(settings: DashboardSettings) -> float:
     value = getattr(settings, "sticky_reallocation_secondary_budget_threshold_pct", None)
     return float(value if value is not None else 100.0)
-
-
-def _remaining_budget_seconds(deadline: float) -> float:
-    return max(0.0, deadline - time.monotonic())
 
 
 def _proxy_request_timeout_event(request_id: str) -> ResponseFailedEvent:

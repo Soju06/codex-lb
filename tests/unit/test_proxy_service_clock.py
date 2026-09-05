@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -39,7 +40,7 @@ def test_remaining_budget_uses_injected_virtual_clock() -> None:
 
 def test_remaining_budget_keeps_real_clock_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
     now = 100.0
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: now)
+    monkeypatch.setattr(time, "monotonic", lambda: now)
     service = _service()
 
     assert service._remaining_budget_seconds(107.5) == 7.5

@@ -11074,7 +11074,7 @@ async def test_reconnect_http_bridge_session_uses_bridge_budget_for_capacity_wai
         api_key_reservation=None,
         started_at=100.0,
     )
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.5)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.5)
     monkeypatch.setattr(
         proxy_service,
         "get_settings",
@@ -11126,7 +11126,7 @@ async def test_reconnect_http_bridge_session_skips_capacity_wait_for_usage_limit
         api_key_reservation=None,
         started_at=100.0,
     )
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.5)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.5)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(
         proxy_service,
@@ -11178,7 +11178,7 @@ async def test_reconnect_http_bridge_session_preserves_owner_error_for_owner_usa
         started_at=100.0,
         preferred_account_id=session.account.id,
     )
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.5)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.5)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(
         proxy_service,
@@ -34280,7 +34280,7 @@ async def test_maybe_touch_api_key_reservation_keeps_last_touch_when_touch_fails
 
     monkeypatch.setattr(proxy_service, "ApiKeysService", _FakeApiKeysService)
     monkeypatch.setattr(service, "_repo_factory", lambda: _RepoContext())
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 2000.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 2000.0)
 
     result = await service._maybe_touch_api_key_reservation(
         api_key=api_key,
@@ -34323,7 +34323,7 @@ async def test_maybe_touch_api_key_reservation_keeps_last_touch_when_reservation
 
     monkeypatch.setattr(proxy_service, "ApiKeysService", _FakeApiKeysService)
     monkeypatch.setattr(service, "_repo_factory", lambda: _RepoContext())
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 2000.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 2000.0)
 
     result = await service._maybe_touch_api_key_reservation(
         api_key=api_key,

@@ -13364,7 +13364,7 @@ async def test_service_compact_budget_bounds_unconfigured_upstream_read_timeout(
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(runtime_settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -19266,7 +19266,7 @@ async def test_stream_with_retry_capacity_wait_keeps_original_request_deadline(m
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", monotonic)
+    monkeypatch.setattr(time, "monotonic", monotonic)
     monkeypatch.setattr(streaming_retry_module.time, "monotonic", monotonic)
     monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(
@@ -23162,7 +23162,7 @@ async def test_connect_proxy_websocket_maps_budget_exhaustion_to_timeout_error(m
         started_at=100.0,
     )
 
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
 
     websocket_send = AsyncMock()
     websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
@@ -23633,7 +23633,7 @@ async def test_create_http_bridge_session_fails_over_after_repeated_401_refresh_
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
 
     async def select_account(**kwargs: object) -> AccountSelection:
         excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
@@ -25268,7 +25268,7 @@ async def test_connect_proxy_websocket_maps_handshake_budget_exhaustion_to_timeo
     )
     monkeypatch.setattr(service, "_handle_websocket_connect_error", handle_connect_error)
     monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
 
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_handshake_budget",
@@ -28053,7 +28053,7 @@ def test_slim_response_create_counts_oversized_historical_tool_outputs(sizes):
 
 
 def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monkeypatch):
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
 
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [90.0, 95.0],
@@ -28068,7 +28068,7 @@ def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monke
 
 
 def test_websocket_receive_timeout_prefers_request_budget_when_sooner(monkeypatch):
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
 
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [90.0],
@@ -28083,7 +28083,7 @@ def test_websocket_receive_timeout_prefers_request_budget_when_sooner(monkeypatc
 
 
 def test_websocket_receive_timeout_keeps_idle_classification_after_scheduler_jitter(monkeypatch):
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 700.001)
+    monkeypatch.setattr(time, "monotonic", lambda: 700.001)
 
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [100.0],
@@ -28099,7 +28099,7 @@ def test_websocket_receive_timeout_keeps_idle_classification_after_scheduler_jit
 
 
 def test_websocket_receive_timeout_uses_budget_when_equal_budget_is_sooner(monkeypatch):
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 400.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 400.0)
 
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [100.0],
@@ -28115,7 +28115,7 @@ def test_websocket_receive_timeout_uses_budget_when_equal_budget_is_sooner(monke
 
 
 def test_websocket_receive_timeout_honors_idle_when_equal_to_full_budget(monkeypatch):
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
 
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [100.0],
@@ -28222,7 +28222,7 @@ async def test_cancel_safe_cleanup_tracks_background_task_until_done():
 
 @pytest.mark.asyncio
 async def test_next_websocket_receive_timeout_ignores_draining_requests(monkeypatch):
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     draining_request = proxy_service._WebSocketRequestState(
         request_id="req_draining_near_budget",
@@ -28263,7 +28263,7 @@ async def test_fail_expired_pending_websocket_requests_keeps_newer_requests(monk
 
     monkeypatch.setattr(service, "_emit_websocket_terminal_error", emit_terminal_error)
     monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
 
     expired_request = proxy_service._WebSocketRequestState(
         request_id="ws_req_expired",
@@ -37704,7 +37704,7 @@ async def test_resolve_websocket_previous_response_owner_rechecks_same_scope_aft
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     clock = {"value": 100.0}
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: clock["value"])
+    monkeypatch.setattr(time, "monotonic", lambda: clock["value"])
 
     owner_1 = await service._resolve_websocket_previous_response_owner(
         previous_response_id="resp_prev_missing",
@@ -37743,7 +37743,7 @@ async def test_resolve_websocket_previous_response_owner_miss_does_not_evict_kno
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     clock = {"value": 100.0}
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: clock["value"])
+    monkeypatch.setattr(time, "monotonic", lambda: clock["value"])
     api_key = ApiKeyData(
         id="key_shared",
         name="shared-key",
@@ -39442,7 +39442,7 @@ async def test_stream_responses_budget_exhaustion_emits_timeout_event(monkeypatc
     runtime_settings = SimpleNamespace(**runtime_values)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
 
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
 
@@ -39912,7 +39912,7 @@ async def test_stream_refresh_budget_is_recomputed_after_selection(monkeypatch):
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(time, "monotonic", fake_monotonic)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -41059,7 +41059,7 @@ async def test_compact_responses_budget_exhaustion_returns_request_timeout(monke
     runtime_settings = SimpleNamespace(**runtime_values)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -44153,7 +44153,7 @@ async def test_transcribe_budget_exhaustion_blocks_401_retry_with_timeout(monkey
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(time, "monotonic", fake_monotonic)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -45566,7 +45566,7 @@ async def test_try_open_websocket_connect_attempt_does_not_refresh_twice_after_f
     handshake_error = proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "still invalid"))
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
     ensure_fresh = AsyncMock(return_value=account)
     open_upstream = AsyncMock(side_effect=handshake_error)
     retry_after_401 = AsyncMock(side_effect=AssertionError("forced refresh must not refresh same account twice"))
@@ -45617,7 +45617,7 @@ async def test_reconnect_http_bridge_skips_extra_same_account_retry_after_keepal
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
 
     async def select_account(**kwargs: object) -> AccountSelection:
         account_ids = kwargs.get("account_ids")
@@ -45683,7 +45683,7 @@ async def test_reconnect_http_bridge_discards_model_fallback_before_selected_rep
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -45749,7 +45749,7 @@ async def test_reconnect_http_bridge_does_not_fail_over_after_selected_model_rep
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
 
     async def select_account(**_kwargs: object) -> AccountSelection:
         selected = replacement_account if not selected_account_ids else third_account
@@ -45830,7 +45830,7 @@ async def test_reconnect_http_bridge_session_reuses_same_account_stream_lease(mo
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
 
     async def select_account(**kwargs: object) -> AccountSelection:
         seen_lease_kinds.append(kwargs.get("lease_kind"))
@@ -45918,7 +45918,7 @@ async def test_reconnect_http_bridge_session_serializes_lease_swap_with_reacquis
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     # Keep the deterministic service clock local; mutating the shared time
     # module also freezes asyncio's event-loop timers.
-    monkeypatch.setattr(proxy_service, "time", SimpleNamespace(monotonic=lambda: 10.0))
+    monkeypatch.setattr(proxy_service, "time", SimpleNamespace(monotonic=lambda: 10.0), raising=False)
 
     async def release_account_lease_side_effect(released_lease: proxy_service.AccountLease) -> None:
         assert released_lease is reacquired_lease
@@ -45990,7 +45990,7 @@ async def test_reconnect_http_bridge_security_rebind_clears_previous_response_st
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -46079,7 +46079,7 @@ async def test_reconnect_http_bridge_session_restarts_reader_before_local_close(
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -46174,7 +46174,7 @@ async def test_reconnect_http_bridge_session_fails_over_after_repeated_401_refre
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
 
     async def select_account(**kwargs: object) -> AccountSelection:
         excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
@@ -46236,7 +46236,7 @@ async def test_create_http_bridge_session_required_preferred_does_not_fall_back_
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
 
     async def select_account(**kwargs: object) -> AccountSelection:
         excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
@@ -51086,7 +51086,7 @@ async def test_retry_http_bridge_precreated_request_fails_closed_when_file_owner
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
     monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=replacement_account))
     monkeypatch.setattr(

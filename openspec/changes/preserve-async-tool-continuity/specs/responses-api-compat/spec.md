@@ -51,3 +51,14 @@ calls.
 - **THEN** every suffix item MUST have a nonblank string `call_id` and satisfy the existing self-contained tool-item rules before async items are excluded from manifest comparison
 - **AND** invalid items MUST reject the proof without raising an internal error
 - **AND** an unavailable continuity owner MUST produce the existing fail-closed compatibility error instead of an upstream replay
+
+#### Scenario: No-manifest recovery retains asynchronous history
+
+- **GIVEN** a durable HTTP-bridge response has only asynchronous pending calls and no synchronous pending-tool manifest
+- **AND** a full resend matches the stored input prefix and retains a completed assistant message followed by fresh input
+- **WHEN** the owner is lost or another instance recovers the session
+- **THEN** unresolved async function and custom tool calls in the prefix or suffix MUST NOT block the retained-output proof
+- **AND** matching typed async outputs, including delayed prefix-call outputs, MUST be accepted without synthetic results
+- **AND** malformed, duplicate, or mismatched async items MUST fail closed
+- **AND** async calls or their outputs alone MUST NOT replace the completed-assistant boundary or settle pending synchronous calls
+- **AND** existing account-ownership and account-neutral replay checks MUST remain required

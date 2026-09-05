@@ -34,3 +34,18 @@ For example, a suffix containing an async call without `call_id` rejects
 the recovery proof rather than raising `KeyError` on an HTTP request.
 
 Rejected: landing async tools inside #2089. Maintainer required a split.
+
+The no-manifest retained-output proof must carry the prefix's outstanding
+async identities and track suffix async calls separately from synchronous
+calls. Validate async call/output shapes with the existing self-contained
+validator, and consume only matching typed outputs. A delayed output after
+a retained assistant message is fresh input; an async call is not a turn
+boundary. Keep the completed-assistant boundary mandatory, since without
+a manifest a call/output pair cannot prove parallel output completeness.
+
+This extends the existing retained-output policy to the async vocabulary
+introduced here. Main's synchronous proof and its fail-closed boundaries
+remain the baseline. A focused shared-proof repair is preferable to a new
+persisted async manifest or transcript reconstruction: neither is needed
+to distinguish non-blocking async work in client-supplied full history.
+Complete transcript persistence (#1900) remains separate scope.

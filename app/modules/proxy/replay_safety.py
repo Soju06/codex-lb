@@ -352,7 +352,15 @@ def responses_input_suffix_retains_prior_output(
     )
     if prefix_state is None:
         return False
-    pending_suffix_calls, seen_suffix_call_ids, _prefix_async = prefix_state
+    pending_suffix_calls, seen_suffix_call_ids, async_calls = prefix_state
+    async_items = [
+        item
+        for item in input_items[:stored_count]
+        if isinstance(item, dict)
+        and isinstance(call_id := item.get("call_id"), str)
+        and call_id in async_calls
+        and async_calls[call_id] == item.get("type")
+    ]
     retained_output_seen = False
     retained_output_is_final_answer = False
     fresh_followup_seen = False
@@ -373,7 +381,11 @@ def responses_input_suffix_retains_prior_output(
             if not isinstance(call_id, str) or not call_id or call_id in seen_suffix_call_ids:
                 return False
             seen_suffix_call_ids.add(call_id)
-            pending_suffix_calls.append((item_type, call_id))
+            if item.get("async") is True:
+                async_calls[call_id] = item_type
+                async_items.append(item)
+            else:
+                pending_suffix_calls.append((item_type, call_id))
             # Without a persisted output manifest, a call/output pair cannot
             # prove that an omitted parallel call was not part of the response.
             # Require a later completed assistant message as the turn boundary.
@@ -388,9 +400,19 @@ def responses_input_suffix_retains_prior_output(
             if item.get("status") not in (None, "completed", "failed"):
                 return False
             call_id = item.get("call_id")
-            if not isinstance(call_id, str) or not pending_suffix_calls:
+            if not isinstance(call_id, str):
                 return False
-            if pending_suffix_calls[0] != (call_type, call_id):
+            if call_id in async_calls:
+                if async_calls[call_id] != call_type:
+                    return False
+                del async_calls[call_id]
+                async_items.append(item)
+                if retained_output_seen:
+                    fresh_followup_seen = True
+                    fresh_followup_count += 1
+                    fresh_followup_is_user_message = False
+                continue
+            if not pending_suffix_calls or pending_suffix_calls[0] != (call_type, call_id):
                 return False
             pending_suffix_calls.popleft()
             continue
@@ -422,7 +444,13 @@ def responses_input_suffix_retains_prior_output(
             fresh_developer_followup_seen = True
             continue
         return False
-    return retained_output_seen and fresh_followup_seen and not pending_suffix_calls
+    return (
+        retained_output_seen
+        and fresh_followup_seen
+        and not pending_suffix_calls
+        and all(_is_nonblank_string(item.get("call_id")) for item in async_items)
+        and responses_input_items_are_self_contained_fresh_replay([*async_items])
+    )
 
 
 def responses_input_suffix_matches_pending_tool_calls(

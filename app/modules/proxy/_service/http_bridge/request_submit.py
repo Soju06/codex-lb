@@ -47,6 +47,7 @@ from app.core.clients.proxy_websocket import (
     is_account_neutral_websocket_error_code,
 )
 from app.core.errors import OpenAIErrorEnvelope, openai_error
+from app.core.exceptions import ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
     ResponsesRequest,
@@ -231,6 +232,10 @@ from app.modules.proxy.helpers import (
     _parse_openai_error,
 )
 from app.modules.proxy.load_balancer import effective_account_concurrency_caps
+from app.modules.proxy.request_policy import (
+    prepare_astra_reasoning_policy_continuation,
+    validate_astra_request,
+)
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
 )
@@ -612,7 +617,13 @@ def _text_without_account_installation_id(text_data: str) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
-def _text_with_previous_response_id(text_data: str, response_id: str | None) -> str:
+def _text_with_previous_response_id(
+    text_data: str,
+    response_id: str | None,
+    *,
+    api_key: ApiKeyData | None = None,
+    request_state: _WebSocketRequestState | None = None,
+) -> str:
     if not response_id:
         return text_data
     try:
@@ -622,6 +633,21 @@ def _text_with_previous_response_id(text_data: str, response_id: str | None) -> 
     if not isinstance(payload, dict) or not response_id:
         return text_data
     payload["previous_response_id"] = response_id
+    model = payload.get("model")
+    if api_key is not None and isinstance(model, str) and model.strip().lower() == "gpt-6-astra":
+        request = ResponsesRequest.model_validate(payload)
+        prepare_astra_reasoning_policy_continuation(request, api_key)
+        validate_astra_request(request, api_key)
+        forwarded_payload = request.to_payload()
+        payload["input"] = forwarded_payload.get("input")
+        if request_state is not None and isinstance(request.input, list):
+            prepared_input = cast(list[JsonValue], request.input)
+            request_state.input_item_count = len(prepared_input)
+            request_state.input_full_fingerprint = _fingerprint_input_items(prepared_input)
+            request_state.request_usage_budget = estimate_api_key_request_usage(
+                request,
+                upstream_payload=forwarded_payload,
+            )
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
@@ -768,6 +794,9 @@ class _HTTPBridgeRequestSubmitMixin:
         enforce_openai_sdk_contract: bool = True,
         upstream_payload_base: JsonObject | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
+        if prepare_astra_reasoning_policy_continuation(payload, api_key):
+            upstream_payload_base = None
+        validate_astra_request(payload, api_key)
         deduped_replayed_input_count: int | None = None
         deduped_replayed_input_fingerprint: str | None = None
         deduped_replayed_tool_call_count = 0
@@ -1450,7 +1479,12 @@ class _HTTPBridgeRequestSubmitMixin:
                         # successive response anchors.
                         seen_hard_turn_response_ids.add(terminal_hard_turn_response_id)
                         hard_turn_chain_advanced = True
-                        text_data = _text_with_previous_response_id(text_data, terminal_hard_turn_response_id)
+                        text_data = _text_with_previous_response_id(
+                            text_data,
+                            terminal_hard_turn_response_id,
+                            api_key=request_state.api_key,
+                            request_state=request_state,
+                        )
                         request_state.request_text = text_data
                         _bind_http_bridge_proxy_injected_anchor(
                             self,
@@ -1503,7 +1537,12 @@ class _HTTPBridgeRequestSubmitMixin:
                                     )
                             completed_response_id = getattr(completed_operation, "response_id", None)
                             if completed_response_id and completed_response_id != request_state.previous_response_id:
-                                text_data = _text_with_previous_response_id(text_data, completed_response_id)
+                                text_data = _text_with_previous_response_id(
+                                    text_data,
+                                    completed_response_id,
+                                    api_key=request_state.api_key,
+                                    request_state=request_state,
+                                )
                                 request_state.request_text = text_data
                                 _bind_http_bridge_proxy_injected_anchor(
                                     self,
@@ -1552,6 +1591,10 @@ class _HTTPBridgeRequestSubmitMixin:
                     parent_response_id=operation_parent_response_id,
                     request_text=text_data,
                 )
+            except (ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed):
+                # Late operation anchors revalidate restored Astra input.
+                # Client-policy failures must keep their 400/403 envelope.
+                raise
             except Exception as exc:
                 session.closed = True
                 session.upstream_control.reconnect_requested = True

@@ -269,6 +269,10 @@ from app.modules.proxy.replay_safety import (
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
+from app.modules.proxy.request_policy import (
+    prepare_astra_reasoning_policy_continuation,
+    validate_astra_request,
+)
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
@@ -1302,6 +1306,8 @@ class _HTTPBridgeStreamingMixin:
             *,
             reservation: ApiKeyUsageReservationData | None = api_key_reservation,
         ) -> tuple[_WebSocketRequestState, str]:
+            prepare_astra_reasoning_policy_continuation(request_payload, api_key)
+            validate_astra_request(request_payload, api_key)
             if bridge_uses_responses_lite:
                 request_state, text_data = self._prepare_http_bridge_request(
                     request_payload,
@@ -2697,6 +2703,8 @@ class _HTTPBridgeStreamingMixin:
                 )
                 if recovery_injected_input is not None:
                     recovery_payload = recovery_payload.model_copy(update={"input": recovery_injected_input})
+                prepare_astra_reasoning_policy_continuation(recovery_payload, api_key)
+                validate_astra_request(recovery_payload, api_key)
                 owner_recovery_scope_id = ensure_request_scope_id() if original_request_unanchored else None
                 if owner_recovery_scope_id is not None:
                     _reserve_http_bridge_unanchored_handoff(
@@ -3855,6 +3863,8 @@ class _HTTPBridgeStreamingMixin:
                 retry_api_key_reservation = api_key_reservation
                 retry_reservation_reacquired = False
                 if api_key is not None and api_key_reservation is not None:
+                    prepare_astra_reasoning_policy_continuation(retry_payload, api_key)
+                    validate_astra_request(retry_payload, api_key)
                     retry_api_key_reservation = await self._reserve_websocket_api_key_usage(
                         api_key,
                         request_model=retry_payload.model,

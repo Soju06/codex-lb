@@ -15801,12 +15801,7 @@ async def test_v1_responses_http_bridge_stream_cancel_retires_session(
 
     first_event = await stream.__anext__()
     assert "response.created" in first_event
-    # Let the upstream reader observe its queued terminal close while the
-    # downstream cancellation is scheduled.  This is the production
-    # terminal-vs-cancel interleaving that the deterministic harness models.
-    close_task = asyncio.create_task(stream.aclose())
-    await asyncio.sleep(0)
-    await close_task
+    await stream.aclose()
 
     session_key = proxy_module._HTTPBridgeSessionKey(
         affinity_kind="prompt_cache",

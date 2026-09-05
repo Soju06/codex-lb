@@ -11,6 +11,17 @@
   "commitConvention": "angular",
   "contributors": [
     {
+      "login": "shuhulx",
+      "name": "Shuhul",
+      "avatar_url": "https://avatars.githubusercontent.com/u/106345809?v=4",
+      "profile": "https://github.com/shuhulx",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
+    },
+    {
       "login": "Soju06",
       "name": "Soju06",
       "avatar_url": "https://avatars.githubusercontent.com/u/34199905?v=4",

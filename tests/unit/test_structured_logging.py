@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 
 import pytest
 
@@ -534,6 +535,31 @@ def test_authorization_redaction_does_not_swallow_following_traceback_line(monke
 
 
 @pytest.mark.parametrize("log_format", ["text", "json"])
+def test_unterminated_json_secret_with_trailing_escape_redacts_through_end_of_line(monkeypatch, log_format):
+    import sys
+
+    formatter = _formatter_from_config(monkeypatch, log_format)
+    token = "QAJSONSECRET"
+    try:
+        raise RuntimeError('payload={"token":"' + token + "\\\nsafe diagnostic line")
+    except RuntimeError:
+        record = _record("request failed", exc_info=sys.exc_info())
+
+    output = _render(formatter, record)
+    rendered = json.loads(output)["exception"] if log_format == "json" else output
+
+    assert token not in rendered
+    assert '{"token":"[REDACTED]' in rendered
+    assert "safe diagnostic line" in rendered
+
+
+def test_basic_token_prepass_does_not_swallow_following_line():
+    output = runtime_logging.redact_rendered_log_text("Authorization: Basic \nSAFE diagnostic", keyed_secrets=False)
+
+    assert output.splitlines()[-1] == "SAFE diagnostic"
+
+
+@pytest.mark.parametrize("log_format", ["text", "json"])
 def test_unterminated_json_secret_redacts_through_end_of_line(monkeypatch, log_format):
     import sys
 
@@ -567,17 +593,19 @@ def test_secret_pattern_redaction_preserves_terminators_and_is_idempotent():
     text = (
         "authorization=Digest username=a\n"
         "retrying upstream\r\n"
+        "cr-only diagnostic\r"
         'payload={"token":"QAJSONSECRET\n'
         "Bearer abc.def:GLUEDTAIL, status=502\n"
     )
+    terminators = re.compile(r"\r\n|\n|\r")
 
     once = runtime_logging.redact_rendered_log_text(text)
     twice = runtime_logging.redact_rendered_log_text(once)
 
     assert once == twice
-    assert once.count("\n") == text.count("\n")
-    assert once.count("\r\n") == text.count("\r\n")
+    assert terminators.findall(once) == terminators.findall(text)
     assert "retrying upstream" in once
+    assert "cr-only diagnostic" in once
     assert "abc.def" not in once
     assert "GLUEDTAIL" not in once
     assert "QAJSONSECRET" not in once

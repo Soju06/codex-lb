@@ -33,7 +33,7 @@ rendered text and JSON exception field, INFO limited to URL userinfo and
 
 ## Example
 
-```
+```text
 RuntimeError: authorization=Basic X
 status=failed
 api_key=Y
@@ -43,7 +43,7 @@ payload={"token":"abc
 
 renders as
 
-```
+```text
 RuntimeError: authorization=[REDACTED]
 status=failed
 api_key=[REDACTED]

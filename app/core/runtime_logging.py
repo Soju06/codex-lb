@@ -37,7 +37,7 @@ _BASIC_TOKEN_PRECHECKS = ("Basic ", "basic ", "BASIC ")
 _REDACTION_FAILED_PLACEHOLDER = "[REDACTED: log redaction failed]"
 _JSON_SENSITIVE_LOG_VALUE_PATTERN = re.compile(
     r'(?i)("(?:password|passwd|pwd|token|secret|api[_-]?key|authorization)"\s*:\s*")'
-    r'(?:\\.|[^"\\])*("|(?=\Z))'
+    r'(?:\\.|[^"\\])*(?:\\(?=\Z))?("|(?=\Z))'
 )
 # ``scheme://user:pass@`` userinfo, e.g. aiohttp ConnectionKey proxy URL reprs.
 # RFC 3986 userinfo never contains ``/``, ``?`` or ``#``, so a bare host
@@ -99,13 +99,18 @@ def _redact_secret_patterns_on_line(text: str) -> str:
     return _PYTHON_REPR_SENSITIVE_LOG_VALUE_PATTERN.sub(_redact_python_repr_secret, redacted)
 
 
-def _redact_secret_patterns(text: str) -> str:
+def _map_log_lines(text: str, transform: Callable[[str], str]) -> str:
     if "\n" not in text and "\r" not in text:
-        return _redact_secret_patterns_on_line(text)
-    return "".join(
-        _redact_secret_patterns_on_line(part) if index % 2 == 0 else part
-        for index, part in enumerate(_LINE_BREAKS.split(text))
-    )
+        return transform(text)
+    return "".join(transform(part) if index % 2 == 0 else part for index, part in enumerate(_LINE_BREAKS.split(text)))
+
+
+def _redact_secret_patterns(text: str) -> str:
+    return _map_log_lines(text, _redact_secret_patterns_on_line)
+
+
+def _redact_basic_tokens_on_line(text: str) -> str:
+    return _BASIC_TOKEN_PATTERN.sub(_redact_bearer_token, text)
 
 
 def redact_rendered_log_text(text: str, *, keyed_secrets: bool = True) -> str:
@@ -124,7 +129,7 @@ def redact_rendered_log_text(text: str, *, keyed_secrets: bool = True) -> str:
         if "@" in text and "://" in text:
             redacted = _USERINFO_PATTERN.sub(_redact_userinfo, redacted)
         if any(precheck in text for precheck in _BASIC_TOKEN_PRECHECKS):
-            redacted = _BASIC_TOKEN_PATTERN.sub(_redact_bearer_token, redacted)
+            redacted = _map_log_lines(redacted, _redact_basic_tokens_on_line)
         if not keyed_secrets:
             return redacted
         folded = text.casefold()

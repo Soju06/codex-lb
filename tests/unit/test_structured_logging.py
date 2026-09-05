@@ -549,14 +549,13 @@ def test_unterminated_json_secret_with_trailing_escape_redacts_through_end_of_li
     rendered = json.loads(output)["exception"] if log_format == "json" else output
 
     assert token not in rendered
-    assert '{"token":"[REDACTED]' in rendered
-    assert "safe diagnostic line" in rendered
+    assert '{"token":"[REDACTED]\nsafe diagnostic line' in rendered
 
 
 def test_basic_token_prepass_does_not_swallow_following_line():
     output = runtime_logging.redact_rendered_log_text("Authorization: Basic \nSAFE diagnostic", keyed_secrets=False)
 
-    assert output.splitlines()[-1] == "SAFE diagnostic"
+    assert output == "Authorization: Basic \nSAFE diagnostic"
 
 
 @pytest.mark.parametrize("log_format", ["text", "json"])

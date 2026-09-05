@@ -1,7 +1,7 @@
 ## 1. Establish the regression
 
 - [x] 1.1 Add actual HTTP-route red coverage at response.created before terminal and at terminal/EOF with detached persistence pending. Use real Uvicorn sockets and unchanged selection/service/persistence paths; ASGITransport buffering cannot prove the early delivery boundary.
-- [x] 1.2 Record the existing nearest coverage and demonstrate that the new check fails when the claimed production behavior is severed.
+- [x] 1.2 Record the existing nearest coverage and demonstrate that the new check fails when the claimed production behavior is severed. Include the real upstream-error normalization case and preserve upstream-event origin separately from local response-ID provenance.
 
 ## 2. Implement the owning change
 

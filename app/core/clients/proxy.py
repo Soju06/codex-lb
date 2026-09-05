@@ -109,7 +109,13 @@ from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.proxy_env import resolve_http_proxy_from_env
 from app.core.utils.request_id import get_request_id
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation, _await_task_deferring_cancellation
-from app.core.utils.sse import format_local_sse_event, format_sse_event, parse_sse_data_json, sse_event_type_from_block
+from app.core.utils.sse import (
+    ParsedSseBlock,
+    format_local_sse_event,
+    format_sse_event,
+    parse_sse_data_json,
+    sse_event_type_from_block,
+)
 
 CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
 CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
@@ -2159,6 +2165,14 @@ def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, 
     return payload
 
 
+def _format_normalized_stream_event(payload: dict[str, JsonValue], normalized: dict[str, JsonValue]) -> str:
+    block = format_sse_event(normalized)
+    # Error normalization creates a local response ID, but upstream activity occurred.
+    if normalized is not payload and normalized.get("type") == "response.failed":
+        return ParsedSseBlock(block, normalized, response_id_is_local=True)
+    return block
+
+
 def _normalize_stream_payload_for_http_block(
     event_block: str,
     *,
@@ -2197,7 +2211,7 @@ def _normalize_stream_payload_for_http_block(
         return event_block, event_type if isinstance(event_type, str) else None
     normalized_type = normalized.get("type")
     event_type = normalized_type if isinstance(normalized_type, str) else None
-    return format_sse_event(normalized), event_type
+    return _format_normalized_stream_event(payload, normalized), event_type
 
 
 def _non_streaming_response_event(payload: JsonValue) -> tuple[str, str]:
@@ -2720,7 +2734,7 @@ async def _stream_websocket_events(
         normalized = payload if not enforce_openai_sdk_contract else _normalize_stream_event_payload(payload)
         raw_event_type = normalized.get("type")
         event_type = raw_event_type if isinstance(raw_event_type, str) else None
-        yield format_sse_event(normalized), event_type
+        yield _format_normalized_stream_event(payload, normalized), event_type
         if event_type is not None and _is_response_stream_terminal_event_type(
             event_type,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -2788,7 +2802,7 @@ async def _stream_codex_websocket_events(
         normalized = payload if not enforce_openai_sdk_contract else _normalize_stream_event_payload(payload)
         raw_event_type = normalized.get("type")
         event_type = raw_event_type if isinstance(raw_event_type, str) else None
-        yield format_sse_event(normalized), event_type
+        yield _format_normalized_stream_event(payload, normalized), event_type
         if event_type is not None and _is_response_stream_terminal_event_type(
             event_type,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,

@@ -4,7 +4,6 @@ import asyncio
 import inspect
 import json
 import logging
-import time  # noqa: F401 - preserve the module-local seam used by legacy clock tests.
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone

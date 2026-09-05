@@ -11,6 +11,7 @@ Native HTTP `_stream_once` extracts authoritative upstream response IDs, but its
 ## Decisions
 
 - Call existing `_remember_websocket_previous_response_owner` from the HTTP attempt's existing authoritative lifecycle-ID extraction, before yielding the corresponding downstream event. Cover the first event and later lifecycle events; never publish the initial local request ID, a synthetic error ID, or a client-supplied previous-response ID as evidence of a new owner.
+- Keep core-generated terminals distinguishable with the existing `ParsedSseBlock` carrier: `is_local` stays outside the serialized payload, survives payload reattachment, and is checked before service rewrites. This covers oversized frames and generic local errors that do not carry the existing transport-failure marker. Preserve that marker and its retry/native-boundary behavior.
 - Bind the observed ID to the actually selected account, API-key ID or None, and the existing normalized session identity. Preserve the cache's bounded size and existing fallback-key semantics. Do not broaden its authorization behavior or change the durable resolver.
 - The earliest standard observable ID is `response.created`. Publishing only on `response.completed`, EOF or detached persistence would leave an avoidable race. A follow-up after created must resolve the known account; the upstream still decides whether that response is usable before completion.
 - Extend real Responses-route tests with two eligible synthetic accounts, actual selection/services/persistence and a scripted local upstream. Hold the originating stream before terminal after emitting created; a second HTTP request carrying that ID must dispatch on its owner without waiting for the first log. A terminal/EOF variant holds only detached log completion at its existing persistence seam. Existing scoped-owner and unknown-owner tests cover durable fallback and fail-closed behavior; extend them only where the new HTTP publication boundary is unprotected.
@@ -29,4 +30,4 @@ No migration. Cache publication starts for new observed responses; persisted row
 
 ## Open Questions
 
-None blocking. Owner and HTTP-timing changes touch the same method but have no implementation dependency; their final integration merge requires a joint route regression run.
+None blocking. HTTP timing depends on this change's producer provenance and will normally merge the completed owner head before its timing commit. The shared correction is owned here; the combined build must run both route regressions.

@@ -9,7 +9,7 @@ import pickle
 import subprocess
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
@@ -41,6 +41,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     WebsocketsUpstreamWebSocket,
 )
+from app.core.clock import RealScheduler
 from app.core.config.settings import Settings
 from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, openai_error
 from app.core.openai.models import OpenAIError, OpenAIResponsePayload
@@ -93,6 +94,22 @@ class _RecordingVirtualScheduler(VirtualScheduler):
         self.task_names.append(name)
         self.task_coroutines.append(coroutine.cr_code.co_name)
         return super().create_task(coroutine, name=name)
+
+
+class _SleepThroughScheduler(RealScheduler):
+    """Real scheduler whose timer ``sleep`` is replaced by a test double.
+
+    The bridge path sleeps through ``scheduler_for(service)``; substituting
+    the sleep here observes or short-circuits those timers without patching
+    ``asyncio.sleep`` process-wide.
+    """
+
+    def __init__(self, sleep: Callable[[float], Awaitable[None]]) -> None:
+        self._sleep = sleep
+
+    async def sleep(self, delay: float, result: Any = None) -> Any:
+        await self._sleep(delay)
+        return result
 
 
 def _durable_owner_lookup(*, process_epoch: str, lease_expires_at: datetime) -> DurableBridgeLookup:
@@ -2076,25 +2093,22 @@ async def test_http_bridge_send_replaces_timestamp_and_wakes_existing_reader(
         UpstreamWebSocket,
         SimpleNamespace(send_text=send_text, close=AsyncMock()),
     )
-    monotonic_values = iter((100.0, 200.0))
-    monotonic = lambda: next(monotonic_values)  # noqa: E731
-    monkeypatch.setattr(
-        http_bridge_request_submit_module,
-        "_service_time",
-        lambda: SimpleNamespace(monotonic=monotonic),
-    )
+    clock = VirtualClock(monotonic_value=100.0)
 
     await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
         session,
         request_state,
         "first",
+        clock=clock,
     )
     first_attempt = request_state.response_create_attempt
     session.upstream_reader_wakeup.clear()
+    clock.advance(100.0)
     await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
         session,
         request_state,
         "second",
+        clock=clock,
     )
 
     assert seen_sent_ats == [100.0, 200.0]
@@ -2124,11 +2138,6 @@ async def test_http_bridge_failed_send_disarms_eventless_deadline(
         UpstreamWebSocket,
         SimpleNamespace(send_text=send_text, close=AsyncMock()),
     )
-    monkeypatch.setattr(
-        http_bridge_request_submit_module,
-        "_service_time",
-        lambda: SimpleNamespace(monotonic=lambda: 100.0),
-    )
     session.upstream_reader_wakeup.clear()
 
     with pytest.raises(type(failure)):
@@ -2136,6 +2145,7 @@ async def test_http_bridge_failed_send_disarms_eventless_deadline(
             session,
             request_state,
             "request",
+            clock=VirtualClock(monotonic_value=100.0),
         )
 
     assert request_state.response_create_sent_at is None
@@ -4354,7 +4364,7 @@ def test_http_bridge_capacity_wait_plan_reserves_final_gate_attempt(monkeypatch:
     )
     now = time.monotonic()
 
-    plenty = http_bridge_streaming_module._http_bridge_capacity_wait_plan(exc, request_deadline=now + 120.0)
+    plenty = http_bridge_streaming_module._http_bridge_capacity_wait_plan(exc, request_deadline=now + 120.0, now=now)
     assert plenty is not None
     assert plenty[0] == pytest.approx(
         http_bridge_streaming_module._RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS,
@@ -4363,7 +4373,7 @@ def test_http_bridge_capacity_wait_plan_reserves_final_gate_attempt(monkeypatch:
 
     # With less budget left than the retry sleep, the plan reserves the tail
     # for one final gate acquisition attempt instead of sleeping it away.
-    tail = http_bridge_streaming_module._http_bridge_capacity_wait_plan(exc, request_deadline=now + 8.0)
+    tail = http_bridge_streaming_module._http_bridge_capacity_wait_plan(exc, request_deadline=now + 8.0, now=now)
     assert tail is not None
     assert tail[0] == pytest.approx(0.0, abs=0.5)
 
@@ -4903,23 +4913,19 @@ async def test_http_bridge_submit_capacity_wait_uses_original_request_deadline(
         ),
     )
     submit = AsyncMock(side_effect=capacity_error)
-    clock = [100.0]
+    clock = VirtualClock(monotonic_value=100.0)
+    service._clock = clock
     waited: list[float] = []
 
     async def fake_capacity_wait(**kwargs: object):
         waited.append(cast(float, kwargs["sleep_seconds"]))
-        clock[0] += waited[-1]
+        clock.advance(waited[-1])
         if False:
             yield ""
 
     monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 30.0)
     monkeypatch.setattr(http_bridge_streaming_module, "_iter_account_capacity_wait_sse", fake_capacity_wait)
-    monkeypatch.setattr(
-        http_bridge_streaming_module,
-        "_service_time",
-        lambda: SimpleNamespace(monotonic=lambda: clock[0]),
-    )
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async for _ in service._stream_http_bridge_session_events(
@@ -4967,7 +4973,8 @@ async def test_http_bridge_submit_capacity_retry_uses_advanced_request_body(
         ),
     )
     submitted_texts: list[str] = []
-    clock = [100.0]
+    clock = VirtualClock(monotonic_value=100.0)
+    service._clock = clock
 
     async def submit(_session: Any, *, request_state: Any, text_data: str, **_kwargs: Any) -> None:
         submitted_texts.append(text_data)
@@ -4976,18 +4983,13 @@ async def test_http_bridge_submit_capacity_retry_uses_advanced_request_body(
         await request_state.event_queue.put(None)
 
     async def fake_capacity_wait(**kwargs: object):
-        clock[0] += cast(float, kwargs["sleep_seconds"])
+        clock.advance(cast(float, kwargs["sleep_seconds"]))
         if False:
             yield ""
 
     monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 0.001)
     monkeypatch.setattr(http_bridge_streaming_module, "_iter_account_capacity_wait_sse", fake_capacity_wait)
-    monkeypatch.setattr(
-        http_bridge_streaming_module,
-        "_service_time",
-        lambda: SimpleNamespace(monotonic=lambda: clock[0]),
-    )
 
     async for _ in service._stream_http_bridge_session_events(
         session,
@@ -5506,6 +5508,8 @@ async def test_http_bridge_model_capacity_waits_before_retrying_safe_injected_an
             "emit_keepalives": True,
             "error_message": capacity_message,
             "cancel_when_detached": True,
+            "scheduler": service._scheduler,
+            "clock": service._clock,
         }
         assert request_state.previous_response_id == "resp-proxy-injected"
         call_order.append("wait")
@@ -7225,7 +7229,7 @@ async def test_http_bridge_one_shot_hard_turn_waits_through_startup_cooldown(
     )
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", cooldown)
     monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
-    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", sleep)
+    service._scheduler = _SleepThroughScheduler(sleep)
 
     with pytest.raises(RuntimeError, match="submitted after cooldown"):
         async for _ in service._stream_http_bridge_session_events(
@@ -7278,7 +7282,7 @@ async def test_http_bridge_previous_response_anchor_bypasses_hard_turn_cooldown_
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", cooldown)
     monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
     monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire)
-    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", sleep)
+    service._scheduler = _SleepThroughScheduler(sleep)
 
     with pytest.raises(RuntimeError, match="submitted without cooldown wait"):
         async for _ in service._stream_http_bridge_session_events(
@@ -7330,7 +7334,7 @@ async def test_http_bridge_one_shot_hard_turn_without_durable_fence_fails_closed
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=30.0))
     monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
     monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire)
-    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", sleep)
+    service._scheduler = _SleepThroughScheduler(sleep)
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async for _ in service._stream_http_bridge_session_events(
@@ -7395,7 +7399,7 @@ async def test_http_bridge_startup_cooldown_terminal_spares_session_owned_by_adm
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=30.0))
     monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
     monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire)
-    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", AsyncMock())
+    service._scheduler = _SleepThroughScheduler(AsyncMock())
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async for _ in service._stream_http_bridge_session_events(
@@ -7449,7 +7453,7 @@ async def test_http_bridge_one_shot_hard_turn_requires_operation_ledger_for_cool
     )
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=30.0))
     monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
-    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", sleep)
+    service._scheduler = _SleepThroughScheduler(sleep)
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async for _ in service._stream_http_bridge_session_events(
@@ -7560,7 +7564,7 @@ async def test_http_bridge_one_shot_hard_turn_renews_durable_lease_while_waiting
     )
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", cooldown)
     monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
-    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", sleep)
+    service._scheduler = _SleepThroughScheduler(sleep)
 
     with pytest.raises(RuntimeError, match="submitted after renewed cooldown"):
         async for _ in service._stream_http_bridge_session_events(
@@ -7617,7 +7621,7 @@ async def test_http_bridge_one_shot_hard_turn_fails_closed_when_lease_renewal_ra
         AsyncMock(return_value=25.0),
     )
     monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
-    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", AsyncMock())
+    service._scheduler = _SleepThroughScheduler(AsyncMock())
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async for _ in service._stream_http_bridge_session_events(
@@ -7661,12 +7665,13 @@ async def test_http_bridge_one_shot_hard_turn_does_not_submit_after_wait_budget(
         session_id="turn-state-wait-budget",
         hard_continuity_anchor=True,
     )
-    clock = SimpleNamespace(now=100.0)
+    clock = VirtualClock(monotonic_value=100.0)
+    service._clock = clock
     submit = AsyncMock()
     release = AsyncMock()
 
     async def sleep(delay: float) -> None:
-        clock.now += delay
+        clock.advance(delay)
 
     monkeypatch.setattr(
         proxy_service,
@@ -7675,11 +7680,10 @@ async def test_http_bridge_one_shot_hard_turn_does_not_submit_after_wait_budget(
             http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_anchored_replay_once",
         ),
     )
-    monkeypatch.setattr(http_bridge_streaming_module._service_time(), "monotonic", lambda: clock.now)
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=30.0))
     monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
     monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release)
-    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", sleep)
+    service._scheduler = _SleepThroughScheduler(sleep)
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async for _ in service._stream_http_bridge_session_events(
@@ -7723,12 +7727,13 @@ async def test_http_bridge_one_shot_hard_turn_sse_budget_wait_uses_eventless_tim
         session_id="turn-state-wait-budget-sse",
         hard_continuity_anchor=True,
     )
-    clock = SimpleNamespace(now=100.0)
+    clock = VirtualClock(monotonic_value=100.0)
+    service._clock = clock
     submit = AsyncMock()
     release = AsyncMock()
 
     async def sleep(delay: float) -> None:
-        clock.now += delay
+        clock.advance(delay)
 
     monkeypatch.setattr(
         proxy_service,
@@ -7737,11 +7742,10 @@ async def test_http_bridge_one_shot_hard_turn_sse_budget_wait_uses_eventless_tim
             http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_anchored_replay_once",
         ),
     )
-    monkeypatch.setattr(http_bridge_streaming_module._service_time(), "monotonic", lambda: clock.now)
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=30.0))
     monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
     monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release)
-    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", sleep)
+    service._scheduler = _SleepThroughScheduler(sleep)
 
     events = [
         event
@@ -9555,9 +9559,11 @@ async def test_stream_via_http_bridge_stops_session_creation_retry_after_budget_
         del api_key, api_key_reservation, request_id, client_ip
         return request_state, '{"type":"response.create"}'
 
+    clock = VirtualClock(monotonic_value=now)
+    service._clock = clock
+
     async def fake_sleep(seconds: float) -> None:
-        nonlocal now
-        now += seconds
+        clock.advance(seconds)
 
     monkeypatch.setattr(
         proxy_service,
@@ -9572,12 +9578,7 @@ async def test_stream_via_http_bridge_stops_session_creation_retry_after_budget_
             http_responses_session_bridge_request_budget_seconds=1.0,
         ),
     )
-    monkeypatch.setattr(
-        http_bridge_streaming_module,
-        "_service_time",
-        lambda: SimpleNamespace(monotonic=lambda: now),
-    )
-    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", fake_sleep)
+    service._scheduler = _SleepThroughScheduler(fake_sleep)
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 120.0)
     monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 120.0)
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)

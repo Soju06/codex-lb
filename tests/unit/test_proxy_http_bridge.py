@@ -43,16 +43,18 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.config.settings import Settings
 from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, openai_error
-from app.core.openai.models import OpenAIError
+from app.core.openai.models import OpenAIError, OpenAIResponsePayload
 from app.core.openai.requests import ResponsesRequest
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
 from app.db.models import AccountStatus, Base, HttpBridgeSessionState
 from app.modules.proxy import affinity as proxy_affinity
+from app.modules.proxy import api as proxy_api
 from app.modules.proxy import http_bridge_forwarding as http_bridge_forwarding_module
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import support as proxy_support_module
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
 from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
+from app.modules.proxy._service.http_bridge import owner_forwarding as http_bridge_owner_forwarding_module
 from app.modules.proxy._service.http_bridge import quarantine as http_bridge_quarantine_module
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy._service.http_bridge import retry_circuit as http_bridge_retry_circuit_module
@@ -7740,6 +7742,97 @@ async def test_http_bridge_keepalive_counts_as_first_yield_before_late_response_
     await event_queue.put(None)
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(anext(stream), timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_keepalive_remains_nonterminal_for_aggregated_collector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            sse_keepalive_interval_seconds=0.05,
+            stream_idle_timeout_seconds=10.0,
+        ),
+    )
+
+    session = _make_bridge_session(key_value="sid-keepalive-collector")
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-keepalive-collector",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        transport="http",
+        response_id="resp_keepalive_collector",
+    )
+    completed_response: dict[str, Any] = {
+        "id": "resp_keepalive_collector",
+        "object": "response",
+        "status": "completed",
+        "output": [],
+    }
+
+    async def fake_submit_http_bridge_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del text_data, queue_limit
+        target_session.pending_requests.append(request_state)
+        await event_queue.put(
+            proxy_service.format_sse_event(
+                {
+                    "type": "response.created",
+                    "response": {"id": "resp_keepalive_collector", "status": "in_progress"},
+                }
+            )
+        )
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+
+    async def enqueue_completed() -> None:
+        await asyncio.sleep(1.0)
+        await event_queue.put(
+            proxy_service.format_sse_event({"type": "response.completed", "response": completed_response})
+        )
+        await event_queue.put(None)
+
+    keepalive_count = 0
+
+    async def bridge_stream() -> AsyncIterator[str]:
+        nonlocal keepalive_count
+        async for event in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data="{}",
+            queue_limit=8,
+            propagate_http_errors=True,
+            downstream_turn_state=None,
+        ):
+            payload = proxy_service.parse_sse_data_json(event)
+            if payload is not None and payload.get("type") == "response.in_progress":
+                keepalive_count += 1
+            yield event
+
+    async with asyncio.TaskGroup() as task_group:
+        task_group.create_task(enqueue_completed())
+        result = await asyncio.wait_for(
+            proxy_api._collect_responses_payload(bridge_stream()),
+            timeout=3.0,
+        )
+
+    assert keepalive_count > 0
+    assert isinstance(result, OpenAIResponsePayload)
+    assert result.model_dump(mode="json", exclude_none=True) == completed_response
 
 
 @pytest.mark.asyncio
@@ -16465,6 +16558,155 @@ async def test_recovery_forward_replaces_incoming_affinity_with_recovered_turn_s
     assert signed_headers["x-codex-turn-state"] == "http_turn_recovered"
     assert "http_turn_stale" not in signed_headers.values()
     assert signed_headers["x-request-trace"] == "keep-me"
+
+
+def test_owner_forward_headers_drop_illegal_control_char_client_headers() -> None:
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    context = proxy_service.HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+
+    forwarded = http_bridge_forwarding_module.build_owner_forward_headers(
+        headers={
+            "x-request-trace": "ok\tvalue",
+            "x-bad-trace": "bad\x00value",
+            "x-bad-name\t": "bad",
+        },
+        payload=payload,
+        context=context,
+    )
+
+    assert forwarded["x-request-trace"] == "ok\tvalue"
+    assert "x-bad-trace" not in forwarded
+    assert "x-bad-name\t" not in forwarded
+
+
+def test_owner_forward_headers_allow_htab_in_signed_metadata_values() -> None:
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    context = proxy_service.HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state="http_turn\tgenerated",
+        original_affinity_kind="session_header",
+        original_affinity_key="sid\t123",
+    )
+
+    forwarded = http_bridge_forwarding_module.build_owner_forward_headers(
+        headers={"authorization": "Bearer\tclient"},
+        payload=payload,
+        context=context,
+    )
+
+    assert forwarded["x-codex-turn-state"] == "http_turn\tgenerated"
+    assert forwarded["x-codex-bridge-affinity-key"] == "sid\t123"
+    assert forwarded["authorization"] == "Bearer\tclient"
+
+
+def test_owner_forward_headers_reject_illegal_control_char_affinity_metadata() -> None:
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    context = proxy_service.HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+        original_affinity_kind="prompt_cache",
+        original_affinity_key="cache\x00key",
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        http_bridge_forwarding_module.build_owner_forward_headers(
+            headers={},
+            payload=payload,
+            context=context,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+def test_owner_forward_headers_reject_illegal_control_char_reservation_metadata() -> None:
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    context = proxy_service.HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+        reservation=proxy_service.ApiKeyUsageReservationData(
+            reservation_id="reservation-1",
+            key_id="key-1",
+            model="gpt-5.4\npriority",
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        http_bridge_forwarding_module.build_owner_forward_headers(
+            headers={},
+            payload=payload,
+            context=context,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+@pytest.mark.asyncio
+async def test_forward_http_bridge_request_to_owner_rejects_unsafe_reservation_before_owner_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-b",
+        owner_endpoint="http://instance-b",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
+    )
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation-1",
+        key_id="key-1",
+        model="gpt-5.4\npriority",
+    )
+    post_called = False
+
+    class FakeOwnerSession:
+        async def __aenter__(self) -> "FakeOwnerSession":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            nonlocal post_called
+            post_called = True
+            raise AssertionError("unsafe reservation metadata reached owner POST")
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        http_bridge_forwarding_module.aiohttp,
+        "ClientSession",
+        lambda **_kwargs: FakeOwnerSession(),
+    )
+
+    with pytest.raises(http_bridge_owner_forwarding_module._OwnerForwardRequestError) as exc_info:
+        async for _ in service._forward_http_bridge_request_to_owner(
+            owner_forward=owner_forward,
+            payload=payload,
+            headers={"x-codex-session-id": "sid-123"},
+            api_key_reservation=reservation,
+            codex_session_affinity=True,
+            downstream_turn_state="http_turn_generated",
+            request_started_at=10.0,
+            proxy_api_authorization=None,
+        ):
+            pass
+
+    assert post_called is False
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.payload["error"]["code"] == "bridge_forward_invalid"
+    assert exc_info.value.outcome is http_bridge_owner_forwarding_module._OwnerForwardOutcome.NOT_DISPATCHED
 
 
 @pytest.mark.asyncio
@@ -30742,6 +30984,26 @@ async def test_http_bridge_retry_circuit_counts_stream_idle_timeout() -> None:
     await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_idle_timeout")
 
     assert cast(Any, service)._http_bridge_retry_circuits[hard_session.key].consecutive_failures == 1
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_ignores_suppressed_duplicate_terminal() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-duplicate-terminal-circuit")
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(),
+    )
+
+    result = await service._record_http_bridge_retry_circuit_failure(
+        hard_session,
+        detail="duplicate_tool_call_replay_suppressed",
+    )
+
+    assert result is None
+    assert hard_session.key not in cast(Any, service)._http_bridge_retry_circuits
+    service._durable_bridge.lookup_retry_circuit.assert_not_awaited()
+    service._durable_bridge.persist_retry_circuit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

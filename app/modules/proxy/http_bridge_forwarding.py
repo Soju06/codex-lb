@@ -114,6 +114,54 @@ class OwnerForwardRelayFailure(Exception):
     event_block: str
 
 
+def _bridge_header_name_has_illegal_control_char(name: str) -> bool:
+    return any(ord(char) < 32 or ord(char) == 127 for char in name)
+
+
+def _bridge_header_value_has_illegal_control_char(value: str) -> bool:
+    return any((ord(char) < 32 and char != "\t") or ord(char) == 127 for char in value)
+
+
+def _bridge_header_has_illegal_control_char(name: str, value: str) -> bool:
+    """Return whether reconstructed metadata is unsafe as an HTTP header."""
+
+    return _bridge_header_name_has_illegal_control_char(name) or _bridge_header_value_has_illegal_control_char(value)
+
+
+def _reject_illegal_bridge_header_value(name: str, value: str | None) -> None:
+    if value is None or not _bridge_header_has_illegal_control_char(name, value):
+        return
+    raise ProxyResponseError(
+        400,
+        openai_error(
+            "bridge_forward_invalid",
+            "Internal bridge forward metadata is not safe to forward",
+            error_type="invalid_request_error",
+        ),
+    )
+
+
+def _validate_bridge_forward_context_headers(context: HTTPBridgeForwardContext) -> None:
+    for name, value in (
+        (HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER, context.origin_instance),
+        (HTTP_BRIDGE_TARGET_INSTANCE_HEADER, context.target_instance),
+        ("x-codex-turn-state", context.downstream_turn_state),
+        (HTTP_BRIDGE_AFFINITY_KIND_HEADER, context.original_affinity_kind),
+        (HTTP_BRIDGE_AFFINITY_KEY_HEADER, context.original_affinity_key),
+        (HTTP_BRIDGE_FILE_OWNER_HEADER, context.file_owner_account_id),
+        (HTTP_BRIDGE_CLIENT_IP_HEADER, context.client_ip),
+    ):
+        _reject_illegal_bridge_header_value(name, value)
+    if context.reservation is None:
+        return
+    for name, value in (
+        (HTTP_BRIDGE_RESERVATION_ID_HEADER, context.reservation.reservation_id),
+        (HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER, context.reservation.key_id),
+        (HTTP_BRIDGE_RESERVATION_MODEL_HEADER, context.reservation.model),
+    ):
+        _reject_illegal_bridge_header_value(name, value)
+
+
 class HTTPBridgeOwnerClient:
     async def stream_responses(
         self,
@@ -217,6 +265,10 @@ def build_owner_forward_headers(
     payload: ResponsesRequest,
     context: HTTPBridgeForwardContext,
 ) -> dict[str, str]:
+    # WebSocket client metadata is reconstructed as a header mapping without
+    # passing through an HTTP parser. Validate it before signing so aiohttp is
+    # never the first component to discover illegal wire bytes.
+    _validate_bridge_forward_context_headers(context)
     filtered = filter_inbound_headers(headers)
     # Per the hop-by-hop contract, also drop any header named by the inbound
     # Connection header in addition to the fixed unsafe set.
@@ -235,7 +287,9 @@ def build_owner_forward_headers(
     forwarded = {
         key: value
         for key, value in filtered.items()
-        if key.lower() not in drop and not key.lower().startswith("x-codex-bridge-")
+        if key.lower() not in drop
+        and not key.lower().startswith("x-codex-bridge-")
+        and not _bridge_header_has_illegal_control_char(key, value)
     }
     # filter_inbound_headers strips Authorization, but the owner instance
     # re-validates the client API key from this header (see
@@ -246,7 +300,7 @@ def build_owner_forward_headers(
         (value for key, value in headers.items() if key.lower() == "authorization"),
         None,
     )
-    if authorization is not None:
+    if authorization is not None and not _bridge_header_has_illegal_control_char("authorization", authorization):
         forwarded["authorization"] = authorization
     forwarded[HTTP_BRIDGE_FORWARDED_HEADER] = "1"
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
@@ -51,10 +51,16 @@ import {
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 import { useThemeStore } from "@/hooks/use-theme";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
+import { getErrorMessageOrNull } from "@/utils/errors";
 import { formatModelLabel, formatCurrency, formatSlug } from "@/utils/formatters";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 
 const MODEL_OPTION_DELIMITER = ":::";
+
+type RetainedDashboardLoadError = {
+  timeframe: OverviewTimeframe;
+  message: string;
+};
 
 export function DashboardPage() {
   const { t, i18n } = useTranslation();
@@ -105,6 +111,10 @@ export function DashboardPage() {
   const dashboardTimeframe =
     dashboardView === "conversations" ? conversationTimeframe : overviewTimeframe;
   const dashboardQuery = useDashboard(dashboardTimeframe);
+  const [retainedDashboardLoadError, setRetainedDashboardLoadError] =
+    useState<RetainedDashboardLoadError | null>(null);
+  const [overviewRetryTimeframe, setOverviewRetryTimeframe] =
+    useState<OverviewTimeframe | null>(null);
   const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
   const conversationsState = useConversations({
     enabled: isAdmin && dashboardView === "conversations",
@@ -351,8 +361,32 @@ export function DashboardPage() {
     [optionsQuery.data?.statuses, t],
   );
 
+  const dashboardLoadError = getErrorMessageOrNull(dashboardQuery.error);
+  if (
+    retainedDashboardLoadError !== null &&
+    (overview || retainedDashboardLoadError.timeframe !== dashboardTimeframe)
+  ) {
+    setRetainedDashboardLoadError(null);
+  } else if (
+    !overview &&
+    dashboardLoadError !== null &&
+    (retainedDashboardLoadError === null ||
+      retainedDashboardLoadError.message !== dashboardLoadError)
+  ) {
+    setRetainedDashboardLoadError({
+      timeframe: dashboardTimeframe,
+      message: dashboardLoadError,
+    });
+  }
+  const displayedDashboardLoadError =
+    dashboardLoadError ??
+    (retainedDashboardLoadError?.timeframe === dashboardTimeframe
+      ? retainedDashboardLoadError.message
+      : null);
+  const overviewRetryBusy =
+    dashboardQuery.isFetching || overviewRetryTimeframe === dashboardTimeframe;
   const errorMessage =
-    (dashboardQuery.error instanceof Error && dashboardQuery.error.message) ||
+    (overview ? dashboardLoadError : null) ||
     (dashboardView === "request-logs" && optionsQuery.error instanceof Error && optionsQuery.error.message) ||
     null;
 
@@ -394,8 +428,38 @@ export function DashboardPage() {
 
       {errorMessage ? <AlertMessage variant="error">{errorMessage}</AlertMessage> : null}
 
-      {!view ? (
+      {(dashboardQuery.isPending || dashboardQuery.isFetching) &&
+      !view &&
+      displayedDashboardLoadError === null ? (
         <DashboardSkeleton />
+      ) : !view ? (
+        <div className="space-y-3 rounded-xl border bg-card p-4">
+          <div role="alert">
+            <AlertMessage variant="error">{displayedDashboardLoadError ?? "Request failed"}</AlertMessage>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            aria-busy={overviewRetryBusy}
+            disabled={overviewRetryBusy}
+            onClick={() => {
+              const retryTimeframe = dashboardTimeframe;
+              setRetainedDashboardLoadError({
+                timeframe: retryTimeframe,
+                message: displayedDashboardLoadError ?? "Request failed",
+              });
+              setOverviewRetryTimeframe(retryTimeframe);
+              void dashboardQuery.refetch().finally(() => {
+                setOverviewRetryTimeframe((current) =>
+                  current === retryTimeframe ? null : current,
+                );
+              });
+            }}
+          >
+            {t("common.actions.retry")}
+          </Button>
+        </div>
       ) : (
         <>
           <StatsGrid stats={view.stats} />

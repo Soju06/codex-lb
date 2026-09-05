@@ -167,7 +167,7 @@ async def test_late_successor_anonymous_error_does_not_settle_unrelated_create()
     control.suppress_downstream_event = False
 
     await service._process_upstream_websocket_text(
-        json.dumps({"error": {"code": "server_error", "message": "successor crashed"}}),
+        json.dumps({"error": {"code": "server_error", "message": "visible request failed"}}),
         account=account,
         account_id_value=account.id,
         pending_requests=pending,
@@ -177,11 +177,9 @@ async def test_late_successor_anonymous_error_does_not_settle_unrelated_create()
         response_create_gate=gate,
     )
 
-    assert list(pending) == [unrelated]
-    assert unrelated.response_id == "r-unrelated"
-    assert not logs.calls
-    assert control.suppress_downstream_event is True
-    assert control.suppressed_steering_anonymous_terminals == 0
+    assert unrelated not in pending
+    assert control.suppressed_steering_anonymous_terminals == 1
+    assert control.suppress_downstream_event is False
 
 
 @pytest.mark.asyncio

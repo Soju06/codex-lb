@@ -5507,16 +5507,13 @@ class _WebSocketMixin:
                     error_message=error_message,
                     allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
                 )
-                if event_type == "error" or is_typeless_error_event:
-                    steal_identified_request = (
-                        request_state is not None
-                        and request_state.response_id is not None
-                        and upstream_control.suppressed_steering_anonymous_terminals > 0
-                    )
-                    if request_state is None or steal_identified_request:
-                        if consume_suppressed_steering_anonymous_terminal(upstream_control):
-                            upstream_control.suppress_downstream_event = True
-                            return text
+                if (
+                    request_state is None
+                    and (event_type == "error" or is_typeless_error_event)
+                    and consume_suppressed_steering_anonymous_terminal(upstream_control)
+                ):
+                    upstream_control.suppress_downstream_event = True
+                    return text
                 release_create_gate = False
             else:
                 release_create_gate = False

@@ -74,10 +74,10 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 - **AND** that unrelated request still owns its created event
 
 #### Scenario: A live request owns anonymous errors before a successor tombstone
-- **GIVEN** a suppressed late successor and an unresolved visible request
+- **GIVEN** a suppressed late successor and a visible request, including one that already has a response id
 - **WHEN** an ID-less top-level error arrives
 - **THEN** the visible request owns that error
-- **AND** the suppressed successor lifecycle remains available for a later identified terminal
+- **AND** the suppressed successor lifecycle remains available for a later unmatched terminal
 
 #### Scenario: An already-sent explicit create owns the next created event
 - **GIVEN** an explicit response.create for parent r1 is pending and a steering placeholder also exists for r1

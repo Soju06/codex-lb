@@ -291,7 +291,7 @@ def responses_input_items_are_self_contained_fresh_replay(input_items: list[Json
         if not _input_item_has_only_known_fields(item, item_type):
             return False
         call_id_value = item.get("call_id")
-        call_id = call_id_value if isinstance(call_id_value, str) and call_id_value else None
+        call_id = call_id_value if isinstance(call_id_value, str) and call_id_value.strip() else None
         if item_type in _TOOL_CALL_TYPES:
             if (
                 call_id is None

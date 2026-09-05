@@ -58,3 +58,10 @@ retained-suffix ordering; their existing call-body validation contracts
 are different. Omitted and false markers remain synchronous, and true
 remains asynchronous. No recovery, boundary, or persistence policy changes
 are needed for this explicit malformed-field finding.
+
+Blank async call IDs are rejected by the shared account-neutral proof, using
+the same nonblank identity contract as durable suffix validation. This does
+not add ingress validation or change same-account replay: the malformed
+history remains bound to its original account and cannot authorize a move
+to another account after a stale anchor. A focused guard is sufficient;
+no new tracking or persistence mechanism is needed.

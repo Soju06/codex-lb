@@ -6170,8 +6170,19 @@ def test_v1_responses_websocket_marks_fresh_turn_as_retry_safe_at_prep_time(
 
 
 @pytest.mark.parametrize("endpoint", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize(
+    "async_call",
+    [
+        None,
+        ("function_call", "valid"),
+        ("custom_tool_call", "valid"),
+        ("function_call", " "),
+        ("custom_tool_call", "\t\n"),
+    ],
+)
 def test_responses_websocket_replays_client_full_resend_previous_response_miss_without_anchor(
     endpoint,
+    async_call,
     app_instance,
     monkeypatch,
 ):
@@ -6294,7 +6305,9 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
         connect_count += 1
         if connect_count == 1:
             return SimpleNamespace(id="acct_ws_prev_mask", codex_installation_id="account-installation"), first_upstream
-        return SimpleNamespace(id="acct_ws_prev_mask", codex_installation_id="account-installation"), recovered_upstream
+        return SimpleNamespace(
+            id="acct_ws_replay_other", codex_installation_id="account-installation"
+        ), recovered_upstream
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
@@ -6306,6 +6319,20 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
         {"role": "assistant", "content": [{"type": "output_text", "text": "first response"}]},
         {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
     ]
+
+    valid_replay = async_call is None or bool(async_call[1].strip())
+    if async_call is not None:
+        call_type, call_id = async_call
+        full_resend_input.insert(
+            2,
+            {
+                "type": call_type,
+                "call_id": call_id,
+                "name": "work",
+                "arguments" if call_type == "function_call" else "input": "{}",
+                "async": True,
+            },
+        )
 
     with TestClient(app_instance) as client:
         with client.websocket_connect(endpoint) as websocket:
@@ -6337,7 +6364,14 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
                 )
             )
             created_2 = json.loads(websocket.receive_text())
-            completed_2 = json.loads(websocket.receive_text())
+            completed_2 = json.loads(websocket.receive_text()) if valid_replay else None
+
+    if not valid_replay:
+        assert created_2["type"] == "response.failed"
+        assert created_2["response"]["error"]["code"] == "previous_response_owner_unavailable"
+        assert connect_count == 2
+        assert recovered_upstream.sent_text == []
+        return
 
     assert created_2["type"] == "response.created"
     assert created_2["response"]["id"] == "resp_ws_prev_retry"

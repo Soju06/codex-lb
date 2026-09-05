@@ -71,3 +71,10 @@ calls.
 - **AND** string, list, null, integer, and object values MUST reject both synchronous-manifest and retained-output recovery proofs without raising an internal error
 - **AND** an unavailable continuity owner MUST return the existing fail-closed compatibility error without an upstream replay
 - **AND** an omitted marker or `false` MUST retain synchronous settlement requirements, while `true` MUST retain asynchronous settlement semantics
+
+#### Scenario: Blank call identities cannot authorize fresh replay
+
+- **WHEN** a full-history replay contains an async tool call with an empty or whitespace-only call ID
+- **THEN** the account-neutral proof MUST reject the replay even if the async call has no output
+- **AND** WebSocket stale-anchor recovery MUST NOT replay that malformed history to a different account
+- **AND** nonblank async IDs MUST retain the existing unresolved-call replay behavior

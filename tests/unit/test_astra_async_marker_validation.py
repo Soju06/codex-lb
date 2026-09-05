@@ -87,3 +87,30 @@ def test_durable_replay_validates_async_marker(marked_call, call_in_prefix, proo
 @pytest.mark.parametrize("fields,expected", [({}, False), ({"async": False}, False), ({"async": True}, True)])
 def test_only_true_async_marker_allows_unsettled_call(call, fields, expected) -> None:
     assert responses_payload_is_account_neutral_fresh_replay({"input": [{**call, **fields}]}) is expected
+
+
+@pytest.mark.parametrize("call_id", ["", " ", "\t\n", "valid-id"])
+@pytest.mark.parametrize("settled", [False, True])
+def test_async_replay_requires_nonblank_identity(call, call_id, settled) -> None:
+    items = [{**call, "call_id": call_id, "async": True}]
+    if settled:
+        items.append({"type": f"{call['type']}_output", "call_id": call_id, "output": "done"})
+    assert responses_payload_is_account_neutral_fresh_replay({"input": items}) is bool(call_id.strip())
+
+
+@pytest.mark.parametrize("call_id", [" ", "\t\n", "valid-id"])
+@pytest.mark.parametrize("call_in_prefix", [False, True])
+def test_durable_async_replay_requires_nonblank_identity(call, call_id, call_in_prefix) -> None:
+    first = {"role": "user", "content": "first"}
+    async_call = {**call, "call_id": call_id, "async": True}
+    items = [first, async_call]
+    stored_count = 2 if call_in_prefix else 1
+    sync = {"type": "function_call", "call_id": "sync_1", "name": "now", "arguments": "{}"}
+    output = {"type": "function_call_output", "call_id": "sync_1", "output": "ok"}
+    assert responses_input_suffix_matches_pending_tool_calls(
+        [*items, sync, output], stored_count=stored_count, pending_tool_calls={"sync_1": "function_call"}
+    ) is bool(call_id.strip())
+    answer = {"role": "assistant", "content": [{"type": "output_text", "text": "done"}]}
+    assert responses_input_suffix_retains_prior_output(
+        [*items, answer, {"role": "user", "content": "next"}], stored_count=stored_count
+    ) is bool(call_id.strip())

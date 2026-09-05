@@ -253,7 +253,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
             ) : null}
           </Button>
         ) : null}
-        {status === "paused" && (
+        {(status === "paused" || status === "deactivated") && (
           <Button
             type="button"
             size="sm"

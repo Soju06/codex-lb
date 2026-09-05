@@ -472,7 +472,7 @@ export function AccountList({
                 >
                   <Zap className="h-3.5 w-3.5" aria-hidden="true" />
                 </Button>
-                {status === "paused" ? (
+                {status === "paused" || status === "deactivated" ? (
                   <Button
                     type="button"
                     size="sm"

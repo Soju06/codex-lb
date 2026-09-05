@@ -2193,6 +2193,15 @@ Index(
     UsageHistory.recorded_at,
     postgresql_include=["used_percent", "reset_at", "window_minutes", "id"],
 )
+Index(
+    "idx_usage_window_account_reset_time",
+    UsageHistory.window,
+    UsageHistory.account_id,
+    UsageHistory.reset_at,
+    UsageHistory.recorded_at,
+    UsageHistory.id,
+    postgresql_include=["used_percent", "window_minutes"],
+)
 Index("idx_accounts_email", Account.email)
 # Pending-deletion queue: every replica probes ``delete_requested_at IS NOT
 # NULL LIMIT 1`` each worker interval and the leader orders the queue by

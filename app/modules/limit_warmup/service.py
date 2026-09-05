@@ -40,7 +40,8 @@ _STAGGER_SLOT_GRACE_SECONDS = 60
 _IDLE_PRIMARY_WINDOW = "primary_idle"
 # Minimum reset_at forward jump (in seconds) to confirm a real quota window reset.
 # Upstream timestamp jitter of ~1 second must not trigger a warm-up.
-_RESET_CONFIRMED_MIN_JUMP_SECONDS = 60
+RESET_CONFIRMED_MIN_JUMP_SECONDS = 60
+_RESET_CONFIRMED_MIN_JUMP_SECONDS = RESET_CONFIRMED_MIN_JUMP_SECONDS
 # Persist the upstream value, but treat nearby values as the same reset. This
 # avoids duplicate attempts when reset_at jitters between refresh cycles.
 _RESET_AT_JITTER_TOLERANCE_SECONDS = 5

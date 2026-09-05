@@ -1296,6 +1296,84 @@ async def test_usage_history_covering_index_migration_repairs_invalid_leftover_p
 
 
 @pytest.mark.asyncio
+async def test_usage_history_reset_transition_index_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'usage-reset-transition-index.sqlite'}"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    target_revision = "20260904_000000_add_usage_reset_transition_index"
+    index_name = "idx_usage_window_account_reset_time"
+
+    async def _usage_history_indexes(engine) -> set[str]:
+        async with engine.connect() as conn:
+            return {row[1] for row in await conn.execute(text("PRAGMA index_list('usage_history')"))}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert index_name not in await _usage_history_indexes(engine)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, target_revision, bootstrap_legacy=False))
+        assert index_name in await _usage_history_indexes(engine)
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        assert index_name not in await _usage_history_indexes(engine)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not _is_postgresql_database_url(_DATABASE_URL),
+    reason="PostgreSQL-only invalid reset-transition-index repair test",
+)
+async def test_usage_history_reset_transition_index_migration_repairs_invalid_leftover_postgresql(db_setup):
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    index_name = "idx_usage_window_account_reset_time"
+
+    await run_startup_migrations(_DATABASE_URL)
+    await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(_DATABASE_URL), parent_revision))
+
+    async with SessionLocal() as session:
+        await session.execute(text(f"CREATE INDEX {index_name} ON usage_history (account_id)"))
+        await session.execute(
+            text("UPDATE pg_index SET indisvalid = false WHERE indexrelid = CAST(:name AS regclass)"),
+            {"name": index_name},
+        )
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    async with SessionLocal() as session:
+        indisvalid = (
+            await session.execute(
+                text(
+                    "SELECT i.indisvalid FROM pg_index i "
+                    "JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = :name"
+                ),
+                {"name": index_name},
+            )
+        ).scalar_one()
+        indexdef = (
+            await session.execute(
+                text("SELECT pg_get_indexdef(CAST(:name AS regclass))"),
+                {"name": index_name},
+            )
+        ).scalar_one()
+
+    assert indisvalid is True
+    assert "reset_at" in indexdef
+    assert "INCLUDE" in indexdef
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     not _is_postgresql_database_url(_DATABASE_URL),
     reason="PostgreSQL-only autovacuum reloptions test",

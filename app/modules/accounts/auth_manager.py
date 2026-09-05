@@ -63,6 +63,7 @@ class AccountsRepositoryPort(Protocol):
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_plan_type: str | None | object = None,
     ) -> bool: ...
 
     async def rotate_tokens(

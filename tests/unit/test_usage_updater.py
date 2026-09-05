@@ -30,6 +30,8 @@ from app.modules.usage.updater import UsageUpdater
 
 pytestmark = pytest.mark.unit
 
+_UNSET = object()
+
 
 @pytest.fixture(autouse=True)
 def _clear_refresh_cache():
@@ -3114,8 +3116,9 @@ class StubAccountsRepository:
         expected_status: AccountStatus,
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
-        expected_blocked_at: int | None = None,
+        expected_blocked_at: int | None | object = _UNSET,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_plan_type: str | None | object = _UNSET,
     ) -> bool:
         account = self.accounts_by_id.get(account_id)
         if (
@@ -3123,7 +3126,8 @@ class StubAccountsRepository:
             or account.status != expected_status
             or account.deactivation_reason != expected_deactivation_reason
             or account.reset_at != expected_reset_at
-            or account.blocked_at != expected_blocked_at
+            or (expected_blocked_at is not _UNSET and account.blocked_at != expected_blocked_at)
+            or (expected_plan_type is not _UNSET and account.plan_type != expected_plan_type)
         ):
             return False
         return await self.update_status(account_id, status, deactivation_reason, reset_at, blocked_at)

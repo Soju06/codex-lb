@@ -300,6 +300,118 @@ async def test_scheduler_recovers_rate_limited_free_before_monthly_reset_warmup(
 
 
 @pytest.mark.asyncio
+async def test_scheduler_recovers_rate_limited_team_after_confirmed_weekly_reset(
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del db_setup
+    now = int(time.time())
+    blocked_at = now - 3600
+    legacy_weekly_reset_at = now + 3 * 24 * 60 * 60
+    after_recorded_at = datetime.fromtimestamp(now - 60, timezone.utc).replace(tzinfo=None)
+    after_weekly_reset_at = now - 60 + 7 * 24 * 60 * 60
+    account = _account(
+        "acc_team_weekly_recovery",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=legacy_weekly_reset_at,
+        blocked_at=blocked_at,
+    )
+    account.plan_type = "team"
+
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account.id,
+            100.0,
+            window="primary",
+            recorded_at=datetime.fromtimestamp(blocked_at + 1, timezone.utc).replace(tzinfo=None),
+            reset_at=now + 5 * 60 * 60,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account.id,
+            100.0,
+            window="secondary",
+            recorded_at=datetime.fromtimestamp(now - 120, timezone.utc).replace(tzinfo=None),
+            reset_at=legacy_weekly_reset_at,
+            window_minutes=10_080,
+        )
+        await SettingsRepository(session).update(
+            limit_warmup_enabled=True,
+            limit_warmup_windows="secondary",
+            limit_warmup_model="gpt-5.1-codex-mini",
+        )
+
+    class _Leader:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
+
+    class _Updater:
+        async def refresh_accounts(
+            self,
+            accounts: list[Account],
+            latest_usage: dict[str, UsageHistory],
+        ) -> bool:
+            assert [candidate.id for candidate in accounts] == [account.id]
+            assert set(latest_usage) == {account.id}
+            async with SessionLocal() as session:
+                usage_repo = UsageRepository(session)
+                await usage_repo.add_entry(
+                    account.id,
+                    0.0,
+                    window="primary",
+                    recorded_at=after_recorded_at,
+                    reset_at=now + 5 * 60 * 60,
+                    window_minutes=300,
+                )
+                await usage_repo.add_entry(
+                    account.id,
+                    0.0,
+                    window="secondary",
+                    recorded_at=after_recorded_at,
+                    reset_at=after_weekly_reset_at,
+                    window_minutes=10_080,
+                )
+            return True
+
+    class _Sender:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def send(self, target: Account, *, model: str, prompt: str) -> LimitWarmupSendResult:
+            del model, prompt
+            async with SessionLocal() as session:
+                persisted = await AccountsRepository(session).get_by_id(target.id)
+            assert persisted is not None
+            assert (persisted.status, persisted.reset_at, persisted.blocked_at) == (
+                AccountStatus.ACTIVE,
+                None,
+                None,
+            )
+            self.calls.append(target.id)
+            return LimitWarmupSendResult(request_id="warmup-team-weekly", success=True, latency_ms=12)
+
+    sender = _Sender()
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
+    monkeypatch.setattr(refresh_scheduler_module, "StreamingLimitWarmupSender", lambda *_args, **_kwargs: sender)
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+
+    assert await scheduler._refresh_once() == 60.0
+    assert sender.calls == [account.id]
+    async with SessionLocal() as session:
+        persisted = await AccountsRepository(session).get_by_id(account.id)
+    assert persisted is not None
+    assert (persisted.status, persisted.reset_at, persisted.blocked_at) == (
+        AccountStatus.ACTIVE,
+        None,
+        None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_scheduler_warms_confirmed_paid_to_free_plan_transition(
     db_setup,
     monkeypatch: pytest.MonkeyPatch,

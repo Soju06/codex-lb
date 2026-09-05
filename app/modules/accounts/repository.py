@@ -790,6 +790,7 @@ class AccountsRepository:
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_plan_type: str | None | object = _UNSET,
     ) -> bool:
         async with sqlite_writer_section():
             values: dict[str, object | None] = {
@@ -827,6 +828,11 @@ class AccountsRepository:
                 # re-auth/import rotates the token ciphertext without touching
                 # status/reason/reset, and this write must lose that race.
                 stmt = stmt.where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
+            if expected_plan_type is not _UNSET:
+                if expected_plan_type is None:
+                    stmt = stmt.where(Account.plan_type.is_(None))
+                else:
+                    stmt = stmt.where(Account.plan_type == expected_plan_type)
             result = await self._session.execute(stmt)
             updated_id = result.scalar_one_or_none()
             if updated_id is not None and self._hard_sticky_outage_started(expected_status, status):

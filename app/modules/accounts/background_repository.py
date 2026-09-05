@@ -55,6 +55,7 @@ class BackgroundAccountsRepository:
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_plan_type: str | None | object = _UNSET,
     ) -> bool:
         async with get_background_session() as session:
             repo = AccountsRepository(session)
@@ -66,6 +67,8 @@ class BackgroundAccountsRepository:
             }
             if expected_blocked_at is not _UNSET:
                 kwargs["expected_blocked_at"] = expected_blocked_at
+            if expected_plan_type is not _UNSET:
+                kwargs["expected_plan_type"] = expected_plan_type
             if blocked_at is _UNSET:
                 return await repo.update_status_if_current(
                     account_id,

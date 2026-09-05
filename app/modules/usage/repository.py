@@ -29,6 +29,7 @@ from sqlalchemy import (
 )
 from sqlalchemy import cast as sqlalchemy_cast
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.core.config.settings import get_settings
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
@@ -45,6 +46,7 @@ from app.modules.usage.additional_quota_keys import (
 
 _PRIMARY_WINDOW_LITERAL = literal_column("'primary'")
 NormalizedUsageWindow = Literal["primary", "secondary"]
+_FALLBACK_ROLLING_WINDOW_SECONDS = 300 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,14 +317,45 @@ def _query_bulk_history_metadata_sqlite(
     )
 
 
-def _normalized_window_expr():
-    return func.coalesce(UsageHistory.window, _PRIMARY_WINDOW_LITERAL)
+def _normalized_window_expr(history_model=UsageHistory):
+    return func.coalesce(history_model.window, _PRIMARY_WINDOW_LITERAL)
 
 
-def _window_clause(window: str | None):
+def _window_clause(window: str | None, history_model=UsageHistory):
     if not window or window == "primary":
-        return _normalized_window_expr() == "primary"
-    return UsageHistory.window == window
+        return _normalized_window_expr(history_model) == "primary"
+    return history_model.window == window
+
+
+def _recorded_at_epoch_expr(recorded_at, dialect_name: str):
+    if dialect_name == "sqlite":
+        return sqlalchemy_cast(func.strftime("%s", recorded_at), Integer)
+    return func.extract("epoch", recorded_at)
+
+
+def _usage_reset_confirmed_clause(before, after, *, dialect_name: str, min_reset_jump_seconds: int):
+    before_observed_at = _recorded_at_epoch_expr(before.recorded_at, dialect_name)
+    observed_at = _recorded_at_epoch_expr(after.recorded_at, dialect_name)
+    window_seconds = func.coalesce(after.window_minutes * 60, _FALLBACK_ROLLING_WINDOW_SECONDS)
+    window_started_at = after.reset_at - window_seconds
+    crossed_previous_reset = and_(
+        before_observed_at <= before.reset_at,
+        before.reset_at <= observed_at,
+        observed_at < after.reset_at,
+    )
+    reanchored_between_samples = and_(
+        after.used_percent < before.used_percent,
+        before_observed_at <= window_started_at,
+        window_started_at <= observed_at,
+        observed_at < after.reset_at,
+    )
+    return and_(
+        before.reset_at.is_not(None),
+        after.reset_at.is_not(None),
+        after.used_percent < 100.0,
+        after.reset_at - before.reset_at >= min_reset_jump_seconds,
+        or_(crossed_previous_reset, reanchored_between_samples),
+    )
 
 
 def _sqlite_path_from_bind(bind) -> object | None:
@@ -980,6 +1013,109 @@ class UsageRepository:
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def reset_transition_candidate(
+        self,
+        account_id: str,
+        window: str,
+        since: datetime,
+        *,
+        expected_reset_at: int,
+        reset_at_tolerance_seconds: int,
+        min_reset_jump_seconds: int,
+    ) -> list[UsageHistory]:
+        """Return a reset marker and the adjacent pair that first proves a reset after it.
+
+        The ``after`` row must both show available quota and carry a reset
+        deadline at least ``min_reset_jump_seconds`` past the marker's, so an
+        interim sub-100 sample that still reports the old deadline cannot
+        truncate the scan before the real old-to-new transition.
+        """
+        baseline_stmt = (
+            select(UsageHistory)
+            .where(
+                UsageHistory.account_id == account_id,
+                _window_clause(window),
+                UsageHistory.recorded_at > since,
+                UsageHistory.reset_at.is_not(None),
+                UsageHistory.reset_at.between(
+                    expected_reset_at - reset_at_tolerance_seconds,
+                    expected_reset_at + reset_at_tolerance_seconds,
+                ),
+            )
+            .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+            .limit(1)
+        )
+        baseline = (await self._session.execute(baseline_stmt)).scalar_one_or_none()
+        if baseline is None or baseline.reset_at is None:
+            return []
+        baseline_reset_at = baseline.reset_at
+        bind = self._session.get_bind()
+        dialect_name = bind.dialect.name if bind is not None else "sqlite"
+
+        candidate_before = aliased(UsageHistory)
+        candidate_after = aliased(UsageHistory)
+        previous_row = aliased(UsageHistory)
+        candidate_after_precedes = or_(
+            candidate_after.recorded_at > baseline.recorded_at,
+            and_(
+                candidate_after.recorded_at == baseline.recorded_at,
+                candidate_after.id > baseline.id,
+            ),
+        )
+        candidate_before_at_or_after_baseline = or_(
+            candidate_before.recorded_at > baseline.recorded_at,
+            and_(
+                candidate_before.recorded_at == baseline.recorded_at,
+                candidate_before.id >= baseline.id,
+            ),
+        )
+        previous_row_id = (
+            select(previous_row.id)
+            .where(
+                previous_row.account_id == account_id,
+                _window_clause(window, previous_row),
+                or_(
+                    previous_row.recorded_at < candidate_after.recorded_at,
+                    and_(
+                        previous_row.recorded_at == candidate_after.recorded_at,
+                        previous_row.id < candidate_after.id,
+                    ),
+                ),
+            )
+            .order_by(previous_row.recorded_at.desc(), previous_row.id.desc())
+            .limit(1)
+            .correlate(candidate_after)
+            .scalar_subquery()
+        )
+        pair_stmt = (
+            select(candidate_before, candidate_after)
+            .select_from(candidate_after)
+            .join(candidate_before, candidate_before.id == previous_row_id)
+            .where(
+                candidate_after.account_id == account_id,
+                _window_clause(window, candidate_after),
+                candidate_after.reset_at.is_not(None),
+                candidate_after.reset_at >= baseline_reset_at + min_reset_jump_seconds,
+                candidate_after_precedes,
+                candidate_before_at_or_after_baseline,
+                _usage_reset_confirmed_clause(
+                    candidate_before,
+                    candidate_after,
+                    dialect_name=dialect_name,
+                    min_reset_jump_seconds=min_reset_jump_seconds,
+                ),
+            )
+            .order_by(candidate_after.recorded_at.asc(), candidate_after.id.asc())
+            .limit(1)
+        )
+        row = (await self._session.execute(pair_stmt)).one_or_none()
+        if row is None:
+            return [baseline]
+        before, after = row
+        if before.id == baseline.id:
+            return [baseline, after]
+        return [baseline, before, after]
 
     async def bulk_history_since(
         self,

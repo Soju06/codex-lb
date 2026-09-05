@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Collection, Iterable, Literal
 
 from app.core.balancer.types import FailureClass, UpstreamError
+from app.core.plan_types import RATE_LIMIT_PLAN_ALIASES
 from app.core.usage import PLAN_CAPACITY_CREDITS_SECONDARY
 from app.core.utils.retry import backoff_seconds, parse_retry_after
 from app.db.models import AccountStatus
@@ -79,12 +80,7 @@ UsageWeightedOrder = Literal["secondary_first", "primary_first"]
 ResetPreferenceWindow = Literal["primary", "secondary"]
 UNKNOWN_PLAN_FALLBACK = "free"
 CAPACITY_PLAN_ALIASES = {
-    "education": "edu",
-    "k12": "edu",
-    "guest": "free",
-    "go": "free",
-    "free_workspace": "free",
-    "quorum": "free",
+    **RATE_LIMIT_PLAN_ALIASES,
     "unknown": "free",
 }
 

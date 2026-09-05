@@ -44,6 +44,16 @@ _FAIL_CLOSED_HTTP_ROUTES: frozenset[_RouteKey] = frozenset(
         ("HTTP", "POST", "/backend-api/codex/memories/trace_summarize"),
         ("HTTP", "POST", "/backend-api/codex/safety/arc"),
         ("HTTP", "POST", "/backend-api/codex/alpha/search"),
+        ("HTTP", "POST", "/backend-api/codex/alpha/history/v2/list_windows"),
+        ("HTTP", "POST", "/backend-api/codex/alpha/history/v2/list_items"),
+        ("HTTP", "POST", "/backend-api/codex/alpha/history/v2/read_item"),
+        ("HTTP", "POST", "/backend-api/codex/alpha/history/v2/search_contents"),
+        ("HTTP", "POST", "/backend-api/codex/alpha/notes/v2/thread_hint"),
+        ("HTTP", "POST", "/backend-api/codex/alpha/notes/v2/list_files_by_prefix"),
+        ("HTTP", "POST", "/backend-api/codex/alpha/notes/v2/read_file"),
+        ("HTTP", "POST", "/backend-api/codex/alpha/notes/v2/search_contents"),
+        ("HTTP", "POST", "/backend-api/codex/alpha/notes/v2/append_to_file"),
+        ("HTTP", "POST", "/backend-api/codex/alpha/notes/v2/write_file"),
         ("HTTP", "GET", "/backend-api/codex/agent-identities/jwks"),
         ("HTTP", "POST", "/backend-api/codex/responses"),
         ("HTTP", "POST", "/backend-api/codex/responses/"),
@@ -164,6 +174,12 @@ _PROVIDER_ROUTING_CASES = [
     pytest.param("POST", "/backend-api/codex/realtime/calls", {"content": b"v=offer\r\n"}, id="realtime-call"),
     pytest.param("POST", "/backend-api/codex/safety/arc", {"json": {}}, id="safety-arc"),
     pytest.param("POST", "/backend-api/codex/alpha/search", {"json": {}}, id="alpha-search"),
+    pytest.param(
+        "POST",
+        "/backend-api/codex/alpha/notes/v2/thread_hint",
+        {"json": {}},
+        id="native-history-notes",
+    ),
     pytest.param("GET", "/backend-api/codex/agent-identities/jwks", {}, id="agent-identities"),
     pytest.param("GET", "/backend-api/codex/opportunistic/admission", {}, id="opportunistic-admission"),
     pytest.param("POST", "/v1/warmup", {"json": {"mode": "normal"}}, id="warmup-body"),
@@ -245,24 +261,32 @@ async def test_daybreak_capability_fails_closed_on_unsupported_routing_http_surf
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "request_kwargs"),
+    [
+        ("GET", "/backend-api/codex/thread/goal/get", {}),
+        ("POST", "/backend-api/codex/alpha/notes/v2/thread_hint", {"content": b"{"}),
+    ],
+)
 @pytest.mark.parametrize("auth_state", ["missing", "invalid"])
 async def test_daybreak_capability_unsupported_http_authenticates_before_denial(
     async_client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path: str,
+    request_kwargs: Mapping[str, Any],
     auth_state: str,
 ) -> None:
     async def fail_before_routing(*_args: Any, **_kwargs: Any) -> None:
         pytest.fail("unauthenticated capability intent must fail before routing")
 
     monkeypatch.setattr(ProxyService, "thread_goal_request", fail_before_routing)
+    monkeypatch.setattr(ProxyService, "codex_control_request", fail_before_routing)
     headers = dict(_CAPABILITY_HEADERS)
     if auth_state == "invalid":
         headers["Authorization"] = "Bearer invalid-daybreak-key"
 
-    response = await async_client.get(
-        "/backend-api/codex/thread/goal/get",
-        headers=headers,
-    )
+    response = await _request(async_client, method, path, headers=headers, request_kwargs=request_kwargs)
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "invalid_api_key"

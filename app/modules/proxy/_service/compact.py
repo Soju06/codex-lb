@@ -46,6 +46,7 @@ from app.modules.proxy.affinity import (
     _affinity_with_payload_continuity,
     _AffinityPolicy,
     _bare_codex_session_affinity,
+    _history_session_affinity,
     _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
@@ -450,8 +451,11 @@ def _sticky_key_for_compact_request(
         openai_cache_affinity=openai_cache_affinity,
         api_key=api_key,
     )
+    history_affinity = _history_session_affinity(payload, headers, enabled=codex_session_affinity)
     turn_state_key = _sticky_key_from_turn_state_header(headers)
-    if turn_state_key:
+    if history_affinity is not None:
+        policy = history_affinity
+    elif turn_state_key:
         policy = _AffinityPolicy(
             key=turn_state_key,
             kind=StickySessionKind.CODEX_SESSION,

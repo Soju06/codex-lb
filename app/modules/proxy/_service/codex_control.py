@@ -255,6 +255,8 @@ class _CodexControlMixin:
         query_params: Mapping[str, str] | Sequence[tuple[str, str]],
         headers: Mapping[str, str],
         codex_session_affinity: bool = True,
+        body_session_id: str | None = None,
+        allow_cross_account_retry: bool = True,
         api_key: ApiKeyData | None = None,
         success_gate: Callable[[str, CodexControlResponse], Awaitable[bool]] | None = None,
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
@@ -275,6 +277,7 @@ class _CodexControlMixin:
         affinity = _sticky_key_for_codex_control_request(
             headers,
             codex_session_affinity=codex_session_affinity,
+            body_session_id=body_session_id,
         )
         selection_model = api_key.enforced_model if api_key is not None else None
         routing_strategy = _routing_strategy(settings)
@@ -411,14 +414,21 @@ class _CodexControlMixin:
                 )
 
             try:
-                account = await proxy._ensure_previsible_unary_fresh_with_failover(
-                    account,
-                    deadline=deadline,
-                    request_id=request_id,
-                    kind=request_kind,
-                    select_next_account=_select_control_failover,
-                    privacy_policy=effective_privacy_policy,
-                )
+                if allow_cross_account_retry:
+                    account = await proxy._ensure_previsible_unary_fresh_with_failover(
+                        account,
+                        deadline=deadline,
+                        request_id=request_id,
+                        kind=request_kind,
+                        select_next_account=_select_control_failover,
+                        privacy_policy=effective_privacy_policy,
+                    )
+                else:
+                    account = await proxy._ensure_fresh_with_budget_or_auth_error(
+                        account,
+                        timeout_seconds=_remaining_budget_seconds(deadline),
+                        privacy_policy=effective_privacy_policy,
+                    )
                 account_id_value = account.id
                 response = await _call_control(account)
                 await proxy._load_balancer.record_success(account)
@@ -437,6 +447,11 @@ class _CodexControlMixin:
                     ),
                 ) from refresh_exc
             except ProxyResponseError as exc:
+                if not allow_cross_account_retry:
+                    failed_account = _proxy_response_failed_account(exc, account)
+                    account_id_value = failed_account.id
+                    await _handle_proxy_error(failed_account, exc)
+                    raise
                 if exc.status_code != 401:
                     failover = await proxy._retry_previsible_unary_call_failover(
                         exc,

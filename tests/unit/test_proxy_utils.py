@@ -13241,6 +13241,71 @@ def test_sticky_key_for_compact_request_derives_prompt_cache_before_codex_sessio
     assert payload.prompt_cache_key
 
 
+@pytest.mark.parametrize("carrier", ("header", "client_metadata"))
+def test_history_ingest_marker_uses_the_same_hard_history_session_key_for_responses_and_compact(carrier: str):
+    marker = '{"history_ingest_requested":true}'
+    headers = {"session_id": "history-session", "thread-id": "child-thread"}
+    extra: dict[str, object] = {}
+    if carrier == "header":
+        headers["x-codex-turn-metadata"] = marker
+    else:
+        extra["client_metadata"] = {"x-codex-turn-metadata": marker}
+    response_payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            **extra,
+        }
+    )
+    compact_payload = ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [], **extra}
+    )
+
+    response_policy = proxy_service._sticky_key_for_responses_request(
+        response_payload,
+        headers,
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=True,
+    )
+    compact_policy = proxy_service._sticky_key_for_compact_request(
+        compact_payload,
+        headers,
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=True,
+    )
+
+    expected_key = proxy_affinity._history_session_selection_key("history-session")
+    for policy in (response_policy, compact_policy):
+        assert policy.codex_session_source == "history_session"
+        assert policy.kind == StickySessionKind.CODEX_SESSION
+        assert policy.selection_key == expected_key
+        assert policy.legacy_selection_key is None
+        assert policy.spill_on_account_cap is False
+
+
+def test_unmarked_responses_session_keeps_thread_local_affinity():
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    headers = {"session_id": "ordinary-session", "thread-id": "ordinary-thread"}
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers,
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=True,
+    )
+
+    assert policy.codex_session_source == "thread_header"
+    assert policy.kind == StickySessionKind.PROMPT_CACHE
+
+
 def test_sticky_key_for_responses_request_respects_prompt_cache_derivation_flag(monkeypatch):
     class Settings:
         openai_prompt_cache_key_derivation_enabled = False

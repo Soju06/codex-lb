@@ -2703,7 +2703,7 @@ async def test_proxy_responses_forwards_native_codex_headers(async_client, monke
     native_headers = {
         "originator": "Codex Desktop",
         "session_id": "sid-native",
-        "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"none"}',
+        "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"none","history_ingest_requested":true}',
         "x-codex-beta-features": "js_repl,multi_agent",
         "x-request-id": "req_native_headers_123",
     }
@@ -2720,6 +2720,7 @@ async def test_proxy_responses_forwards_native_codex_headers(async_client, monke
     assert seen_headers["originator"] == native_headers["originator"]
     assert seen_headers["session_id"] == native_headers["session_id"]
     assert seen_headers["x-codex-turn-metadata"] == native_headers["x-codex-turn-metadata"]
+    assert json.loads(seen_headers["x-codex-turn-metadata"])["history_ingest_requested"] is True
     assert seen_headers["x-codex-beta-features"] == native_headers["x-codex-beta-features"]
     assert seen_headers["x-request-id"] == native_headers["x-request-id"]
 

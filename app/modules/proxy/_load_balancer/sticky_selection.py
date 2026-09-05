@@ -448,7 +448,7 @@ async def run_sticky_selection_path(
             # could become spillable.
             bare_session_key = (
                 sticky_kind == StickySessionKind.CODEX_SESSION
-                and sticky_source == "session_header"
+                and sticky_source in {"session_header", "body_session"}
                 and legacy_sticky_key is not None
                 and not sticky_existing_is_legacy
             )

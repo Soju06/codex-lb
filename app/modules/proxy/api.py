@@ -941,6 +941,36 @@ class _RealtimeCallCodexControlAdapter:
 _PASSTHROUGH_CODEX_CONTROL_ADAPTER = _PassthroughCodexControlAdapter()
 
 
+_NATIVE_HISTORY_NOTES_CONTROL_PATHS: Final[frozenset[str]] = frozenset(
+    {
+        "alpha/history/v2/list_windows",
+        "alpha/history/v2/list_items",
+        "alpha/history/v2/read_item",
+        "alpha/history/v2/search_contents",
+        "alpha/notes/v2/thread_hint",
+        "alpha/notes/v2/list_files_by_prefix",
+        "alpha/notes/v2/read_file",
+        "alpha/notes/v2/search_contents",
+        "alpha/notes/v2/append_to_file",
+        "alpha/notes/v2/write_file",
+    }
+)
+
+
+def _native_history_notes_session_id(payload: bytes) -> str:
+    try:
+        parsed = json.loads(payload)
+    except (JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="native history and notes payload must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="native history and notes payload must be a JSON object")
+    context = parsed.get("context")
+    session_id = context.get("session_id") if isinstance(context, dict) else None
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise HTTPException(status_code=400, detail="native history and notes payload requires context.session_id")
+    return session_id
+
+
 async def _codex_control_proxy(
     request: Request,
     path: str,
@@ -954,14 +984,23 @@ async def _codex_control_proxy(
         capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
         if capability_transport_denial is not None:
             return capability_transport_denial
+    payload = await request.body() if request.method.upper() not in {"GET", "HEAD"} else None
+    body_session_id = None
+    allow_cross_account_retry = True
+    if path in _NATIVE_HISTORY_NOTES_CONTROL_PATHS:
+        assert payload is not None
+        body_session_id = _native_history_notes_session_id(payload)
+        allow_cross_account_retry = False
     try:
         response = await context.service.codex_control_request(
             path,
             method=request.method,
-            payload=await request.body() if request.method.upper() not in {"GET", "HEAD"} else None,
+            payload=payload,
             query_params=list(request.query_params.multi_items()),
             headers=request.headers,
             codex_session_affinity=True,
+            body_session_id=body_session_id,
+            allow_cross_account_retry=allow_cross_account_retry,
             api_key=api_key,
             privacy_policy=adapter.privacy_policy,
             success_gate=adapter.success_gate,
@@ -1058,6 +1097,24 @@ async def codex_alpha_search(
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     return await _codex_control_proxy(request, "alpha/search", context, api_key)
+
+
+@router.post("/alpha/history/v2/list_windows")
+@router.post("/alpha/history/v2/list_items")
+@router.post("/alpha/history/v2/read_item")
+@router.post("/alpha/history/v2/search_contents")
+@router.post("/alpha/notes/v2/thread_hint")
+@router.post("/alpha/notes/v2/list_files_by_prefix")
+@router.post("/alpha/notes/v2/read_file")
+@router.post("/alpha/notes/v2/search_contents")
+@router.post("/alpha/notes/v2/append_to_file")
+@router.post("/alpha/notes/v2/write_file")
+async def codex_native_history_notes(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, request.url.path.removeprefix("/backend-api/codex/"), context, api_key)
 
 
 @router.get("/agent-identities/jwks")

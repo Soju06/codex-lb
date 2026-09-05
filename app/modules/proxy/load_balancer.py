@@ -1286,6 +1286,7 @@ class LoadBalancer:
                 if not accounts and all_accounts_require_reauthentication(
                     additional_quota_candidates,
                     self._encryptor,
+                    now=self._clock.time(),
                 ):
                     accounts = additional_quota_candidates
                 elif not accounts:
@@ -1523,6 +1524,7 @@ class LoadBalancer:
         eligible_accounts: list[Account] = []
         blocked_by_data = False
         blocked_by_exhaustion = False
+        now = self._clock.time()
         for account in accounts:
             eligibility = _additional_quota_eligibility(
                 account_id=account.id,
@@ -1534,6 +1536,7 @@ class LoadBalancer:
                 latest_secondary=latest_secondary,
                 fresh_primary=fresh_primary,
                 fresh_secondary=fresh_secondary,
+                now=now,
             )
             if eligibility == "eligible":
                 eligible_accounts.append(account)

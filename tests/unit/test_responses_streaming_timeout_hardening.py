@@ -315,3 +315,43 @@ async def test_capacity_probe_immediate_completion_keeps_real_scheduler_default(
         )
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_chat_startup_probe_timeout_and_marker_grace_use_virtual_scheduler() -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    capacity_wait_event = asyncio.Event()
+
+    async def late_first_item() -> AsyncIterator[str]:
+        await scheduler.sleep(0.5)
+        yield 'data: {"type":"response.created"}\n\n'
+
+    probe = scheduler.create_task(
+        proxy_api._probe_chat_stream_startup_error(
+            late_first_item(),
+            timeout_seconds=0.05,
+            capacity_wait_event=capacity_wait_event,
+            scheduler=scheduler,
+            clock=clock,
+        )
+    )
+    await scheduler.drain()
+    assert not probe.done()
+
+    # The startup probe window elapses on the virtual clock ...
+    await scheduler.advance(0.05)
+    assert not probe.done()
+    # ... then the capacity-marker grace window, both without a wall-clock wait.
+    await scheduler.advance(proxy_api._CAPACITY_WAIT_MARKER_GRACE_SECONDS)
+    stream, startup_error = await probe
+
+    assert startup_error is None
+    assert clock.monotonic() == pytest.approx(0.05 + proxy_api._CAPACITY_WAIT_MARKER_GRACE_SECONDS)
+    # The first-item probe task is owned by the scheduler and handed to the stream.
+    pending_owned = [task for task in scheduler.owned_tasks if not task.done()]
+    assert len(pending_owned) == 1
+
+    await scheduler.advance(0.5)
+    assert await anext(stream) == 'data: {"type":"response.created"}\n\n'
+    await scheduler.cancel_owned_tasks()

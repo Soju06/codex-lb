@@ -76,13 +76,14 @@ tracing = [
 
 [dependency-groups]
 dev = [
+    "h2>=4.3.0",
     "pre-commit>=4.5.1",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-timeout>=2.4.0",
     "httpx>=0.28.1",
     "ruff>=0.14.13",
-    "ty==0.0.73",
+    "ty==0.0.75",
     "openai>=2.16.0",
     "pytest-xdist>=3.8.0",
     "pytest-cov>=7.1.0",

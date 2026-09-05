@@ -287,7 +287,7 @@ class AuthManager:
         self._refresh_claims = refresh_claims
 
     async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
-        if force or should_refresh(account.last_refresh):
+        if force or (account.status != AccountStatus.REAUTH_REQUIRED and should_refresh(account.last_refresh)):
             account = await _REFRESH_SINGLEFLIGHT.run(
                 _refresh_singleflight_key(self._encryptor, account),
                 lambda: self._run_refresh(account),
@@ -342,6 +342,20 @@ class AuthManager:
     async def refresh_account(self, account: Account) -> Account:
         claims = self._refresh_claims if self._refresh_claims is not None else get_refresh_claim_coordinator()
         if claims is None:
+            requested_fingerprint = _refresh_token_material_fingerprint(
+                self._encryptor,
+                account.refresh_token_encrypted,
+            )
+            latest = await self._repo.get_by_id_fresh(account.id)
+            if latest is not None:
+                if (
+                    _refresh_token_material_fingerprint(self._encryptor, latest.refresh_token_encrypted)
+                    != requested_fingerprint
+                ):
+                    return _adopt_account_row(account, latest)
+                _adopt_account_row(account, latest)
+                if account.status in _TERMINAL_REFRESH_STATUSES:
+                    raise _terminal_status_refresh_error(account)
             return await self._perform_refresh(account, refresh_token_encrypted=account.refresh_token_encrypted)
         return await self._refresh_account_with_claim(account, claims)
 
@@ -928,7 +942,6 @@ class AuthManager:
             if applied:
                 account.status = status
                 account.deactivation_reason = reason
-                mark_account_routing_unavailable(account.id)
                 get_account_selection_cache().invalidate()
                 logger.warning(
                     "Token-refresh compare-and-set for account_id=%s could not persist the freshly "
@@ -1049,7 +1062,8 @@ class AuthManager:
             if applied:
                 account.status = status
                 account.deactivation_reason = reason
-                mark_account_routing_unavailable(account.id)
+                if status == AccountStatus.DEACTIVATED:
+                    mark_account_routing_unavailable(account.id)
                 get_account_selection_cache().invalidate()
                 return None
             # CAS missed: the freshly observed account state changed between the

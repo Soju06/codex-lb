@@ -1,5 +1,16 @@
 # syntax=docker/dockerfile:1.7
-FROM ghcr.io/astral-sh/uv:0.12.5 AS uv-bin
+FROM ghcr.io/astral-sh/uv:0.12.8 AS uv-bin
+
+FROM rust:1.96.0-slim-bookworm AS native-egress-build
+
+WORKDIR /src
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked --package codex-lb-egress-worker --bin codex-lb-native-egress \
+    && cp target/release/codex-lb-native-egress /tmp/codex-lb-native-egress
 
 FROM oven/bun:1.4.0-alpine AS frontend-build
 
@@ -61,6 +72,7 @@ COPY --from=python-build /staged-libs/lib/ /lib/
 COPY --from=python-build /staged-libs/usr/lib/ /usr/lib/
 COPY --from=python-build /usr/local /usr/local
 COPY --from=python-build /opt/venv /opt/venv
+COPY --from=native-egress-build /tmp/codex-lb-native-egress /usr/local/bin/codex-lb-native-egress
 COPY --from=python-build --chown=nonroot:nonroot /var/lib/codex-lb /var/lib/codex-lb
 COPY --chown=nonroot:nonroot app app
 COPY --chown=nonroot:nonroot config config

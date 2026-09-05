@@ -11,6 +11,19 @@ OpenAI account surfaces can display reset state earlier than `/wham/usage`,
 especially during team reset windows, so the dashboard can temporarily show an
 account as `rate_limited` even when Codex Desktop says the quota has reset.
 
+## Access and refresh eligibility
+
+A permanent refresh-token failure marks an account `reauth_required` and stops
+proactive exchange of that refresh material, while ordinary requests may keep
+using the stored access token until its known expiry. Claimless forced refresh
+first reads current state: it adopts genuine peer rotation, uses fresh ciphertext
+as the guard for unchanged non-terminal material, and fails closed without
+exchange when terminal material is unchanged. Before access-token expiry, a
+request that reaches this terminal failure may fail over after excluding the
+account locally; it does not globally de-route it or move owner-bound continuity
+to another account. At known expiry, selection and bridge reuse reject the
+account before upstream I/O.
+
 ## Upstream Usage Source
 
 codex-lb refreshes account usage by calling:

@@ -229,6 +229,9 @@ def _make_dashboard_settings(
         id=1,
         sticky_threads_enabled=False,
         upstream_stream_transport="auto",
+        # This suite exercises the bridge itself. Tests for policy-driven
+        # bypass override this explicitly (for example, ``always_http``).
+        http_downstream_transport_policy="always_websocket",
         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
         routing_strategy="usage_weighted",
         openai_cache_affinity_max_age_seconds=300,
@@ -7101,6 +7104,59 @@ async def test_v1_responses_http_bridge_kill_switch_falls_back_to_legacy_path(as
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_always_http_policy_bypasses_enabled_bridge(async_client, monkeypatch):
+    app_settings = _make_app_settings(enabled=True)
+    dashboard_settings = _make_dashboard_settings()
+    dashboard_settings.http_downstream_transport_policy = "always_http"
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=app_settings,
+        dashboard_settings=dashboard_settings,
+    )
+    await _import_account(async_client, "acc_http_policy_fallback", "http-policy-fallback@example.com")
+    seen = {"http": 0}
+
+    async def fake_http_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        assert kwargs["upstream_stream_transport_override"] == "http"
+        seen["http"] += 1
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_policy_http",'
+            '"object":"response","status":"completed",'
+            '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,'
+            '"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}\n\n'
+        )
+
+    async def fail_connect(*args, **kwargs):
+        raise AssertionError("always_http must bypass the enabled websocket bridge")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_http_stream)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fail_connect)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "input": "hi",
+            "prompt_cache_key": "sticky-but-always-http",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_policy_http"
+    assert "x-codex-turn-state" not in response.headers
+    assert seen["http"] == 1
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_http_bridge_kill_switch_falls_back_to_legacy_path(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=False)
     await _import_account(async_client, "acc_backend_http_bridge_fallback", "backend-http-bridge-fallback@example.com")
@@ -10588,6 +10644,11 @@ async def test_codex_responses_http_bridge_replaces_retired_gate_without_client_
         enabled=True,
         admission_wait_timeout_seconds=0.001,
     )
+    # Native Codex HTTP stays HTTP under auto policy. This bridge-specific
+    # recovery test opts into WebSocket explicitly, whose precedence remains
+    # authoritative.
+    dashboard_settings = await proxy_module.get_settings_cache().get()
+    dashboard_settings.upstream_stream_transport = "websocket"
     proxy_module.get_settings().http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.01
     account_id = await _import_account(
         async_client,

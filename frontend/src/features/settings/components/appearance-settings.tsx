@@ -3,7 +3,10 @@ import { useTranslation } from "react-i18next";
 
 import { Switch } from "@/components/ui/switch";
 import { useAccountQuotaDisplayStore, type AccountQuotaDisplayPreference } from "@/hooks/use-account-quota-display";
-import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
+import {
+  useDashboardPreferencesStore,
+  type DashboardRefreshSeconds,
+} from "@/hooks/use-dashboard-preferences";
 import { useThemeStore, type ThemePreference } from "@/hooks/use-theme";
 import { useTimeFormatStore, type TimeFormatPreference } from "@/hooks/use-time-format";
 import { useDateDisplayFormatStore, type DateDisplayFormat } from "@/hooks/use-date-format";
@@ -24,6 +27,8 @@ const DATE_FORMAT_OPTIONS: { value: DateDisplayFormat; labelKey: string }[] = [
   { value: "default", labelKey: "settings.appearance.dateFormat.default" },
   { value: "iso8601", labelKey: "settings.appearance.dateFormat.iso8601" },
 ];
+
+const REFRESH_OPTIONS: DashboardRefreshSeconds[] = [5, 15, 30, 60];
 
 const QUOTA_DISPLAY_OPTIONS: {
   value: AccountQuotaDisplayPreference;
@@ -59,6 +64,8 @@ export function AppearanceSettings() {
   const setAccountBurnrateEnabled = useDashboardPreferencesStore((s) => s.setAccountBurnrateEnabled);
   const dateDisplayFormat = useDateDisplayFormatStore((s) => s.dateDisplayFormat);
   const setDateDisplayFormat = useDateDisplayFormatStore((s) => s.setDateDisplayFormat);
+  const refreshSeconds = useDashboardPreferencesStore((s) => s.refreshSeconds);
+  const setRefreshSeconds = useDashboardPreferencesStore((s) => s.setRefreshSeconds);
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -173,6 +180,31 @@ export function AppearanceSettings() {
                   )}
                 >
                   <span className="block">{t(labelKey)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-medium">{t("settings.appearance.refreshRate.label")}</p>
+              <p className="text-xs text-muted-foreground">{t("settings.appearance.refreshRate.description")}</p>
+            </div>
+            <div className="flex items-center gap-1 rounded-lg border border-border/50 bg-muted/40 p-0.5">
+              {REFRESH_OPTIONS.map((seconds) => (
+                <button
+                  key={seconds}
+                  type="button"
+                  aria-pressed={refreshSeconds === seconds}
+                  onClick={() => setRefreshSeconds(seconds)}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-left text-xs font-medium transition-colors duration-200",
+                    refreshSeconds === seconds
+                      ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {t("settings.appearance.refreshRate.seconds", { seconds })}
                 </button>
               ))}
             </div>

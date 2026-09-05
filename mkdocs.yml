@@ -72,4 +72,7 @@ nav:
       - Remote Access: deployment/remote.md
   - Reference:
       - Settings: reference/settings.md
+  - Traffic Parity: traffic-parity.md
+  - Development:
+      - Rust Migration Architecture: rust-architecture.md
   - Troubleshooting: troubleshooting.md

@@ -40,8 +40,12 @@ from app.core.clients.proxy_websocket import (
 from app.core.errors import (
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+    SYNTHETIC_TRANSPORT_FAILURE_CODES,
     OpenAIErrorParam,
+    openai_error,
     response_failed_event,
+    synthetic_stream_failure_event,
+    synthetic_transport_failure_event,
 )
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE,
@@ -49,8 +53,9 @@ from app.core.errors import (
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
-from app.core.openai.models import OpenAIError, OpenAIEvent
-from app.core.openai.parsing import parse_sse_event
+from app.core.openai.models import OpenAIError, OpenAIEvent, OpenAIResponsePayload, ResponseUsage
+from app.core.openai.parsing import classify_event_type, parse_sse_event
+from app.core.openai.requests import ResponsesRequest
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
 )
@@ -406,6 +411,70 @@ def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
 
+def _canonical_background_ack(
+    event_payload: dict[str, JsonValue] | None,
+    event_type: str | None,
+) -> tuple[str, OpenAIResponsePayload] | None:
+    if event_type not in {"response.queued", "response.in_progress"}:
+        return None
+    response = event_payload.get("response") if event_payload is not None else None
+    response_id = response.get("id") if isinstance(response, dict) else None
+    if not (
+        isinstance(response, dict)
+        and response.get("object") == "response"
+        and isinstance(response_id, str)
+        and bool(response_id)
+        and response_id == response_id.strip()
+        and response.get("status") == event_type.removeprefix("response.")
+        and response.get("output") == []
+    ):
+        return None
+    # The relayed payload model drops known submodels that fail validation
+    # instead of raising, so a malformed `usage` or `error` would otherwise be
+    # discarded silently on a response classified as successful.
+    payload = OpenAIResponsePayload.model_validate(response)
+    if (response.get("usage") is None) != (payload.usage is None):
+        return None
+    if (response.get("error") is None) != (payload.error is None):
+        return None
+    return response_id, payload
+
+
+def _canonical_background_ack_response_id(
+    event_payload: dict[str, JsonValue] | None,
+    event_type: str | None,
+) -> str | None:
+    canonical_ack = _canonical_background_ack(event_payload, event_type)
+    return canonical_ack[0] if canonical_ack is not None else None
+
+
+def _is_background_json_ack(
+    stream: bool | None,
+    event_payload: dict[str, JsonValue] | None,
+    event_type: str | None,
+) -> bool:
+    return stream is False and _canonical_background_ack_response_id(event_payload, event_type) is not None
+
+
+def _settle_background_ack(
+    settlement: _StreamSettlement,
+    payload: ResponsesRequest,
+    event_payload: dict[str, JsonValue] | None,
+    response_id: str,
+) -> tuple[bool, str, ResponseUsage | None]:
+    """Treat a canonical background acknowledgement as the terminal event of a `stream: false` request."""
+    canonical_ack = (
+        _canonical_background_ack(event_payload, classify_event_type(event_payload))
+        if payload.stream is False
+        else None
+    )
+    if canonical_ack is None:
+        return False, response_id, None
+    ack_response_id, ack_payload = canonical_ack
+    settlement.response_id = ack_response_id
+    return True, ack_response_id, ack_payload.usage
+
+
 def _stream_iterator_after_capacity_admission(
     stream: AsyncIterator[str],
 ) -> AsyncIterator[str]:
@@ -720,11 +789,29 @@ def _build_rewritten_stream_response_failed_event(
         error_type="server_error",
         response_id=response_id,
     )
+    if error_code in SYNTHETIC_TRANSPORT_FAILURE_CODES:
+        rewritten_event_payload = synthetic_transport_failure_event(rewritten_event_payload)
     rewritten_event_block = format_sse_event(rewritten_event_payload)
     rewritten_payload = parse_sse_data_json(rewritten_event_block)
     rewritten_event = parse_sse_event(rewritten_event_block)
     rewritten_event_type = _event_type_from_payload(rewritten_event, rewritten_payload)
     return rewritten_event_block, rewritten_event, rewritten_payload, rewritten_event_type
+
+
+def _stream_transport_failure_event_or_raise(
+    error_code: str,
+    error_message: str,
+    *,
+    response_id: str,
+    preserve_native_failure_lifecycle: bool,
+) -> str:
+    if preserve_native_failure_lifecycle:
+        raise ProxyResponseError(
+            502,
+            openai_error(error_code, error_message),
+            failure_phase="upstream",
+        )
+    return format_sse_event(synthetic_stream_failure_event(error_code, error_message, response_id=response_id))
 
 
 def _build_stream_incomplete_terminal_event_for_request(
@@ -741,16 +828,10 @@ def _build_stream_incomplete_terminal_event_for_request(
         error_code=error_code,
         error_message=error_message,
     )
+    if payload is None:  # pragma: no cover - formatter/parser contract
+        raise RuntimeError("rewritten stream failure event did not contain a JSON payload")
     downstream_text = json.dumps(
-        cast(
-            dict[str, JsonValue],
-            response_failed_event(
-                error_code,
-                error_message,
-                error_type="server_error",
-                response_id=_websocket_downstream_response_id(request_state),
-            ),
-        ),
+        payload,
         ensure_ascii=True,
         separators=(",", ":"),
     )
@@ -861,6 +942,7 @@ async def _select_account_with_budget_for_stream(proxy: Any, deadline: float, **
         "estimated_lease_tokens",
         "fallback_on_preferred_account_unavailable",
         "preferred_account_is_continuity_owner",
+        "preferred_account_overrides_single_account_routing",
         "spill_bare_session_on_account_cap",
         "require_unambiguous_account",
     )

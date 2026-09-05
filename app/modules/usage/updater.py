@@ -781,7 +781,8 @@ class UsageUpdater:
         await self._auth_manager._repo.update_status(account.id, status, reason)
         account.status = status
         account.deactivation_reason = reason
-        mark_account_routing_unavailable(account.id)
+        if status == AccountStatus.DEACTIVATED:
+            mark_account_routing_unavailable(account.id)
         get_account_selection_cache().invalidate()
 
     async def _sync_identity_metadata(self, account: Account, payload: UsagePayload) -> bool:

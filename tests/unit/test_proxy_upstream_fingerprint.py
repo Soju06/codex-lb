@@ -5,6 +5,7 @@ from unittest.mock import patch
 from app.core.clients import proxy as proxy_module
 from app.core.clients.proxy import (
     _build_upstream_headers,
+    _build_upstream_websocket_headers,
     build_codex_user_agent,
 )
 
@@ -46,6 +47,19 @@ def test_non_native_sdk_http_request_is_rewritten_to_codex_cli_fingerprint():
     assert sum(key.lower() == "version" for key in headers) == 1
 
 
+def test_routing_hint_is_hop_local_for_responses_http_and_websocket():
+    inbound = {
+        "User-Agent": "codex_exec/0.150.1 (Ubuntu 24.4.0; x86_64) dumb (codex_exec; 0.150.1)",
+        "X-Codex-Routing-Hint": "model=gpt-5.6-luna",
+    }
+
+    http_headers = _build_upstream_headers(inbound, "tok", "acct-1")
+    websocket_headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
+
+    assert "x-codex-routing-hint" not in _lower_keys(http_headers)
+    assert "x-codex-routing-hint" not in _lower_keys(websocket_headers)
+
+
 def test_non_native_request_uses_pascalcase_account_header():
     with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
         headers = _build_upstream_headers({"User-Agent": "OpenAI/Python 2.24.0"}, "tok", "acct-9")
@@ -84,6 +98,18 @@ def test_native_codex_http_request_is_left_unchanged():
     # Native requests keep the existing lowercase account header.
     assert headers["chatgpt-account-id"] == "acct-1"
     assert "ChatGPT-Account-Id" not in headers
+
+
+def test_native_codex_http_request_does_not_gain_proxy_request_id():
+    native_ua = "codex_exec/0.149.0 (Ubuntu 24.4.0; x86_64) dumb"
+    with patch.object(proxy_module, "get_request_id", return_value="proxy-generated-id"):
+        headers = _build_upstream_headers(
+            {"User-Agent": native_ua, "originator": "codex_exec", "version": "0.149.0"},
+            "tok",
+            None,
+        )
+
+    assert "x-request-id" not in _lower_keys(headers)
 
 
 def test_codex_desktop_native_user_agent_is_left_unchanged():
@@ -183,18 +209,31 @@ def test_websocket_native_codex_request_is_left_unchanged():
     assert headers["chatgpt-account-id"] == "acct-1"
     assert "ChatGPT-Account-Id" not in headers
     assert headers["x-codex-turn-state"] == "abc"
+    assert headers["version"]
 
 
-def test_websocket_connect_preserves_canonical_installation_header_after_filtering():
-    # Regression for the Codex P2 finding: a native direct websocket request that
-    # supplies both x-codex-installation-id and x-codex-turn-metadata has its
-    # standalone installation header stripped by filter_inbound_websocket_headers
-    # (it lives in IGNORE_INBOUND_HEADERS). The connect path re-applies that filter
-    # inside _build_upstream_websocket_headers, so the selected-account header that
-    # apply_codex_installation_headers injects must survive it -- otherwise the
-    # websocket handshake loses the header parity the HTTP /codex/responses egress
-    # keeps. This mirrors what _open_upstream_websocket does before connecting.
-    from app.core.clients.proxy import apply_codex_installation_headers
+def test_websocket_native_codex_request_does_not_gain_proxy_request_id():
+    from app.core.clients.proxy import _build_upstream_websocket_headers
+
+    native_ua = "codex_exec/0.149.0 (Ubuntu 24.4.0; x86_64) dumb"
+    with patch.object(proxy_module, "get_request_id", return_value="proxy-generated-id"):
+        headers = _build_upstream_websocket_headers(
+            {"User-Agent": native_ua, "originator": "codex_exec"},
+            "tok",
+            None,
+        )
+
+    assert "x-request-id" not in _lower_keys(headers)
+
+
+def test_websocket_connect_omits_standalone_installation_header_for_observed_profile():
+    # Direct Codex CLI 0.150.1 carries the selected installation id in
+    # response.create.client_metadata, not in the websocket handshake. Keep
+    # canonical turn metadata while matching that standalone-header shape.
+    from app.core.clients.proxy import (
+        CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE,
+        apply_codex_installation_headers,
+    )
     from app.core.clients.proxy_websocket import (
         _build_upstream_websocket_headers,
         filter_inbound_websocket_headers,
@@ -206,16 +245,18 @@ def test_websocket_connect_preserves_canonical_installation_header_after_filteri
         "x-codex-installation-id": "client-installation",
         "x-codex-turn-metadata": '{"installation_id":"client-installation","turn":1}',
     }
-    # proxy_responses_websocket first filters inbound headers (drops installation id)...
     filtered = filter_inbound_websocket_headers(client_inbound)
     assert "x-codex-installation-id" not in _lower_keys(filtered)
-    # ...then _open_upstream_websocket normalizes the selected account's canonical id.
-    normalized = apply_codex_installation_headers(filtered, "acct-canonical")
+    normalized = apply_codex_installation_headers(
+        filtered,
+        "acct-canonical",
+        wire_profile=CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE,
+    )
 
     headers = _build_upstream_websocket_headers(normalized, "tok", "acct-1")
 
     lowered = {key.lower(): value for key, value in headers.items()}
-    assert lowered["x-codex-installation-id"] == "acct-canonical"
+    assert "x-codex-installation-id" not in lowered
     import json
 
     turn_metadata = json.loads(lowered["x-codex-turn-metadata"])

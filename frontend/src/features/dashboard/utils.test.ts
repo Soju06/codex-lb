@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { DashboardOverviewSchema } from "@/features/dashboard/schemas";
 import type { AccountSummary, Depletion } from "@/features/dashboard/schemas";
 import {
   applySecondaryConstraint,
@@ -679,6 +680,186 @@ describe("buildWeeklyCreditPace", () => {
 });
 
 describe("buildDashboardView", () => {
+  function serverWeeklyPace(overrides: Partial<WeeklyCreditPace> = {}): WeeklyCreditPace {
+    return {
+      totalFullCredits: 100_800,
+      totalActualRemainingCredits: 42_336,
+      totalExpectedRemainingCredits: 60_480,
+      actualUsedPercent: 58,
+      scheduledUsedPercent: 40,
+      deltaPercent: 18,
+      scheduleGapCredits: 18_144,
+      smoothedDeltaPercent: 18,
+      smoothedScheduleGapCredits: 18_144,
+      paceGapSmoothingMinutes: 30,
+      overPlanCredits: 18_144,
+      projectedShortfallCredits: 0,
+      pauseForBreakEvenHours: null,
+      paceMultiplier: null,
+      throttleToPercent: null,
+      reduceByPercent: null,
+      proAccountEquivalentToCoverOverPlan: null,
+      proAccountsToCoverOverPlan: null,
+      projectedDepletionHours: null,
+      projectedMinimumRemainingCredits: 12_000,
+      forecastBurnRateCreditsPerHour: 6_000,
+      scheduledBurnRateCreditsPerHour: 600,
+      status: "on_track",
+      accountCount: 2,
+      staleAccountCount: 0,
+      inactiveAccountCount: 0,
+      confidence: "high",
+      ...overrides,
+    };
+  }
+
+  it("parses runway fields from a raw wire overview payload into the view end to end", () => {
+    // Raw camelCase wire shape, deliberately untyped: it must survive
+    // DashboardOverviewSchema.parse, not be injected after parsing.
+    const rawWirePace = {
+      totalFullCredits: 100_800,
+      totalActualRemainingCredits: 8_064,
+      totalExpectedRemainingCredits: 60_480,
+      actualUsedPercent: 92,
+      scheduledUsedPercent: 40,
+      deltaPercent: 52,
+      scheduleGapCredits: 52_416,
+      smoothedDeltaPercent: 52,
+      smoothedScheduleGapCredits: 52_416,
+      paceGapSmoothingMinutes: 30,
+      overPlanCredits: 52_416,
+      projectedShortfallCredits: 0,
+      pauseForBreakEvenHours: null,
+      paceMultiplier: null,
+      throttleToPercent: 28,
+      reduceByPercent: 72,
+      proAccountEquivalentToCoverOverPlan: null,
+      proAccountsToCoverOverPlan: null,
+      projectedDepletionHours: null,
+      projectedMinimumRemainingCredits: 0,
+      forecastBurnRateCreditsPerHour: 1_200,
+      scheduledBurnRateCreditsPerHour: 600,
+      runwayStatus: "runs_dry",
+      headroomPercent: 8,
+      headroomCredits: 8_064,
+      burnRateRecentCreditsPerHour: 1_200,
+      depletionEtaHours: 6.7,
+      nextReliefInHours: 26,
+      nextReliefCredits: 50_400,
+      resetEvents: [{ at: "2026-01-08T14:00:00+00:00", creditsReturned: 50_400 }],
+      saturatedAccountCount: 1,
+      topApiKeys: [
+        {
+          apiKeyId: "key_hermes_prod",
+          name: "hermes-prod",
+          requests: 12_400,
+          billableTokens: 9_800_000,
+          cachedTokens: 4_000_000,
+          dominantModel: "gpt-5.2-codex",
+        },
+      ],
+      addProAccounts: 2,
+      status: "on_track",
+      accountCount: 2,
+      staleAccountCount: 0,
+      inactiveAccountCount: 0,
+      confidence: "high",
+    };
+    const rawOverview: unknown = JSON.parse(
+      JSON.stringify({ ...createDashboardOverview(), weeklyCreditPace: rawWirePace }),
+    );
+
+    const overview = DashboardOverviewSchema.parse(rawOverview);
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+
+    const pace = view.weeklyCreditPace;
+    expect(pace).not.toBeNull();
+    expect(pace?.runwayStatus).toBe("runs_dry");
+    expect(pace?.headroomPercent).toBe(8);
+    expect(pace?.headroomCredits).toBe(8_064);
+    expect(pace?.burnRateRecentCreditsPerHour).toBe(1_200);
+    expect(pace?.depletionEtaHours).toBeCloseTo(6.7);
+    expect(pace?.nextReliefInHours).toBe(26);
+    expect(pace?.nextReliefCredits).toBe(50_400);
+    expect(pace?.resetEvents).toEqual([{ at: "2026-01-08T14:00:00+00:00", creditsReturned: 50_400 }]);
+    expect(pace?.saturatedAccountCount).toBe(1);
+    expect(pace?.topApiKeys).toEqual(rawWirePace.topApiKeys);
+    expect(pace?.addProAccounts).toBe(2);
+    expect(pace?.status).toBe("on_track");
+    expect(pace?.scheduleGapCredits).toBe(52_416);
+  });
+
+  it("parses an old-backend overview payload without runway fields and keeps the legacy shape", () => {
+    // serverWeeklyPace() carries only the legacy fields; the JSON round-trip
+    // turns it into raw wire data before the schema parse.
+    const rawOverview: unknown = JSON.parse(
+      JSON.stringify({ ...createDashboardOverview(), weeklyCreditPace: serverWeeklyPace() }),
+    );
+
+    const overview = DashboardOverviewSchema.parse(rawOverview);
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+
+    const pace = view.weeklyCreditPace;
+    expect(pace).not.toBeNull();
+    expect(pace?.status).toBe("on_track");
+    expect(pace?.scheduleGapCredits).toBe(18_144);
+    expect(pace?.runwayStatus).toBeUndefined();
+    expect(pace?.headroomPercent).toBeUndefined();
+    expect(pace?.headroomCredits).toBeUndefined();
+    expect(pace?.resetEvents).toBeUndefined();
+    expect(pace?.topApiKeys).toBeUndefined();
+  });
+
+  it("keeps the overview weekly pace when the projections refinement is null", () => {
+    const overviewPace = serverWeeklyPace({ runwayStatus: "safe" });
+    const overview = { ...createDashboardOverview(), weeklyCreditPace: overviewPace };
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false, {
+      weeklyCreditPace: null,
+    });
+
+    expect(view.weeklyCreditPace).toBe(overviewPace);
+  });
+
+  it("prefers the fresh overview weekly pace over a retained projections copy", () => {
+    // TanStack Query keeps the last successful projections payload across
+    // later failures; a stale "safe" copy must not mask a fresh "runs_dry".
+    const overviewPace = serverWeeklyPace({ runwayStatus: "runs_dry", headroomPercent: 4, headroomCredits: 4_032 });
+    const staleProjectionsPace = serverWeeklyPace({ runwayStatus: "safe", headroomPercent: 40, headroomCredits: 40_320 });
+    const overview = { ...createDashboardOverview(), weeklyCreditPace: overviewPace };
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false, {
+      weeklyCreditPace: staleProjectionsPace,
+    });
+
+    expect(view.weeklyCreditPace).toBe(overviewPace);
+  });
+
+  it("uses the projections weekly pace when the overview omits the field (older backend)", () => {
+    const overview = createDashboardOverview();
+    expect(overview.weeklyCreditPace).toBeUndefined();
+    const projectionsPace = serverWeeklyPace({ runwayStatus: "safe", headroomPercent: 40, headroomCredits: 40_320 });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false, {
+      weeklyCreditPace: projectionsPace,
+    });
+
+    expect(view.weeklyCreditPace).toBe(projectionsPace);
+  });
+
+  it("uses the projections weekly pace when the overview serves an explicit null (older backend)", () => {
+    // Old backends serve `weeklyCreditPace: null` rather than omitting the
+    // field, so a served null must not be read as an authoritative "no pace".
+    const overview = { ...createDashboardOverview(), weeklyCreditPace: null };
+    const projectionsPace = serverWeeklyPace({ runwayStatus: "safe", headroomPercent: 40, headroomCredits: 40_320 });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false, {
+      weeklyCreditPace: projectionsPace,
+    });
+
+    expect(view.weeklyCreditPace).toBe(projectionsPace);
+  });
+
   it("prefers backend weekly credit pace when the overview provides it", () => {
     const serverPace: WeeklyCreditPace = {
       totalFullCredits: 50_400,
@@ -727,7 +908,7 @@ describe("buildDashboardView", () => {
     expect(view.weeklyCreditPace).toBe(serverPace);
   });
 
-  it("keeps an explicit null backend weekly credit pace instead of falling back locally", () => {
+  it("falls back to the local projection when the overview serves null and projections have none", () => {
     const weeklyResetAt = new Date(Date.now() + 3.5 * 24 * 60 * 60 * 1000).toISOString();
     const overview = createDashboardOverview({
       weeklyCreditPace: null,
@@ -747,11 +928,14 @@ describe("buildDashboardView", () => {
       ],
     });
 
+    // Old backends serve null instead of omitting the field, so the client
+    // must still synthesize a pace locally rather than hiding the card.
     expect(buildWeeklyCreditPace(overview.accounts)).not.toBeNull();
 
     const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
 
-    expect(view.weeklyCreditPace).toBeNull();
+    expect(view.weeklyCreditPace).not.toBeNull();
+    expect(view.weeklyCreditPace?.accountCount).toBe(1);
   });
 
   it("keeps donut totals anchored to window capacity even when displayed slices are constrained", () => {

@@ -1709,8 +1709,8 @@ async def test_record_errors_does_not_restore_terminal_status(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_mark_permanent_failure_marks_account_routing_unavailable() -> None:
-    account = _make_account("acc-permanent-routing-unavailable", "permanent-routing@example.com")
+async def test_mark_reauth_failure_keeps_account_routing_available() -> None:
+    account = _make_account("acc-reauth-routing-available", "reauth-routing@example.com")
     accounts_repo = StubAccountsRepository([account])
     usage_repo = StubUsageRepository(primary={}, secondary={})
     sticky_repo = StubStickySessionsRepository()
@@ -1719,7 +1719,7 @@ async def test_mark_permanent_failure_marks_account_routing_unavailable() -> Non
     await balancer.mark_permanent_failure(account, "refresh_token_expired")
 
     assert account.status == AccountStatus.REAUTH_REQUIRED
-    assert is_account_routing_unavailable(account.id) is True
+    assert is_account_routing_unavailable(account.id) is False
 
 
 @pytest.mark.asyncio
@@ -1952,7 +1952,8 @@ async def test_select_account_skips_stale_persistence_after_terminal_status_upda
     selection = await select_task
 
     assert accounts_repo.status_updates[-1]["status"] == AccountStatus.REAUTH_REQUIRED
-    assert selection.account is None
+    assert selection.account is not None
+    assert selection.account.id == account.id
 
 
 @pytest.mark.asyncio
@@ -2000,7 +2001,8 @@ async def test_select_account_retries_after_post_persist_permanent_failure(monke
     selection = await balancer.select_account()
 
     assert account.status == AccountStatus.REAUTH_REQUIRED
-    assert selection.account is None
+    assert selection.account is not None
+    assert selection.account.id == account.id
 
 
 @pytest.mark.asyncio
@@ -3474,6 +3476,35 @@ async def test_select_account_returns_data_unavailable_error_for_mapped_model(mo
 
 
 @pytest.mark.asyncio
+async def test_expired_reauth_error_precedes_additional_quota_data_unavailable(monkeypatch) -> None:
+    account = _make_account("acc-gated-expired-reauth", "gated-expired-reauth@example.com")
+    account.plan_type = "pro"
+    account.status = AccountStatus.REAUTH_REQUIRED
+    account.access_token_encrypted = TokenEncryptor().encrypt("e30.eyJleHAiOjB9.")
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    additional_usage_repo = StubAdditionalUsageRepository(primary={}, secondary={})
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+    )
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is None
+    assert selection.error_message == "All accounts require re-authentication"
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
 async def test_select_account_allows_plus_plan_without_additional_quota_rows(monkeypatch) -> None:
     account = _make_account("acc-plus-no-gated-rows", "plus-no-gated-rows@example.com")
     now = utcnow()
@@ -4050,9 +4081,7 @@ async def test_mark_permanent_failure_skips_routing_exclusion_on_peer_rotation()
 
 
 @pytest.mark.asyncio
-async def test_mark_permanent_failure_excludes_routing_on_genuine_failure() -> None:
-    """A genuine permanent failure (guarded CAS applies) both persists the
-    downgrade AND marks the account routing-unavailable locally, as before."""
+async def test_mark_reauth_failure_does_not_exclude_routing_on_genuine_failure() -> None:
     account = _make_account("acc-perm-routing-genuine")
     account.status = AccountStatus.ACTIVE
 
@@ -4065,6 +4094,23 @@ async def test_mark_permanent_failure_excludes_routing_on_genuine_failure() -> N
 
     assert downgraded is True
     assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert is_account_routing_unavailable(account.id) is False
+
+
+@pytest.mark.asyncio
+async def test_mark_deactivation_failure_excludes_routing() -> None:
+    account = _make_account("acc-deactivated-routing-genuine")
+    account.status = AccountStatus.ACTIVE
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    downgraded = await balancer.mark_permanent_failure(account, "account_suspended")
+
+    assert downgraded is True
+    assert account.status == AccountStatus.DEACTIVATED
     assert is_account_routing_unavailable(account.id) is True
 
 

@@ -99,6 +99,8 @@ class RequestLogsService:
         reasoning_efforts: list[str] | None = None,
         status: list[str] | None = None,
         *,
+        cache_mode: str = "since",
+        timeframe: str | None = None,
         include_sensitive_metadata: bool,
     ) -> RequestLogsPage:
         status_filter = _map_status_filter(status)
@@ -122,6 +124,8 @@ class RequestLogsService:
             include_error_other=status_filter.include_error_other,
             error_codes_in=status_filter.error_codes_in,
             error_codes_excluding=status_filter.error_codes_excluding,
+            cache_mode=cache_mode,
+            timeframe=timeframe,
             include_sensitive_metadata=include_sensitive_metadata,
         )
         logs = result.logs

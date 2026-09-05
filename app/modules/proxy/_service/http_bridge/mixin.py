@@ -10,7 +10,6 @@ from typing import Any, Literal, TypeVar, overload
 from uuid import uuid4
 
 import aiohttp
-import anyio
 
 from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import RefreshError
@@ -45,10 +44,10 @@ from app.core.metrics.prometheus import (
     bridge_prompt_cache_locality_miss_total,
     bridge_soft_local_rebind_total,
 )
+from app.core.utils.locks import fast_lock
 from app.core.utils.request_id import ensure_request_scope_id
 from app.core.utils.shared_future import wait_on_shared_future
 from app.db.models import (
-    AccountStatus,
     StickySessionKind,
 )
 from app.modules.api_keys.service import (
@@ -209,6 +208,8 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy._service.warmup import (
     _WarmupUsageSnapshot as _WarmupUsageSnapshot,
 )
+from app.modules.proxy.account_eligibility import ROUTABLE_STATUSES
+from app.modules.proxy.account_eligibility import account_access_token_expires_at as _token_expiry
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _extract_model_class,
@@ -775,7 +776,7 @@ class _HTTPBridgeMixin(
                     existing = None
                 if existing is not None and (
                     force_goal_restart_account_reselection
-                    or (not existing.closed and existing.account.status == AccountStatus.ACTIVE)
+                    or (not existing.closed and existing.account.status in ROUTABLE_STATUSES)
                 ):
                     old_account_id = existing.account.id
                     retiring_with_visible_requests = _http_bridge_session_retiring_with_visible_requests(existing)
@@ -1481,7 +1482,7 @@ class _HTTPBridgeMixin(
                         session.last_used_at = _service_time().monotonic()
                         return session
                 if force_goal_restart_account_reselection or (
-                    not session.closed and session.account.status == AccountStatus.ACTIVE
+                    not session.closed and session.account.status in ROUTABLE_STATUSES
                 ):
                     old_account_id = session.account.id
                     retiring_with_visible_requests = _http_bridge_session_retiring_with_visible_requests(session)
@@ -1756,15 +1757,14 @@ class _HTTPBridgeMixin(
                     selected_account_id=None,
                 )
                 if proxy_connect_failover.last_error is not None:
-                    # No eligible replacement exists after a confirmed
-                    # pre-dispatch route failure: preserve the original
-                    # sanitized failure instead of generating ``no_accounts``.
+                    # Preserve a confirmed pre-dispatch route failure instead
+                    # of generating ``no_accounts``.
                     raise proxy_connect_failover.last_error
                 if (
                     require_preferred_account
                     and preferred_account_id is not None
                     and preferred_account_is_continuity_owner
-                    and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE
+                    and selection.error_code in (CONTINUITY_OWNER_UNAVAILABLE, "hard_affinity_saturated")
                 ):
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 status_code, error_payload = selection_failure_response(selection)
@@ -1965,14 +1965,15 @@ class _HTTPBridgeMixin(
             upstream=upstream,
             upstream_control=_WebSocketUpstreamControl(),
             pending_requests=deque(),
-            pending_lock=anyio.Lock(),
+            pending_lock=fast_lock(),
             response_create_gate=asyncio.Semaphore(1),
             queued_request_count=0,
-            lifecycle_lock=anyio.Lock(),
+            lifecycle_lock=fast_lock(),
             last_used_at=_service_time().monotonic(),
             idle_ttl_seconds=idle_ttl_seconds,
             codex_session=(affinity.kind == StickySessionKind.CODEX_SESSION or key.affinity_kind == "thread_header"),
-            prewarm_lock=anyio.Lock(),
+            access_token_expires_at=_token_expiry(account, self._encryptor),
+            prewarm_lock=fast_lock(),
             upstream_turn_state=_upstream_turn_state_from_socket(upstream),
             downstream_turn_state=None,
             account_lease=selected_account_lease,
@@ -1997,7 +1998,6 @@ class _HTTPBridgeMixin(
         request_state.response_create_sent_at = None
         goal_restart = request_state.affinity_policy.abandon_unavailable_legacy_owner
         if selection_affinity is None and goal_restart:
-            # Storage drops this bit; its request retains reconnect and account-switch authority.
             selection_affinity = request_state.affinity_policy
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind, key=session.key.affinity_key
@@ -2085,6 +2085,7 @@ class _HTTPBridgeMixin(
             preferred_candidate_id = None
         selected_account_lease: AccountLease | None = None
         selected_account_model_replacement = False
+        file_owner = request_state.file_required_preferred_account
 
         def record_selected_account_takeover(
             selected_account_id: str | None, preferred_account_id: str | None = session.account.id
@@ -2096,8 +2097,7 @@ class _HTTPBridgeMixin(
 
         async def release_selected_account_lease() -> None:
             nonlocal selected_account_lease
-            lease = selected_account_lease
-            selected_account_lease = None
+            lease, selected_account_lease = selected_account_lease, None
             if lease is None:
                 return
             async with session.pending_lock:
@@ -2162,7 +2162,8 @@ class _HTTPBridgeMixin(
                     service_tier=session.request_service_tier,
                     exclude_account_ids=excluded_account_ids,
                     preferred_account_id=preferred_candidate_id,
-                    preferred_account_is_continuity_owner=account_neutral_recovery,
+                    preferred_account_is_continuity_owner=account_neutral_recovery or file_owner,
+                    preferred_account_overrides_single_account_routing=file_owner,
                     require_security_work_authorized=require_security_work_authorized,
                     lease_kind=None if reuse_current_account_lease else "stream",
                     estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(
@@ -2184,7 +2185,7 @@ class _HTTPBridgeMixin(
                 except BaseException:
                     complete_failed_handoff()
                     raise
-                if account_neutral_recovery and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE:
+                if required_preferred_account_id is not None and selection.continuity_owner_no_longer_exists:
                     complete_failed_handoff()
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 if (
@@ -2411,7 +2412,7 @@ class _HTTPBridgeMixin(
                     await self._load_balancer.release_account_lease(old_lease)
                     session.account_lease = None
             session.account_lease = selected_account_lease
-            session.account, session.headers, session.upstream = account, connect_headers, upstream
+            session.replace_connection(account, connect_headers, upstream, _token_expiry(account, self._encryptor))
             session.catalog_omission_quota_admission = selection.catalog_omission_quota_admission
             session.upstream_control = _WebSocketUpstreamControl()
             session.closed = False

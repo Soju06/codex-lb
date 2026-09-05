@@ -88,6 +88,7 @@ describe("formatters", () => {
     expect(formatPercent(49.6)).toBe("50%");
     expect(formatPercent(null)).toBe("0%");
     expect(formatPercentNullable(49.6)).toBe("50%");
+    expect(formatPercentNullable(49.64, 1)).toBe("49.6%");
     expect(formatPercentNullable(null)).toBe("--");
     expect(formatPercentValue(49.6)).toBe(50);
     expect(formatPercentValue(null)).toBe(0);

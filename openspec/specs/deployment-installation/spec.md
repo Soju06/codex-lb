@@ -575,3 +575,92 @@ Every shipped or documented launch path for the main application MUST delegate t
 - **THEN** that command delegates to `app.cli`
 - **AND** direct SIGTERM reaches the pre-connection drain server
 
+### Requirement: Nix flake provides reproducible development and execution paths
+
+The repository MUST provide a locked Nix flake for each supported Nix platform. The flake MUST expose the proxy as its default package and default app, and MUST expose a default development shell containing an editable project installation, all locked runtime dependencies, the `dev` dependency group, and the project package manager. The default package and development shell MUST exclude documentation dependencies and optional runtime integrations unless they are required by those outputs. The flake package and development shell MUST use Python 3.13 and MUST derive Python dependencies from the committed `pyproject.toml` and `uv.lock` files.
+
+Because the packaged module root lives in the read-only Nix store where env files cannot exist, the packaged entry points MUST provide launch-directory `.env` / `.env.local` loading through the explicit `CODEX_LB_ENV_FILE` settings-load override (an `os.pathsep`-separated env-file path list, honored before Settings reads env files), defaulted by the package wrapper and never overriding an operator-provided value. Nix packaging MUST NOT change env-file discovery for non-Nix launch paths: without `CODEX_LB_ENV_FILE`, env files resolve relative to the installed module root and launch-directory env files are never loaded implicitly.
+
+#### Scenario: Default package builds the proxy
+
+- **WHEN** a user runs `nix build`
+- **THEN** Nix builds a package containing the `codex-lb` and `codex-lb-db` commands
+- **AND** the package contains the compiled dashboard served by the proxy root route
+- **AND** the package uses the dependency versions and hashes recorded by the flake and Python lock files
+
+#### Scenario: Default app runs the proxy CLI
+
+- **WHEN** a user runs `nix run . -- --help`
+- **THEN** the packaged `codex-lb` command prints its CLI help and exits successfully
+- **AND** running `nix run .` without help arguments starts the proxy through the project-owned CLI entry point
+- **AND** the packaged app loads `.env` and `.env.local` from the directory where it is launched
+- **AND** an operator-provided `CODEX_LB_ENV_FILE` value takes precedence over the launch-directory default
+
+#### Scenario: Non-Nix launch paths keep module-root env-file discovery
+
+- **WHEN** the application is launched outside the Nix wrapper without `CODEX_LB_ENV_FILE`
+- **THEN** `.env` and `.env.local` resolve relative to the installed module root
+- **AND** env files in the launch directory are not loaded
+
+#### Scenario: Development shell is editable and complete
+
+- **WHEN** a user enters the repository with `nix develop`
+- **THEN** the shell provides Python 3.13, `uv`, the project CLI entry points, runtime dependencies, and the `dev` dependency group
+- **AND** Python imports resolve the project packages from the working tree so source edits take effect without rebuilding the shell
+- **AND** documentation dependencies and optional metrics and tracing integrations are absent from the default shell
+- **AND** `uv` is prevented from downloading Python or replacing the Nix-managed environment
+
+#### Scenario: Flake check builds the package
+
+- **WHEN** a user runs `nix flake check`
+- **THEN** Nix builds the default package
+
+### Requirement: Official Linux container packages locked native egress
+
+The official Linux container build MUST compile the native egress worker from
+the repository-root Cargo workspace with its committed lockfile and pinned
+toolchain in an isolated Rust build stage, and MUST install only the resulting
+release executable as `codex-lb-native-egress` on the runtime path. The
+executable MUST support a long-lived multiplexed request protocol and reusable
+reqwest client pools without requiring a sidecar or operator setting. The
+runtime image MUST NOT contain the Rust toolchain or Cargo build directory.
+Python wheel and source installs MUST remain valid when the executable is
+absent.
+
+#### Scenario: Container runtime exposes native helper
+
+- **WHEN** the official Linux image is built from the repository
+- **THEN** `codex-lb-native-egress` is executable on the runtime path
+- **AND** it was built with the committed lockfile
+- **AND** it accepts multiple request commands during one process lifetime
+- **AND** Cargo and the Rust compiler are absent from the runtime image
+
+#### Scenario: Universal Python package remains portable
+
+- **WHEN** a wheel or source install runs on a platform without the helper
+- **THEN** importing and starting codex-lb succeeds
+- **AND** supported direct requests fall back to the Python transport
+
+### Requirement: Rust migration uses one final-state workspace
+
+The repository MUST maintain one virtual Cargo workspace at its root, one
+committed application lockfile, and a pinned Rust toolchain. Production Rust
+code MUST live in focused crates below `crates/`; it MUST NOT be isolated in a
+temporary language or helper subtree that requires a repository-wide move when
+the Python backend is retired. The protocol, reusable transport, and worker
+binary MUST remain separate dependency layers, with the worker depending on
+transport and transport depending on the runtime-free protocol crate. Workspace
+policy MUST forbid unsafe Rust by default, deny Clippy warnings in CI, and audit
+advisories, licenses, wildcard dependencies, and non-approved sources.
+
+#### Scenario: Another backend slice migrates to Rust
+
+- **WHEN** a cohesive Python-owned backend slice gains a Rust implementation
+- **THEN** its focused crate is added under the existing root workspace
+- **AND** reusable libraries do not depend on executable crates
+
+#### Scenario: Python backend is eventually retired
+
+- **WHEN** Rust becomes the application owner
+- **THEN** the existing root workspace and crates remain at their canonical paths
+- **AND** the server application is added without relocating a temporary `rust/` or `native/` tree

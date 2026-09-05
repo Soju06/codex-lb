@@ -32,6 +32,7 @@ from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
 from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
+    CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE,
     CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY,
     ImageFetchSession,
     ProxyResponseError,
@@ -284,6 +285,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _trim_http_bridge_previous_response_input_items as _trim_http_bridge_previous_response_input_items,
+)
+from app.modules.proxy._service.http_bridge.request_submit import (
+    _text_with_account_installation_id as _text_with_account_installation_id,
 )
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
@@ -811,12 +815,8 @@ async def _wait_for_process_network_recovery(
 
 
 def _websocket_text_with_account_installation_id(text_data: str, account: Account) -> str:
-    payload = json.loads(text_data)
-    if not isinstance(payload, dict):
-        return text_data
     codex_installation_id = getattr(account, "codex_installation_id", None)
-    apply_codex_installation_metadata(cast(dict[str, JsonValue], payload), codex_installation_id)
-    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    return _text_with_account_installation_id(text_data, codex_installation_id)
 
 
 def _websocket_enforce_response_create_text_size(
@@ -1416,11 +1416,9 @@ class _WebSocketMixin:
         account_lease: AccountLease | None = None
         upstream_requires_security_work_authorized: bool | None = None
         upstream_turn_state: str | None = _sticky_key_from_turn_state_header(headers)
-        # The API inserts its generated downstream turn state into ``headers``
-        # before entering this service. Preserve a turn-state header as
-        # client-owned only when no synthesized value accompanied it; otherwise
-        # account-switch cleanup must remain able to remove the old account's
-        # generated token from ``filtered_headers``.
+        # Synthesized downstream state arrives through its explicit provenance
+        # parameter rather than through ``headers``. Only a genuine client
+        # header can therefore become initial upstream state.
         client_turn_state_header: str | None = (
             _sticky_key_from_turn_state_header(filtered_headers) if synthesized_turn_state is None else None
         )
@@ -1639,6 +1637,11 @@ class _WebSocketMixin:
                             ),
                         )
                     except asyncio.TimeoutError:
+                        if shutdown_state.is_draining():
+                            # Re-enter the loop so the drain gate above wins
+                            # over an idle close when draining began while
+                            # receive() was blocked.
+                            continue
                         if not await proxy._downstream_websocket_is_idle(
                             pending_requests,
                             pending_lock=pending_lock,
@@ -4651,7 +4654,11 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         access_token = proxy._encryptor.decrypt(account.access_token_encrypted)
-        headers = apply_codex_installation_headers(headers, getattr(account, "codex_installation_id", None))
+        headers = apply_codex_installation_headers(
+            headers,
+            getattr(account, "codex_installation_id", None),
+            wire_profile=CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE,
+        )
         account_id = _header_account_id(account.chatgpt_account_id)
         connect_lease = await proxy._get_work_admission().acquire_websocket_connect()
         try:
@@ -6233,7 +6240,10 @@ class _WebSocketMixin:
                 "account_health_error_handled",
                 False,
             )
-        if request_state.suppressed_duplicate_tool_call and error_code == "stream_incomplete":
+        if (
+            request_state.suppressed_duplicate_tool_call
+            and error_code == _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE
+        ):
             settlement.account_health_error = False
         if (
             error_code == "stream_incomplete"

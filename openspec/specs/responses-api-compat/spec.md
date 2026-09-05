@@ -290,12 +290,12 @@ The default compact request budget MUST be at least 180 seconds, and the default
 
 ### Requirement: Responses upstream websocket liveness is bounded
 
-The proxy MUST configure direct and routed upstream Responses WebSocket transports with finite ping/pong liveness detection derived from `proxy_downstream_websocket_idle_timeout_seconds`. When an established Responses WebSocket is terminated because its transport did not receive the required pong, the adapter MUST classify the failure as `upstream_websocket_liveness_timeout`. Direct WebSocket and HTTP bridge relay owners MUST treat that failure as account neutral, MUST NOT transparently replay a pending request whose delivery is ambiguous, MUST finalize its pending request ownership exactly once, and MUST retire the affected upstream socket so a later client retry opens a fresh connection. An HTTP bridge reader MUST suppress its own pending-deque settlement only when a concurrent submitter explicitly claimed liveness-settlement ownership under the session lifecycle lock; `session.closed` alone MUST NOT suppress settlement.
+The proxy MUST configure direct and routed upstream Responses WebSocket transports with finite ping/pong liveness detection derived from `proxy_downstream_websocket_idle_timeout_seconds`. A direct connection MUST use the native helper watchdog when native egress is selected and the Python `websockets` watchdog only on the pre-dispatch missing-helper fallback. When an established Responses WebSocket is terminated because its transport did not receive the required pong, the adapter MUST classify the failure as `upstream_websocket_liveness_timeout`. Direct WebSocket and HTTP bridge relay owners MUST treat that failure as account neutral, MUST NOT transparently replay a pending request whose delivery is ambiguous, MUST finalize its pending request ownership exactly once, and MUST retire the affected upstream socket so a later client retry opens a fresh connection. An HTTP bridge reader MUST suppress its own pending-deque settlement only when a concurrent submitter explicitly claimed liveness-settlement ownership under the session lifecycle lock; `session.closed` alone MUST NOT suppress settlement.
 
 #### Scenario: Direct Responses websocket loses pong liveness
 
 - **GIVEN** a direct upstream Responses WebSocket has been established
-- **WHEN** the `websockets` keepalive watchdog terminates it after a pong timeout
+- **WHEN** the selected native-helper or Python fallback keepalive watchdog terminates it after a pong timeout
 - **THEN** the pending request fails with `upstream_websocket_liveness_timeout`
 - **AND** the request is not transparently replayed
 - **AND** the selected account receives no failure-health signal
@@ -5536,3 +5536,198 @@ captured when the connection began.
 - **GIVEN** `prohibitFastMode` is enabled
 - **WHEN** an internal owner-forwarded payload carries a priority service tier
 - **THEN** the receiving preparation boundary omits `service_tier` before upstream forwarding
+### Requirement: Native direct HTTP egress preserves Responses streaming semantics
+
+Direct Responses HTTP/SSE requests sent through native egress MUST preserve the existing normalized upstream payload and headers, rate-limit header ingestion, maximum SSE event size, idle and total request deadlines, terminal-event requirements, downstream event normalization, archives, and error envelope behavior. Downstream cancellation MUST cancel and await only the owned native request task, unregister its event stream, and leave unrelated multiplexed requests usable. Native transport selection MUST NOT change the public HTTP status or SSE framing contract.
+
+#### Scenario: Native SSE response uses the ordinary parser
+
+- **GIVEN** native direct egress returns an HTTP success and streamed SSE chunks
+- **WHEN** the proxy consumes the response
+- **THEN** chunks pass through the ordinary SSE parser, normalizer, terminal-event detection, and archive path
+- **AND** the downstream event sequence matches the Python transport contract
+
+#### Scenario: Downstream cancellation owns helper cleanup
+
+- **GIVEN** one native helper generation owns multiple active requests
+- **WHEN** one downstream stream is cancelled or closed before its terminal event
+- **THEN** only that native request task is cancelled and awaited
+- **AND** the helper and unrelated request streams remain usable
+- **AND** the cancelled POST is not replayed through another HTTP client
+
+### Requirement: HTTP session bridge admission obeys downstream transport policy
+
+Before an HTTP/SSE Responses request enters the upstream WebSocket session bridge, the proxy MUST apply the same explicit-transport precedence and effective `http_downstream_transport_policy` used by the ordinary streaming retry path. An explicit upstream `http` selection MUST bypass the bridge, an explicit upstream `websocket` selection MUST retain it, and otherwise the per-key override or global policy MUST decide. A bridge bypass MUST continue through the ordinary HTTP streaming path without changing request or response shapes.
+
+#### Scenario: Always-HTTP bypasses an enabled bridge
+
+- **GIVEN** the HTTP Responses session bridge is enabled
+- **AND** the effective downstream-HTTP policy is `always_http` or `pinned`
+- **WHEN** a downstream HTTP/SSE request is handled
+- **THEN** the request bypasses the WebSocket session bridge
+- **AND** is sent through the ordinary upstream HTTP path
+
+#### Scenario: Smart bridge admission follows continuity signals
+
+- **GIVEN** the HTTP Responses session bridge is enabled
+- **AND** the effective policy is `smart`
+- **WHEN** a request has no sticky-continuation signal
+- **THEN** it bypasses the bridge
+- **BUT WHEN** any defined sticky-continuation signal is present
+- **THEN** it remains eligible for the bridge
+
+#### Scenario: Explicit transport wins before bridge admission
+
+- **GIVEN** the HTTP Responses session bridge is enabled
+- **WHEN** upstream transport is explicitly `http`
+- **THEN** the bridge is bypassed under every policy
+- **BUT WHEN** upstream transport is explicitly `websocket`
+- **THEN** the bridge remains enabled under every policy
+
+#### Scenario: Per-key policy controls bridge admission
+
+- **GIVEN** a per-API-key transport policy override is non-null
+- **WHEN** bridge admission is evaluated
+- **THEN** that override is used instead of the global policy
+
+### Requirement: Responses WebSocket preserves bidirectional transport semantics
+
+The Responses WebSocket relay MUST preserve ordered text and binary messages, selected subprotocol response metadata, close codes, and terminal error delivery across its downstream and upstream boundaries. Direct and account-routed upstream connections MUST use native Codex-family WebSocket egress when the fixed helper is available before dispatch, while Python MUST retain route-aware endpoint selection, fallback safety, metadata, and cleanup. Ping and pong control frames MUST remain transport-owned and MUST NOT surface as application events. A frame whose native send acknowledgement is ambiguous or failed MUST NOT be replayed.
+
+#### Scenario: Native direct relay preserves frames
+
+- **GIVEN** a direct or account-routed Responses WebSocket uses the native helper
+- **WHEN** text and binary frames travel in both directions
+- **THEN** their type, payload, and ordering are preserved
+- **AND** control ping and pong frames are handled below the application relay
+
+#### Scenario: Native direct relay preserves terminal close
+
+- **WHEN** the native upstream sends a close frame
+- **THEN** the relay observes its close code and reason
+- **AND** the native connection is removed from the helper's active registry
+
+#### Scenario: Ambiguous native frame send fails closed
+
+- **GIVEN** a downstream `response.create` frame is dispatched to the helper
+- **WHEN** acknowledgement fails because the helper or connection closes
+- **THEN** the turn surfaces a terminal transport failure
+- **AND** the frame is not resent on another transport
+
+### Requirement: Synthesized downstream turn state must remain provenance-scoped
+
+A turn-state value synthesized by codex-lb for downstream reconnect and
+internal affinity MUST remain available to those consumers without being
+presented to the upstream server as a client-originated initial WebSocket
+handshake header. A nonblank turn-state explicitly supplied by the client or
+issued by upstream MAY continue through the existing owner-bound continuity
+path.
+
+#### Scenario: Initial WebSocket uses internal synthesized affinity only
+
+- **GIVEN** a client opens a Responses WebSocket without `x-codex-turn-state`
+- **WHEN** codex-lb accepts the downstream connection and opens upstream
+- **THEN** the downstream accept MUST include a synthesized `x-codex-turn-state`
+- **AND** internal continuity MUST be able to use that synthesized value
+- **AND** the initial upstream handshake MUST NOT include that value as an `x-codex-turn-state` header.
+
+#### Scenario: Explicit client turn state retains continuity semantics
+
+- **GIVEN** a client reconnects with a nonblank `x-codex-turn-state`
+- **WHEN** codex-lb opens the corresponding upstream connection
+- **THEN** the value MUST retain its explicit client continuity provenance
+- **AND** the synthesized-state omission rule MUST NOT silently reclassify it as LB-generated state.
+
+### Requirement: Backend non-streaming Responses preserve HTTP JSON transport
+
+When `POST /backend-api/codex/responses` receives a valid request with
+`stream: false`, the service MUST preserve that value in the upstream request,
+MUST use upstream HTTP rather than WebSocket, and MUST return one
+`application/json` Response object rather than an SSE stream. The service MUST
+retain the existing account selection, error masking, usage settlement, and
+request logging behavior around that request. This requirement does not change
+the `/v1/responses` subscription compatibility path, which MAY aggregate an
+upstream stream when required by the configured ChatGPT Codex backend.
+
+#### Scenario: Backend stream false stays false upstream
+
+- **GIVEN** a client sends `POST /backend-api/codex/responses` with
+  `stream: false`
+- **WHEN** codex-lb forwards the request to an HTTP-capable upstream
+- **THEN** the upstream request body MUST contain `stream: false`
+- **AND** its request headers MUST advertise `Accept: application/json`
+- **AND** codex-lb MUST NOT open an upstream WebSocket for that request.
+
+#### Scenario: Backend non-streaming response remains JSON downstream
+
+- **GIVEN** the upstream returns a successful single Response JSON object
+- **WHEN** codex-lb completes the backend non-streaming request
+- **THEN** the downstream response MUST have an `application/json` content type
+- **AND** its Response fields MUST preserve the upstream values.
+
+### Requirement: Native Codex HTTP attempts preserve client transport choice
+
+For a downstream HTTP/SSE Responses request identified as a native Codex
+request by the existing first-party `User-Agent` or `originator` rules, the
+proxy MUST retain upstream HTTP when transport is otherwise controlled by the
+HTTP downstream policy. This native pin MUST take precedence over sticky
+continuation signals and the `smart` or `always_websocket` policy, but it MUST
+NOT override an explicit operator `upstream_stream_transport="websocket"` or
+an existing higher-precedence mandatory transport rail. Native downstream
+WebSocket requests MUST remain on their dedicated WebSocket path.
+
+#### Scenario: Codex HTTP fallback is not promoted again
+
+- **GIVEN** a native Codex client retries a WebSocket turn as an HTTP request
+- **AND** the HTTP request carries a prompt cache key or Codex session header
+- **WHEN** the configured transport is automatic and the HTTP policy is smart
+- **THEN** codex-lb sends the attempt upstream over HTTP
+
+#### Scenario: Explicit WebSocket remains authoritative
+
+- **GIVEN** a native Codex HTTP request
+- **WHEN** the operator explicitly configures upstream WebSocket transport
+- **THEN** the explicit WebSocket selection remains authoritative
+
+### Requirement: Native Codex preserves upstream failure lifecycle
+
+For a native Codex HTTP/SSE Responses request, an upstream transport timeout or
+stream EOF without a terminal Responses event MUST terminate the downstream
+stream without synthesizing `response.failed`, `error`, or `[DONE]`. The proxy
+MUST still execute reservation, request-log, account-health, and owned-resource
+cleanup before propagating the termination. Non-native and OpenAI-compatible
+clients MUST retain the existing stable terminal-error shaping.
+
+#### Scenario: Native Codex sees a truncated SSE lifecycle
+
+- **GIVEN** a native Codex HTTP request has received a non-terminal SSE event
+- **WHEN** upstream closes without a terminal event
+- **THEN** downstream closes without a synthetic terminal event or `[DONE]`
+- **AND** proxy cleanup and failure accounting still complete
+
+#### Scenario: Non-native client keeps the terminal umbrella
+
+- **GIVEN** an OpenAI SDK or other non-native client receives the same upstream
+  truncation
+- **WHEN** codex-lb normalizes the stream
+- **THEN** the client receives the existing terminal `response.failed` shape
+
+### Requirement: Propagated upstream rate limits preserve Retry-After
+
+When a Responses upstream HTTP rejection carries a valid `Retry-After` header
+and that rejection is propagated as a downstream HTTP response, codex-lb MUST
+copy the field value unchanged. The proxy MUST accept only a bounded value with
+no CR or LF and MUST NOT expose other upstream response headers through this
+rule. A missing or invalid value MUST remain absent.
+
+#### Scenario: Upstream 429 retry hint survives startup propagation
+
+- **WHEN** upstream rejects a Responses request with HTTP 429 and
+  `Retry-After: 1`
+- **THEN** the propagated downstream 429 includes `Retry-After: 1`
+
+#### Scenario: Unsafe retry hint is omitted
+
+- **WHEN** an upstream retry hint contains a line break or exceeds the bounded
+  field length
+- **THEN** codex-lb does not copy that value downstream

@@ -3556,7 +3556,7 @@ async def test_source_responses_normalize_error_still_settles_reservation(monkey
 
 
 @pytest.mark.asyncio
-async def test_backend_desktop_openai_shape_uses_codex_heartbeat_with_sdk_normalization(
+async def test_backend_desktop_openai_shape_preserves_native_event_order(
     async_client,
     monkeypatch,
 ):
@@ -3571,12 +3571,11 @@ async def test_backend_desktop_openai_shape_uses_codex_heartbeat_with_sdk_normal
         account_suffix="desktop_openai_shape",
     )
 
-    assert lines[:2] == CODEX_KEEPALIVE_FRAME.strip().splitlines()
     event_types = [event.get("type") for event in _sse_data_events(lines)]
-    standard_event_types = [event_type for event_type in event_types if event_type != "codex.keepalive"]
-    assert standard_event_types[0] == "response.created"
-    assert "codex.rate_limits" not in event_types
-    assert "response.completed" in standard_event_types
+    assert event_types[0] == "codex.rate_limits"
+    assert "codex.keepalive" not in event_types
+    assert "response.created" not in event_types
+    assert "response.completed" in event_types
 
 
 @pytest.mark.asyncio

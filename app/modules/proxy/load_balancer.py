@@ -42,6 +42,7 @@ from app.core.balancer.types import UpstreamError
 from app.core.config import settings as config_settings
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
+from app.core.crypto import TokenEncryptor
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     account_cap_rejections_total,
@@ -61,6 +62,7 @@ from app.core.resilience.degradation import set_degraded, set_normal
 from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
+from app.db.snapshot import clone_row
 from app.modules.proxy._load_balancer.model_eligibility import (
     _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES,
     CatalogOmissionQuotaAdmission,
@@ -133,6 +135,10 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     run_unbound_selection_path,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.account_eligibility import (
+    account_access_token_expires_at,
+    all_accounts_require_reauthentication,
+)
 from app.modules.proxy.affinity import _CodexSessionSource
 from app.modules.proxy.cap_partitioning import (
     configured_account_concurrency_caps,
@@ -203,6 +209,7 @@ class AccountSelection:
     resets_at: int | None = None
     lease: AccountLease | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
+    continuity_owner_no_longer_exists: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,14 +227,12 @@ class _SelectionInputs(SelectionInputsProtocol):
     latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_monthly: dict[str, UsageHistory]
-    # Ownership ambiguity is resolved before transient additional-quota,
-    # exclusion, runtime-health, budget, and account-cap filters. Keep that
-    # stronger candidate pool alongside the effective routing pool.
+    # Resolve ownership before transient routing filters; keep that stronger
+    # candidate pool alongside the effective routing pool.
     continuity_owner_candidates: list[Account] | None = None
-    # Sticky-row mutation is authorized by account assignment and security
-    # policy, before model/service-tier eligibility. Keep this separate from
-    # continuity ambiguity: a model-ineligible account can still own the raw
-    # row that this authenticated request is allowed to retire.
+    # Sticky mutation authority precedes model/service-tier eligibility; keep
+    # it separate because a model-ineligible account can still own the raw row
+    # this authenticated request may retire.
     sticky_mutation_authority_account_ids: frozenset[str] | None = None
     quota_planner_settings: PlannerSettings = PlannerSettings()
     runtime_accounts: list[Account] | None = None
@@ -276,8 +281,9 @@ SelectionInputs = _SelectionInputs
 
 
 class LoadBalancer:
-    def __init__(self, repo_factory: ProxyRepoFactory) -> None:
+    def __init__(self, repo_factory: ProxyRepoFactory, *, encryptor: TokenEncryptor | None = None) -> None:
         self._repo_factory = repo_factory
+        self._encryptor = encryptor or TokenEncryptor()
         self._runtime: dict[str, RuntimeState] = {}
         self._runtime_lock = asyncio.Lock()
         self._account_locks: dict[str, asyncio.Lock] = {}
@@ -711,6 +717,7 @@ class LoadBalancer:
                 account=None,
                 error_message=selection_inputs.error_message,
                 error_code=selection_inputs.error_code,
+                continuity_owner_no_longer_exists=selection_inputs.error_code == CONTINUITY_OWNER_UNAVAILABLE,
             )
 
         selected_snapshot: Account | None = None
@@ -951,7 +958,7 @@ class LoadBalancer:
                     error_message=error_message,
                     error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
                 )
-            if required_continuity_owner and selection_error_code in (None, "hard_affinity_saturated"):
+            if required_continuity_owner and selection_error_code is None:
                 selection_error_code = CONTINUITY_OWNER_UNAVAILABLE
             if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and error_message and selection_error_code is None:
                 return AccountSelection(
@@ -1183,7 +1190,7 @@ class LoadBalancer:
             else:
                 # Administrative/runtime status affects routability, not who
                 # may own account-scoped upstream state. Capture this pool
-                # before PAUSED/REAUTH_REQUIRED/etc. can manufacture uniqueness.
+                # before PAUSED/DEACTIVATED/etc. can manufacture uniqueness.
                 continuity_owner_candidates = scoped_accounts
             if model and not accounts:
                 if not all_accounts:
@@ -1257,8 +1264,9 @@ class LoadBalancer:
                 return selection_inputs
 
             if effective_limit_name:
+                additional_quota_candidates = accounts
                 additional_filter = await self._filter_accounts_for_additional_limit(
-                    accounts,
+                    additional_quota_candidates,
                     model=model,
                     limit_name=effective_limit_name,
                     explicit_limit=additional_limit_name is not None,
@@ -1266,7 +1274,12 @@ class LoadBalancer:
                     require_fresh_evidence_account_ids=model_catalog_omitted_account_ids,
                 )
                 accounts = additional_filter.accounts
-                if not accounts:
+                if not accounts and all_accounts_require_reauthentication(
+                    additional_quota_candidates,
+                    self._encryptor,
+                ):
+                    accounts = additional_quota_candidates
+                elif not accounts:
                     selection_inputs = _SelectionInputs(
                         accounts=[],
                         latest_primary={},
@@ -1343,15 +1356,9 @@ class LoadBalancer:
             )
             selection_inputs = _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
-                latest_primary={
-                    account_id: _clone_usage_history(entry) for account_id, entry in latest_primary.items()
-                },
-                latest_secondary={
-                    account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
-                },
-                latest_monthly={
-                    account_id: _clone_standard_usage_history(entry) for account_id, entry in latest_monthly.items()
-                },
+                latest_primary={account_id: clone_row(entry) for account_id, entry in latest_primary.items()},
+                latest_secondary={account_id: clone_row(entry) for account_id, entry in latest_secondary.items()},
+                latest_monthly={account_id: clone_row(entry) for account_id, entry in latest_monthly.items()},
                 continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
                 sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                 quota_planner_settings=quota_planner_settings,
@@ -1403,6 +1410,7 @@ class LoadBalancer:
                 runtime=self._runtime,
                 routing_policy_override=selection_inputs.routing_policy_override,
                 ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
+                encryptor=self._encryptor,
             )
             selection_states = _filter_states_for_account_caps(
                 states,
@@ -1606,6 +1614,7 @@ class LoadBalancer:
             runtime=self._runtime,
             routing_policy_override=selection_inputs.routing_policy_override,
             ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
+            encryptor=self._encryptor,
         )
         if required_account_id is None:
             return states, account_map
@@ -1719,18 +1728,15 @@ class LoadBalancer:
             self._selection_inputs_cache.invalidate()
 
     async def mark_permanent_failure(self, account: Account, error_code: str) -> bool:
-        """Downgrade *account* to its permanent-failure status and, when that
-        downgrade actually lands, exclude it from local routing.
+        """Downgrade *account* to its permanent-failure status.
 
         Returns whether the permanent downgrade applied (or was already in
         effect). When the guarded status write MISSES because a peer replica
         concurrently re-authed/imported and rotated ``refresh_token_encrypted``
-        (the DB row was repaired and left ACTIVE), the account is NOT marked
-        routing-unavailable in this replica's local overlay -- excluding a
-        freshly repaired healthy account would be a self-inflicted routing loss
-        that undermines the CAS guard. Only a real downgrade (CAS applied, or no
-        write needed because the primary refresh authority already CAS-wrote it)
-        both persists the failure status and applies the local exclusion.
+        (the DB row was repaired and left ACTIVE), the account keeps its
+        repaired state. A landed DEACTIVATED downgrade is excluded from local
+        routing; REAUTH_REQUIRED remains request-routable with its stored access
+        token while still blocking future refresh-token exchange.
         """
         lock = await self._get_account_lock(account.id)
         async with lock:
@@ -1760,11 +1766,7 @@ class LoadBalancer:
                     state,
                     expected_refresh_token_encrypted=account.refresh_token_encrypted,
                 )
-            # Honor the guarded-CAS result: only exclude the account from local
-            # routing when the permanent downgrade actually applied. A CAS miss
-            # means a peer replica repaired/rotated the row (still ACTIVE), so
-            # keep the healthy account selectable here.
-            if downgraded:
+            if downgraded and state.status == AccountStatus.DEACTIVATED:
                 mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
             return downgraded
@@ -1879,7 +1881,7 @@ class LoadBalancer:
                 runtime=replace(runtime),
             )
             account_status = normalized_state.status
-            if account_status != AccountStatus.ACTIVE:
+            if account_status not in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED):
                 return
 
             settings = get_settings()
@@ -2089,6 +2091,7 @@ def _build_states(
     runtime: dict[str, RuntimeState],
     routing_policy_override: str | None = None,
     ignore_standard_quota_account_ids: frozenset[str] = frozenset(),
+    encryptor: TokenEncryptor | None = None,
 ) -> tuple[list[AccountState], dict[str, Account]]:
     states: list[AccountState] = []
     account_map: dict[str, Account] = {}
@@ -2106,6 +2109,11 @@ def _build_states(
             primary_entry=latest_primary.get(account.id),
             secondary_entry=secondary_entry,
             runtime=runtime.setdefault(account.id, RuntimeState()),
+            access_token_expires_at=(
+                account_access_token_expires_at(account, encryptor)
+                if account.status == AccountStatus.REAUTH_REQUIRED and encryptor is not None
+                else None
+            ),
         )
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
             state.routing_policy = routing_policy_override
@@ -2249,6 +2257,7 @@ def _state_from_account(
     primary_entry: UsageHistory | AdditionalUsageHistory | None,
     secondary_entry: UsageHistory | AdditionalUsageHistory | None,
     runtime: RuntimeState,
+    access_token_expires_at: float | None = None,
 ) -> AccountState:
     routing_policy = _normalize_account_routing_policy(getattr(account, "routing_policy", None))
     normalized_usage = _normalize_usage_inputs(
@@ -2573,6 +2582,7 @@ def _state_from_account(
         health_tier=new_tier,
         priority_used_percent=used_percent if usage_exhaustion_evidence_status else None,
         priority_secondary_used_percent=secondary_used if usage_exhaustion_evidence_status else None,
+        access_token_expires_at=access_token_expires_at,
         inflight_response_creates=runtime.inflight_response_creates,
         inflight_streams=runtime.inflight_streams,
         leased_tokens=runtime.leased_tokens,
@@ -2909,11 +2919,7 @@ def _filter_accounts_for_model_with_catalog_evidence(
 
 
 def _selectable_accounts(accounts: list[Account]) -> list[Account]:
-    return [
-        account
-        for account in accounts
-        if account.status not in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
-    ]
+    return [account for account in accounts if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)]
 
 
 def _mapped_model_has_registry_entry(model: str | None) -> bool:
@@ -2934,32 +2940,14 @@ def _first_not_none(
     return None
 
 
-def _clone_usage_history(entry: UsageHistory | AdditionalUsageHistory) -> UsageHistory | AdditionalUsageHistory:
-    if isinstance(entry, AdditionalUsageHistory):
-        data = {column.name: getattr(entry, column.name) for column in AdditionalUsageHistory.__table__.columns}
-        return AdditionalUsageHistory(**data)
-    data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
-    return UsageHistory(**data)
-
-
-def _clone_standard_usage_history(entry: UsageHistory) -> UsageHistory:
-    data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
-    return UsageHistory(**data)
-
-
 def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInputs:
     return _SelectionInputs(
         accounts=[_clone_account(account) for account in selection_inputs.accounts],
-        latest_primary={
-            account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_primary.items()
-        },
+        latest_primary={account_id: clone_row(entry) for account_id, entry in selection_inputs.latest_primary.items()},
         latest_secondary={
-            account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_secondary.items()
+            account_id: clone_row(entry) for account_id, entry in selection_inputs.latest_secondary.items()
         },
-        latest_monthly={
-            account_id: _clone_standard_usage_history(entry)
-            for account_id, entry in selection_inputs.latest_monthly.items()
-        },
+        latest_monthly={account_id: clone_row(entry) for account_id, entry in selection_inputs.latest_monthly.items()},
         continuity_owner_candidates=(
             None
             if selection_inputs.continuity_owner_candidates is None

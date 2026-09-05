@@ -25,6 +25,7 @@ from app.core.balancer import (
 )
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
+from app.db.snapshot import clone_row
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy._load_balancer.types import (
     MAX_SELECTION_ATTEMPTS,
@@ -52,6 +53,7 @@ _STICKY_EXISTING_UNSET = object()
 _RECOVERABLE_STATUSES = frozenset(
     {
         AccountStatus.ACTIVE,
+        AccountStatus.REAUTH_REQUIRED,
         AccountStatus.RATE_LIMITED,
         AccountStatus.QUOTA_EXCEEDED,
     }
@@ -696,7 +698,9 @@ async def run_sticky_selection_path(
                         and lease_kind is not None
                         and len(selection_states) < len(states)
                         and any(
-                            state.status == AccountStatus.ACTIVE for state in states if state not in selection_states
+                            state.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+                            for state in states
+                            if state not in selection_states
                         )
                     ):
                         selection_error_code = _account_cap_error_code(lease_kind)
@@ -1842,5 +1846,4 @@ def _best_health_tier_states(states: list[AccountState]) -> list[AccountState]:
 
 
 def _clone_account(account: Account) -> Account:
-    data = {column.name: getattr(account, column.name) for column in Account.__table__.columns}
-    return Account(**data)
+    return clone_row(account)

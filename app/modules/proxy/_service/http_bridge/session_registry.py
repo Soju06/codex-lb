@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from datetime import timedelta
 from typing import Any
 
 from app.core.clients.proxy import ProxyResponseError
@@ -12,7 +13,9 @@ from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     bridge_durable_recover_total,
     bridge_instance_mismatch_total,
+    http_bridge_operation_abandonment_total,
 )
+from app.core.utils.time import utcnow
 from app.db.models import StickySessionKind
 from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
@@ -23,6 +26,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_live_turn_state_alias_owner,
     _http_bridge_owner_lookup_unavailable_error_envelope,
     _http_bridge_previous_response_alias_key,
+    _http_bridge_request_budget_seconds,
     _http_bridge_turn_state_alias_key,
     _is_missing_durable_bridge_table_error,
     _log_http_bridge_event,
@@ -91,6 +95,71 @@ class _HTTPBridgeSessionRegistryMixin:
             return 0
         self._schedule_http_bridge_session_closes(pruned_sessions, reason="idle_sweep")
         return len(pruned_sessions)
+
+    async def abandon_stale_http_bridge_operations(self: Any) -> int:
+        """Fence ownerless ambiguous operations after the bridge budget.
+
+        The in-memory registry and event batcher are both part of the safety
+        proof. A durable row is only eligible when no canonical or detached
+        generation, including terminal event settlement, still references it.
+        """
+        settings = _service_get_settings()
+        inactivity_seconds = max(30.0 * 60.0, _http_bridge_request_budget_seconds(settings))
+        maintenance_now = utcnow()
+        cutoff = maintenance_now - timedelta(seconds=inactivity_seconds)
+        lease_expired_before = maintenance_now - timedelta(seconds=_http_bridge_durable_lease_ttl_seconds())
+        protected_operation_ids: set[str] = set()
+        async with self._http_bridge_lock:
+            local_sessions = [
+                *self._http_bridge_sessions.values(),
+                *self._http_bridge_detached_sessions.values(),
+            ]
+            for session in local_sessions:
+                protected_operation_ids.update(
+                    operation_id
+                    for request_state in tuple(session.pending_requests)
+                    if (operation_id := getattr(request_state, "operation_id", None))
+                )
+
+        batcher = getattr(self, "_http_bridge_operation_event_batcher", None)
+        pending_operation_ids = getattr(batcher, "pending_operation_ids", None)
+        if callable(pending_operation_ids):
+            try:
+                protected_operation_ids.update(await pending_operation_ids())
+            except Exception:
+                logger.warning(
+                    "Failed to snapshot HTTP bridge operation spool protection",
+                    exc_info=True,
+                )
+                return 0
+
+        abandon_stale_operations = getattr(self._durable_bridge, "abandon_stale_operations", None)
+        if not callable(abandon_stale_operations):
+            return 0
+        try:
+            abandonments = await abandon_stale_operations(
+                cutoff=cutoff,
+                lease_expired_before=lease_expired_before,
+                protected_operation_ids=protected_operation_ids,
+            )
+        except Exception:
+            logger.warning("HTTP bridge stale operation abandonment failed", exc_info=True)
+            return 0
+        for abandonment in abandonments:
+            source_state = str(abandonment.source_state)
+            if PROMETHEUS_AVAILABLE and http_bridge_operation_abandonment_total is not None:
+                http_bridge_operation_abandonment_total.labels(source_state=source_state).inc()
+            logger.warning(
+                "Abandoned stale HTTP bridge operation",
+                extra={
+                    "source_state": source_state,
+                    "reason": "stale_owner",
+                    "age_seconds": round(float(abandonment.age_seconds), 3),
+                    "owner_lease_outcome": abandonment.owner_lease_outcome,
+                    "session_hash": abandonment.session_hash,
+                },
+            )
+        return len(abandonments)
 
     def _initialize_http_bridge_session_registry(self: _HTTPBridgeServiceProtocol) -> None:
         # Canonical and detached registries both own live generations until

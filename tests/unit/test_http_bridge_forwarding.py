@@ -39,6 +39,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     build_owner_forward_headers,
     parse_forwarded_request,
 )
+from tests.simulation.virtual_time import VirtualClock
 
 
 @pytest.fixture(autouse=True)
@@ -996,73 +997,60 @@ def test_owner_forward_timeout_only_bounds_connect_phase() -> None:
     assert timeout.sock_read == pytest.approx(300.0)
 
 
-def test_owner_forward_receive_timeout_prefers_idle_timeout_with_budget_remaining(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 100.0)
-
+def test_owner_forward_receive_timeout_prefers_idle_timeout_with_budget_remaining() -> None:
     timeout = _owner_forward_receive_timeout(
         request_started_at=10.0,
         proxy_request_budget_seconds=300.0,
         stream_idle_timeout_seconds=45.0,
+        now=100.0,
     )
 
     assert timeout.timeout_seconds == pytest.approx(45.0)
     assert timeout.error_code == "stream_idle_timeout"
 
 
-def test_owner_forward_receive_timeout_clamps_to_remaining_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 100.0)
-
+def test_owner_forward_receive_timeout_clamps_to_remaining_budget() -> None:
     timeout = _owner_forward_receive_timeout(
         request_started_at=10.0,
         proxy_request_budget_seconds=95.0,
         stream_idle_timeout_seconds=45.0,
+        now=100.0,
     )
 
     assert timeout.timeout_seconds == pytest.approx(5.0)
     assert timeout.error_code == "upstream_request_timeout"
 
 
-def test_owner_forward_receive_timeout_prefers_idle_after_scheduler_jitter(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 610.01)
-
+def test_owner_forward_receive_timeout_prefers_idle_after_scheduler_jitter() -> None:
     timeout = _owner_forward_receive_timeout(
         request_started_at=10.0,
         proxy_request_budget_seconds=600.0,
         stream_idle_timeout_seconds=600.0,
+        now=610.01,
     )
 
     assert timeout.timeout_seconds == pytest.approx(0.0)
     assert timeout.error_code == "stream_idle_timeout"
 
 
-def test_owner_forward_receive_timeout_uses_budget_when_equal_budget_is_sooner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 400.0)
-
+def test_owner_forward_receive_timeout_uses_budget_when_equal_budget_is_sooner() -> None:
     timeout = _owner_forward_receive_timeout(
         request_started_at=100.0,
         proxy_request_budget_seconds=600.0,
         stream_idle_timeout_seconds=600.0,
+        now=400.0,
     )
 
     assert timeout.timeout_seconds == pytest.approx(300.0)
     assert timeout.error_code == "upstream_request_timeout"
 
 
-def test_owner_forward_receive_timeout_allows_bridge_budget_beyond_proxy_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 700.0)
-
+def test_owner_forward_receive_timeout_allows_bridge_budget_beyond_proxy_budget() -> None:
     timeout = _owner_forward_receive_timeout(
         request_started_at=100.0,
         proxy_request_budget_seconds=7200.0,
         stream_idle_timeout_seconds=3600.0,
+        now=700.0,
     )
 
     assert timeout.timeout_seconds == pytest.approx(3600.0)
@@ -1112,7 +1100,6 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
             return FakeResponse()
 
     monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
-    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 10.0)
     monkeypatch.setenv("CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS", "7")
     monkeypatch.setenv("CODEX_LB_STREAM_IDLE_TIMEOUT_SECONDS", "11")
     get_settings.cache_clear()
@@ -1135,6 +1122,7 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
             headers={"Authorization": "Bearer proxy-key"},
             context=context,
             request_started_at=10.0,
+            clock=VirtualClock(monotonic_value=10.0),
             on_response_wait=lambda: response_state_calls.append("wait"),
             on_response_ready=lambda: response_state_calls.append("ready"),
         )
@@ -1194,7 +1182,6 @@ async def test_owner_forward_allows_json_content_type_for_internal_post(
             return FakeResponse()
 
     monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
-    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 10.0)
 
     client = HTTPBridgeOwnerClient()
     payload = _payload()
@@ -1216,6 +1203,7 @@ async def test_owner_forward_allows_json_content_type_for_internal_post(
             },
             context=context,
             request_started_at=10.0,
+            clock=VirtualClock(monotonic_value=10.0),
         )
     ]
 
@@ -1283,7 +1271,6 @@ async def test_owner_forward_connector_failure_does_not_mark_dispatched(
             return FakeResponse()
 
     monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
-    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 10.0)
     dispatched = {"called": False}
 
     async def collect() -> None:
@@ -1299,6 +1286,7 @@ async def test_owner_forward_connector_failure_does_not_mark_dispatched(
                 downstream_turn_state=None,
             ),
             request_started_at=10.0,
+            clock=VirtualClock(monotonic_value=10.0),
             on_request_dispatched=lambda: dispatched.__setitem__("called", True),
         ):
             return
@@ -1334,7 +1322,6 @@ async def test_owner_forward_midflight_transport_failure_marks_dispatched(
             return FakeResponse()
 
     monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
-    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 10.0)
     dispatched = {"called": False}
 
     async def collect() -> None:
@@ -1350,6 +1337,7 @@ async def test_owner_forward_midflight_transport_failure_marks_dispatched(
                 downstream_turn_state=None,
             ),
             request_started_at=10.0,
+            clock=VirtualClock(monotonic_value=10.0),
             on_request_dispatched=lambda: dispatched.__setitem__("called", True),
         ):
             return
@@ -1390,7 +1378,6 @@ async def test_owner_forward_non_200_body_read_failure_keeps_rejected(
             return FakeResponse()
 
     monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
-    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 10.0)
     dispatched = {"called": False}
     rejected = {"called": False}
 
@@ -1407,6 +1394,7 @@ async def test_owner_forward_non_200_body_read_failure_keeps_rejected(
                 downstream_turn_state=None,
             ),
             request_started_at=10.0,
+            clock=VirtualClock(monotonic_value=10.0),
             on_request_dispatched=lambda: dispatched.__setitem__("called", True),
             on_response_rejected=lambda: rejected.__setitem__("called", True),
         ):
@@ -1444,7 +1432,6 @@ async def test_owner_forward_cancel_during_aenter_marks_dispatched(
             return FakeResponse()
 
     monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
-    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 10.0)
     dispatched = {"called": False}
 
     async def collect() -> None:
@@ -1460,6 +1447,7 @@ async def test_owner_forward_cancel_during_aenter_marks_dispatched(
                 downstream_turn_state=None,
             ),
             request_started_at=10.0,
+            clock=VirtualClock(monotonic_value=10.0),
             on_request_dispatched=lambda: dispatched.__setitem__("called", True),
         ):
             return

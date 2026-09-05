@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
@@ -86,6 +87,56 @@ async def test_blocked_maintenance_does_not_delay_heartbeat_or_other_phases(bloc
 
 
 @pytest.mark.asyncio
+async def test_exhausted_production_sized_request_pool_does_not_block_heartbeat_pool() -> None:
+    request_pool = asyncio.Semaphore(2)
+    heartbeat_pool = asyncio.Semaphore(1)
+    release_maintenance = asyncio.Event()
+    maintenance_started = {"durable_ownership": asyncio.Event(), "cap_partition": asyncio.Event()}
+    heartbeat_calls = 0
+
+    async def heartbeat() -> None:
+        nonlocal heartbeat_calls
+        async with heartbeat_pool:
+            heartbeat_calls += 1
+
+    def blocking_maintenance(phase: str):
+        async def run() -> None:
+            async with request_pool:
+                maintenance_started[phase].set()
+                await release_maintenance.wait()
+
+        return run
+
+    async def idle_sweep() -> None:
+        return None
+
+    lifecycle = BridgeRingPeriodicLifecycle(
+        heartbeat=heartbeat,
+        durable_ownership=blocking_maintenance("durable_ownership"),
+        idle_sweep=idle_sweep,
+        cap_partition=blocking_maintenance("cap_partition"),
+        interval_seconds=0.01,
+        heartbeat_deadline_seconds=0.05,
+        maintenance_deadline_seconds=0.01,
+        restart_delay_seconds=0.01,
+    )
+    lifecycle.start()
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(started.wait() for started in maintenance_started.values())),
+            timeout=1,
+        )
+        assert request_pool.locked()
+        await _wait_until(lambda: heartbeat_calls >= 3)
+    finally:
+        release_maintenance.set()
+        result = await lifecycle.stop(timeout_seconds=1)
+
+    assert result.heartbeat_stopped is True
+    assert result.all_stopped is True
+
+
+@pytest.mark.asyncio
 async def test_each_periodic_phase_runs_in_a_distinct_owned_task() -> None:
     phase_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -145,6 +196,8 @@ async def test_periodic_lifecycle_records_bounded_metrics_and_structured_recover
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    import app.main as main
+
     class FakeGauge:
         def __init__(self) -> None:
             self.values: list[float] = []
@@ -197,8 +250,14 @@ async def test_periodic_lifecycle_records_bounded_metrics_and_structured_recover
         if heartbeat_calls == 1:
             raise RuntimeError("heartbeat failed")
 
+    stale_cleanup = AsyncMock(side_effect=RuntimeError("stale cleanup failed"))
+    proxy_service = SimpleNamespace(
+        reconcile_durable_http_bridge_ownership=AsyncMock(return_value=0),
+        abandon_stale_http_bridge_operations=stale_cleanup,
+    )
+
     async def durable_ownership() -> None:
-        raise ValueError("reconcile failed")
+        await main.run_http_bridge_durable_ownership_maintenance(proxy_service)
 
     async def noop() -> None:
         return None
@@ -222,6 +281,8 @@ async def test_periodic_lifecycle_records_bounded_metrics_and_structured_recover
 
     assert len(gauge.values) >= 2
     assert heartbeat_failures.values[None] == 1
+    stale_cleanup.assert_awaited()
+    assert maintenance.values.get(("durable_ownership", "failure"), 0) >= 1
     assert set(key for key in maintenance.values if key is not None) <= {
         ("durable_ownership", "success"),
         ("durable_ownership", "failure"),
@@ -392,7 +453,7 @@ async def test_owned_lifespan_shutdown_completes_under_anyio_level_cancellation(
         cancellation = await main._run_owned_lifespan_shutdown(cleanup)
 
     assert cleanup_complete.is_set()
-    assert cancellation is None
+    assert isinstance(cancellation, asyncio.CancelledError)
 
 
 @pytest.mark.asyncio

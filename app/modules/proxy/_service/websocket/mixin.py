@@ -421,6 +421,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _sanitize_public_websocket_event_payload,
     _sanitize_websocket_connect_failure,
     _sanitize_websocket_previous_response_error,
+    _sanitize_websocket_previous_response_input_items,
     _sanitize_websocket_terminal_error_fields,
     _serialize_websocket_error_event,
     _trim_websocket_previous_response_input_items,
@@ -3137,14 +3138,16 @@ class _WebSocketMixin:
         client_full_resend_retry_safe = False
         if responses_payload.previous_response_id is not None and isinstance(responses_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], responses_payload.input)
-            client_full_resend_input_items = previous_response_input_items
+            client_full_resend_input_items = _sanitize_websocket_previous_response_input_items(
+                previous_response_input_items
+            )
             client_full_resend_retry_safe = _websocket_client_previous_response_full_resend_is_retry_safe(
                 previous_response_id=responses_payload.previous_response_id,
                 input_value=responses_payload.input,
                 continuity_state=continuity_state,
             )
             trimmed_input_items = _trim_websocket_previous_response_input_items(previous_response_input_items)
-            if len(trimmed_input_items) != len(previous_response_input_items):
+            if trimmed_input_items != previous_response_input_items:
                 previous_response_trimmed_input_count = len(previous_response_input_items)
                 previous_response_trimmed_input_fingerprint = _facade()._fingerprint_input_items(
                     previous_response_input_items
@@ -3195,7 +3198,9 @@ class _WebSocketMixin:
             original_input_items = cast(list[JsonValue], responses_payload.input)
             original_input_item_count = len(original_input_items)
             original_input_fingerprint = _facade()._fingerprint_input_items(original_input_items)
-            original_full_resend_payload = responses_payload
+            original_full_resend_payload = responses_payload.model_copy(
+                update={"input": _sanitize_websocket_previous_response_input_items(original_input_items)}
+            )
             responses_payload = responses_payload.model_copy(
                 update={
                     "previous_response_id": session_anchor.previous_response_id,

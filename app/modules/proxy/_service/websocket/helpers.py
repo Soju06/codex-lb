@@ -569,6 +569,7 @@ _WEBSOCKET_TOOL_CALL_ITEM_TYPES_BY_OUTPUT_TYPE = {
     "function_call_output": "function_call",
     "custom_tool_call_output": "custom_tool_call",
     "apply_patch_call_output": "apply_patch_call",
+    "tool_search_output": "tool_search_call",
 }
 _WEBSOCKET_TOOL_CALL_ITEM_TYPES = frozenset(_WEBSOCKET_TOOL_CALL_ITEM_TYPES_BY_OUTPUT_TYPE.values())
 
@@ -2070,32 +2071,51 @@ def _serialize_websocket_error_event(payload: dict[str, JsonValue]) -> str:
 
 
 def _trim_websocket_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
+    replay_safe_input_items = _sanitize_websocket_previous_response_input_items(input_items)
     first_output_index = next(
         (
             index
             for index, item in enumerate(input_items)
             if _websocket_input_item_type(item)
-            in {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
+            in {"function_call_output", "custom_tool_call_output", "apply_patch_call_output", "tool_search_output"}
         ),
         None,
     )
-    if first_output_index is None or first_output_index == 0:
-        return input_items
+    if first_output_index is None:
+        return replay_safe_input_items
+    if first_output_index == 0:
+        return replay_safe_input_items
     prefix = input_items[:first_output_index]
     if not all(_is_websocket_previous_response_output_item(item) for item in prefix):
-        return input_items
-    return input_items[first_output_index:]
+        return replay_safe_input_items
+    return replay_safe_input_items[first_output_index:]
+
+
+def _sanitize_websocket_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
+    return [_strip_websocket_replayed_tool_search_id(item) for item in input_items]
 
 
 def _is_websocket_previous_response_output_item(item: JsonValue) -> bool:
     if isinstance(item, dict) and _websocket_input_item_type(item) is None and item.get("role") == "assistant":
         return True
     item_type = _websocket_input_item_type(item)
-    if item_type in {"reasoning", "function_call", "custom_tool_call", "apply_patch_call"}:
+    if item_type in {"reasoning", "function_call", "custom_tool_call", "apply_patch_call", "tool_search_call"}:
         return True
     if item_type != "message" or not isinstance(item, dict):
         return False
     return item.get("role") == "assistant"
+
+
+def _strip_websocket_replayed_tool_search_id(item: JsonValue) -> JsonValue:
+    if (
+        not isinstance(item, dict)
+        or _websocket_input_item_type(item) not in {"tool_search_call", "tool_search_output"}
+        or "id" not in item
+    ):
+        return item
+    stripped = dict(item)
+    stripped.pop("id", None)
+    return stripped
 
 
 def _websocket_input_item_type(item: JsonValue) -> str | None:

@@ -27060,6 +27060,22 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
             "internal_chat_message_metadata_passthrough": owner_metadata,
         },
         {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "docs"},
+            "execution": "client",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "status": "completed",
+            "tools": [],
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+        {
             "type": "message",
             "role": "assistant",
             "status": "completed",

@@ -15,11 +15,10 @@ _TOOL_CALL_TYPE_BY_OUTPUT_TYPE = {
     "function_call_output": "function_call",
     "custom_tool_call_output": "custom_tool_call",
     "apply_patch_call_output": "apply_patch_call",
+    "tool_search_output": "tool_search_call",
 }
 _TOOL_CALL_TYPES = frozenset(_TOOL_CALL_TYPE_BY_OUTPUT_TYPE.values())
-_ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES = frozenset(
-    {"reasoning", "tool_search_call", "tool_search_output", "web_search_call"}
-)
+_ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES = frozenset({"reasoning", "web_search_call"})
 _INTERNAL_CHAT_MESSAGE_METADATA_FIELD = "internal_chat_message_metadata_passthrough"
 _ACCOUNT_NEUTRAL_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS = frozenset({"turn_id"})
 _ACCOUNT_NEUTRAL_TOOL_TYPES = frozenset({"custom", "function", "web_search", "web_search_preview"})
@@ -47,6 +46,8 @@ _ACCOUNT_NEUTRAL_INPUT_ITEM_TYPES = frozenset(
         "input_image",
         "input_text",
         "message",
+        "tool_search_call",
+        "tool_search_output",
     }
 )
 _ACCOUNT_NEUTRAL_MESSAGE_CONTENT_TYPES = frozenset(
@@ -92,6 +93,22 @@ _ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS = {
     ),
     "function_call_output": frozenset(
         {"call_id", "caller", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "output", "status", "type"}
+    ),
+    "tool_search_call": frozenset(
+        {"arguments", "call_id", "caller", "execution", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "status", "type"}
+    ),
+    "tool_search_output": frozenset(
+        {
+            "call_id",
+            "caller",
+            "execution",
+            "id",
+            _INTERNAL_CHAT_MESSAGE_METADATA_FIELD,
+            "output",
+            "status",
+            "tools",
+            "type",
+        }
     ),
 }
 _ACCOUNT_NEUTRAL_ITEM_STATUSES = frozenset({"completed", "failed"})
@@ -628,6 +645,9 @@ def _tool_call_is_self_contained(item_type: str, item: Mapping[str, JsonValue]) 
         return _is_nonblank_string(item.get("name")) and isinstance(item.get("arguments"), str)
     if item_type == "custom_tool_call":
         return _is_nonblank_string(item.get("name")) and isinstance(item.get("input"), str)
+    if item_type == "tool_search_call":
+        arguments = item.get("arguments")
+        return isinstance(arguments, dict) and item.get("execution") in (None, "client")
     operation = item.get("operation")
     patch = item.get("patch")
     input_value = item.get("input")
@@ -677,6 +697,12 @@ def _apply_patch_operation_is_self_contained(operation: JsonValue | None) -> boo
 def _tool_output_is_self_contained(item_type: str, item: Mapping[str, JsonValue]) -> bool:
     if item.get("status") not in (None, "completed", "failed"):
         return False
+    if item_type == "tool_search_output":
+        if item.get("status") == "failed":
+            return False
+        has_tools = isinstance(item.get("tools"), list)
+        has_output = isinstance(item.get("output"), str)
+        return item.get("execution") in (None, "client") and has_tools != has_output
     output = item.get("output")
     if isinstance(output, str):
         return True

@@ -26032,6 +26032,108 @@ async def test_prepare_websocket_response_create_request_injects_anchor_for_code
 
 
 @pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_sanitizes_injected_anchor_tool_search_fresh_retry(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_injected_tool_search_replay",
+        name="ws-injected-tool-search-replay",
+        key_prefix="sk-ws-injected-tool-search",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        trace_channels = frozenset()
+        openai_prompt_cache_key_derivation_enabled = True
+
+    historical_input: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
+        {
+            "type": "tool_search_call",
+            "id": "tsc_injected_replay",
+            "call_id": "call_search_injected",
+            "arguments": {"query": "codex-lb"},
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "id": "tso_injected_replay",
+            "call_id": "call_search_injected",
+            "output": "completed",
+            "status": "completed",
+        },
+    ]
+    replay_safe_historical_input: list[JsonValue] = [
+        historical_input[0],
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search_injected",
+            "arguments": {"query": "codex-lb"},
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search_injected",
+            "output": "completed",
+            "status": "completed",
+        },
+    ]
+    new_input: JsonValue = {"role": "user", "content": [{"type": "input_text", "text": "next question"}]}
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=len(historical_input),
+        last_completed_response_id="resp_completed_tool_search_anchor",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(historical_input),
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "input": [*historical_input, new_input],
+            },
+        ),
+        headers={"session_id": "turn_ws_injected_tool_search"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert upstream_payload["previous_response_id"] == "resp_completed_tool_search_anchor"
+    assert upstream_payload["input"] == [new_input]
+    assert prepared.request_state.proxy_injected_previous_response_id is True
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is True
+    assert prepared.request_state.fresh_upstream_request_text is not None
+    fresh_payload = json.loads(prepared.request_state.fresh_upstream_request_text)
+    assert "previous_response_id" not in fresh_payload
+    assert fresh_payload["input"] == [*replay_safe_historical_input, new_input]
+    assert (
+        proxy_service._prepare_websocket_request_state_for_account_switch(prepared.request_state)
+        == prepared.request_state.request_text
+    )
+    assert prepared.request_state.previous_response_id is None
+
+
+@pytest.mark.asyncio
 async def test_prepare_websocket_goal_restart_keeps_full_resend_without_injected_anchor(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -26198,6 +26300,37 @@ async def test_prepare_websocket_response_create_request_captures_client_full_re
 
     full_resend_input: list[JsonValue] = [
         {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
+        {
+            "type": "tool_search_call",
+            "id": "tsc_replay",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "id": "tso_replay",
+            "call_id": "call_search",
+            "output": "completed",
+            "status": "completed",
+        },
+        {"role": "assistant", "content": [{"type": "output_text", "text": "old answer"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "next question"}]},
+    ]
+    replay_safe_full_resend_input: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "output": "completed",
+            "status": "completed",
+        },
         {"role": "assistant", "content": [{"type": "output_text", "text": "old answer"}]},
         {"role": "user", "content": [{"type": "input_text", "text": "next question"}]},
     ]
@@ -26232,13 +26365,195 @@ async def test_prepare_websocket_response_create_request_captures_client_full_re
 
     upstream_payload = json.loads(prepared.text_data)
     assert upstream_payload["previous_response_id"] == "resp_client_anchor"
-    assert upstream_payload["input"] == full_resend_input
+    assert upstream_payload["input"] == replay_safe_full_resend_input
     assert prepared.request_state.previous_response_id == "resp_client_anchor"
     assert prepared.request_state.fresh_upstream_request_is_retry_safe is True
     assert prepared.request_state.fresh_upstream_request_text is not None
     fresh_payload = json.loads(prepared.request_state.fresh_upstream_request_text)
     assert "previous_response_id" not in fresh_payload
+    assert fresh_payload["input"] == replay_safe_full_resend_input
+
+
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_keeps_full_fresh_retry_after_prefix_trim(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_client_full_resend_trim",
+        name="ws-client-full-resend-trim",
+        key_prefix="sk-ws-full-trim",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        trace_channels = frozenset()
+        openai_prompt_cache_key_derivation_enabled = True
+
+    function_call = cast(
+        JsonValue,
+        {
+            "type": "function_call",
+            "name": "shell_command",
+            "call_id": "call_prefix_trim",
+            "arguments": "{}",
+        },
+    )
+    function_call_output = cast(
+        JsonValue,
+        {
+            "type": "function_call_output",
+            "call_id": "call_prefix_trim",
+            "output": "ok",
+        },
+    )
+    next_input = cast(JsonValue, {"role": "user", "content": [{"type": "input_text", "text": "continue"}]})
+    full_resend_input: list[JsonValue] = [function_call, function_call_output, next_input]
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=1,
+        last_completed_response_id="resp_client_anchor",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items([function_call]),
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "previous_response_id": "resp_client_anchor",
+                "input": full_resend_input,
+            },
+        ),
+        headers={"session_id": "turn_ws_client_full_resend_trim"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert upstream_payload["previous_response_id"] == "resp_client_anchor"
+    assert upstream_payload["input"] == [function_call_output, next_input]
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is True
+    assert prepared.request_state.fresh_upstream_request_text is not None
+    fresh_payload = json.loads(prepared.request_state.fresh_upstream_request_text)
+    assert "previous_response_id" not in fresh_payload
     assert fresh_payload["input"] == full_resend_input
+
+
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_sanitizes_tool_search_ids_before_fresh_retry(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_tool_search_full_resend_trim",
+        name="ws-tool-search-full-resend-trim",
+        key_prefix="sk-ws-tool-search-full-trim",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        trace_channels = frozenset()
+        openai_prompt_cache_key_derivation_enabled = True
+
+    tool_search_call = cast(
+        JsonValue,
+        {
+            "type": "tool_search_call",
+            "id": "tsc_replayed",
+            "call_id": "call_search_trim",
+            "arguments": {"query": "codex-lb"},
+            "status": "completed",
+        },
+    )
+    tool_search_output = cast(
+        JsonValue,
+        {
+            "type": "tool_search_output",
+            "id": "tso_replayed",
+            "call_id": "call_search_trim",
+            "output": "completed",
+            "status": "completed",
+        },
+    )
+    expected_tool_search_call = cast(
+        JsonValue,
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search_trim",
+            "arguments": {"query": "codex-lb"},
+            "status": "completed",
+        },
+    )
+    expected_tool_search_output = cast(
+        JsonValue,
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search_trim",
+            "output": "completed",
+            "status": "completed",
+        },
+    )
+    next_input = cast(JsonValue, {"role": "user", "content": [{"type": "input_text", "text": "continue"}]})
+    full_resend_input: list[JsonValue] = [tool_search_call, tool_search_output, next_input]
+    replay_safe_full_resend_input = [expected_tool_search_call, expected_tool_search_output, next_input]
+    continuity_state = proxy_service._WebSocketContinuityState()
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "previous_response_id": "resp_untracked",
+                "input": full_resend_input,
+            },
+        ),
+        headers={"session_id": "turn_ws_tool_search_full_resend_trim"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert upstream_payload["previous_response_id"] == "resp_untracked"
+    assert upstream_payload["input"] == [expected_tool_search_output, next_input]
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is True
+    assert prepared.request_state.fresh_upstream_request_text is not None
+    fresh_payload = json.loads(prepared.request_state.fresh_upstream_request_text)
+    assert "previous_response_id" not in fresh_payload
+    assert fresh_payload["input"] == replay_safe_full_resend_input
 
 
 @pytest.mark.asyncio
@@ -26368,6 +26683,34 @@ def test_websocket_client_previous_response_full_resend_retry_allows_self_contai
         proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
             previous_response_id="resp_client_anchor",
             input_value=self_contained_tool_history,
+            continuity_state=None,
+        )
+        is True
+    )
+
+
+def test_websocket_client_previous_response_full_resend_retry_allows_tool_search_history() -> None:
+    self_contained_tool_search_history: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "search tools"}]},
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "mcp tools"},
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "tools": [{"name": "tool_search"}],
+            "status": "completed",
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_client_anchor",
+            input_value=self_contained_tool_search_history,
             continuity_state=None,
         )
         is True
@@ -47311,6 +47654,112 @@ def test_trim_websocket_previous_response_input_items_handles_apply_patch_replay
     trimmed = proxy_service._trim_websocket_previous_response_input_items(input_items)
 
     assert trimmed == input_items[2:]
+
+
+def test_trim_http_bridge_previous_response_input_items_handles_tool_search_replay():
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "id": "tsc_replay",
+            "call_id": "call_search_1",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "id": "tso_replay",
+            "call_id": "call_search_1",
+            "output": [{"title": "result"}],
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    trimmed = proxy_service._trim_http_bridge_previous_response_input_items(input_items)
+
+    assert trimmed == [
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search_1",
+            "output": [{"title": "result"}],
+        },
+        input_items[2],
+    ]
+
+
+def test_trim_http_bridge_previous_response_input_items_strips_output_first_tool_search_id():
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_output",
+            "id": "tso_replay",
+            "call_id": "call_search_1",
+            "output": "completed",
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    trimmed = proxy_service._trim_http_bridge_previous_response_input_items(input_items)
+
+    assert len(trimmed) == len(input_items)
+    assert trimmed == [
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search_1",
+            "output": "completed",
+        },
+        input_items[1],
+    ]
+
+
+def test_trim_websocket_previous_response_input_items_handles_tool_search_replay():
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "id": "tsc_replay",
+            "call_id": "call_search_1",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "id": "tso_replay",
+            "call_id": "call_search_1",
+            "output": [{"title": "result"}],
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    trimmed = proxy_service._trim_websocket_previous_response_input_items(input_items)
+
+    assert trimmed == [
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search_1",
+            "output": [{"title": "result"}],
+        },
+        input_items[2],
+    ]
+
+
+def test_trim_websocket_previous_response_input_items_strips_output_first_tool_search_id():
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_output",
+            "id": "tso_replay",
+            "call_id": "call_search_1",
+            "output": "completed",
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    trimmed = proxy_service._trim_websocket_previous_response_input_items(input_items)
+
+    assert len(trimmed) == len(input_items)
+    assert trimmed == [
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search_1",
+            "output": "completed",
+        },
+        input_items[1],
+    ]
 
 
 def test_prepare_response_bridge_request_state_keeps_unconfirmed_missing_tool_output_history():

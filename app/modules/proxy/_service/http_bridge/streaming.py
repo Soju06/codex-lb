@@ -1839,7 +1839,7 @@ class _HTTPBridgeStreamingMixin:
         if effective_payload.previous_response_id is not None and isinstance(effective_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], effective_payload.input)
             trimmed_input_items = _trim_http_bridge_previous_response_input_items(previous_response_input_items)
-            if len(trimmed_input_items) != len(previous_response_input_items):
+            if trimmed_input_items != previous_response_input_items:
                 previous_response_trimmed_input_count = len(previous_response_input_items)
                 previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
                 effective_payload = effective_payload.model_copy(update={"input": trimmed_input_items})

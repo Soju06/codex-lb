@@ -36,6 +36,7 @@ from app.core.clients.proxy import codex_control_request as core_codex_control_r
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
+from app.core.clock import scheduler_for
 from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
@@ -4782,7 +4783,7 @@ class _HTTPBridgeStreamingMixin:
                     if not yielded_any and not keepalive_sent:
                         wait_timeout = max(wait_timeout, _http_bridge_startup_keepalive_grace_seconds())
                     try:
-                        event_block = await asyncio.wait_for(event_queue.get(), timeout=wait_timeout)
+                        event_block = await scheduler_for(self).wait_for(event_queue.get(), timeout=wait_timeout)
                     except asyncio.TimeoutError:
                         if request_state.account_capacity_waiting:
                             keepalive_count = 0

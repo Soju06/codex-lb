@@ -38,6 +38,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clock import REAL_SCHEDULER, Scheduler, scheduler_for
 from app.core.config.settings import Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import (
@@ -1590,6 +1591,7 @@ async def _close_http_bridge_session_resources(
                 upstream_reader,
                 label="http bridge upstream reader",
                 cleanup_tasks=service._background_cleanup_tasks,
+                scheduler=scheduler_for(service),
             )
             if session.upstream_reader is upstream_reader:
                 session.upstream_reader = None
@@ -1641,7 +1643,7 @@ async def _close_http_bridge_session(
             not existing.done() or (not existing.cancelled() and existing.exception() is None)
         ):
             return existing
-        created = asyncio.create_task(
+        created = scheduler_for(service).create_task(
             _close_http_bridge_session_resources(
                 service,
                 session,
@@ -1695,7 +1697,7 @@ async def _close_http_bridge_session_bounded(
     if session.upstream_reader is asyncio.current_task():
         session.upstream_reader = None
 
-    close_task = asyncio.create_task(
+    close_task = scheduler_for(service).create_task(
         service._close_http_bridge_session(session),
         name=f"http-bridge-close-{_hash_identifier(session.key.affinity_key)}",
     )
@@ -2671,10 +2673,11 @@ def _cancel_and_track_cancelled_task(
     label: str,
     cleanup_tasks: set[asyncio.Task[None]] | None,
     cancel_task: bool = True,
+    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> None:
     if cancel_task:
         task.cancel()
-    cleanup_task = asyncio.create_task(_drain_cancelled_task(task), name=f"cancelled-task-cleanup-{label}")
+    cleanup_task = scheduler.create_task(_drain_cancelled_task(task), name=f"cancelled-task-cleanup-{label}")
     if cleanup_tasks is not None:
         cleanup_tasks.add(cleanup_task)
         cleanup_task.add_done_callback(cleanup_tasks.discard)
@@ -2687,6 +2690,7 @@ async def _await_cancelled_task(
     label: str,
     cancel: bool = True,
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
+    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> bool:
     effective_timeout = max(float(timeout_seconds), 0.0)
     remaining_drain_timeout = shutdown_state.remaining_drain_timeout_seconds()
@@ -2699,20 +2703,32 @@ async def _await_cancelled_task(
         try:
             await asyncio.sleep(0)
         except asyncio.CancelledError:
-            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks)
+            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, scheduler=scheduler)
             raise
     if cancel:
         task.cancel()
     try:
-        done, _ = await asyncio.wait({task}, timeout=effective_timeout)
+        await scheduler.wait_for(asyncio.wait({task}), timeout=effective_timeout)
+    except TimeoutError:
+        logger.warning("Timed out waiting for %s cancellation", label)
+        _cancel_and_track_cancelled_task(
+            task,
+            label=label,
+            cleanup_tasks=cleanup_tasks,
+            cancel_task=False,
+            scheduler=scheduler,
+        )
+        return False
     except asyncio.CancelledError:
         if not task.done():
-            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
+            _cancel_and_track_cancelled_task(
+                task,
+                label=label,
+                cleanup_tasks=cleanup_tasks,
+                cancel_task=False,
+                scheduler=scheduler,
+            )
         raise
-    if task not in done:
-        logger.warning("Timed out waiting for %s cancellation", label)
-        _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
-        return False
     try:
         task.result()
     except asyncio.CancelledError:

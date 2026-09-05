@@ -9,6 +9,7 @@ from typing import Any
 
 import anyio
 
+from app.core.clock import clock_for
 from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_circuit_total
 from app.modules.proxy._service.http_bridge.quarantine import (
@@ -552,7 +553,7 @@ class _HTTPBridgeRetryCircuitMixin:
         if key.strength != "hard":
             return True
 
-        now_monotonic = time.monotonic()
+        now_monotonic = clock_for(self).monotonic()
         async with self._http_bridge_retry_circuit_lock:
             self._prune_http_bridge_retry_circuit_state(now_monotonic)
             local_state = self._http_bridge_retry_circuits.get(key)
@@ -629,7 +630,7 @@ class _HTTPBridgeRetryCircuitMixin:
                         )
             return True
 
-        now_epoch = time.time()
+        now_epoch = clock_for(self).time()
         row_age = now_epoch - persisted.updated_at_epoch
         if (
             row_age > DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
@@ -922,8 +923,8 @@ class _HTTPBridgeRetryCircuitMixin:
         session: _HTTPBridgeSession,
         state: _HTTPBridgeRetryCircuitState,
     ) -> None:
-        now_monotonic = time.monotonic()
-        now_wall = time.time()
+        now_monotonic = clock_for(self).monotonic()
+        now_wall = clock_for(self).time()
         threshold = max(1, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD)
         key_lock = await self._acquire_http_bridge_retry_circuit_key_lock(session.key)
         try:
@@ -1132,7 +1133,7 @@ class _HTTPBridgeRetryCircuitMixin:
             return True
 
         await self._load_http_bridge_retry_circuit(session)
-        now = time.monotonic()
+        now = clock_for(self).monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
             if state is None or state.cooldown_until <= now:
@@ -1475,7 +1476,7 @@ class _HTTPBridgeRetryCircuitMixin:
             return 0.0
 
         await self._load_http_bridge_retry_circuit(session)
-        now = time.monotonic()
+        now = clock_for(self).monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
             if state is None:
@@ -1492,8 +1493,8 @@ class _HTTPBridgeRetryCircuitMixin:
             return 0.0
         return max(
             0.0,
-            generation[3] - time.time(),
-            generation[6] - time.monotonic(),
+            generation[3] - clock_for(self).time(),
+            generation[6] - clock_for(self).monotonic(),
         )
 
     async def _record_http_bridge_retry_circuit_failure(
@@ -1560,7 +1561,7 @@ class _HTTPBridgeRetryCircuitMixin:
             # the base backoff would otherwise persist an already-aged
             # cooldown and make the fresh failure look older than the
             # durable load for merge bookkeeping.
-            now = time.monotonic()
+            now = clock_for(self).monotonic()
             async with self._http_bridge_retry_circuit_lock:
                 if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_recorded:
                     duplicate_attempt = scoped_attempt

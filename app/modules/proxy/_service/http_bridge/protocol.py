@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 from app.core.clients.proxy import ProxyResponseError
+from app.core.clock import Clock, Scheduler
 from app.core.openai.requests import ResponsesRequest
 from app.db.models import Account
 from app.modules.proxy._service.support import _HTTPBridgeSession, _HTTPBridgeSessionKey, _WebSocketRequestState
@@ -15,6 +16,8 @@ from app.modules.proxy.load_balancer import AccountSelection
 class _HTTPBridgeServiceProtocol(Protocol):
     _repo_factory: Any
     _encryptor: Any
+    _clock: Clock
+    _scheduler: Scheduler
     _load_balancer: Any
     _http_client: Any
     _ring_membership: Any

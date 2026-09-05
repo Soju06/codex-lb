@@ -35,6 +35,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clock import scheduler_for
 from app.core.errors import openai_error
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
@@ -1981,7 +1982,7 @@ class _HTTPBridgeMixin(
             catalog_omission_quota_admission=selection.catalog_omission_quota_admission,
         )
         _copy_websocket_route_metadata_to_session(session, request_state)
-        session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
+        session.upstream_reader = scheduler_for(self).create_task(self._relay_http_bridge_upstream_messages(session))
         return session
 
     async def _reconnect_http_bridge_session(
@@ -2020,6 +2021,7 @@ class _HTTPBridgeMixin(
                         old_reader,
                         label="http bridge upstream reader",
                         cleanup_tasks=self._background_cleanup_tasks,
+                        scheduler=scheduler_for(self),
                     )
                 except BaseException:
                     session.closed = True
@@ -2424,7 +2426,9 @@ class _HTTPBridgeMixin(
             await abort_selected_handoff()
             raise
         if restart_reader:
-            session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
+            session.upstream_reader = scheduler_for(self).create_task(
+                self._relay_http_bridge_upstream_messages(session)
+            )
         _log_http_bridge_event(
             "reconnect",
             session.key,

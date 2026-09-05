@@ -4197,8 +4197,9 @@ async def test_v1_responses_http_bridge_reconnect_fails_when_reader_cancel_times
     blocking_reader = asyncio.create_task(blocking_reader_task())
     bridge_session.upstream_reader = blocking_reader
 
-    async def fake_await_cancelled_task(task, *, timeout_seconds=1.0, label, cleanup_tasks=None):
+    async def fake_await_cancelled_task(task, *, timeout_seconds=1.0, label, cleanup_tasks=None, scheduler):
         del task, timeout_seconds, label, cleanup_tasks
+        assert scheduler is service._scheduler
         return False
 
     monkeypatch.setattr(proxy_module, "_await_cancelled_task", fake_await_cancelled_task)
@@ -15800,7 +15801,12 @@ async def test_v1_responses_http_bridge_stream_cancel_retires_session(
 
     first_event = await stream.__anext__()
     assert "response.created" in first_event
-    await stream.aclose()
+    # Let the upstream reader observe its queued terminal close while the
+    # downstream cancellation is scheduled.  This is the production
+    # terminal-vs-cancel interleaving that the deterministic harness models.
+    close_task = asyncio.create_task(stream.aclose())
+    await asyncio.sleep(0)
+    await close_task
 
     session_key = proxy_module._HTTPBridgeSessionKey(
         affinity_kind="prompt_cache",

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -38,8 +38,10 @@ from app.modules.proxy.load_balancer import (
     _select_long_window_entry,
     _state_above_sticky_budget_threshold,
     _state_from_account,
+    _usage_entry_is_recent_enough,
     background_recovery_state_from_account,
 )
+from tests.simulation.virtual_time import VirtualClock
 
 pytestmark = pytest.mark.unit
 
@@ -1678,9 +1680,8 @@ def test_select_account_caps_cooldown_retry_hint():
     assert states[0].cooldown_until == now + 86_400
 
 
-def test_apply_usage_quota_sets_fallback_reset_for_primary_window(monkeypatch):
+def test_apply_usage_quota_sets_fallback_reset_from_evaluation_time():
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     status, used_percent, reset_at = apply_usage_quota(
         status=AccountStatus.ACTIVE,
         primary_used=100.0,
@@ -1689,11 +1690,21 @@ def test_apply_usage_quota_sets_fallback_reset_for_primary_window(monkeypatch):
         runtime_reset=None,
         secondary_used=None,
         secondary_reset=None,
+        now=now,
     )
     assert status == AccountStatus.RATE_LIMITED
     assert used_percent == 100.0
     assert reset_at is not None
     assert reset_at == pytest.approx(now + 60.0)
+
+
+def test_usage_recency_uses_injected_evaluation_time() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    recent = datetime.fromtimestamp(clock.time() - 179.0, tz=timezone.utc)
+    stale = datetime.fromtimestamp(clock.time() - 181.0, tz=timezone.utc)
+
+    assert _usage_entry_is_recent_enough(recent, now=clock.time())
+    assert not _usage_entry_is_recent_enough(stale, now=clock.time())
 
 
 def test_apply_usage_quota_secondary_exhausted_without_credits_sets_quota_exceeded():
@@ -1792,6 +1803,64 @@ def test_apply_usage_quota_respects_runtime_reset_for_quota_exceeded(monkeypatch
     assert status == AccountStatus.QUOTA_EXCEEDED
     assert used_percent == 50.0
     assert reset_at == future
+
+
+@pytest.mark.parametrize(
+    ("status", "primary_used", "secondary_used"),
+    [
+        (AccountStatus.QUOTA_EXCEEDED, None, 50.0),
+        (AccountStatus.RATE_LIMITED, 50.0, None),
+        (AccountStatus.RATE_LIMITED, None, 50.0),
+    ],
+)
+def test_apply_usage_quota_uses_explicit_evaluation_time_for_runtime_recovery(
+    status: AccountStatus,
+    primary_used: float | None,
+    secondary_used: float | None,
+) -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+
+    recovered, _, reset_at = apply_usage_quota(
+        status=status,
+        primary_used=primary_used,
+        primary_reset=None,
+        primary_window_minutes=None,
+        runtime_reset=clock.time() - 1.0,
+        secondary_used=secondary_used,
+        secondary_reset=None,
+        now=clock.time(),
+    )
+    blocked, _, blocked_reset_at = apply_usage_quota(
+        status=status,
+        primary_used=primary_used,
+        primary_reset=None,
+        primary_window_minutes=None,
+        runtime_reset=clock.time() + 1.0,
+        secondary_used=secondary_used,
+        secondary_reset=None,
+        now=clock.time(),
+    )
+
+    assert recovered == AccountStatus.ACTIVE
+    assert reset_at is None
+    assert blocked == status
+    assert blocked_reset_at == clock.time() + 1.0
+
+
+def test_state_from_account_passes_injected_time_to_runtime_recovery() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=int(clock.time() - 1.0))
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=_make_test_usage(window="primary", used_percent=50.0),
+        secondary_entry=None,
+        runtime=RuntimeState(reset_at=clock.time() - 1.0),
+        now=clock.time(),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
 
 
 def test_apply_usage_quota_respects_runtime_reset_for_rate_limited(monkeypatch):

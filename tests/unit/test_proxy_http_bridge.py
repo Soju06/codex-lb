@@ -77,9 +77,22 @@ from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_e
 from app.modules.proxy.http_bridge_event_batcher import TerminalOperationEventAppendResult
 from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, CatalogOmissionQuotaAdmission
+from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 from tests.unit.hypothesis_strategies import json_values as hypothesis_json_values
 
 pytestmark = pytest.mark.unit
+
+
+class _RecordingVirtualScheduler(VirtualScheduler):
+    def __init__(self, clock: VirtualClock) -> None:
+        super().__init__(clock)
+        self.task_names: list[str | None] = []
+        self.task_coroutines: list[str] = []
+
+    def create_task(self, coroutine: Any, *, name: str | None = None) -> asyncio.Task[Any]:
+        self.task_names.append(name)
+        self.task_coroutines.append(coroutine.cr_code.co_name)
+        return super().create_task(coroutine, name=name)
 
 
 def _durable_owner_lookup(*, process_epoch: str, lease_expires_at: datetime) -> DurableBridgeLookup:
@@ -1739,6 +1752,179 @@ class _SilentEventlessUpstream:
 
     async def close(self) -> None:
         self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_receive_deadline_uses_injected_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked receive must time out on virtual, not wall-clock, time.
+
+    The reader keeps its receive task alive while it races the wakeup event.
+    The deadline wrapper must therefore use the service scheduler without
+    taking ownership of either child task; normal reader cleanup still owns
+    their cancellation.
+    """
+
+    class _BlockedUpstream:
+        def __init__(self) -> None:
+            self.receive_started = asyncio.Event()
+            self.receive_cancelled = asyncio.Event()
+            self.active_receives = 0
+
+        async def receive(self) -> UpstreamWebSocketMessage:
+            self.active_receives += 1
+            self.receive_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.receive_cancelled.set()
+                raise
+            finally:
+                self.active_receives -= 1
+            raise AssertionError("blocked upstream receive returned")
+
+        async def close(self) -> None:
+            return None
+
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock, scheduler=scheduler)
+    upstream = _BlockedUpstream()
+    session = _make_bridge_session(key_value="virtual-reader-deadline")
+    session.upstream = cast(UpstreamWebSocket, upstream)
+    receive_timeout = SimpleNamespace(
+        timeout_seconds=5.0,
+        error_code="stream_idle_timeout",
+        error_message="Upstream stream idle timeout",
+    )
+
+    async def settle_pending_after_reader_closes(*args: Any, **kwargs: Any) -> bool:
+        del args, kwargs
+        assert session.closed is True
+        return True
+
+    async def retire_closed_session(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        assert session.closed is True
+
+    fail_pending = AsyncMock(side_effect=settle_pending_after_reader_closes)
+    retire_session = AsyncMock(side_effect=retire_closed_session)
+    original_fail_reader = service._fail_http_bridge_reader_and_maybe_retire
+    fail_reader = AsyncMock(wraps=original_fail_reader)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_next_websocket_receive_timeout", AsyncMock(return_value=receive_timeout))
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire_session)
+    monkeypatch.setattr(service, "_fail_http_bridge_reader_and_maybe_retire", fail_reader)
+
+    reader_task = scheduler.create_task(service._relay_http_bridge_upstream_messages(session))
+    await scheduler.drain()
+    assert upstream.receive_started.is_set()
+    assert reader_task.done() is False
+
+    await scheduler.advance(4.999)
+    assert reader_task.done() is False
+    assert upstream.active_receives == 1
+
+    await scheduler.advance(0.001)
+    await reader_task
+
+    assert clock.monotonic() == pytest.approx(5.0)
+    assert upstream.receive_cancelled.is_set()
+    assert upstream.active_receives == 0
+    fail_reader.assert_awaited_once()
+    assert fail_reader.await_args.args == (session,)
+    assert fail_reader.await_args.kwargs["error_code"] == "stream_idle_timeout"
+    assert fail_reader.await_args.kwargs["error_message"] == "Upstream stream idle timeout"
+    assert fail_reader.await_args.kwargs["retry_circuit_attempt_selection"].kind == "absent"
+    fail_pending.assert_awaited_once()
+    retire_session.assert_awaited_once()
+    assert session.closed is True
+    await scheduler.drain()
+    assert scheduler._tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_timeout_rechecks_receive_completed_during_timeout_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A receive that finishes with the scheduler timeout stays a receive.
+
+    ``Scheduler.wait_for`` can raise just as the transport receive completes.
+    In that case the reader must consume the completed message rather than
+    classifying it as an idle timeout and settling the live session as failed.
+    """
+
+    class _ReceiveAtTimeoutUpstream:
+        def __init__(self, release_receive: asyncio.Event) -> None:
+            self.receive_started = asyncio.Event()
+            self.release_receive = release_receive
+            self.receive_cancelled = False
+
+        async def receive(self) -> UpstreamWebSocketMessage:
+            self.receive_started.set()
+            try:
+                await self.release_receive.wait()
+            except asyncio.CancelledError:
+                self.receive_cancelled = True
+                raise
+            return UpstreamWebSocketMessage(kind="text", text='{"type":"response.completed"}')
+
+        async def close(self) -> None:
+            return None
+
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    release_receive = asyncio.Event()
+    original_wait_for = scheduler.wait_for
+
+    async def finish_receive_while_timeout_unwinds(awaitable: Any, timeout: float | None) -> Any:
+        try:
+            return await original_wait_for(awaitable, timeout)
+        except asyncio.TimeoutError:
+            release_receive.set()
+            await scheduler.drain()
+            raise
+
+    monkeypatch.setattr(scheduler, "wait_for", finish_receive_while_timeout_unwinds)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock, scheduler=scheduler)
+    upstream = _ReceiveAtTimeoutUpstream(release_receive)
+    session = _make_bridge_session(key_value="virtual-reader-timeout-recheck")
+    session.upstream = cast(UpstreamWebSocket, upstream)
+    receive_timeout = SimpleNamespace(
+        timeout_seconds=5.0,
+        error_code="stream_idle_timeout",
+        error_message="Upstream stream idle timeout",
+    )
+    process_text = AsyncMock()
+    retire_after_drain = AsyncMock(return_value=True)
+    fail_reader = AsyncMock()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_next_websocket_receive_timeout", AsyncMock(return_value=receive_timeout))
+    monkeypatch.setattr(service, "_process_http_bridge_upstream_text", process_text)
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire_after_drain)
+    retry_precreated = AsyncMock(return_value=False)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(service, "_fail_http_bridge_reader_and_maybe_retire", fail_reader)
+
+    reader_task = scheduler.create_task(service._relay_http_bridge_upstream_messages(session))
+    await scheduler.drain()
+    assert upstream.receive_started.is_set()
+
+    await scheduler.advance(5.0)
+    await reader_task
+
+    assert clock.monotonic() == pytest.approx(5.0)
+    process_text.assert_awaited_once_with(session, '{"type":"response.completed"}')
+    retire_after_drain.assert_awaited_once_with(session)
+    retry_precreated.assert_not_awaited()
+    fail_reader.assert_not_awaited()
+    assert upstream.receive_cancelled is False
+    assert session.closed is True
+    await scheduler.drain()
+    assert scheduler._tasks == set()
 
 
 def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_safe_cap() -> None:
@@ -14647,7 +14833,8 @@ async def test_close_http_bridge_session_fails_pending_downstream_requests() -> 
 async def test_close_http_bridge_session_uses_one_resource_owner_for_concurrent_callers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    scheduler = _RecordingVirtualScheduler(VirtualClock())
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), scheduler=scheduler)
     session = _make_bridge_session(key_value="close-single-flight")
     close_started = asyncio.Event()
     release_close = asyncio.Event()
@@ -14674,6 +14861,7 @@ async def test_close_http_bridge_session_uses_one_resource_owner_for_concurrent_
     assert upstream_close_calls == 1
     release_account_lease.assert_awaited_once()
     assert service._http_bridge_detached_sessions == {}
+    assert any(name and name.startswith("http-bridge-resource-close-") for name in scheduler.task_names)
 
 
 @pytest.mark.asyncio
@@ -14966,6 +15154,46 @@ async def test_await_cancelled_task_defers_stubborn_child_cleanup() -> None:
         if not cleanup_tasks:
             break
         await asyncio.sleep(0)
+    assert cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_await_cancelled_task_timeout_uses_injected_scheduler() -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    child_cancelled = asyncio.Event()
+    release_child = asyncio.Event()
+
+    async def stubborn_child() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            await release_child.wait()
+
+    child = scheduler.create_task(stubborn_child())
+    cleanup_tasks: set[asyncio.Task[None]] = set()
+    waiter = scheduler.create_task(
+        proxy_service._await_cancelled_task(
+            child,
+            timeout_seconds=0.25,
+            label="virtual stubborn cleanup",
+            cleanup_tasks=cleanup_tasks,
+            scheduler=scheduler,
+        )
+    )
+    await scheduler.drain()
+
+    assert child_cancelled.is_set()
+    assert not waiter.done()
+
+    await scheduler.advance(0.25)
+
+    assert await waiter is False
+    assert cleanup_tasks
+    release_child.set()
+    await child
+    await scheduler.drain()
     assert cleanup_tasks == set()
 
 
@@ -24510,7 +24738,8 @@ async def test_recovery_submit_owner_fence_rejection_retires_before_send() -> No
 
 @pytest.mark.asyncio
 async def test_recovery_submit_cancellation_after_alias_commit_restores_previous_owner() -> None:
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    scheduler = _RecordingVirtualScheduler(VirtualClock())
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), scheduler=scheduler)
     key = _make_account_neutral_replay_session_key("alias-commit-cancel")
     send_text = AsyncMock()
     close = AsyncMock()
@@ -24601,6 +24830,9 @@ async def test_recovery_submit_cancellation_after_alias_commit_restores_previous
     assert session.closed is True
     assert session.queued_request_count == 0
     assert session.pending_requests == deque()
+    # Registration and its cancellation rollback are both scheduler-owned.
+    assert scheduler.task_coroutines.count("_register_http_bridge_recovery_turn_state_locked") == 1
+    assert scheduler.task_coroutines.count("rollback_recovery_turn_state_registration") == 1
 
 
 @pytest.mark.asyncio
@@ -28001,6 +28233,7 @@ async def test_http_bridge_eventless_timeout_clears_durable_anchor_only_for_expi
             *,
             label: str,
             cleanup_tasks: set[asyncio.Task[None]] | None = None,
+            scheduler_owner: Any | None = None,
         ) -> bool:
             if label == "HTTP bridge upstream receive after missing response.created":
                 return False
@@ -28008,6 +28241,7 @@ async def test_http_bridge_eventless_timeout_clears_durable_anchor_only_for_expi
                 task,
                 label=label,
                 cleanup_tasks=cleanup_tasks,
+                scheduler_owner=scheduler_owner,
             )
 
         monkeypatch.setattr(
@@ -28132,6 +28366,7 @@ async def test_http_bridge_eventless_timeout_does_not_mark_or_clear_after_late_r
         *,
         label: str,
         cleanup_tasks: set[asyncio.Task[None]] | None = None,
+        scheduler_owner: Any | None = None,
     ) -> bool:
         if label == "HTTP bridge upstream receive after missing response.created":
             upstream.release_receive.set()
@@ -28139,7 +28374,12 @@ async def test_http_bridge_eventless_timeout_does_not_mark_or_clear_after_late_r
             await asyncio.sleep(0)
             assert task is not None and task.done() and not task.cancelled()
             return True
-        return await original_cancel_reader_child(task, label=label, cleanup_tasks=cleanup_tasks)
+        return await original_cancel_reader_child(
+            task,
+            label=label,
+            cleanup_tasks=cleanup_tasks,
+            scheduler_owner=scheduler_owner,
+        )
 
     monkeypatch.setattr(
         http_bridge_upstream_events_module,
@@ -28822,7 +29062,8 @@ async def test_http_bridge_liveness_send_receive_race_settles_request_once(
                 error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
             )
 
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    scheduler = _RecordingVirtualScheduler(VirtualClock())
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), scheduler=scheduler)
     sibling_queue: asyncio.Queue[str | None] = asyncio.Queue()
     sibling_state = proxy_service._WebSocketRequestState(
         request_id="req-bridge-liveness-race-sibling",
@@ -28938,6 +29179,8 @@ async def test_http_bridge_liveness_send_receive_race_settles_request_once(
     retry_circuit_attempt_selection = retire_call.kwargs["retry_circuit_attempt_selection"]
     assert retry_circuit_attempt_selection.attempt is request_state.response_create_attempt
     assert request_state.response_create_attempt.disarmed is True
+    assert "http-bridge-liveness-send-settlement" in scheduler.task_names
+    assert "_settle_claimed_http_bridge_liveness_failure" in scheduler.task_coroutines
 
 
 @pytest.mark.asyncio

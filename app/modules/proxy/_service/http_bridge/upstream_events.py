@@ -38,6 +38,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     is_account_neutral_websocket_error_code,
 )
+from app.core.clock import scheduler_for
 from app.core.errors import response_failed_event
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import (
@@ -1168,6 +1169,7 @@ async def _cancel_http_bridge_reader_child(
     task: asyncio.Task[Any] | None,
     *,
     label: str,
+    scheduler_owner: Any,
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
 ) -> bool:
     if task is None:
@@ -1186,6 +1188,7 @@ async def _cancel_http_bridge_reader_child(
                 task,
                 label=label,
                 cleanup_tasks=cleanup_tasks,
+                scheduler=scheduler_for(scheduler_owner),
             )
         )
     except Exception:
@@ -1991,6 +1994,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         self: Any,
         session: "_HTTPBridgeSession",
     ) -> None:
+        scheduler = scheduler_for(self)
         runtime_settings = _service_get_settings()
         relay_upstream = session.upstream
         receive_task: asyncio.Task[UpstreamWebSocketMessage] | None = None
@@ -2032,7 +2036,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
                 )
                 if receive_task is None:
-                    receive_task = asyncio.create_task(session.upstream.receive())
+                    receive_task = scheduler.create_task(session.upstream.receive())
 
                 message: UpstreamWebSocketMessage | None = None
                 timed_out = False
@@ -2050,8 +2054,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                     # asyncio.wait round trip; the finally below cancels the
                     # long-lived waiter once at loop exit.
                     if wakeup_task is None:
-                        wakeup_task = asyncio.create_task(session.upstream_reader_wakeup.wait())
-                    done, _pending = await asyncio.wait(
+                        wakeup_task = scheduler.create_task(session.upstream_reader_wakeup.wait())
+                    done, _pending = await scheduler.wait(
                         (receive_task, wakeup_task),
                         timeout=receive_timeout.timeout_seconds if receive_timeout is not None else None,
                         return_when=asyncio.FIRST_COMPLETED,
@@ -2124,6 +2128,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                     receive_task,
                                     label="HTTP bridge upstream receive after missing response.created",
                                     cleanup_tasks=self._background_cleanup_tasks,
+                                    scheduler_owner=self,
                                 )
                                 if receive_task.done() and not receive_task.cancelled():
                                     # A response (or a typed receive failure)
@@ -2221,6 +2226,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             receive_task,
                             label="HTTP bridge upstream receive after timeout",
                             cleanup_tasks=self._background_cleanup_tasks,
+                            scheduler_owner=self,
                         )
                         if not receive_cancelled:
                             raise RuntimeError("HTTP bridge upstream receive did not cancel after timeout")
@@ -2399,11 +2405,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 wakeup_task,
                 label="HTTP bridge reader wakeup wait",
                 cleanup_tasks=self._background_cleanup_tasks,
+                scheduler_owner=self,
             )
             await _cancel_http_bridge_reader_child(
                 receive_task,
                 label="HTTP bridge upstream receive",
                 cleanup_tasks=self._background_cleanup_tasks,
+                scheduler_owner=self,
             )
 
     async def _process_http_bridge_upstream_text(

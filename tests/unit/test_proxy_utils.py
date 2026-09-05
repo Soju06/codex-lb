@@ -43786,7 +43786,7 @@ async def test_select_account_with_budget_times_out_during_settings_fetch(monkey
             return settings
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SlowSettingsCache())
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 0.01)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 0.01)
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
@@ -43814,7 +43814,7 @@ async def test_select_account_with_budget_forwards_estimated_lease_tokens(monkey
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     selection = await service._select_account_with_budget(
         deadline=123.0,
@@ -43857,7 +43857,7 @@ async def test_select_account_with_budget_intersects_cap_spillover_with_request_
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     await service._select_account_with_budget(
         deadline=123.0,
@@ -43901,7 +43901,7 @@ async def test_select_account_with_budget_reconciles_sticky_mapping_for_preferre
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     await service._select_account_with_budget(
         deadline=123.0,
@@ -43953,7 +43953,7 @@ async def test_select_account_with_budget_keeps_thread_seed_for_first_exact_owne
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     await service._select_account_with_budget(
         deadline=123.0,
@@ -43994,7 +43994,7 @@ async def test_select_account_with_budget_preserves_conversation_check_for_prefe
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     selection = await service._select_account_with_budget(
         deadline=123.0,
@@ -44032,7 +44032,7 @@ async def test_single_account_routing_does_not_narrow_conversation_ownership_sco
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     selection = await service._select_account_with_budget(
         deadline=123.0,
@@ -44064,7 +44064,7 @@ async def test_single_account_routing_skips_soft_preferred_account_outside_singl
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     selection = await service._select_account_with_budget(
         deadline=123.0,
@@ -44101,7 +44101,7 @@ async def test_select_account_with_budget_reserves_stream_slot_for_reattach(
     settings.proxy_account_stream_recovery_reserve = 3
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     await service._select_account_with_budget(
         deadline=123.0,

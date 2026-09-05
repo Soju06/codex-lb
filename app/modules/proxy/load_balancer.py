@@ -2773,38 +2773,13 @@ def background_recovery_state_from_account(
             primary_entry=primary_entry,
             long_window_entry=secondary_entry,
         )
-        normalized_usage = _normalize_usage_inputs(
-            account=account,
-            primary_entry=primary_entry,
-            secondary_entry=secondary_entry,
-            now_epoch=int(now),
-        )
-        credits_has, credits_unlimited, credits_balance = _extract_credit_status(
-            primary_entry,
-            normalized_usage.effective_secondary_entry,
-            secondary_entry,
-        )
-        quota_available = usage_windows_allow_recovery(
-            _recovery_primary_used(
-                plan_type=account.plan_type,
-                primary_used=normalized_usage.primary_used,
-            ),
-            normalized_usage.secondary_used,
-            credits_has,
-            credits_unlimited,
-            credits_balance,
-        )
         # Keep elapsed resets intact until _state_from_account evaluates the
-        # selector's normal expiry path; quota and freshness gate final repair.
+        # selector's normal expiry path; only freshness gates the final repair.
         if blocked_at is not None and reset_at is not None and reset_at <= now:
             minimum_floor_deadline = blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
             # An early explicit reset does not let scheduler reconciliation
             # bypass the persisted post-429 minimum floor.
-            if (
-                now < minimum_floor_deadline
-                or not quota_available
-                or not _usage_entry_recorded_after_block(freshness_entry, blocked_at)
-            ):
+            if now < minimum_floor_deadline or not _usage_entry_recorded_after_block(freshness_entry, blocked_at):
                 return replace(
                     state,
                     status=AccountStatus.RATE_LIMITED,

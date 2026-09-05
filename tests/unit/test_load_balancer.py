@@ -4038,43 +4038,6 @@ def test_background_recovery_state_keeps_rate_limited_when_long_window_exhausted
     assert state.status == AccountStatus.RATE_LIMITED
 
 
-def test_background_recovery_state_requires_all_quota_windows_after_reset_elapses(monkeypatch):
-    now = 1_700_000_000.0
-    blocked = now - 7200.0
-    past_reset = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
-    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
-
-    account = _make_test_account(
-        status=AccountStatus.RATE_LIMITED,
-        reset_at=past_reset,
-        blocked_at=int(blocked),
-        plan_type="plus",
-    )
-    fresh_primary = _make_test_usage(
-        window="primary",
-        used_percent=10.0,
-        reset_at=int(now + 3600),
-        recorded_at=_epoch_to_naive_utc(now - 30),
-    )
-    exhausted_secondary = _make_test_usage(
-        window="secondary",
-        used_percent=100.0,
-        reset_at=int(now + 5 * 24 * 3600),
-        recorded_at=_epoch_to_naive_utc(now - 30),
-    )
-
-    state = background_recovery_state_from_account(
-        account=account,
-        primary_entry=fresh_primary,
-        secondary_entry=exhausted_secondary,
-    )
-
-    assert state.status == AccountStatus.RATE_LIMITED
-    assert state.reset_at == pytest.approx(past_reset)
-    assert state.blocked_at == pytest.approx(blocked)
-
-
 def test_background_recovery_state_allows_alias_credit_recovery_after_reset_elapses(monkeypatch):
     now = 1_700_000_000.0
     blocked = now - 7200.0

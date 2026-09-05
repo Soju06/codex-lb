@@ -87,7 +87,7 @@ class _DummyFacade:
         return None
 
 
-async def _no_op_release_gate(_request_state: object, _response_create_gate: object) -> None:
+async def _no_op_release_gate(_request_state: object, _response_create_gate: object, **_kwargs: object) -> None:
     return None
 
 

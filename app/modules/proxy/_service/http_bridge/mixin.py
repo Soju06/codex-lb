@@ -2346,20 +2346,30 @@ class _HTTPBridgeMixin(
 
         async def abort_selected_handoff() -> None:
             session.closed = True
+            # ``shield(coroutine)`` would ``ensure_future`` an unowned task; the
+            # scheduler spawns it so a simulation owns the outliving cleanup.
+            scheduler = scheduler_for(self)
             try:
-                await asyncio.shield(upstream.close())
+                await asyncio.shield(scheduler.create_task(upstream.close(), name="http-bridge-handoff-abort-close"))
             except BaseException:
                 logger.debug("Failed to close HTTP bridge replacement websocket", exc_info=True)
             selected_lease = selected_account_lease
             old_lease = session.account_lease
             try:
-                await asyncio.shield(release_selected_account_lease())
+                await asyncio.shield(
+                    scheduler.create_task(release_selected_account_lease(), name="http-bridge-handoff-abort-lease")
+                )
             except BaseException:
                 logger.debug("Failed to release HTTP bridge replacement lease", exc_info=True)
             if old_lease is not None and old_lease is not selected_lease:
                 session.account_lease = None
                 try:
-                    await asyncio.shield(self._load_balancer.release_account_lease(old_lease))
+                    await asyncio.shield(
+                        scheduler.create_task(
+                            self._load_balancer.release_account_lease(old_lease),
+                            name="http-bridge-handoff-abort-old-lease",
+                        )
+                    )
                 except BaseException:
                     logger.debug("Failed to release HTTP bridge old account lease", exc_info=True)
             complete_failed_handoff()

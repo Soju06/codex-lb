@@ -31190,7 +31190,9 @@ async def test_process_upstream_websocket_text_retries_account_model_rejection_w
     assert response_create_gate.locked() is True
     assert list(pending_requests) == []
 
-    await proxy_service._release_websocket_response_create_gate(pending_request, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(
+        pending_request, response_create_gate, scheduler=REAL_SCHEDULER
+    )
 
     assert pending_request.response_create_gate is None
     assert pending_request.response_create_gate_acquired is False
@@ -32132,7 +32134,9 @@ async def test_hidden_http_bridge_model_capacity_retry_suppresses_reconnect_wait
     assert request_state.response_create_gate_acquired is True
     assert response_create_gate.locked() is True
     assert younger_gate_waiter.done() is False
-    await proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(
+        request_state, response_create_gate, scheduler=REAL_SCHEDULER
+    )
     await asyncio.wait_for(younger_gate_waiter, timeout=1.0)
     response_create_gate.release()
 
@@ -43639,9 +43643,13 @@ async def test_response_create_admission_waits_on_session_gate_before_shared_cap
     shared_lease = await service._get_work_admission().acquire_response_create()
     shared_lease.release()
 
-    await proxy_service._release_websocket_response_create_gate(first_request, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(
+        first_request, response_create_gate, scheduler=REAL_SCHEDULER
+    )
     await second_task
-    await proxy_service._release_websocket_response_create_gate(second_request, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(
+        second_request, response_create_gate, scheduler=REAL_SCHEDULER
+    )
 
     assert second_request.response_create_gate_acquired is False
     assert second_request.response_create_admission is None
@@ -43679,7 +43687,9 @@ async def test_response_create_gate_release_waits_for_account_lease_release():
     request_state.account_response_create_release = release_account_lease
 
     release_task = asyncio.create_task(
-        proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+        proxy_service._release_websocket_response_create_gate(
+            request_state, response_create_gate, scheduler=REAL_SCHEDULER
+        )
     )
     await release_started.wait()
     await asyncio.sleep(0)
@@ -43728,7 +43738,9 @@ async def test_response_create_gate_release_reraises_caller_cancellation_after_c
     request_state.account_response_create_release = release_account_lease
 
     release_task = asyncio.create_task(
-        proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+        proxy_service._release_websocket_response_create_gate(
+            request_state, response_create_gate, scheduler=REAL_SCHEDULER
+        )
     )
     await release_started.wait()
     release_task.cancel()
@@ -50508,7 +50520,9 @@ async def test_retry_http_bridge_precreated_request_reacquires_replacement_respo
     assert request_state.response_create_admission_reacquire_required is False
     replacement_upstream.send_text.assert_awaited_once_with(request_state.request_text)
 
-    await proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(
+        request_state, response_create_gate, scheduler=REAL_SCHEDULER
+    )
 
     release_lease.assert_awaited_once_with(replacement_lease)
     assert request_state.account_response_create_lease is None
@@ -50664,7 +50678,9 @@ async def test_retry_http_bridge_precreated_request_does_not_send_after_admissio
 
     acquire_admission.assert_awaited_once_with()
     upstream.send_text.assert_not_awaited()
-    await proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(
+        request_state, response_create_gate, scheduler=REAL_SCHEDULER
+    )
     release_lease.assert_awaited_once_with(replacement_lease)
     assert replacement_admission_gate._value == 1
 
@@ -50736,7 +50752,9 @@ async def test_retry_http_bridge_precreated_request_bounds_admission_wait_by_dea
     release_lease.assert_awaited_once_with(replacement_lease)
     assert request_state.account_response_create_lease is None
     assert request_state.response_create_admission is None
-    await proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(
+        request_state, response_create_gate, scheduler=REAL_SCHEDULER
+    )
 
 
 @pytest.mark.asyncio

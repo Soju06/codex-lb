@@ -38,6 +38,7 @@ from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # 
 from app.core.clients.proxy_websocket import (
     UpstreamWebSocketMessage,
 )
+from app.core.clock import Scheduler
 from app.core.errors import (
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_NOT_FOUND_CODE,
@@ -1839,7 +1840,11 @@ def _pop_matching_websocket_request_states(
 async def _release_websocket_response_create_gate(
     request_state: _WebSocketRequestState,
     response_create_gate: asyncio.Semaphore,
+    *,
+    scheduler: Scheduler,
 ) -> None:
+    """Release every create owner; ``scheduler`` owns the deferred lease-release task."""
+
     cancellation: asyncio.CancelledError | None = None
     account_response_create_lease = request_state.account_response_create_lease
     account_response_create_release = request_state.account_response_create_release
@@ -1850,7 +1855,8 @@ async def _release_websocket_response_create_gate(
         request_state.response_create_admission = None
     if account_response_create_lease is not None and account_response_create_release is not None:
         cancellation = await _await_cleanup_deferring_cancellation(
-            account_response_create_release(account_response_create_lease)
+            account_response_create_release(account_response_create_lease),
+            scheduler=scheduler,
         )
     request_state.awaiting_response_created = False
     request_state.response_create_gate = None

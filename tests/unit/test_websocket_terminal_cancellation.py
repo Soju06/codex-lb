@@ -15,6 +15,7 @@ from fastapi import WebSocket
 
 from app.core import shutdown as shutdown_state
 from app.core.clients.proxy_websocket import UpstreamWebSocket
+from app.core.clock import REAL_SCHEDULER, Scheduler
 from app.core.utils.time import utcnow
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
@@ -1281,10 +1282,12 @@ async def test_terminal_message_ownership_survives_relay_cancellation(
     async def _blocking_release_gate(
         request_state: proxy_service._WebSocketRequestState,
         response_create_gate: asyncio.Semaphore,
+        *,
+        scheduler: Scheduler,
     ) -> None:
         gate_entered.set()
         await release_gate.wait()
-        await original_release_gate(request_state, response_create_gate)
+        await original_release_gate(request_state, response_create_gate, scheduler=scheduler)
 
     monkeypatch.setattr(
         websocket_mixin,
@@ -2210,7 +2213,7 @@ async def test_scope_cancellation_while_waiting_for_reconnect_reader_preserves_a
         for state in list(pending_requests):
             gate = state.response_create_gate
             if gate is not None:
-                await websocket_mixin._release_websocket_response_create_gate(state, gate)
+                await websocket_mixin._release_websocket_response_create_gate(state, gate, scheduler=REAL_SCHEDULER)
         pending_requests.clear()
 
     claim_unsent = AsyncMock(wraps=websocket_mixin._claim_unsent_websocket_request_for_reconnect)

@@ -601,7 +601,11 @@ async def _reject_websocket_owner_switch_blocked(
         error_message=error_message,
         downstream_activity=downstream_activity,
     )
-    await _release_websocket_response_create_gate(request_state, response_create_gate)
+    await _release_websocket_response_create_gate(
+        request_state,
+        response_create_gate,
+        scheduler=scheduler_for(proxy),
+    )
 
 
 async def _reject_websocket_capability_switch_blocked(
@@ -635,7 +639,11 @@ async def _reject_websocket_capability_switch_blocked(
         error_message=error_message,
         downstream_activity=downstream_activity,
     )
-    await _release_websocket_response_create_gate(request_state, response_create_gate)
+    await _release_websocket_response_create_gate(
+        request_state,
+        response_create_gate,
+        scheduler=scheduler_for(proxy),
+    )
 
 
 async def _close_downstream_after_sequenced_replay_refusal(
@@ -1583,7 +1591,11 @@ class _WebSocketMixin:
                             error_type="server_error",
                             downstream_activity=downstream_activity,
                         )
-                        await _release_websocket_response_create_gate(request_state, response_create_gate)
+                        await _release_websocket_response_create_gate(
+                            request_state,
+                            response_create_gate,
+                            scheduler=scheduler_for(proxy),
+                        )
                         continue
                     payload = _parse_websocket_payload(text_data)
                     if payload is None:
@@ -1597,7 +1609,11 @@ class _WebSocketMixin:
                             error_type="server_error",
                             downstream_activity=downstream_activity,
                         )
-                        await _release_websocket_response_create_gate(request_state, response_create_gate)
+                        await _release_websocket_response_create_gate(
+                            request_state,
+                            response_create_gate,
+                            scheduler=scheduler_for(proxy),
+                        )
                         continue
                     if request_state.response_create_gate_acquired:
                         # Ordinary pre-created replay retains its create gate.
@@ -2394,6 +2410,7 @@ class _WebSocketMixin:
                         await _release_websocket_response_create_gate(
                             response_create_request_state,
                             response_create_gate,
+                            scheduler=scheduler_for(proxy),
                         )
                         continue
                     except asyncio.CancelledError:
@@ -2405,6 +2422,7 @@ class _WebSocketMixin:
                         await _release_websocket_response_create_gate(
                             response_create_request_state,
                             response_create_gate,
+                            scheduler=scheduler_for(proxy),
                         )
                         raise
                     except Exception:
@@ -2416,6 +2434,7 @@ class _WebSocketMixin:
                         await _release_websocket_response_create_gate(
                             response_create_request_state,
                             response_create_gate,
+                            scheduler=scheduler_for(proxy),
                         )
                         raise
 
@@ -2530,7 +2549,11 @@ class _WebSocketMixin:
                             async with pending_lock:
                                 if request_state in pending_requests:
                                     pending_requests.remove(request_state)
-                            await _release_websocket_response_create_gate(request_state, response_create_gate)
+                            await _release_websocket_response_create_gate(
+                                request_state,
+                                response_create_gate,
+                                scheduler=scheduler_for(proxy),
+                            )
                         continue
                     await release_current_account_lease()
                     account_lease = request_state.websocket_stream_lease
@@ -2718,7 +2741,11 @@ class _WebSocketMixin:
                             async with pending_lock:
                                 if request_state in pending_requests:
                                     pending_requests.remove(request_state)
-                            await _release_websocket_response_create_gate(request_state, response_create_gate)
+                            await _release_websocket_response_create_gate(
+                                request_state,
+                                response_create_gate,
+                                scheduler=scheduler_for(proxy),
+                            )
                         await proxy._emit_websocket_terminal_error(
                             websocket,
                             client_send_lock=client_send_lock,
@@ -5584,7 +5611,11 @@ class _WebSocketMixin:
             )
 
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
-            await _release_websocket_response_create_gate(created_request_state, response_create_gate)
+            await _release_websocket_response_create_gate(
+                created_request_state,
+                response_create_gate,
+                scheduler=scheduler_for(proxy),
+            )
 
         if request_state is not None:
             await proxy._touch_active_websocket_thread_affinity(request_state, account)
@@ -5945,7 +5976,11 @@ class _WebSocketMixin:
                         request_state.error_param_override = error.param_state if error else None
                         upstream_control.reconnect_requested = True
                         upstream_control.suppress_downstream_event = True
-                        await _release_websocket_response_create_gate(request_state, response_create_gate)
+                        await _release_websocket_response_create_gate(
+                            request_state,
+                            response_create_gate,
+                            scheduler=scheduler_for(proxy),
+                        )
                         upstream_control.downstream_texts = [
                             json.dumps(
                                 _facade()._security_work_advisory_event(
@@ -6186,7 +6221,11 @@ class _WebSocketMixin:
         response_service_tier = request_state.service_tier
 
         if request_state.draining_until_terminal:
-            await _release_websocket_response_create_gate(request_state, response_create_gate)
+            await _release_websocket_response_create_gate(
+                request_state,
+                response_create_gate,
+                scheduler=scheduler_for(proxy),
+            )
             await proxy._release_websocket_request_state_reservation(request_state)
             # The reservation is settled; clear any terminal-bookkeeping
             # settlement claim so abort handling does not settle it again.
@@ -6280,7 +6319,11 @@ class _WebSocketMixin:
         ):
             settlement.account_health_error = False
         proxy._cancel_request_state_api_key_reservation_heartbeat(request_state)
-        await _release_websocket_response_create_gate(request_state, response_create_gate)
+        await _release_websocket_response_create_gate(
+            request_state,
+            response_create_gate,
+            scheduler=scheduler_for(proxy),
+        )
         if settlement.account_health_error:
             # Connection safety must not wait on settlement or health
             # persistence. The health write remains ordered below.
@@ -6568,7 +6611,11 @@ class _WebSocketMixin:
         )
         response_create_gate = request_state.response_create_gate
         if response_create_gate is not None:
-            await _release_websocket_response_create_gate(request_state, response_create_gate)
+            await _release_websocket_response_create_gate(
+                request_state,
+                response_create_gate,
+                scheduler=scheduler_for(proxy),
+            )
         async with client_send_lock:
             await websocket.send_text(
                 _serialize_websocket_error_event(

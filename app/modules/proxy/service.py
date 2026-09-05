@@ -1271,6 +1271,7 @@ class ProxyService(
         account_id: str | None = None,
         surface: str = "websocket",
     ) -> None:
+        scheduler = self._scheduler
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
         if bridge_session is not None:
             timeout_seconds = _http_bridge_admission_timeout_seconds(
@@ -1288,7 +1289,7 @@ class ProxyService(
             )
             request_state.account_response_create_release = self._load_balancer.release_account_lease
         try:
-            await self._scheduler.wait_for(response_create_gate.acquire(), timeout=timeout_seconds)
+            await scheduler.wait_for(response_create_gate.acquire(), timeout=timeout_seconds)
         except TimeoutError as exc:
             await self._release_request_state_account_response_create_lease(request_state)
             request_state.response_create_gate = None
@@ -1394,7 +1395,7 @@ class ProxyService(
             )
         except BaseException:
             await self._release_request_state_account_response_create_lease(request_state)
-            await _release_websocket_response_create_gate(request_state, response_create_gate)
+            await _release_websocket_response_create_gate(request_state, response_create_gate, scheduler=scheduler)
             raise
 
     async def _release_request_state_account_response_create_lease(

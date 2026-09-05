@@ -161,7 +161,9 @@ class _VirtualTimeout:
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
         traceback: TracebackType | None,
-    ) -> bool:
+    ) -> None:
+        # Never suppresses: it either re-raises the deadline as ``TimeoutError``
+        # or lets the body's exception propagate.
         self._exited = True
         if self._timer is not None:
             self._scheduler._disarm(self._timer)
@@ -173,7 +175,6 @@ class _VirtualTimeout:
                 and issubclass(exc_type, asyncio.CancelledError)
             ):
                 raise TimeoutError from exc
-        return False
 
 
 class _VirtualFailAfter:

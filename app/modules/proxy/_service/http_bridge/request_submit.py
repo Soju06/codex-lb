@@ -2717,6 +2717,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                 await _release_websocket_response_create_gate(
                                     warmup_state,
                                     session.response_create_gate,
+                                    scheduler=scheduler_for(self),
                                 )
                         return
                     if event_block is None:
@@ -2911,7 +2912,9 @@ class _HTTPBridgeRequestSubmitMixin:
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
         if request_state.response_create_gate is not None:
             if gate_acquired or request_state.response_create_gate_acquired:
-                await _release_websocket_response_create_gate(request_state, session.response_create_gate)
+                await _release_websocket_response_create_gate(
+                    request_state, session.response_create_gate, scheduler=scheduler_for(self)
+                )
             else:
                 account_response_create_lease = request_state.account_response_create_lease
                 account_response_create_release = request_state.account_response_create_release
@@ -2926,7 +2929,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.response_create_gate = None
                 request_state.response_create_gate_acquired = False
         elif gate_acquired:
-            await _release_websocket_response_create_gate(request_state, session.response_create_gate)
+            await _release_websocket_response_create_gate(
+                request_state, session.response_create_gate, scheduler=scheduler_for(self)
+            )
         if retire_closed_session:
             await self._retire_stale_pending_http_bridge_session(
                 session,
@@ -3122,7 +3127,9 @@ class _HTTPBridgeRequestSubmitMixin:
             # completed handler that wins first keeps its local queue reference;
             # a detach that wins first leaves no queue for that handler to claim.
             request_state.event_queue = None
-        await _release_websocket_response_create_gate(request_state, session.response_create_gate)
+        await _release_websocket_response_create_gate(
+            request_state, session.response_create_gate, scheduler=scheduler_for(self)
+        )
         if not detached:
             if request_state.operation_replay:
                 # Replay requests are delivered from the durable transcript

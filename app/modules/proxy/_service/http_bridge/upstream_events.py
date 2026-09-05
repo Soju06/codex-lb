@@ -3062,8 +3062,17 @@ class _HTTPBridgeUpstreamEventsMixin:
 
             async def persist_grouped_terminal_events() -> Exception | None:
                 first_error: Exception | None = None
+                # Spawned through the scheduler (``gather`` would ``ensure_future``
+                # each coroutine into an unowned task) so a simulation owns the
+                # per-request persistence work of a grouped terminal.
                 persistence_results = await asyncio.gather(
-                    *(persist_one_grouped_terminal_event(item) for item in grouped_terminal_events),
+                    *(
+                        scheduler.create_task(
+                            persist_one_grouped_terminal_event(item),
+                            name=f"http-bridge-grouped-terminal-persist-{session.durable_session_id}",
+                        )
+                        for item in grouped_terminal_events
+                    ),
                     return_exceptions=True,
                 )
                 for persistence_result in persistence_results:
@@ -4087,7 +4096,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                     logger.debug("Failed to release HTTP bridge recovery origin lease", exc_info=True)
 
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
-            await _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
+            await _release_websocket_response_create_gate(
+                created_request_state, session.response_create_gate, scheduler=scheduler
+            )
 
         if terminal_request_state is not None and settlement_event_type in {"response.failed", "error"}:
             if settlement_event_type == "error":

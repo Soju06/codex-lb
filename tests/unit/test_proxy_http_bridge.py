@@ -41,7 +41,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     WebsocketsUpstreamWebSocket,
 )
-from app.core.clock import RealScheduler
+from app.core.clock import REAL_SCHEDULER, RealScheduler
 from app.core.config.settings import Settings
 from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, openai_error
 from app.core.openai.models import OpenAIError, OpenAIResponsePayload
@@ -25270,7 +25270,9 @@ async def test_submit_http_bridge_request_does_not_send_after_retirement_between
         pass
     finally:
         if request_state.response_create_gate_acquired:
-            await proxy_service._release_websocket_response_create_gate(request_state, session.response_create_gate)
+            await proxy_service._release_websocket_response_create_gate(
+                request_state, session.response_create_gate, scheduler=REAL_SCHEDULER
+            )
 
     assert stale_send_seen is False
 
@@ -34126,7 +34128,7 @@ async def test_http_bridge_reader_crash_marks_session_closed_before_releasing_pe
 
     async def fail_pending_requests(**_kwargs: object) -> None:
         assert session.closed is True
-        await proxy_service._release_websocket_response_create_gate(request_state, gate)
+        await proxy_service._release_websocket_response_create_gate(request_state, gate, scheduler=REAL_SCHEDULER)
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service, "_process_http_bridge_upstream_text", AsyncMock(side_effect=RuntimeError("boom")))

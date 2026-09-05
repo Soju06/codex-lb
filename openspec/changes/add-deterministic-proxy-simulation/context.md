@@ -104,7 +104,23 @@ transport loops, the request-log shutdown drain stays on `loop.time()`, and
 the process-global TTL caches (stale previous-response, upstream transport
 failure, account and rate-limit caches) read the wall clock by design. The
 property turn stubs `_release_websocket_reservation`,
-`_reconnect_http_bridge_session`, `_release_retry_account_lease` and
-`_get_work_admission`, so ownership of the api-key settlement/heartbeat,
-reconnect, request-log and operation-event spawns is proven by the
-recording-scheduler unit tests rather than by the 200-seed run.
+`_settle_stream_api_key_usage`, `_reconnect_http_bridge_session`,
+`_release_retry_account_lease`, `_get_work_admission` and the load balancer's
+`record_success`, so ownership of the api-key settlement/heartbeat, reconnect,
+request-log and operation-event spawns is proven by the recording-scheduler
+unit tests rather than by the 200-seed run.
+
+Spawn channels that used to bypass the scheduler on the turn path now go
+through it: the three `asyncio.shield(<coroutine>)` sites in the reconnect
+abort path shield a scheduler-created task instead (`shield` would
+`ensure_future` an unowned one), the grouped-terminal persistence `gather`
+receives scheduler-created tasks, and
+`_await_result_deferring_cancellation` / `_await_cleanup_deferring_cancellation`
+take a `scheduler` (real default) and spawn a coroutine through it, which
+`_release_websocket_response_create_gate` requires from every caller. All of
+these are `asyncio.create_task` under `RealScheduler`, so production is
+unchanged. Allowance: the route-level cleanups in `app/modules/proxy/api.py`
+call the deferring-cancellation helpers with the real default; the route layer
+is outside the simulated turn, and the guard PR should list
+`app/core/utils/shared_future.py` (its `ensure_future` fallback serves
+non-coroutine awaitables) alongside the proxy modules it scans.

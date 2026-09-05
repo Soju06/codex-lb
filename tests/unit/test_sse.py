@@ -226,6 +226,8 @@ def test_lifecycle_event_types_cover_terminal_and_created_frames():
     assert _LIFECYCLE_EVENT_TYPES == frozenset(
         {
             "response.created",
+            "response.queued",
+            "response.in_progress",
             "response.completed",
             "response.incomplete",
             "response.failed",

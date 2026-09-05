@@ -287,7 +287,7 @@ def _finalize_ttft_latency_ms(
 
 
 # Stream frames whose parsed payload feeds a real per-event consumer:
-# lifecycle/terminal handling and usage settlement (created/in_progress/
+# lifecycle/terminal handling and usage settlement (created/queued/in_progress/
 # completed/failed/incomplete/error), parallel tool-call rewrite + duplicate
 # side-effect suppression (response.output_item.*), and text-done suppression
 # (response.output_text.done / response.content_part.done). Canonically framed
@@ -296,6 +296,7 @@ def _finalize_ttft_latency_ms(
 _MUST_PARSE_STREAM_EVENT_TYPES = frozenset(
     {
         "response.created",
+        "response.queued",
         "response.in_progress",
         "response.completed",
         "response.failed",

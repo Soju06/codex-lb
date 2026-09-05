@@ -1907,7 +1907,19 @@ async def test_v1_responses_previous_response_owner_lookup_failure_without_http_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("delivery_point", ["created", "completed", "synthetic", "oversized", "normalized_error"])
+@pytest.mark.parametrize(
+    "delivery_point",
+    [
+        "created",
+        "completed",
+        "in_progress",
+        "queued_json",
+        "in_progress_json",
+        "synthetic",
+        "oversized",
+        "normalized_error",
+    ],
+)
 async def test_http_previous_response_owner_is_ready_before_persistence(
     app_instance, monkeypatch: pytest.MonkeyPatch, delivery_point: str
 ):
@@ -1923,6 +1935,7 @@ async def test_http_previous_response_owner_is_ready_before_persistence(
     finish_origin = asyncio.Event()
     persist_started = asyncio.Event()
     finish_persistence = asyncio.Event()
+    background_json = delivery_point.endswith("_json")
     synthesized_id = delivery_point in {"synthetic", "oversized", "normalized_error"}
     anchor_id = "req_http_owner_unobserved" if synthesized_id else "resp_http_owner_before_persistence"
     original_persist = proxy_module.ProxyService._persist_request_log
@@ -1938,6 +1951,12 @@ async def test_http_previous_response_owner_is_ready_before_persistence(
         origin_accounts.append(request.headers.get("chatgpt-account-id"))
         followup = payload.get("previous_response_id") is not None
         response_id = "resp_http_owner_followup" if followup else anchor_id
+        if background_json and not followup:
+            assert payload["stream"] is False
+            assert payload["background"] is True
+            return web.json_response(
+                {"id": response_id, "object": "response", "status": delivery_point.removesuffix("_json"), "output": []}
+            )
         response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
         await response.prepare(request)
         if synthesized_id:
@@ -1963,13 +1982,15 @@ async def test_http_previous_response_owner_is_ready_before_persistence(
             await response.write_eof()
             return response
         if not followup:
-            if delivery_point == "created":
-                event = {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}}
+            if delivery_point in {"created", "in_progress"}:
+                if delivery_point == "in_progress":
+                    await response.write(b'data: {"type":"response.output_text.delta","delta":"hello"}\n\n')
+                event = {"type": f"response.{delivery_point}", "response": {"id": response_id, "status": "in_progress"}}
             else:
                 # The supported no-created stream exposes its ID in a later terminal event.
                 event = {"type": "response.output_text.delta", "delta": "hello"}
             await response.write(("data: " + json.dumps(event) + "\n\n").encode())
-            if delivery_point == "created":
+            if delivery_point in {"created", "in_progress"}:
                 await finish_origin.wait()
         await response.write(
             (
@@ -2023,8 +2044,13 @@ async def test_http_previous_response_owner_is_ready_before_persistence(
                 assert imported.status_code == 200
             async with client.stream(
                 "POST",
-                "/v1/responses",
-                json={"model": "gpt-5.4", "input": "start", "stream": True},
+                "/backend-api/codex/responses" if background_json else "/v1/responses",
+                json={
+                    "model": "gpt-5.4",
+                    "input": "start",
+                    "stream": not background_json,
+                    **({"background": True, "instructions": "hi"} if background_json else {}),
+                },
                 headers={
                     "session_id": "sid_http_owner_before_persistence",
                     "x-request-id": anchor_id if synthesized_id else "req_http_owner_start",
@@ -2052,21 +2078,27 @@ async def test_http_previous_response_owner_is_ready_before_persistence(
                         assert len(origin_accounts) == attempts
                         return
                     assert first.status_code == 200
-                    lines = first.aiter_lines()
-                    async for line in lines:
-                        if not line.startswith("data: "):
-                            continue
-                        event = json.loads(line[6:])
-                        if event.get("type") == f"response.{delivery_point}":
-                            if event.get("response", {}).get("id") == anchor_id:
-                                break
-                    else:
-                        pytest.fail("the upstream response ID was never delivered")
-                    if delivery_point == "completed":
-                        _ = [line async for line in lines]
+                    if background_json:
+                        await first.aread()
+                        assert first.json()["id"] == anchor_id
+                        assert first.json()["status"] == delivery_point.removesuffix("_json")
                         await asyncio.wait_for(persist_started.wait(), 5)
                     else:
-                        assert not persist_started.is_set()
+                        lines = first.aiter_lines()
+                        async for line in lines:
+                            if not line.startswith("data: "):
+                                continue
+                            event = json.loads(line[6:])
+                            if event.get("type") == f"response.{delivery_point}":
+                                if event.get("response", {}).get("id") == anchor_id:
+                                    break
+                        else:
+                            pytest.fail("the upstream response ID was never delivered")
+                        if delivery_point == "completed":
+                            _ = [line async for line in lines]
+                            await asyncio.wait_for(persist_started.wait(), 5)
+                        else:
+                            assert not persist_started.is_set()
                     async with SessionLocal() as session:
                         assert (
                             await session.execute(select(RequestLog).where(RequestLog.request_id == anchor_id))

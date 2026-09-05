@@ -53,8 +53,9 @@ from app.core.errors import (
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
-from app.core.openai.models import OpenAIError, OpenAIEvent
-from app.core.openai.parsing import parse_sse_event
+from app.core.openai.models import OpenAIError, OpenAIEvent, OpenAIResponsePayload, ResponseUsage
+from app.core.openai.parsing import classify_event_type, parse_sse_event
+from app.core.openai.requests import ResponsesRequest
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
 )
@@ -408,6 +409,70 @@ from app.modules.proxy.load_balancer import AccountSelection
 
 def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
+
+
+def _canonical_background_ack(
+    event_payload: dict[str, JsonValue] | None,
+    event_type: str | None,
+) -> tuple[str, OpenAIResponsePayload] | None:
+    if event_type not in {"response.queued", "response.in_progress"}:
+        return None
+    response = event_payload.get("response") if event_payload is not None else None
+    response_id = response.get("id") if isinstance(response, dict) else None
+    if not (
+        isinstance(response, dict)
+        and response.get("object") == "response"
+        and isinstance(response_id, str)
+        and bool(response_id)
+        and response_id == response_id.strip()
+        and response.get("status") == event_type.removeprefix("response.")
+        and response.get("output") == []
+    ):
+        return None
+    # The relayed payload model drops known submodels that fail validation
+    # instead of raising, so a malformed `usage` or `error` would otherwise be
+    # discarded silently on a response classified as successful.
+    payload = OpenAIResponsePayload.model_validate(response)
+    if (response.get("usage") is None) != (payload.usage is None):
+        return None
+    if (response.get("error") is None) != (payload.error is None):
+        return None
+    return response_id, payload
+
+
+def _canonical_background_ack_response_id(
+    event_payload: dict[str, JsonValue] | None,
+    event_type: str | None,
+) -> str | None:
+    canonical_ack = _canonical_background_ack(event_payload, event_type)
+    return canonical_ack[0] if canonical_ack is not None else None
+
+
+def _is_background_json_ack(
+    stream: bool | None,
+    event_payload: dict[str, JsonValue] | None,
+    event_type: str | None,
+) -> bool:
+    return stream is False and _canonical_background_ack_response_id(event_payload, event_type) is not None
+
+
+def _settle_background_ack(
+    settlement: _StreamSettlement,
+    payload: ResponsesRequest,
+    event_payload: dict[str, JsonValue] | None,
+    response_id: str,
+) -> tuple[bool, str, ResponseUsage | None]:
+    """Treat a canonical background acknowledgement as the terminal event of a `stream: false` request."""
+    canonical_ack = (
+        _canonical_background_ack(event_payload, classify_event_type(event_payload))
+        if payload.stream is False
+        else None
+    )
+    if canonical_ack is None:
+        return False, response_id, None
+    ack_response_id, ack_payload = canonical_ack
+    settlement.response_id = ack_response_id
+    return True, ack_response_id, ack_payload.usage
 
 
 def _stream_iterator_after_capacity_admission(

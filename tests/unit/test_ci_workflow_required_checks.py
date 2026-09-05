@@ -77,6 +77,23 @@ def test_dashboard_browser_smoke_covers_both_contract_sides_and_is_required() ->
     assert "- dashboard-browser-smoke" in required_job
 
 
+def test_openspec_validation_is_required_for_spec_only_changes() -> None:
+    workflow = _ci_workflow_text()
+    trigger_block = workflow.split("concurrency:", maxsplit=1)[0]
+
+    openspec_job = _job_block(workflow, "openspec")
+    required_job = _job_block(workflow, "ci-required")
+
+    assert "pull_request:" in trigger_block
+    assert "paths:" not in trigger_block
+    assert "paths-ignore:" not in trigger_block
+    assert "\n    needs:" not in openspec_job
+    assert "\n    if:" not in openspec_job
+    assert "npx --yes @fission-ai/openspec@1.11.0 validate --specs" in openspec_job
+    assert "--strict" not in openspec_job
+    assert "- openspec" in required_job
+
+
 def test_rust_job_runs_native_routed_wire_probe_with_built_helper() -> None:
     workflow = _ci_workflow_text()
     rust_job = _job_block(workflow, "rust")

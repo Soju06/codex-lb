@@ -235,6 +235,7 @@ from app.modules.proxy.load_balancer import effective_account_concurrency_caps
 from app.modules.proxy.request_policy import (
     prepare_astra_reasoning_policy_continuation,
     validate_astra_request,
+    validate_configuration_update_policy,
 )
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
@@ -827,10 +828,14 @@ class _HTTPBridgeRequestSubmitMixin:
         request_log_id: str | None = None,
         enforce_openai_sdk_contract: bool = True,
         upstream_payload_base: JsonObject | None = None,
+        apply_astra_subscription_schema: bool = True,
     ) -> tuple[_WebSocketRequestState, str]:
-        if prepare_astra_reasoning_policy_continuation(payload, api_key):
-            upstream_payload_base = None
-        validate_astra_request(payload, api_key)
+        if apply_astra_subscription_schema:
+            if prepare_astra_reasoning_policy_continuation(payload, api_key):
+                upstream_payload_base = None
+            validate_astra_request(payload, api_key)
+        else:
+            validate_configuration_update_policy(payload, api_key, subscription=False)
         deduped_replayed_input_count: int | None = None
         deduped_replayed_input_fingerprint: str | None = None
         deduped_replayed_tool_call_count = 0

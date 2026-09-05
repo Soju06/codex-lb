@@ -18,6 +18,7 @@ preparation SHALL be idempotent.
 - **GIVEN** an API key allows only low reasoning
 - **WHEN** a request contains configuration_update selecting high
 - **THEN** the request is rejected before upstream work starts
+- **AND** the error param identifies `input.<index>.reasoning.effort`
 
 #### Scenario: Enforcement conflicts are explicit
 
@@ -38,15 +39,24 @@ preparation SHALL be idempotent.
 - **THEN** preparation retains exactly one leading configuration update selecting ultra and request-level ultra, without treating either value as max during API-key policy checks
 - **AND** only final subscription wire serialization maps both ultra values to max
 
+#### Scenario: HTTP-bridge full resend trims before the Astra reset
+
+- **GIVEN** a previous_response_id full resend that starts with stored assistant or reasoning output followed by a tool output
+- **WHEN** a restricted key requires a continuation reset
+- **THEN** the proxy trims that stored prefix before inserting the reset
+
 #### Scenario: Injected Ultra resets survive repeated anchor advances
 
 - **GIVEN** a proxy-injected HTTP-bridge anchor for an Ultra-only key
 - **WHEN** the same reconstructed request is prepared again after the first injection serialized as max
 - **THEN** the client-plane Ultra identity is restored for policy checks
 - **AND** the continuation is not rejected as max
+- **AND** repeated preparation keeps one leading configuration_update, the same item count and order, and request-level Ultra
+- **AND** only subscription wire serialization maps Ultra to max
 
 #### Scenario: Non-leading updates keep client-plane efforts across repeated anchors
 
-- **GIVEN** a turn-state request with a non-leading configuration_update selecting Ultra
+- **GIVEN** a turn-state request with a non-leading configuration_update
 - **WHEN** continuation preparation prepends a policy update and a later advance reconstructs the request
-- **THEN** every configuration_update is restored to client-plane Ultra before policy checks
+- **THEN** each historical configuration_update is restored to its stored client-plane effort and original position
+- **AND** the prepended policy update keeps the selected continuation effort

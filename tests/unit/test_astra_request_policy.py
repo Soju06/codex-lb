@@ -141,8 +141,9 @@ def test_astra_rejects_none_after_enforced_model_selection(request_type):
 
 
 def test_astra_history_update_obeys_allowed_efforts():
-    with pytest.raises(ProxyReasoningEffortNotAllowed):
+    with pytest.raises(ProxyReasoningEffortNotAllowed) as exc_info:
         _apply_subscription_policy(_request(), _key(allowed=["low"]))
+    assert exc_info.value.param == "input.1.reasoning.effort"
 
 
 def test_astra_history_update_obeys_enforced_effort():

@@ -14,6 +14,9 @@ from app.core.exceptions import ProxyInvalidRequestError, ProxyReasoningEffortNo
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
+from app.modules.proxy._service.http_bridge.helpers import (
+    _trim_http_bridge_previous_response_input_items,
+)
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     prepare_astra_reasoning_policy_continuation,
@@ -235,6 +238,28 @@ def test_http_bridge_preparation_resets_late_anchor_before_derived_state() -> No
     assert request_state.request_text == text_data
 
 
+def test_http_bridge_trims_full_resend_before_astra_reset() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-6-astra",
+            "instructions": "",
+            "previous_response_id": "resp_history",
+            "reasoning": {"effort": "high"},
+            "input": [
+                {"type": "message", "role": "assistant", "id": "msg_1", "status": "completed", "content": "done"},
+                {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "slow", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+                {"role": "user", "content": "Continue"},
+            ],
+        }
+    )
+    request.input = _trim_http_bridge_previous_response_input_items(cast(list[JsonValue], request.input))
+    validate_astra_request(request, _key(allowed=["high"]))
+    assert request.input[0] == {"type": "configuration_update", "reasoning": {"effort": "high"}}
+    assert request.input[1]["type"] == "function_call_output"
+    assert not any(isinstance(item, dict) and item.get("id") == "msg_1" for item in request.input)
+
+
 def test_http_bridge_injected_anchor_resets_before_derived_state() -> None:
     text_data = json.dumps(
         {
@@ -315,10 +340,14 @@ def test_http_bridge_injected_anchor_preserves_ultra_from_request_state() -> Non
         api_key=_key(allowed=["ultra"]),
         request_state=cast(Any, request_state),
     )
-    assert json.loads(repeated_text)["input"][0] == {
+    repeated_payload = json.loads(repeated_text)
+    assert repeated_payload["input"][0] == {
         "type": "configuration_update",
         "reasoning": {"effort": "max"},
     }
+    assert repeated_payload["input"] == wire_payload["input"]
+    assert repeated_payload["reasoning"] == {"effort": "max"}
+    assert sum(1 for item in repeated_payload["input"] if item.get("type") == "configuration_update") == 1
 
 
 def test_http_bridge_injected_anchor_preserves_ultra_configuration_update() -> None:
@@ -436,6 +465,34 @@ async def test_websocket_create_rejects_disallowed_configuration_update(monkeypa
             openai_cache_affinity_max_age_seconds=300,
             api_key=key,
         )
+
+
+@pytest.mark.asyncio
+async def test_websocket_source_owned_skips_astra_schema(monkeypatch) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    key = _key(allowed=["low", "high"])
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=key))
+    monkeypatch.setattr(
+        "app.modules.proxy._service.websocket.mixin.responses_model_is_source_owned",
+        AsyncMock(return_value=True),
+    )
+    prepared = await service._prepare_websocket_response_create_request(
+        {
+            "type": "response.create",
+            "model": "gpt-6-astra",
+            "instructions": "",
+            "logprobs": True,
+            "input": [{"role": "user", "content": "Hi"}],
+        },
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=key,
+    )
+    assert prepared is not None
 
 
 @pytest.mark.asyncio

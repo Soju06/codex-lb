@@ -131,7 +131,12 @@ def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None
     raise ProxyModelNotAllowed(f"This API key does not have access to model '{model}'")
 
 
-def validate_reasoning_effort_access(api_key: ApiKeyData | None, effort: str | None) -> None:
+def validate_reasoning_effort_access(
+    api_key: ApiKeyData | None,
+    effort: str | None,
+    *,
+    param: str = "reasoning.effort",
+) -> None:
     if api_key is None:
         return
     allowed_reasoning_efforts = getattr(api_key, "allowed_reasoning_efforts", None)
@@ -148,7 +153,7 @@ def validate_reasoning_effort_access(api_key: ApiKeyData | None, effort: str | N
     )
     raise ProxyReasoningEffortNotAllowed(
         f"This API key does not have access to reasoning effort '{normalized_effort}'",
-        param="reasoning.effort",
+        param=param,
     )
 
 
@@ -404,6 +409,7 @@ def _validate_astra_configuration_update_effort_access(
     effort: str,
     *,
     subscription: bool,
+    param: str = "reasoning.effort",
 ) -> None:
     allowed = api_key.allowed_reasoning_efforts
     if allowed is None:
@@ -415,7 +421,7 @@ def _validate_astra_configuration_update_effort_access(
         equivalent_effort = "low" if normalized == "minimal" else "minimal"
         if equivalent_effort in allowed:
             return
-    validate_reasoning_effort_access(api_key, normalized)
+    validate_reasoning_effort_access(api_key, normalized, param=param)
 
 
 def prepare_astra_reasoning_policy_continuation(
@@ -482,7 +488,12 @@ def validate_configuration_update_policy(
                 )
             continue
         effort = value.strip().lower()
-        _validate_astra_configuration_update_effort_access(api_key, effort, subscription=subscription)
+        _validate_astra_configuration_update_effort_access(
+            api_key,
+            effort,
+            subscription=subscription,
+            param=f"input.{index}.reasoning.effort",
+        )
         if api_key.enforced_reasoning_effort is not None:
             enforced = api_key.enforced_reasoning_effort.strip().lower()
             if subscription:

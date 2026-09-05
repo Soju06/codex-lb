@@ -233,6 +233,9 @@ from app.modules.model_sources.selection import (
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
+from app.modules.proxy._service.http_bridge.helpers import (
+    _trim_http_bridge_previous_response_input_items,
+)
 from app.modules.proxy._service.support import (
     _bind_propagated_capacity_startup_ready,
     _bind_propagated_capacity_startup_wait,
@@ -6042,6 +6045,8 @@ async def _stream_responses(
             service_tier_was_enforced=service_tier_was_enforced,
         )
     apply_prohibit_fast_mode(payload, prohibit_fast_mode=prohibit_fast_mode)
+    if payload.previous_response_id is not None and isinstance(payload.input, list):
+        payload.input = _trim_http_bridge_previous_response_input_items(payload.input)
     validate_astra_request(payload, api_key)
     validate_model_access(api_key, payload.model)
     compact_payload: ResponsesCompactRequest | None = None
@@ -6554,6 +6559,8 @@ async def _collect_responses(
         payload,
         service_tier_was_enforced=service_tier_was_enforced,
     )
+    if payload.previous_response_id is not None and isinstance(payload.input, list):
+        payload.input = _trim_http_bridge_previous_response_input_items(payload.input)
     validate_astra_request(payload, api_key)
     validate_model_access(api_key, payload.model)
     admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)

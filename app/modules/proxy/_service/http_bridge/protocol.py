@@ -18,6 +18,7 @@ class _HTTPBridgeServiceProtocol(Protocol):
     _encryptor: Any
     _clock: Clock
     _scheduler: Scheduler
+    _remaining_budget_seconds: Any
     _load_balancer: Any
     _http_client: Any
     _ring_membership: Any

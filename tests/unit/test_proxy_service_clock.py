@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 
 from app.modules.proxy import service as proxy_service
@@ -154,3 +156,41 @@ async def test_account_selection_keeps_real_scheduler_behavior(
 
     assert selection is expected_selection
     select_account.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bridge_and_websocket_budgets_follow_virtual_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Budget math on the bridge/websocket paths reads the injected clock, never the wall clock."""
+
+    clock = VirtualClock(monotonic_value=100.0)
+    scheduler = VirtualScheduler(clock)
+    service = _service(clock, scheduler)
+    # A wall clock far ahead of every virtual deadline: any budget read that
+    # leaks to ``time.monotonic()`` collapses to zero and fails the assertions.
+    monkeypatch.setattr(time, "monotonic", lambda: 1_000_000.0)
+    deadline = clock.monotonic() + 30.0
+
+    # ProxyService mixins (http bridge / websocket / streaming retry) share this method.
+    assert service._remaining_budget_seconds(deadline) == 30.0
+    # The websocket receive deadline compares owner-clock started_at values with the owner clock.
+    pending = deque([SimpleNamespace(started_at=90.0, draining_until_terminal=False)])
+    receive_timeout = await service._next_websocket_receive_timeout(
+        pending,
+        pending_lock=anyio.Lock(),
+        proxy_request_budget_seconds=20.0,
+        stream_idle_timeout_seconds=5.0,
+    )
+    assert receive_timeout is not None
+    assert receive_timeout.timeout_seconds == 5.0
+
+    await scheduler.advance(30.0)
+
+    assert service._remaining_budget_seconds(deadline) == 0.0
+    receive_timeout = await service._next_websocket_receive_timeout(
+        pending,
+        pending_lock=anyio.Lock(),
+        proxy_request_budget_seconds=20.0,
+        stream_idle_timeout_seconds=5.0,
+    )
+    assert receive_timeout is not None
+    assert receive_timeout.timeout_seconds == 0.0

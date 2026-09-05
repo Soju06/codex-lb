@@ -15174,7 +15174,7 @@ async def test_stream_with_retry_preserves_stream_cap_error_type_when_wait_exhau
     def fake_remaining_budget(_deadline: float) -> float:
         return next(remaining_budget_values, 0.0)
 
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", fake_remaining_budget)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", fake_remaining_budget)
 
     async def select_account(_deadline: float, **_kwargs: object) -> AccountSelection:
         return AccountSelection(
@@ -15662,7 +15662,7 @@ async def test_stream_with_retry_waits_after_response_create_cap_has_no_alternat
     monkeypatch.setattr(service, "_stream_once", fake_stream_once)
     monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
     monkeypatch.setattr(
-        proxy_service,
+        service,
         "_remaining_budget_seconds",
         lambda _deadline: 0.0 if budget_expires and stream_once_calls >= 1 and len(selection_exclusions) >= 2 else 10.0,
     )
@@ -18545,7 +18545,7 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_penalizes_wit
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
     monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
     monkeypatch.setattr(
-        proxy_service,
+        service,
         "_remaining_budget_seconds",
         lambda _deadline: 0.0 if terminal_outcome == "budget_before_selection" and stream_once_calls >= 2 else 10.0,
     )
@@ -18929,7 +18929,7 @@ async def test_stream_with_retry_post_refresh_capacity_exhaustion_preserves_orig
         lambda _selection: 1.0,
     )
     monkeypatch.setattr(
-        proxy_service,
+        service,
         "_remaining_budget_seconds",
         lambda _deadline: 0.0 if budget_exhausted else 1.0,
     )
@@ -19039,7 +19039,7 @@ async def test_stream_with_retry_surfaces_response_create_cap_when_wait_retries_
     def fake_remaining_budget(_deadline: float) -> float:
         return next(remaining_budget_values, 0.0)
 
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", fake_remaining_budget)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", fake_remaining_budget)
     monkeypatch.setattr(
         service,
         "_select_account_with_budget_compatible",
@@ -19119,7 +19119,7 @@ async def test_stream_with_retry_raises_response_create_cap_when_propagation_exh
     def fake_remaining_budget(_deadline: float) -> float:
         return next(remaining_budget_values, 0.0)
 
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", fake_remaining_budget)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", fake_remaining_budget)
     monkeypatch.setattr(
         service,
         "_select_account_with_budget_compatible",
@@ -24717,7 +24717,7 @@ async def test_select_websocket_capacity_wait_budget_preserves_original_cap(
         fake_sleep_for_account_selection_recovery,
     )
     monkeypatch.setattr(
-        proxy_service,
+        service,
         "_remaining_budget_seconds",
         lambda _deadline: next(remaining_budget, 0.0),
     )
@@ -28052,13 +28052,12 @@ def test_slim_response_create_counts_oversized_historical_tool_outputs(sizes):
     assert cast(list[JsonValue], slimmed_payload["input"])[-1] == latest
 
 
-def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monkeypatch):
-    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
-
+def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows():
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [90.0, 95.0],
         proxy_request_budget_seconds=20.0,
         stream_idle_timeout_seconds=5.0,
+        now=100.0,
     )
 
     assert timeout is not None
@@ -28067,13 +28066,12 @@ def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monke
     assert timeout.error_message == "Upstream stream idle timeout"
 
 
-def test_websocket_receive_timeout_prefers_request_budget_when_sooner(monkeypatch):
-    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
-
+def test_websocket_receive_timeout_prefers_request_budget_when_sooner():
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [90.0],
         proxy_request_budget_seconds=11.0,
         stream_idle_timeout_seconds=5.0,
+        now=100.0,
     )
 
     assert timeout is not None
@@ -28082,13 +28080,12 @@ def test_websocket_receive_timeout_prefers_request_budget_when_sooner(monkeypatc
     assert timeout.error_message == "Proxy request budget exhausted"
 
 
-def test_websocket_receive_timeout_keeps_idle_classification_after_scheduler_jitter(monkeypatch):
-    monkeypatch.setattr(time, "monotonic", lambda: 700.001)
-
+def test_websocket_receive_timeout_keeps_idle_classification_after_scheduler_jitter():
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [100.0],
         proxy_request_budget_seconds=600.0,
         stream_idle_timeout_seconds=600.0,
+        now=700.001,
     )
 
     assert timeout is not None
@@ -28098,13 +28095,12 @@ def test_websocket_receive_timeout_keeps_idle_classification_after_scheduler_jit
     assert timeout.fail_all_pending is False
 
 
-def test_websocket_receive_timeout_uses_budget_when_equal_budget_is_sooner(monkeypatch):
-    monkeypatch.setattr(time, "monotonic", lambda: 400.0)
-
+def test_websocket_receive_timeout_uses_budget_when_equal_budget_is_sooner():
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [100.0],
         proxy_request_budget_seconds=600.0,
         stream_idle_timeout_seconds=600.0,
+        now=400.0,
     )
 
     assert timeout is not None
@@ -28114,13 +28110,12 @@ def test_websocket_receive_timeout_uses_budget_when_equal_budget_is_sooner(monke
     assert timeout.fail_all_pending is False
 
 
-def test_websocket_receive_timeout_honors_idle_when_equal_to_full_budget(monkeypatch):
-    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
-
+def test_websocket_receive_timeout_honors_idle_when_equal_to_full_budget():
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [100.0],
         proxy_request_budget_seconds=600.0,
         stream_idle_timeout_seconds=600.0,
+        now=100.0,
     )
 
     assert timeout is not None
@@ -39968,7 +39963,7 @@ async def test_stream_attempt_timeout_overrides_follow_remaining_budget(monkeypa
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", fake_remaining_budget)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", fake_remaining_budget)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -40034,7 +40029,7 @@ async def test_stream_forced_refresh_reapplies_idle_and_total_budget_overrides(m
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", fake_remaining_budget)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", fake_remaining_budget)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",

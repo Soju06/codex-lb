@@ -1924,6 +1924,7 @@ def _websocket_receive_timeout_for_pending_requests(
     *,
     proxy_request_budget_seconds: float,
     stream_idle_timeout_seconds: float,
+    now: float,
 ) -> _WebSocketReceiveTimeout | None:
     if not started_ats:
         return None
@@ -1931,7 +1932,8 @@ def _websocket_receive_timeout_for_pending_requests(
     idle_timeout_seconds = max(0.001, stream_idle_timeout_seconds)
     oldest_started_at = min(started_ats)
     budget_deadline = oldest_started_at + proxy_request_budget_seconds
-    remaining_budget = _facade()._remaining_budget_seconds(budget_deadline)
+    # ``started_ats`` come from the owner's clock; ``now`` must too.
+    remaining_budget = max(0.0, budget_deadline - now)
     idle_timeout_matches_request_budget = idle_timeout_seconds == max(0.001, proxy_request_budget_seconds)
 
     if remaining_budget <= 0 and idle_timeout_matches_request_budget:

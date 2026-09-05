@@ -64,7 +64,7 @@ from app.core.clients.proxy_websocket import (
     filter_inbound_websocket_headers,
     is_account_neutral_websocket_error_code,
 )
-from app.core.clock import Scheduler, scheduler_for
+from app.core.clock import Scheduler, clock_for, scheduler_for
 from app.core.errors import (
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_NOT_FOUND_CODE,
@@ -3637,7 +3637,7 @@ class _WebSocketMixin:
                 if (
                     last_failover_exc is not None
                     and not require_preferred_account
-                    and _facade()._remaining_budget_seconds(deadline) <= 0
+                    and proxy._remaining_budget_seconds(deadline) <= 0
                 ):
                     await proxy._emit_websocket_connect_timeout(
                         websocket=websocket,
@@ -3915,7 +3915,7 @@ class _WebSocketMixin:
                 kind="websocket",
                 request_stage=request_state.request_stage,
                 model=model,
-                max_sleep_seconds=_facade()._remaining_budget_seconds(deadline),
+                max_sleep_seconds=proxy._remaining_budget_seconds(deadline),
                 request_state=request_state,
                 heartbeat=_heartbeat,
             ):
@@ -3924,7 +3924,7 @@ class _WebSocketMixin:
             # completed wait. Preserve the selection error that caused it
             # instead of performing one more selection that can only replace
             # the original local-cap 429 with upstream_request_timeout.
-            if _facade()._remaining_budget_seconds(deadline) <= 0:
+            if proxy._remaining_budget_seconds(deadline) <= 0:
                 break
 
         account = selection.account
@@ -4193,7 +4193,7 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         try:
-            remaining_budget = _facade()._remaining_budget_seconds(deadline)
+            remaining_budget = proxy._remaining_budget_seconds(deadline)
             if remaining_budget <= 0:
                 await proxy._emit_websocket_connect_timeout(
                     websocket=websocket,
@@ -4211,7 +4211,7 @@ class _WebSocketMixin:
             if force_refresh and request_state.force_refresh_account_id == account.id:
                 request_state.force_refresh_account_id = None
 
-            remaining_budget = _facade()._remaining_budget_seconds(deadline)
+            remaining_budget = proxy._remaining_budget_seconds(deadline)
             if remaining_budget <= 0:
                 await proxy._emit_websocket_connect_timeout(
                     websocket=websocket,
@@ -4360,7 +4360,7 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         try:
-            remaining_budget = _facade()._remaining_budget_seconds(deadline)
+            remaining_budget = proxy._remaining_budget_seconds(deadline)
             if remaining_budget <= 0:
                 await proxy._emit_websocket_connect_timeout(
                     websocket=websocket,
@@ -4461,7 +4461,7 @@ class _WebSocketMixin:
             ) from refresh_transport_exc
 
         try:
-            remaining_budget = _facade()._remaining_budget_seconds(deadline)
+            remaining_budget = proxy._remaining_budget_seconds(deadline)
             if remaining_budget <= 0:
                 await proxy._emit_websocket_connect_timeout(
                     websocket=websocket,
@@ -6029,7 +6029,6 @@ class _WebSocketMixin:
         stream_idle_timeout_seconds: float,
     ) -> _WebSocketReceiveTimeout | None:
         proxy = cast(_WebSocketServiceProtocol, self)
-        _ = proxy
         async with pending_lock:
             started_ats = [
                 request_state.started_at
@@ -6040,6 +6039,7 @@ class _WebSocketMixin:
             started_ats,
             proxy_request_budget_seconds=proxy_request_budget_seconds,
             stream_idle_timeout_seconds=stream_idle_timeout_seconds,
+            now=clock_for(proxy).monotonic(),
         )
 
     async def _emit_pending_websocket_keepalive(

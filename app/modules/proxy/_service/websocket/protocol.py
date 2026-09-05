@@ -9,6 +9,7 @@ class _WebSocketServiceProtocol(Protocol):
     _capability_router: Any
     _background_cleanup_tasks: Any
     _clock: Clock
+    _remaining_budget_seconds: Any
     _acquire_account_response_create_lease_or_overload: Any
     _acquire_request_state_response_create_admission: Any
     _cancel_request_state_api_key_reservation_heartbeat: Any

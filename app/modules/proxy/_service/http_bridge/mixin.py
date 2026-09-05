@@ -148,7 +148,6 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _raise_proxy_unavailable,
     _record_continuity_fail_closed,
     _record_same_account_takeover,
-    _remaining_budget_seconds,
     _routing_strategy,
     _service_get_settings,
     _service_get_settings_cache,
@@ -1792,7 +1791,7 @@ class _HTTPBridgeMixin(
             try:
                 account = await self._ensure_fresh_with_budget(
                     account,
-                    timeout_seconds=_remaining_budget_seconds(deadline),
+                    timeout_seconds=self._remaining_budget_seconds(deadline),
                 )
                 connect_headers = _websocket_safe_headers_with_turn_state(
                     headers, _sticky_key_from_turn_state_header(headers)
@@ -1802,7 +1801,7 @@ class _HTTPBridgeMixin(
                     account,
                     connect_headers,
                     optional_kwargs={"request_state": request_state},
-                    timeout_seconds=_remaining_budget_seconds(deadline),
+                    timeout_seconds=self._remaining_budget_seconds(deadline),
                 )
                 _record_same_account_takeover(
                     preferred_account_id=preferred_account_id,
@@ -1821,7 +1820,7 @@ class _HTTPBridgeMixin(
                 ):
                     selected_account_lease = None
                     continue
-                if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
+                if exc.status_code != 401 or self._remaining_budget_seconds(deadline) <= 0:
                     await self._load_balancer.release_account_lease(selected_account_lease)
                     selected_account_lease = None
                     raise
@@ -1829,7 +1828,7 @@ class _HTTPBridgeMixin(
                     account = await self._ensure_fresh_with_budget(
                         account,
                         force=True,
-                        timeout_seconds=_remaining_budget_seconds(deadline),
+                        timeout_seconds=self._remaining_budget_seconds(deadline),
                     )
                     connect_headers = _websocket_safe_headers_with_turn_state(
                         headers, _sticky_key_from_turn_state_header(headers)
@@ -1837,7 +1836,7 @@ class _HTTPBridgeMixin(
                     upstream = await self._open_upstream_websocket_with_budget(
                         account,
                         connect_headers,
-                        timeout_seconds=_remaining_budget_seconds(deadline),
+                        timeout_seconds=self._remaining_budget_seconds(deadline),
                         request_state=request_state,
                     )
                     _record_same_account_takeover(
@@ -1886,7 +1885,7 @@ class _HTTPBridgeMixin(
             except RefreshError as exc:
                 if exc.is_permanent:
                     await self._load_balancer.mark_permanent_failure(account, exc.code)
-                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                if selected_is_preferred and self._remaining_budget_seconds(deadline) > 0:
                     if retry_same_account_once and not exc.is_permanent:
                         retry_same_account_once = False
                         await self._load_balancer.release_account_lease(selected_account_lease)
@@ -1925,7 +1924,7 @@ class _HTTPBridgeMixin(
                 selected_account_lease = None
                 _raise_proxy_unavailable(exc.message or "Temporary upstream refresh failure")
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                if selected_is_preferred and self._remaining_budget_seconds(deadline) > 0:
                     if retry_same_account_once:
                         retry_same_account_once = False
                         await self._load_balancer.release_account_lease(selected_account_lease)
@@ -2127,7 +2126,7 @@ class _HTTPBridgeMixin(
                 return await self._open_upstream_websocket_with_budget(
                     selected_account,
                     selected_headers,
-                    timeout_seconds=_remaining_budget_seconds(deadline),
+                    timeout_seconds=self._remaining_budget_seconds(deadline),
                     request_state=request_state,
                 )
             except Exception:
@@ -2195,7 +2194,7 @@ class _HTTPBridgeMixin(
                     reuse_current_account_lease
                     and not hard_close_account_bound
                     and required_preferred_account_id is None
-                    and _remaining_budget_seconds(deadline) > 0
+                    and self._remaining_budget_seconds(deadline) > 0
                 ):
                     preferred_candidate_id = None
                     continue
@@ -2216,7 +2215,7 @@ class _HTTPBridgeMixin(
                         kind="http_bridge",
                         request_stage="reattach",
                         model=session.request_model,
-                        max_sleep_seconds=_remaining_budget_seconds(deadline),
+                        max_sleep_seconds=self._remaining_budget_seconds(deadline),
                         request_state=request_state,
                     )
                 except BaseException:
@@ -2277,7 +2276,7 @@ class _HTTPBridgeMixin(
                 account = await self._ensure_fresh_with_budget(
                     account,
                     force=force_refresh,
-                    timeout_seconds=_remaining_budget_seconds(deadline),
+                    timeout_seconds=self._remaining_budget_seconds(deadline),
                 )
                 if force_refresh and request_state.force_refresh_account_id == account.id:
                     request_state.force_refresh_account_id = None
@@ -2290,7 +2289,7 @@ class _HTTPBridgeMixin(
                 record_selected_account_takeover(account.id)
                 break
             except ProxyResponseError as exc:
-                if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
+                if exc.status_code != 401 or self._remaining_budget_seconds(deadline) <= 0:
                     await release_selected_account_lease()
                     complete_failed_handoff()
                     raise _http_bridge_reconnect_connect_failure(exc, required_preferred_account_id) from exc
@@ -2298,7 +2297,7 @@ class _HTTPBridgeMixin(
                     account = await self._ensure_fresh_with_budget(
                         account,
                         force=True,
-                        timeout_seconds=_remaining_budget_seconds(deadline),
+                        timeout_seconds=self._remaining_budget_seconds(deadline),
                     )
                     connect_headers = _websocket_safe_headers_with_turn_state(
                         session.headers,
@@ -2328,7 +2327,7 @@ class _HTTPBridgeMixin(
             except RefreshError as exc:
                 if exc.is_permanent:
                     await self._load_balancer.mark_permanent_failure(account, exc.code)
-                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                if selected_is_preferred and self._remaining_budget_seconds(deadline) > 0:
                     if retry_same_account_once and not exc.is_permanent:
                         retry_same_account_once = False
                         await release_selected_account_lease()
@@ -2339,7 +2338,7 @@ class _HTTPBridgeMixin(
                 complete_failed_handoff()
                 raise _http_bridge_reconnect_connect_failure(exc, required_preferred_account_id)
             except (aiohttp.ClientError, asyncio.TimeoutError) as transport_exc:
-                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                if selected_is_preferred and self._remaining_budget_seconds(deadline) > 0:
                     if retry_same_account_once:
                         retry_same_account_once = False
                         await release_selected_account_lease()

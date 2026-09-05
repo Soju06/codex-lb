@@ -227,13 +227,15 @@ async def _iter_account_capacity_recovery_wait(
     account_id: str | None,
     error_message: str | None,
     recovery_sleep_seconds: float,
-    deadline: float,
+    remaining_budget_seconds: float,
     emit_keepalives: bool,
     stage: str,
 ) -> AsyncIterator[str]:
+    # ``remaining_budget_seconds`` is sampled by the caller through the owner's
+    # budget seam (``proxy._remaining_budget_seconds``), so this owner-less
+    # helper never reads a clock of its own for budget math.
     if not emit_keepalives:
         _signal_propagated_capacity_startup_wait()
-    remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
     if remaining_budget_seconds <= 0:
         return
     wait_started_at = time.monotonic()
@@ -858,7 +860,7 @@ class _StreamingRetryMixin:
             while True:
                 settlement.reset()
                 stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
-                    _facade()._remaining_budget_seconds(deadline)
+                    proxy._remaining_budget_seconds(deadline)
                 )
                 try:
                     attempt_stream = _iter_stream_once()
@@ -911,7 +913,7 @@ class _StreamingRetryMixin:
                     transient_retries += 1
                     if (
                         transient_retries < _facade()._MAX_TRANSIENT_SAME_ACCOUNT_RETRIES
-                        and _facade()._remaining_budget_seconds(deadline) > 0
+                        and proxy._remaining_budget_seconds(deadline) > 0
                         and not settlement.downstream_visible
                     ):
                         delay = backoff_seconds(transient_retries)
@@ -995,7 +997,7 @@ class _StreamingRetryMixin:
                             error_code=error_code,
                         )
                     )
-                    if recovery_sleep_seconds is None or _facade()._remaining_budget_seconds(deadline) <= 0:
+                    if recovery_sleep_seconds is None or proxy._remaining_budget_seconds(deadline) <= 0:
                         raise
                     async for wait_event in _iter_account_capacity_recovery_wait(
                         request_id=request_id,
@@ -1003,12 +1005,12 @@ class _StreamingRetryMixin:
                         account_id=account.id,
                         error_message=error.message if error else None,
                         recovery_sleep_seconds=recovery_sleep_seconds,
-                        deadline=deadline,
+                        remaining_budget_seconds=proxy._remaining_budget_seconds(deadline),
                         emit_keepalives=not propagate_http_errors or not enforce_openai_sdk_contract,
                         stage="post_refresh_response_create",
                     ):
                         yield wait_event
-                    if _facade()._remaining_budget_seconds(deadline) <= 0:
+                    if proxy._remaining_budget_seconds(deadline) <= 0:
                         raise
                 finally:
                     pop_stream_timeout_overrides(stream_timeout_tokens)
@@ -1197,7 +1199,7 @@ class _StreamingRetryMixin:
             require_preferred_account = require_preferred_account or turn_state_owner_account_id is not None
             file_required_preferred_account = rewritten_file_account_id is not None
             for attempt in range(max_attempts):
-                remaining_budget = _facade()._remaining_budget_seconds(deadline)
+                remaining_budget = proxy._remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
                     await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                     _facade().logger.warning(
@@ -1328,7 +1330,7 @@ class _StreamingRetryMixin:
                             )
                         )
                         if recovery_sleep_seconds is not None:
-                            remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
+                            remaining_budget_seconds = proxy._remaining_budget_seconds(deadline)
                             if remaining_budget_seconds <= 0:
                                 if propagate_http_errors and last_transient_exc is not None:
                                     raise last_transient_exc
@@ -1350,12 +1352,12 @@ class _StreamingRetryMixin:
                                 account_id=capacity_account_id,
                                 error_message=deferred_error.message if deferred_error else None,
                                 recovery_sleep_seconds=recovery_sleep_seconds,
-                                deadline=deadline,
+                                remaining_budget_seconds=proxy._remaining_budget_seconds(deadline),
                                 emit_keepalives=not propagate_http_errors or not enforce_openai_sdk_contract,
                                 stage="response_create_no_alternate",
                             ):
                                 yield wait_event
-                            if _facade()._remaining_budget_seconds(deadline) <= 0:
+                            if proxy._remaining_budget_seconds(deadline) <= 0:
                                 if propagate_http_errors and last_transient_exc is not None:
                                     raise last_transient_exc
                                 event = response_failed_event(
@@ -1416,7 +1418,7 @@ class _StreamingRetryMixin:
                     ):
                         recovery_sleep_seconds = _account_selection_recovery_sleep_seconds(selection)
                         if recovery_sleep_seconds is not None:
-                            remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
+                            remaining_budget_seconds = proxy._remaining_budget_seconds(deadline)
                             if remaining_budget_seconds <= 0:
                                 break
                             async for wait_event in _iter_account_capacity_recovery_wait(
@@ -1425,12 +1427,12 @@ class _StreamingRetryMixin:
                                 account_id=None,
                                 error_message=selection.error_message,
                                 recovery_sleep_seconds=recovery_sleep_seconds,
-                                deadline=deadline,
+                                remaining_budget_seconds=remaining_budget_seconds,
                                 emit_keepalives=not propagate_http_errors or not enforce_openai_sdk_contract,
                                 stage="selection",
                             ):
                                 yield wait_event
-                            if _facade()._remaining_budget_seconds(deadline) <= 0:
+                            if proxy._remaining_budget_seconds(deadline) <= 0:
                                 break
                             continue
                     break
@@ -1772,7 +1774,7 @@ class _StreamingRetryMixin:
                         )
                         return
                 try:
-                    remaining_budget = _facade()._remaining_budget_seconds(deadline)
+                    remaining_budget = proxy._remaining_budget_seconds(deadline)
                     if remaining_budget <= 0:
                         _facade().logger.warning(
                             "Proxy request budget exhausted before freshness check "
@@ -2031,7 +2033,7 @@ class _StreamingRetryMixin:
                     any_attempt_logged = True
                     settlement = _StreamSettlement()
                     tool_call_dedupe = _WebSocketUpstreamControl()
-                    effective_attempt_timeout = _facade()._remaining_budget_seconds(deadline)
+                    effective_attempt_timeout = proxy._remaining_budget_seconds(deadline)
                     if effective_attempt_timeout <= 0:
                         _facade().logger.warning(
                             "Proxy request budget exhausted before stream attempt "
@@ -2065,7 +2067,7 @@ class _StreamingRetryMixin:
                     allow_retry_flag = attempt < max_attempts - 1
                     while True:
                         stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
-                            _facade()._remaining_budget_seconds(deadline),
+                            proxy._remaining_budget_seconds(deadline),
                         )
                         try:
                             settlement = _StreamSettlement()
@@ -2308,7 +2310,7 @@ class _StreamingRetryMixin:
                                             deferred_capacity_lease = current_account_lease
                                             excluded_account_ids.add(account.id)
                                             break
-                                        remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
+                                        remaining_budget_seconds = proxy._remaining_budget_seconds(deadline)
                                         if remaining_budget_seconds <= 0:
                                             raise
                                         async for wait_event in _iter_account_capacity_recovery_wait(
@@ -2317,13 +2319,13 @@ class _StreamingRetryMixin:
                                             account_id=account.id,
                                             error_message=error_message,
                                             recovery_sleep_seconds=recovery_sleep_seconds,
-                                            deadline=deadline,
+                                            remaining_budget_seconds=remaining_budget_seconds,
                                             emit_keepalives=not propagate_http_errors
                                             or not enforce_openai_sdk_contract,
                                             stage="response_create",
                                         ):
                                             yield wait_event
-                                        if _facade()._remaining_budget_seconds(deadline) <= 0:
+                                        if proxy._remaining_budget_seconds(deadline) <= 0:
                                             raise
                                         continue
                                     last_transient_exc = tex
@@ -2472,7 +2474,7 @@ class _StreamingRetryMixin:
                             transient_retries += 1
                             if (
                                 transient_retries < _facade()._MAX_TRANSIENT_SAME_ACCOUNT_RETRIES
-                                and _facade()._remaining_budget_seconds(deadline) > 0
+                                and proxy._remaining_budget_seconds(deadline) > 0
                                 and not settlement.downstream_visible
                             ):
                                 delay = backoff_seconds(transient_retries)
@@ -2635,7 +2637,7 @@ class _StreamingRetryMixin:
                         yield await _render_account_model_rejection(exc, account_id=account.id)
                         return
                     if exc.status_code == 401:
-                        remaining_budget = _facade()._remaining_budget_seconds(deadline)
+                        remaining_budget = proxy._remaining_budget_seconds(deadline)
                         if remaining_budget <= 0:
                             _facade().logger.warning(
                                 "Proxy request budget exhausted before forced refresh retry "
@@ -2835,7 +2837,7 @@ class _StreamingRetryMixin:
                             yield format_sse_event(event)
                             return
                         settlement = _StreamSettlement()
-                        effective_attempt_timeout = _facade()._remaining_budget_seconds(deadline)
+                        effective_attempt_timeout = proxy._remaining_budget_seconds(deadline)
                         if effective_attempt_timeout <= 0:
                             _facade().logger.warning(
                                 "Proxy request budget exhausted before post-refresh stream attempt "

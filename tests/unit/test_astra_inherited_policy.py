@@ -310,6 +310,42 @@ def test_http_bridge_injected_anchor_preserves_ultra_from_request_state() -> Non
     }
 
 
+def test_http_bridge_injected_anchor_preserves_ultra_configuration_update() -> None:
+    text_data = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-6-astra",
+            "instructions": "",
+            "reasoning": {"effort": "max"},
+            "input": [
+                {"type": "configuration_update", "reasoning": {"effort": "max"}},
+                {"role": "user", "content": "Continue"},
+            ],
+        }
+    )
+    request_state = SimpleNamespace(
+        reasoning_effort="ultra",
+        astra_client_update_efforts=("ultra",),
+        input_item_count=2,
+        input_full_fingerprint=None,
+        request_usage_budget=None,
+    )
+
+    updated_text = request_submit_module._text_with_previous_response_id(
+        text_data,
+        "resp_injected",
+        api_key=_key(allowed=["ultra"]),
+        request_state=cast(Any, request_state),
+    )
+
+    wire_payload = json.loads(updated_text)
+    assert wire_payload["previous_response_id"] == "resp_injected"
+    assert wire_payload["input"][0] == {
+        "type": "configuration_update",
+        "reasoning": {"effort": "max"},
+    }
+
+
 @pytest.mark.asyncio
 async def test_websocket_create_rejects_disallowed_configuration_update(monkeypatch) -> None:
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))

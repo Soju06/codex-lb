@@ -617,6 +617,32 @@ def _text_without_account_installation_id(text_data: str) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
+def _astra_client_update_efforts(payload: ResponsesRequest) -> tuple[str, ...]:
+    if payload.model.strip().lower() != "gpt-6-astra" or not isinstance(payload.input, list):
+        return ()
+    efforts: list[str] = []
+    for item in payload.input:
+        if not isinstance(item, dict) or item.get("type") != "configuration_update":
+            continue
+        reasoning = item.get("reasoning")
+        effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+        if isinstance(effort, str) and effort.strip():
+            efforts.append(effort.strip().lower())
+    return tuple(efforts)
+
+
+def _restore_astra_client_update_efforts(request: ResponsesRequest, stored: tuple[str, ...]) -> None:
+    if not stored or not isinstance(request.input, list):
+        return
+    updates = [item for item in request.input if isinstance(item, dict) and item.get("type") == "configuration_update"]
+    if len(updates) != len(stored):
+        return
+    for item, effort in zip(updates, stored, strict=True):
+        reasoning = item.get("reasoning")
+        if isinstance(reasoning, dict):
+            item["reasoning"] = {**reasoning, "effort": effort}
+
+
 def _text_with_previous_response_id(
     text_data: str,
     response_id: str | None,
@@ -639,6 +665,9 @@ def _text_with_previous_response_id(
         client_effort = getattr(request_state, "reasoning_effort", None) if request_state is not None else None
         if isinstance(client_effort, str) and client_effort:
             request._codex_lb_client_reasoning_effort = client_effort
+        stored_updates = getattr(request_state, "astra_client_update_efforts", ()) if request_state is not None else ()
+        if stored_updates:
+            _restore_astra_client_update_efforts(request, stored_updates)
         prepare_astra_reasoning_policy_continuation(request, api_key)
         validate_astra_request(request, api_key)
         forwarded_payload = request.to_payload()
@@ -863,6 +892,7 @@ class _HTTPBridgeRequestSubmitMixin:
             model=payload.model,
             service_tier=forwarded_service_tier,
             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+            astra_client_update_efforts=_astra_client_update_efforts(payload),
             api_key_reservation=api_key_reservation,
             started_at=_service_time().monotonic(),
             requested_service_tier=forwarded_service_tier,
@@ -1598,7 +1628,13 @@ class _HTTPBridgeRequestSubmitMixin:
                 # Late operation anchors revalidate restored Astra input.
                 # Client-policy failures must keep their 400/403 envelope
                 # and must not leave the already-created reservation hanging.
-                await self._release_websocket_request_state_reservation(request_state)
+                try:
+                    await self._release_websocket_request_state_reservation(request_state)
+                except Exception:
+                    logger.exception(
+                        "Failed to release reservation after Astra policy rejection request_id=%s",
+                        request_state.request_id,
+                    )
                 raise
             except Exception as exc:
                 session.closed = True

@@ -1373,10 +1373,10 @@ async def test_close_session_reclaims_a_wedged_sqlite_rollback_so_other_writers_
             # finishes and the session is closed for bookkeeping.
             release_wedge.set()
             for _ in range(100):
-                if any("finished late" in record.getMessage() for record in caplog.records):
+                if any("SQLite teardown task finished" in record.getMessage() for record in caplog.records):
                     break
                 await asyncio.sleep(0.02)
-            assert any("finished late" in record.getMessage() for record in caplog.records), (
+            assert any("SQLite teardown task finished" in record.getMessage() for record in caplog.records), (
                 "the abandoned teardown must be observed finishing late"
             )
             # The deferred bookkeeping close is owned until completion (drained
@@ -1921,6 +1921,7 @@ async def test_reclaim_skips_a_connection_the_failed_teardown_already_closed(tmp
     connection, then re-raises. That connection holds nothing, so interrupting
     or invalidating it only raises and the issue #1981 permanent-hold warning
     would be a false alarm; the rollback's own error is what must be reported."""
+    caplog.set_level(logging.INFO, logger=session_module.__name__)
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{tmp_path / 'closed-reclaim.db'}",
         poolclass=NullPool,
@@ -1969,6 +1970,11 @@ async def test_reclaim_skips_a_connection_the_failed_teardown_already_closed(tmp
             await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=2.0)
             await asyncio.sleep(0)
         assert not session_module._wedged_teardown_cleanup_tasks
+        messages = [record.getMessage() for record in caplog.records]
+        assert "SQLite teardown task finished phase=rollback" in messages
+        assert not any("finished late" in message for message in messages), (
+            "a task already terminal during grace must not be reported as finishing after reclamation"
+        )
     finally:
         await engine.dispose()
 
@@ -2035,7 +2041,7 @@ async def test_close_db_drains_a_pending_reclaimed_rollback_and_its_bookkeeping_
             )
             await releaser
 
-        assert any("finished late" in record.getMessage() for record in caplog.records)
+        assert any("SQLite teardown task finished" in record.getMessage() for record in caplog.records)
     finally:
         release_wedge.set()
         await asyncio.sleep(0.05)

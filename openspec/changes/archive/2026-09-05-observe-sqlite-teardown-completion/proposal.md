@@ -8,6 +8,7 @@ A file-backed SQLite worker can finish rollback or close while the event loop is
 - Preserve fencing, captured-connection reclamation and tracked late cleanup for pending, failed or cancelled teardown.
 - Describe the initial wait, completion grace and cleanup separately; log observed outcomes without asserting event-loop lag or a permanent writer hold from elapsed time or an invalidation error.
 - Add real-worker completion-during-loop-starvation coverage at the file-SQLite session teardown path.
+- Report finalization without implying that a task already terminal during grace completed after reclamation, and document the caller-owned observation window before registry handoff.
 - Retain pinned main's shipped private aiohttp SSL cache and consumers; remove this change's superseded TLS delta and duplicate TLS tests.
 
 ## Capabilities

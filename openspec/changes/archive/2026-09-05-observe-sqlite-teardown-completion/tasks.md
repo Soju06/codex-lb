@@ -17,3 +17,9 @@
 - [x] 3.4 Supply this accepted input to the combined integration and complete DB worker completion, cancellation/reclamation and shutdown ownership acceptance. Final wheel packaging and isolated built-product launch remain separate phase-five delivery gates.
 
 - [x] 3.5 Verify, sync and archive the change after combined implementation acceptance, using CI-pinned OpenSpec1.11.0.
+
+## 4. Address the remaining PR review comments
+
+- [x] 4.1 Rename the change to match its DB-only scope, clarify the invalidation diagnostic owner, and document the caller-owned grace window before cleanup registration.
+- [x] 4.2 Extend the existing failed-after-release regression to reject the misleading late-finish diagnostic, obtain red evidence, and use neutral completion wording without changing cleanup ownership.
+- [x] 4.3 Run the guarded focused DB/cancellation/shutdown checks, lint, typecheck and strict owning OpenSpec validation; verify, sync and archive the renamed change.

@@ -814,7 +814,7 @@ def _finish_abandoned_teardown(session: AsyncSession, task: asyncio.Task[object]
         # connection is expected to error; consume it so the abandoned task
         # never logs "exception was never retrieved".
         task.exception()
-    logger.info("Wedged SQLite teardown finished late phase=%s", phase)
+    logger.info("SQLite teardown task finished phase=%s", phase)
     if phase != "rollback":
         return
 

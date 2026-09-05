@@ -124,3 +124,15 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 #### Scenario: Upstream steering failures are sanitized before forwarding
 - **WHEN** upstream sends response.steer.failed with a malformed or structured error.param
 - **THEN** the forwarded client payload omits the non-public parameter value
+
+#### Scenario: Final rejected steering retains failed release ownership
+- **GIVEN** the final queued steer is rejected before its successor is created
+- **WHEN** releasing its reservation fails
+- **THEN** the socket SHALL retain that request in its tracked teardown cleanup and retry release within the existing cleanup budget
+- **AND** unrelated requests SHALL continue while repeated failure is reported without skipping their cleanup
+
+#### Scenario: Pre-send rejection clears explicit continuation ownership
+- **GIVEN** an explicit continuation has replaced its steering placeholder
+- **WHEN** final payload validation rejects the unsent replacement
+- **THEN** the proxy SHALL remove only that replacement's control-map ownership and release its reservation and admission
+- **AND** a corrected continuation SHALL be admitted on the same socket

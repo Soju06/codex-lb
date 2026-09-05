@@ -1522,6 +1522,7 @@ class _WebSocketSteeringContinuation:
 
 @dataclass(slots=True)
 class _WebSocketUpstreamControl:
+    retired_steering_requests: list[_WebSocketRequestState] = field(default_factory=list)
     steering_continuations: dict[str, _WebSocketSteeringContinuation] = field(default_factory=dict)
     suppressed_steering_response_ids: set[str] = field(default_factory=set)
     suppressed_steering_anonymous_terminals: int = 0

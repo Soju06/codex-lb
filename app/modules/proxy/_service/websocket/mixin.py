@@ -2650,7 +2650,7 @@ class _WebSocketMixin:
                     upstream_account_id = account.id
                     upstream_requires_security_work_authorized = request_state.require_security_work_authorized
                     upstream_turn_state = _facade()._upstream_turn_state_from_socket(upstream) or upstream_turn_state
-                    upstream_control = _WebSocketUpstreamControl()
+                    upstream_control = _WebSocketUpstreamControl(retired_steering_requests=retired_steering_requests)
                     upstream_reader = asyncio.create_task(
                         proxy._relay_upstream_websocket_messages(
                             websocket,
@@ -2820,6 +2820,20 @@ class _WebSocketMixin:
                     error_message = error.message if error and error.message else "Upstream error"
                     error_type = error.type if error and error.type else "server_error"
                     if request_state is not None:
+                        if (
+                            request_state_registered
+                            and upstream_control is not None
+                            and request_state.response_create_sent_at is None
+                        ):
+                            async with pending_lock:
+                                continuation = upstream_control.steering_continuations.get(
+                                    request_state.steering_parent_response_id
+                                )
+                                if continuation is not None and continuation.request_state is request_state:
+                                    upstream_control.steering_continuations.pop(
+                                        request_state.steering_parent_response_id, None
+                                    )
+                                    request_state.steering_parent_response_id = None
                         await proxy._release_websocket_request_state_reservation(request_state)
                         if request_state_registered:
                             async with pending_lock:

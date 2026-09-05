@@ -22,12 +22,14 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("final_rejection", [False, True], ids=["replacement", "final-rejection"])
 @pytest.mark.parametrize("cancel_socket", [False, True], ids=["disconnect", "cancel"])
 @pytest.mark.parametrize("release_failures", [1, 2], ids=["transient", "persistent"])
 async def test_websocket_teardown_retries_failed_placeholder_release(
     app_instance: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    final_rejection: bool,
     cancel_socket: bool,
     release_failures: int,
 ) -> None:
@@ -96,6 +98,30 @@ async def test_websocket_teardown_retries_failed_placeholder_release(
             [response("response.created", "r-after"), response("response.completed", "r-after")],
         ]
     )
+    if final_rejection:
+        socket.scripts = [
+            (create(), lambda _: True),
+            (
+                {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"},
+                saw("response.created", "r1"),
+            ),
+            (create(input_items="Unrelated"), saw("response.steer.failed")),
+        ]
+        upstream.events = [
+            [response("response.created", "r1")],
+            [
+                {"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}},
+                response("response.completed", "r1"),
+                {
+                    "type": "response.steer.failed",
+                    "steer": {"id": "s1", "previous_response_id": "r1"},
+                    "error": {"code": "successor_creation_failed", "message": "Rejected"},
+                },
+            ],
+            [response("response.created", "r-after"), response("response.completed", "r-after")],
+        ]
+    settled_tokens = 28 if final_rejection else 42
+    finalized_indices = (0, 2) if final_rejection else (0, 2, 3)
     monkeypatch.setattr(service, "_connect_proxy_websocket", AsyncMock(return_value=(account, upstream)))
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_revalidate_open_websocket_account", AsyncMock(return_value=(account, None, None)))
@@ -180,7 +206,7 @@ async def test_websocket_teardown_retries_failed_placeholder_release(
             placeholder = await repo.get_usage_reservation(placeholder_id)
             assert placeholder is not None and placeholder.status == "reserved"
             limits = await repo.get_limits_by_key(api_key.id)
-            assert limits[0].current_value == 42 + sum(item.reserved_delta for item in placeholder.items)
+            assert limits[0].current_value == settled_tokens + sum(item.reserved_delta for item in placeholder.items)
         assert release_attempts == {placeholder_id: 1}
         assert states[1].api_key_reservation_heartbeat_task is None
         assert heartbeats[1].done()
@@ -202,7 +228,7 @@ async def test_websocket_teardown_retries_failed_placeholder_release(
         assert all(task.done() for task in cleanup_tasks + heartbeats)
         assert not service._background_cleanup_tasks
         assert release_attempts == {placeholder_id: 2}
-        assert Counter(finalized) == {reservations[index].reservation_id: 1 for index in (0, 2, 3)}
+        assert Counter(finalized) == {reservations[index].reservation_id: 1 for index in finalized_indices}
         assert all(
             state.response_create_admission is None and not state.response_create_gate_acquired for state in states
         )
@@ -217,13 +243,14 @@ async def test_websocket_teardown_retries_failed_placeholder_release(
                 "finalized",
                 "released" if release_failures == 1 else "reserved",
                 "finalized",
-                "finalized",
-            ]
+            ] + ([] if final_rejection else ["finalized"])
             if release_failures == 1:
                 assert [item.actual_delta for item in stored[1].items] == [0]
             limits = await repo.get_limits_by_key(api_key.id)
             assert limits[0].current_value == (
-                42 if release_failures == 1 else 42 + sum(item.reserved_delta for item in stored[1].items)
+                settled_tokens
+                if release_failures == 1
+                else settled_tokens + sum(item.reserved_delta for item in stored[1].items)
             )
         assert (
             sum(

@@ -1099,3 +1099,69 @@ async def test_steering_size_limit_rejects_before_forwarding_or_reservation(monk
     assert len(upstream.sent) == len(reservations) == 1
     assert socket.sent[-1]["type"] == "response.steer.failed"
     assert socket.sent[-1]["error"]["code"] == "payload_too_large"
+
+
+@pytest.mark.asyncio
+async def test_explicit_continuation_retries_after_presend_size_rejection(monkeypatch):
+    call = {"type": "function_call", "call_id": "tool", "name": "slow", "arguments": "{}"}
+    result = {"type": "function_call_output", "call_id": "tool", "output": "saved"}
+    oversized = {**result, "output": "x" * 1000}
+    socket = ScriptedSocket(
+        [
+            (create(), lambda _: True),
+            (
+                {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"},
+                saw("response.created", "r1"),
+            ),
+            (create(parent="r1", input_items=[oversized]), saw("response.steer.pending")),
+            (create(parent="r1", input_items=[result]), saw("response.failed")),
+        ]
+    )
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [
+                {"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}},
+                response("response.completed", "r1", output=[call]),
+                {
+                    "type": "response.steer.pending",
+                    "steer": {"id": "s1", "previous_response_id": "r1"},
+                    "reason": "waiting_for_required_input",
+                    "required_input": [{"type": "function_call_output", "call_id": "tool"}],
+                },
+            ],
+            [response("response.created", "r2", parent="r1"), response("response.completed", "r2", parent="r1")],
+        ]
+    )
+    socket.finish_when = lambda event: event["type"] in {"response.completed", "response.failed", "error"}
+    states = []
+
+    def configure(service, account):
+        monkeypatch.setattr(proxy_service, "_write_response_create_dump", lambda *args, **kwargs: None)
+        account.codex_installation_id = "installation-for-presend-size-check"
+        original_admit = service._acquire_request_state_response_create_admission
+        limited = False
+
+        async def admit(state, **kwargs):
+            nonlocal limited
+            states.append(state)
+            await original_admit(state, **kwargs)
+            if not limited and state.previous_response_id == "r1" and state.request_text is not None:
+                # Prepared frame fits; adding the account metadata at dispatch exceeds it.
+                monkeypatch.setattr(
+                    proxy_service, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", len(state.request_text.encode()) + 1
+                )
+                limited = True
+
+        monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", admit)
+
+    _, reservations, settled, released, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
+    failures = [event for event in socket.sent if event["type"] == "response.failed"]
+    assert [event["response"]["error"]["code"] for event in failures] == ["payload_too_large"]
+    assert saw("response.completed", "r2")(socket.sent)
+    assert len(upstream.sent) == 3
+    assert upstream.sent[-1]["input"] == [result]
+    assert len(reservations) == 4
+    assert [(entry[0], entry[3]) for entry in settled] == [("res_0", "r1"), ("res_3", "r2")]
+    assert [call.args[0].reservation_id for call in released.await_args_list if call.args[0]] == ["res_1", "res_2"]
+    assert all(state.response_create_admission is None and not state.response_create_gate_acquired for state in states)

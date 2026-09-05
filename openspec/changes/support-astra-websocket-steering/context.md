@@ -30,3 +30,7 @@ reservation, and records successor usage once.
 ## Related
 
 - Split from #2089. Slices: #2097 (a), #2099 (b).
+
+## Review repair
+
+Final steering rejection uses the same socket-owned retired reservation collection as explicit replacement, including across upstream reconnects. Before a rejected unsent explicit request is released, its exact control-map entry is removed under the pending lock so a corrected request can retry. These are lifecycle repairs within the existing steering contract; no routing or policy expansion is introduced.

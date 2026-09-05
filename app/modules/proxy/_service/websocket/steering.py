@@ -545,6 +545,8 @@ async def process_websocket_steering_event(
                     continuation.request_state.steering_parent_response_id = None
                 else:
                     release_state = continuation.request_state
+                    # Publish cleanup ownership before releasing can yield or fail.
+                    control.retired_steering_requests.append(release_state)
                     if release_state in pending_requests:
                         pending_requests.remove(release_state)
             elif not continuation.explicit_request_prepared:
@@ -560,6 +562,8 @@ async def process_websocket_steering_event(
                 "Failed to release steering placeholder reservation request_id=%s",
                 release_state.request_id,
             )
+        else:
+            control.retired_steering_requests.remove(release_state)
     elif reduce_submission is not None:
         await proxy._reduce_websocket_api_key_usage(
             reduce_reservation,

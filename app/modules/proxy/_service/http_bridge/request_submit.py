@@ -12,8 +12,6 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
 
-import anyio
-
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import (  # noqa: F401
@@ -54,7 +52,8 @@ from app.core.openai.requests import (
     ResponsesRequest,
 )
 from app.core.resilience.overload import is_local_overload_error_code
-from app.core.types import JsonValue
+from app.core.types import JsonObject, JsonValue
+from app.core.utils.locks import fast_lock
 from app.core.utils.request_id import (
     ensure_request_id,
     ensure_request_scope_id,
@@ -404,6 +403,15 @@ def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
     return payload
 
 
+def _http_bridge_hard_continuity_full_history_recovery_error() -> OpenAIErrorEnvelope:
+    """Ask Codex to discard a hard turn-state anchor and resend full history."""
+    return openai_error(
+        "previous_response_not_found",
+        "Continuity state was not found; retry with full history.",
+        error_type="invalid_request_error",
+    )
+
+
 async def _rollback_http_bridge_recovery_turn_state_registration(
     service: Any,
     receipt: DurableBridgeAliasRegistrationReceipt,
@@ -470,12 +478,68 @@ async def _settle_claimed_http_bridge_liveness_failure(
         )
 
 
+_CLIENT_METADATA_TAIL_KEY = ',"client_metadata":'
+
+
+def _dumps_compact(value: JsonValue) -> str:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+
+def _splice_account_installation_id(text_data: str, codex_installation_id: str | None) -> str | None:
+    """Stamp ``client_metadata`` without decoding the rest of the frame.
+
+    Compact ``json.dumps`` (fixed separators, ``ensure_ascii``, insertion
+    order) is compositional: an object encodes as the concatenation of its
+    independently encoded members. For a frame produced by that encoder,
+    rewriting only the trailing top-level ``client_metadata`` value therefore
+    yields exactly the bytes a full decode/rewrite/encode would. This covers the
+    two dominant shapes -- ``client_metadata`` as the last key, or absent -- and
+    returns ``None`` for anything else so the caller falls back to the full
+    round trip.
+    """
+    if len(text_data) < 3 or text_data[0] != "{" or text_data[-1] != "}":
+        return None
+    index = text_data.rfind(_CLIENT_METADATA_TAIL_KEY)
+    if index < 0:
+        if '"client_metadata"' in text_data:
+            # Leading or nested key: not provably absent at the top level.
+            return None
+        inserted: dict[str, JsonValue] = {}
+        apply_codex_installation_metadata(inserted, codex_installation_id)
+        inserted_metadata = inserted.get("client_metadata")
+        if inserted_metadata is None:
+            return text_data
+        return f"{text_data[:-1]}{_CLIENT_METADATA_TAIL_KEY}{_dumps_compact(inserted_metadata)}}}"
+    encoded_metadata = text_data[index + len(_CLIENT_METADATA_TAIL_KEY) : -1]
+    if not encoded_metadata.startswith("{"):
+        return None
+    try:
+        raw_metadata = json.loads(encoded_metadata)
+    except json.JSONDecodeError:
+        # Nested match, or a value followed by further keys: not the trailing top-level key.
+        return None
+    if not isinstance(raw_metadata, dict):
+        return None
+    container: dict[str, JsonValue] = {"client_metadata": cast(dict[str, JsonValue], raw_metadata)}
+    apply_codex_installation_metadata(container, codex_installation_id)
+    metadata = container.get("client_metadata")
+    if metadata is None:
+        return f"{text_data[:index]}}}"
+    updated_metadata = _dumps_compact(metadata)
+    if updated_metadata == encoded_metadata:
+        return text_data
+    return f"{text_data[:index]}{_CLIENT_METADATA_TAIL_KEY}{updated_metadata}}}"
+
+
 def _text_with_account_installation_id(text_data: str, codex_installation_id: str | None) -> str:
+    spliced = _splice_account_installation_id(text_data, codex_installation_id)
+    if spliced is not None:
+        return spliced
     payload = json.loads(text_data)
     if not isinstance(payload, dict):
         return text_data
     apply_codex_installation_metadata(cast(dict[str, JsonValue], payload), codex_installation_id)
-    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    return _dumps_compact(payload)
 
 
 def _text_with_operation_id(text_data: str, operation_id: str | None) -> str:
@@ -594,6 +658,33 @@ def _request_kind_from_headers(headers: Mapping[str, str] | None) -> str:
     return "normal"
 
 
+def _http_bridge_session_unowned_locked(
+    session: "_HTTPBridgeSession",
+    *,
+    ignore_unanchored_reservation: bool = False,
+) -> bool:
+    """Whether no turn owns ``session`` right now; call under ``pending_lock``.
+
+    A registered admission waiter owns a turn that has not yet been counted
+    into the queue (it may be suspended on the pre-lock fair-share resolve,
+    issue #1971, or anywhere between the retry-circuit gate and dispatch);
+    retiring under it would fail an admitted turn with upstream_unavailable.
+    A deferred retirement re-runs on the turn's own drain triggers once it
+    proceeds; if the waiter instead fails admission, its cleanup releases the
+    registration and the submit finalizer retires the flagged session.
+    """
+    has_visible_pending = any(
+        _http_bridge_request_counts_against_queue(request_state) for request_state in session.pending_requests
+    )
+    return (
+        not has_visible_pending
+        and session.queued_request_count == 0
+        and session.admission_waiter_count == 0
+        and (ignore_unanchored_reservation or session.unanchored_reservation_id is None)
+        and not session.upstream_close_attempted
+    )
+
+
 class _HTTPBridgeRequestSubmitMixin:
     @staticmethod
     def _http_bridge_clean_close_retry_max_count() -> int:
@@ -631,6 +722,9 @@ class _HTTPBridgeRequestSubmitMixin:
         enforce_openai_sdk_contract: bool = True,
         preserve_responses_lite_client_metadata: bool = False,
     ) -> tuple[_WebSocketRequestState, str]:
+        # One dump feeds client-metadata derivation, the frame and the usage
+        # budget; ``to_payload`` is deterministic so sharing it is exact.
+        base_payload = payload.to_payload()
         request_state, text_data = self._prepare_response_bridge_request_state(
             payload,
             api_key=api_key,
@@ -639,7 +733,7 @@ class _HTTPBridgeRequestSubmitMixin:
             attach_event_queue=True,
             transport=_REQUEST_TRANSPORT_HTTP,
             client_metadata=_response_create_client_metadata(
-                payload.to_payload(),
+                base_payload,
                 headers=headers,
                 preserve_existing_responses_lite=preserve_responses_lite_client_metadata,
             ),
@@ -647,6 +741,7 @@ class _HTTPBridgeRequestSubmitMixin:
             session_id=_owner_lookup_session_id_from_headers(headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            upstream_payload_base=base_payload,
         )
         (
             request_state.useragent,
@@ -671,6 +766,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_id: str | None = None,
         request_log_id: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        upstream_payload_base: JsonObject | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
         deduped_replayed_input_count: int | None = None
         deduped_replayed_input_fingerprint: str | None = None
@@ -685,12 +781,19 @@ class _HTTPBridgeRequestSubmitMixin:
                 deduped_replayed_input_count = len(replayed_input_items)
                 deduped_replayed_input_fingerprint = _fingerprint_input_items(replayed_input_items)
                 payload = payload.model_copy(update={"input": deduped_input_items})
+                # The caller's dump describes the un-deduped input; it must not
+                # become the forwarded frame or the budget base.
+                upstream_payload_base = None
         protected_agent_control_output_occurrences = (
             _historical_agent_control_output_occurrences(cast(list[JsonValue], payload.input))
             if isinstance(payload.input, list)
             else {}
         )
-        upstream_payload = dict(payload.to_payload())
+        if upstream_payload_base is None:
+            upstream_payload_base = payload.to_payload()
+        # Shallow copy: every mutation below rebinds top-level keys only, so
+        # ``upstream_payload_base`` stays the pristine dump for the budget.
+        upstream_payload = dict(upstream_payload_base)
         upstream_payload.pop("stream", None)
         upstream_payload.pop("background", None)
         if include_type_field:
@@ -736,7 +839,7 @@ class _HTTPBridgeRequestSubmitMixin:
             transport=transport,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             api_key=api_key,
-            request_usage_budget=estimate_api_key_request_usage(payload),
+            request_usage_budget=estimate_api_key_request_usage(payload, upstream_payload=upstream_payload_base),
             previous_response_id=payload.previous_response_id,
             session_id=_normalize_session_id(session_id),
             hard_continuity_anchor=(
@@ -805,18 +908,30 @@ class _HTTPBridgeRequestSubmitMixin:
         text_data: str,
     ) -> str:
         codex_installation_id = getattr(session.account, "codex_installation_id", None)
-        updated_text = _text_with_account_installation_id(text_data, codex_installation_id)
-        if request_state.fresh_upstream_request_text is not None:
-            updated_fresh_text = _text_with_account_installation_id(
-                request_state.fresh_upstream_request_text,
-                codex_installation_id,
-            )
+        # The memo holds the exact objects the previous call returned for this
+        # installation id; a text rewrite yields a new object and an account
+        # swap changes the id, so both miss and take the full stamp below.
+        memo_valid = request_state.installation_stamp_installation_id == codex_installation_id
+        if memo_valid and (
+            text_data is request_state.installation_stamp_text
+            or text_data is request_state.installation_stamp_fresh_text
+        ):
+            updated_text = text_data
+        else:
+            updated_text = _text_with_account_installation_id(text_data, codex_installation_id)
+        fresh_text = request_state.fresh_upstream_request_text
+        if fresh_text is not None and not (memo_valid and fresh_text is request_state.installation_stamp_fresh_text):
+            updated_fresh_text = _text_with_account_installation_id(fresh_text, codex_installation_id)
             _enforce_http_bridge_response_create_text_size(request_state, updated_fresh_text)
             request_state.fresh_upstream_request_text = updated_fresh_text
         if updated_text == text_data:
-            return text_data
-        request_state.request_text = updated_text
-        _enforce_response_create_size_limit(request_state)
+            updated_text = text_data
+        else:
+            request_state.request_text = updated_text
+            _enforce_response_create_size_limit(request_state)
+        request_state.installation_stamp_installation_id = codex_installation_id
+        request_state.installation_stamp_text = updated_text
+        request_state.installation_stamp_fresh_text = request_state.fresh_upstream_request_text
         return updated_text
 
     async def _inline_http_bridge_image_urls(
@@ -909,6 +1024,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 session,
                 request_scope_id=request_scope_id,
             )
+            # Like the half-open lease below, the admission registration the
+            # submit took at entry is handed back here when no dispatch took
+            # it over.
+            released_admission_waiter = await self._release_http_bridge_admission_preregistration(
+                session, request_state=request_state
+            )
             if request_state.claimed_half_open_until > 0.0 and request_state.response_create_attempt_count == 0:
                 # This admission claimed the half-open probe but the request
                 # never ATTEMPTED the upstream send — a poisoned-anchor
@@ -933,11 +1054,13 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.claimed_half_open_until = 0.0
             # Inner pre-submit cleanup may clear the reservation before control
             # returns here, so ownership must be captured before awaiting it.
-            # Only that request can make detached-session retirement newly
-            # ready; an ordinary send/reader failure already owns terminal
-            # settlement, and closing again would run that funnel twice.
+            # Only that request, or one whose pre-dispatch exit just released
+            # the admission registration a retirement was deferring on, can
+            # make detached-session retirement newly ready; an ordinary
+            # send/reader failure already owns terminal settlement, and
+            # closing again would run that funnel twice.
             if (
-                owned_unanchored_handoff
+                (owned_unanchored_handoff or released_admission_waiter)
                 and session.upstream_control.retire_after_drain
                 and not session.upstream_close_attempted
             ):
@@ -999,6 +1122,15 @@ class _HTTPBridgeRequestSubmitMixin:
         owned_unanchored_handoff: bool,
         recovery_turn_state: str | None = None,
     ) -> None:
+        # Own admission from submit entry, not from the dispatch registration:
+        # a concurrent cooldown-suppressed sibling retires a session no turn
+        # owns, and between the retry-circuit gate and that registration this
+        # turn would otherwise be invisible to it (issue #1943 follow-up).
+        # The dispatch registration takes this over; the interruption cleanup
+        # and the submit finalizer release it on every earlier exit.
+        async with session.pending_lock:
+            session.admission_waiter_count += 1
+        request_state.admission_waiter_preregistered = True
         recovery_attempt_consumed = False
         allow_operation_fenced_continuity_replay = False
         if _http_bridge_operation_fence_for_hard_continuity_enabled(request_state):
@@ -1043,6 +1175,20 @@ class _HTTPBridgeRequestSubmitMixin:
         if not retry_allowed:
             block_seconds, block_reason = await self._http_bridge_precreated_retry_block(session)
             retry_after_seconds = max(1, math.ceil(block_seconds))
+            # The session may have been created before this late admission
+            # check (issue #1943).  Do not leave an unsubmitted socket
+            # reusable during the cooldown: hand back this request's own
+            # admission registration, then retire the session when no other
+            # turn owns it, letting the bounded drain path handle registry
+            # detach, aliases, leases, and close ownership.  An admitted
+            # sibling (the half-open probe this cooldown permits) is a live
+            # owner even before its dispatch registration; flagging the
+            # session under it would fail that one allowed submission.
+            await self._release_http_bridge_admission_preregistration(session, request_state=request_state)
+            await self._retire_idle_http_bridge_session_on_cooldown_suppression(
+                session,
+                owned_unanchored_handoff=owned_unanchored_handoff,
+            )
             _log_http_bridge_event(
                 "submit_retry_circuit_suppressed",
                 session.key,
@@ -1443,6 +1589,41 @@ class _HTTPBridgeRequestSubmitMixin:
                         "The recovery checkpoint was already consumed; retry the request.",
                     ),
                 )
+            if not operation.created and operation.state == "abandoned":
+                hard_continuity_recovery = (
+                    request_state.previous_response_id is None
+                    and _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
+                )
+                _record_continuity_fail_closed(
+                    surface="http_bridge",
+                    reason=(
+                        "abandoned_hard_continuity_full_history_recovery"
+                        if hard_continuity_recovery
+                        else "abandoned_operation_full_history_recovery"
+                    ),
+                    previous_response_id=request_state.previous_response_id,
+                    session_id=request_state.session_id,
+                    upstream_error_code="previous_response_not_found",
+                )
+                # The recovery journal may already hold an UNKNOWN row for
+                # this request. Release it before rejecting so an identical
+                # anchored resend sees the same 400 instead of a 502
+                # "another recovery request is already in flight".
+                await self._cleanup_http_bridge_submit_interruption(
+                    session,
+                    request_state=request_state,
+                    gate_acquired=False,
+                    request_enqueued=False,
+                    counted_in_queue=False,
+                )
+                raise ProxyResponseError(
+                    400,
+                    (
+                        _http_bridge_hard_continuity_full_history_recovery_error()
+                        if hard_continuity_recovery
+                        else _http_bridge_client_full_history_recovery_error()
+                    ),
+                )
             if not operation.created and not getattr(operation, "rebound", False):
                 if operation.state in {"completed", "incomplete"}:
                     if getattr(operation, "event_spool_complete", False):
@@ -1617,6 +1798,7 @@ class _HTTPBridgeRequestSubmitMixin:
             )
         if session.upstream_control.retire_after_drain and not owned_unanchored_handoff:
             await _cleanup_unsubmitted_recovery_claim()
+            await self._release_http_bridge_admission_preregistration(session, request_state=request_state)
             if not session.upstream_close_attempted:
                 await self._retire_http_bridge_after_drain_if_ready(session)
             raise ProxyResponseError(
@@ -1708,7 +1890,12 @@ class _HTTPBridgeRequestSubmitMixin:
             # unwinding concurrently cannot see an apparently idle session
             # and release the lease the reacquire installs.
             async with session.pending_lock:
-                session.admission_waiter_count += 1
+                if request_state.admission_waiter_preregistered:
+                    # The submit entry already counted this turn; take that
+                    # registration over instead of counting it twice.
+                    request_state.admission_waiter_preregistered = False
+                else:
+                    session.admission_waiter_count += 1
                 admission_waiter_registered = True
                 # Snapshot under the same lock: with the waiter registered, a
                 # held lease cannot be idle-released, so a session that does
@@ -2352,7 +2539,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     account=session.account,
                     account_id_value=session.account.id,
                     pending_requests=deque([request_state]),
-                    pending_lock=anyio.Lock(),
+                    pending_lock=fast_lock(),
                     error_code=error_code,
                     error_message=failure_error_message,
                     api_key=None,
@@ -2613,8 +2800,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.pending_requests.remove(request_state)
             if counted_in_queue:
                 session.queued_request_count = max(0, session.queued_request_count - 1)
-            if admission_waiter_registered:
+            if admission_waiter_registered or request_state.admission_waiter_preregistered:
                 session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
+                request_state.admission_waiter_preregistered = False
             retire_closed_session = session.closed and session.admission_waiter_count == 0
         if (
             request_state.recovery_attempt_fingerprint is not None
@@ -3154,28 +3342,45 @@ class _HTTPBridgeRequestSubmitMixin:
                 ),
             )
 
+    async def _release_http_bridge_admission_preregistration(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+    ) -> bool:
+        """Hand back a submit-entry admission registration the dispatch never took over.
+
+        Mirrors the interruption cleanup's waiter release for a turn that
+        never reached dispatch: the last waiter to leave a session that was
+        closed under it retires the session when nothing else owns it (a
+        fence-closed session with pending work and a live reader is settled
+        by that reader, not here), and a session left with no in-flight work
+        gives up an idle lease.
+        """
+        if not request_state.admission_waiter_preregistered:
+            return False
+        async with session.pending_lock:
+            session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
+            request_state.admission_waiter_preregistered = False
+            retire_closed_session = session.closed and _http_bridge_session_unowned_locked(session)
+        if retire_closed_session:
+            await self._retire_stale_pending_http_bridge_session(
+                session,
+                detail="last_admission_waiter_cancelled",
+                response_events_seen=max(
+                    request_state.response_event_count,
+                    int(request_state.response_id is not None or request_state.latency_response_created_ms is not None),
+                ),
+                allow_liveness_revive=False,
+            )
+        await self._maybe_release_idle_http_bridge_session_lease(session)
+        return True
+
     async def _retire_http_bridge_after_drain_if_ready(self: Any, session: "_HTTPBridgeSession") -> bool:
         if not (session.upstream_control.reconnect_requested and session.upstream_control.retire_after_drain):
             return False
         async with session.pending_lock:
-            has_visible_pending = any(
-                _http_bridge_request_counts_against_queue(request_state) for request_state in session.pending_requests
-            )
-            should_reconnect = (
-                not has_visible_pending
-                and session.queued_request_count == 0
-                # A registered admission waiter owns a turn that has not yet
-                # been counted into the queue (it may be suspended on the
-                # pre-lock fair-share resolve, issue #1971); retiring under it
-                # would fail an admitted turn with upstream_unavailable. A
-                # deferred retirement re-runs on the turn's own drain
-                # triggers once it proceeds; if the waiter instead fails
-                # admission, its cleanup releases the idle lease and the
-                # flagged session falls back to idle-TTL close.
-                and session.admission_waiter_count == 0
-                and session.unanchored_reservation_id is None
-                and not session.upstream_close_attempted
-            )
+            should_reconnect = _http_bridge_session_unowned_locked(session)
             if should_reconnect:
                 session.pending_requests.clear()
                 session.upstream_close_attempted = True
@@ -3183,6 +3388,40 @@ class _HTTPBridgeRequestSubmitMixin:
             return False
 
         await self._close_http_bridge_session_bounded(session, reason="retire_after_drain")
+        return True
+
+    async def _retire_idle_http_bridge_session_on_cooldown_suppression(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        owned_unanchored_handoff: bool,
+    ) -> bool:
+        """Retire a cooldown-suppressed session unless another turn owns it.
+
+        The bridge opens or selects the session before the hard-key retry
+        circuit decides admission, so a suppressed request can leave a socket
+        that never carried ``response.create`` in the reuse pool, where the
+        next half-open probe picks it up (issue #1943). Flagging the session
+        for retirement and running the bounded drain path closes that socket
+        — but only when no other turn owns the session. A pending or queued
+        turn, a registered admission waiter (the admitted probe between its
+        gate and dispatch), or a foreign unanchored handoff is a live owner
+        whose own lifecycle governs retirement; flagging the session under it
+        would trip the pre-dispatch retiring fence for the one submission the
+        cooldown permits. The caller's own unanchored handoff does not count:
+        its submit finalizer releases it and retires the flagged session.
+        """
+        async with session.pending_lock:
+            idle = _http_bridge_session_unowned_locked(
+                session,
+                ignore_unanchored_reservation=owned_unanchored_handoff,
+            )
+            if idle:
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
+        if not idle:
+            return False
+        await self._retire_http_bridge_after_drain_if_ready(session)
         return True
 
     async def _http_bridge_claim_miss_shows_remote_probe(

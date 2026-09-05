@@ -109,22 +109,22 @@ def _build_ssl_context() -> ssl.SSLContext:
 
 
 @functools.cache
-def shared_ssl_context() -> ssl.SSLContext:
-    """The process's one outbound SSL context, built on first use.
+def _shared_ssl_context() -> ssl.SSLContext:
+    """Return the process-wide verification context shared by every outbound connector.
 
-    Loading the CA bundle costs a synchronous read of every root certificate,
-    and every upstream connector used to pay it on the event loop — a stall
-    that starved the loop for tens of seconds under load and tripped the
-    bounded SQLite teardown below its 5s deadline (issue #2029). Startup's
-    ``init_http_client`` builds it before the app serves, so later connector
-    factories reuse this instance instead of re-reading the roots per turn.
-
-    The published context is treated as immutable: no runtime code may change
-    its verification mode, hostname checking, CA locations, ciphers, or ALPN
-    afterwards, because every connector shares it. Trust-root changes on disk
-    therefore take effect only after a process restart.
+    Building a context parses the system store plus the certifi bundle
+    (~7 ms CPU and ~700 KB per copy), and nothing mutates the context after
+    construction, so per-call sessions, SOCKS connectors, and the shared
+    client generations all reuse this one instance. ``_build_ssl_context`` is
+    looked up at call time so tests can still patch the constructor; the
+    cache is cleared by ``_reset_shared_ssl_context``.
     """
+
     return _build_ssl_context()
+
+
+def _reset_shared_ssl_context() -> None:
+    _shared_ssl_context.cache_clear()
 
 
 def _apply_tcp_keepalive(sock: socket.socket) -> None:
@@ -193,7 +193,7 @@ class HttpClientLease:
 
 async def _build_http_client() -> HttpClient:
     settings = get_settings()
-    ssl_context = shared_ssl_context()
+    ssl_context = _shared_ssl_context()
     proxy_env = (
         settings.upstream_websocket_proxy_env() if hasattr(settings, "upstream_websocket_proxy_env") else os.environ
     )
@@ -417,6 +417,7 @@ async def close_http_client() -> None:
         client = _http_client
         _http_client = None
         _last_generationless_network_rotation_at = None
+        _reset_shared_ssl_context()
         clients = (
             *((client,) if client is not None else ()),
             *_retired_http_clients,

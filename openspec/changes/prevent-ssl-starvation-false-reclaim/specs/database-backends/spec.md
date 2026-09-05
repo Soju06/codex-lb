@@ -2,46 +2,28 @@
 
 ### Requirement: A completed SQLite teardown is never reclaimed
 
-The bounded file-backed SQLite teardown measures its deadline in wall-clock
-time, so a starved event loop can reach that deadline while the aiosqlite
-worker has already finished and only its completion remains queued. Reclaiming
-there fences a healthy session and invalidates a live connection.
+When the initial bounded wait for file-backed SQLite rollback or close expires, the service MUST observe the existing teardown task for a bounded completion grace before reclamation. Only successful task completion observed within that opportunity MUST exempt the session from fencing, driver interruption, connection invalidation and deferred cleanup registration. Normal remaining teardown MUST still run. Failed, cancelled or still-pending tasks MUST retain the existing fencing and tracked reclamation/late-cleanup ownership, using connections captured before teardown; already-closed handles MUST not be interrupted or invalidated again.
 
-When the bound expires, the service MUST observe the abandoned rollback or
-close for a bounded grace period before acting. When that teardown has
-completed successfully, the service MUST NOT fence the session, register the
-task for deferred cleanup, interrupt the driver, or invalidate the connection,
-and MUST emit exactly one warning naming the phase, the configured bound, and
-the elapsed time measured at the bound, before the grace.
+A successful-completion warning MUST name the phase, configured initial bound and elapsed time measured at that bound before grace. Diagnostics MUST describe observed task/cleanup outcomes; elapsed time alone MUST NOT be reported as measured event-loop lag, and failed invalidation alone MUST NOT be asserted to prove a permanent writer hold. Failed teardown and failed invalidation MUST remain visible at warning level through the existing diagnostic owner.
 
-A terminal task is not by itself proof of a successful teardown. A teardown
-that failed or was cancelled MUST NOT receive this exemption, and a teardown
-still pending after the grace MUST retain the existing fence, cleanup
-registration, driver interrupt, connection invalidation, and late-completion
-bookkeeping. A connection that the failed or cancelled teardown had already closed
-holds nothing and MUST be skipped rather than interrupted, invalidated, or
-reported as a hold; when that teardown ended in an exception, the service MUST
-still report that exception at warning level, naming the phase and the elapsed
-time. A failed connection invalidation on a still-open connection
-MUST be reported at warning level, because it is the point at which a permanent
-writer hold begins.
+#### Scenario: Real rollback worker completes while the event loop is delayed
+- **GIVEN** a file-backed SQLite write transaction whose native rollback finishes while the event loop is blocked across the initial bound
+- **WHEN** grace observes successful task completion after the loop resumes
+- **THEN** the session is not fenced and no connection is interrupted or invalidated
+- **AND** no deferred cleanup is registered, normal close runs, and another writer can commit
+- **AND** the warning reports the phase, initial bound and pre-grace elapsed time without claiming measured lag
 
-#### Scenario: Rollback completes after the bound elapses
+#### Scenario: Real close worker completes while the event loop is delayed
+- **GIVEN** a file-backed SQLite session whose native close finishes while completion callbacks cannot run across the initial bound
+- **WHEN** grace observes successful close completion
+- **THEN** no reclaim or deferred cleanup is performed and another writer can commit
 
-- **GIVEN** a file-backed SQLite session whose rollback outlives the teardown bound
-- **WHEN** that rollback completes successfully before the reclaim acts
-- **THEN** the session is not fenced and its connection is neither interrupted nor invalidated
-- **AND** one warning reports the phase, bound, and elapsed seconds
-- **AND** the session's normal close still runs
+#### Scenario: Failure or cancellation is not successful completion
+- **WHEN** a teardown that outlived the initial bound fails, is cancelled, or remains pending after grace
+- **THEN** existing fencing, captured-connection reclamation attempts and owned late cleanup remain in effect
+- **AND** already-closed handles are skipped without suppressing an observed teardown failure
 
-#### Scenario: Close completes after the bound elapses
-
-- **GIVEN** a file-backed SQLite session whose close outlives the teardown bound
-- **WHEN** that close completes successfully before the reclaim acts
-- **THEN** no reclaim is performed and no deferred cleanup is registered
-
-#### Scenario: Failed or cancelled teardown still reclaims
-
-- **GIVEN** a file-backed SQLite session whose rollback outlives the teardown bound
-- **WHEN** that rollback ends by raising or by being cancelled
-- **THEN** the session is fenced and its connection is invalidated as before
+#### Scenario: Reclamation diagnostics do not invent a permanent lock
+- **WHEN** invalidating a captured open connection fails
+- **THEN** the failure is reported at warning level
+- **AND** diagnostics do not assert that a permanent writer hold has been proven

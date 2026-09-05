@@ -62,6 +62,7 @@ from app.core.resilience.degradation import set_degraded, set_normal
 from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
+from app.db.snapshot import clone_row
 from app.modules.proxy._load_balancer.model_eligibility import (
     _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES,
     CatalogOmissionQuotaAdmission,
@@ -208,6 +209,7 @@ class AccountSelection:
     resets_at: int | None = None
     lease: AccountLease | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
+    continuity_owner_no_longer_exists: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,14 +227,12 @@ class _SelectionInputs(SelectionInputsProtocol):
     latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_monthly: dict[str, UsageHistory]
-    # Ownership ambiguity is resolved before transient additional-quota,
-    # exclusion, runtime-health, budget, and account-cap filters. Keep that
-    # stronger candidate pool alongside the effective routing pool.
+    # Resolve ownership before transient routing filters; keep that stronger
+    # candidate pool alongside the effective routing pool.
     continuity_owner_candidates: list[Account] | None = None
-    # Sticky-row mutation is authorized by account assignment and security
-    # policy, before model/service-tier eligibility. Keep this separate from
-    # continuity ambiguity: a model-ineligible account can still own the raw
-    # row that this authenticated request is allowed to retire.
+    # Sticky mutation authority precedes model/service-tier eligibility; keep
+    # it separate because a model-ineligible account can still own the raw row
+    # this authenticated request may retire.
     sticky_mutation_authority_account_ids: frozenset[str] | None = None
     quota_planner_settings: PlannerSettings = PlannerSettings()
     runtime_accounts: list[Account] | None = None
@@ -717,6 +717,7 @@ class LoadBalancer:
                 account=None,
                 error_message=selection_inputs.error_message,
                 error_code=selection_inputs.error_code,
+                continuity_owner_no_longer_exists=selection_inputs.error_code == CONTINUITY_OWNER_UNAVAILABLE,
             )
 
         selected_snapshot: Account | None = None
@@ -957,7 +958,7 @@ class LoadBalancer:
                     error_message=error_message,
                     error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
                 )
-            if required_continuity_owner and selection_error_code in (None, "hard_affinity_saturated"):
+            if required_continuity_owner and selection_error_code is None:
                 selection_error_code = CONTINUITY_OWNER_UNAVAILABLE
             if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and error_message and selection_error_code is None:
                 return AccountSelection(
@@ -1355,15 +1356,9 @@ class LoadBalancer:
             )
             selection_inputs = _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
-                latest_primary={
-                    account_id: _clone_usage_history(entry) for account_id, entry in latest_primary.items()
-                },
-                latest_secondary={
-                    account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
-                },
-                latest_monthly={
-                    account_id: _clone_standard_usage_history(entry) for account_id, entry in latest_monthly.items()
-                },
+                latest_primary={account_id: clone_row(entry) for account_id, entry in latest_primary.items()},
+                latest_secondary={account_id: clone_row(entry) for account_id, entry in latest_secondary.items()},
+                latest_monthly={account_id: clone_row(entry) for account_id, entry in latest_monthly.items()},
                 continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
                 sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                 quota_planner_settings=quota_planner_settings,
@@ -2945,32 +2940,14 @@ def _first_not_none(
     return None
 
 
-def _clone_usage_history(entry: UsageHistory | AdditionalUsageHistory) -> UsageHistory | AdditionalUsageHistory:
-    if isinstance(entry, AdditionalUsageHistory):
-        data = {column.name: getattr(entry, column.name) for column in AdditionalUsageHistory.__table__.columns}
-        return AdditionalUsageHistory(**data)
-    data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
-    return UsageHistory(**data)
-
-
-def _clone_standard_usage_history(entry: UsageHistory) -> UsageHistory:
-    data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
-    return UsageHistory(**data)
-
-
 def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInputs:
     return _SelectionInputs(
         accounts=[_clone_account(account) for account in selection_inputs.accounts],
-        latest_primary={
-            account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_primary.items()
-        },
+        latest_primary={account_id: clone_row(entry) for account_id, entry in selection_inputs.latest_primary.items()},
         latest_secondary={
-            account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_secondary.items()
+            account_id: clone_row(entry) for account_id, entry in selection_inputs.latest_secondary.items()
         },
-        latest_monthly={
-            account_id: _clone_standard_usage_history(entry)
-            for account_id, entry in selection_inputs.latest_monthly.items()
-        },
+        latest_monthly={account_id: clone_row(entry) for account_id, entry in selection_inputs.latest_monthly.items()},
         continuity_owner_candidates=(
             None
             if selection_inputs.continuity_owner_candidates is None

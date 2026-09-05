@@ -100,6 +100,7 @@ lint: architecture-check
 
 architecture-check:
 	uv run python scripts/check_proxy_architecture.py
+	uv run python scripts/check_cancellation_safety.py
 
 typecheck:
 	uv sync --dev --frozen

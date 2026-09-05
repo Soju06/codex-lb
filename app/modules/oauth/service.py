@@ -296,7 +296,7 @@ class OAuthCallbackServer:
     async def start(self) -> None:
         app = web.Application()
         app.router.add_get("/auth/callback", self._handler)
-        self._runner = web.AppRunner(app)
+        self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self._host, self._port)
         await self._site.start()

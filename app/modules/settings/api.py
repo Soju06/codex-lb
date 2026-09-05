@@ -19,12 +19,12 @@ from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
-from app.core.clients.http import shared_ssl_context
+from app.core.clients.http import _shared_ssl_context
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError, DashboardSettingsConflictError
-from app.core.upstream_proxy import resolve_proxy_endpoint
+from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_proxy_endpoint
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_proxy_service_for_app, get_settings_context
@@ -276,6 +276,9 @@ async def create_upstream_proxy_endpoint(
             "Plaintext proxies cannot carry credentials",
             code="plaintext_proxy_credentials_forbidden",
         )
+    if payload.username is not None and ":" in payload.username:
+        # Mirrors the resolver: a Basic user-id cannot encode a colon.
+        raise DashboardBadRequestError('Proxy usernames cannot contain ":"', code="invalid_proxy_username")
     encryptor = TokenEncryptor()
     row = ProxyEndpoint(
         name=payload.name,
@@ -301,7 +304,11 @@ async def test_upstream_proxy_endpoint(
     row = await context.session.get(ProxyEndpoint, endpoint_id)
     if row is None:
         raise DashboardBadRequestError("Proxy endpoint not found", code="proxy_endpoint_not_found")
-    endpoint = resolve_proxy_endpoint(row, encryptor=TokenEncryptor())
+    try:
+        endpoint = resolve_proxy_endpoint(row, encryptor=TokenEncryptor())
+    except UpstreamProxyRouteError as exc:
+        # Persisted rows the resolver now rejects report the reason instead of 500.
+        return UpstreamProxyEndpointTestResponse(endpoint_id=row.id, ok=False, elapsed_ms=0, error=exc.reason)
     started = time.monotonic()
     try:
         status_code = await _probe_upstream_proxy_endpoint(endpoint)
@@ -567,7 +574,7 @@ async def _probe_upstream_proxy_endpoint(endpoint) -> int:
             username=endpoint.username,
             password=endpoint.password,
             rdns=endpoint.proxy_url.split(":", 1)[0] == "socks5h",
-            ssl=shared_ssl_context(),
+            ssl=_shared_ssl_context(),
         )
         async with aiohttp.ClientSession(
             connector=connector,
@@ -580,11 +587,6 @@ async def _probe_upstream_proxy_endpoint(endpoint) -> int:
         proxy=endpoint.proxy_url,
         timeout=httpx.Timeout(UPSTREAM_PROXY_TEST_TIMEOUT_SECONDS),
         follow_redirects=False,
-        # Deliberately not ``verify=shared_ssl_context()``: httpcore calls
-        # ``set_alpn_protocols`` on whatever context it is handed, which would
-        # mutate the process-wide singleton under the aiohttp connectors that
-        # share it. This probe is an operator-triggered dashboard action, so
-        # httpx's own per-client context is an acceptable cost.
     ) as client:
         response = await client.get(UPSTREAM_PROXY_TEST_URL)
         return response.status_code

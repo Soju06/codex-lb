@@ -51,9 +51,7 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import stream_responses as core_stream_responses  # noqa: F401
 from app.core.clients.proxy import thread_goal_request as core_thread_goal_request
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
-from app.core.clients.proxy_websocket import (
-    UpstreamWebSocket as UpstreamWebSocket,
-)
+from app.core.clients.proxy_websocket import UpstreamWebSocket as UpstreamWebSocket
 from app.core.clients.proxy_websocket import (
     connect_live_websocket as connect_live_websocket,
 )
@@ -521,6 +519,7 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.helpers import (
     _is_account_neutral_transport_drop as _is_account_neutral_transport_drop,
 )
+from app.modules.proxy._service.streaming.helpers import _is_background_json_ack as _is_background_json_ack
 from app.modules.proxy._service.streaming.helpers import (
     _push_stream_attempt_timeout_overrides as _push_stream_attempt_timeout_overrides,
 )
@@ -881,6 +880,7 @@ _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
 _SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE = (
     "Suppressed duplicate side-effect tool call; upstream response cannot be continued safely."
 )
+_SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE = "duplicate_tool_call_replay_suppressed"
 _WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
 _WEBSOCKET_CONTINUITY_CACHE_LIMIT = 4096
 _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE = "security_work_authorization_required"
@@ -1708,6 +1708,7 @@ class ProxyService(
         exclude_account_ids: Collection[str] | None = None,
         preferred_account_id: str | None = None,
         preferred_account_is_continuity_owner: bool = False,
+        preferred_account_overrides_single_account_routing: bool = False,
         require_security_work_authorized: bool = False,
         lease_kind: Literal["response_create", "stream"] | None = None,
         estimated_lease_tokens: float = 0.0,
@@ -1778,12 +1779,11 @@ class ProxyService(
                 required_preferred_account = (
                     preferred_account_id is not None and not fallback_on_preferred_account_unavailable
                 )
-                required_continuity_preferred_account = (
-                    required_preferred_account and preferred_account_is_continuity_owner
-                )
+                required_continuity = required_preferred_account and preferred_account_is_continuity_owner
                 single_account_routing_id: str | None = None
                 if _routing_strategy(settings) == "single_account" and (
-                    not required_preferred_account or required_continuity_preferred_account
+                    not required_preferred_account
+                    or (required_continuity and not preferred_account_overrides_single_account_routing)
                 ):
                     selected_account_id = (settings.single_account_id or "").strip()
                     if not selected_account_id:
@@ -1812,12 +1812,12 @@ class ProxyService(
                     and (
                         scoped_account_ids is None
                         or preferred_account_id in scoped_account_ids
-                        or required_continuity_preferred_account
+                        or (required_continuity and not preferred_account_overrides_single_account_routing)
                     )
                     and (
                         single_account_routing_id is None
                         or preferred_account_id == single_account_routing_id
-                        or required_continuity_preferred_account
+                        or required_continuity
                     )
                 )
                 if preferred_account_id is not None and not preferred_eligible:
@@ -1869,12 +1869,12 @@ class ProxyService(
                         additional_limit_name=additional_limit_name,
                         account_ids=(
                             {single_account_routing_id}
-                            if required_continuity_preferred_account and single_account_routing_id is not None
+                            if required_continuity and single_account_routing_id is not None
                             else scoped_account_ids
                         ),
                         required_account_id=preferred_account_id,
                         required_account_is_ownership_constraint=required_preferred_account,
-                        required_continuity_owner=(required_continuity_preferred_account),
+                        required_continuity_owner=required_continuity,
                         require_unambiguous_account=require_unambiguous_account,
                         require_security_work_authorized=require_security_work_authorized,
                         budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),

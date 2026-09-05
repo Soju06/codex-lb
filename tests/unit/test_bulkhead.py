@@ -69,6 +69,72 @@ async def test_bulkhead_returns_429_when_proxy_http_lane_full():
     assert first_response.status_code == 200
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param("/v1", id="v1-root"),
+        pytest.param("/backend-api", id="backend-api-root"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_bulkhead_exact_proxy_root_rejection_uses_proxy_lane_and_openai_envelope(
+    path: str,
+) -> None:
+    bulkhead = _bulkhead()
+    lane, proxy_sem = bulkhead.get_semaphore("http", "/v1/saturated")
+    assert lane == "proxy_http"
+    assert proxy_sem is not None
+    await proxy_sem.acquire()
+
+    app_called = False
+
+    async def inner_app(scope, receive, send):
+        nonlocal app_called
+        app_called = True
+        del scope, receive
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 204,
+                "headers": [],
+            }
+        )
+        await send({"type": "http.response.body", "body": b""})
+
+    middleware = BulkheadMiddleware(cast(Any, inner_app), bulkhead=bulkhead)
+    sent_events: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        return {
+            "type": "http.request",
+            "body": b"",
+            "more_body": False,
+        }
+
+    async def send(message: dict[str, object]) -> None:
+        sent_events.append(message)
+
+    try:
+        await middleware(
+            cast(Any, {"type": "http", "path": path}),
+            cast(Any, receive),
+            cast(Any, send),
+        )
+    finally:
+        proxy_sem.release()
+
+    assert app_called is False
+    assert len(sent_events) == 2
+    assert sent_events[0]["type"] == "http.response.start"
+    assert sent_events[0]["status"] == 429
+    assert sent_events[1]["type"] == "http.response.body"
+
+    payload = json.loads(cast(bytes, sent_events[1]["body"]).decode("utf-8"))
+    assert payload["error"]["type"] == "rate_limit_error"
+    assert payload["error"]["code"] == "proxy_overloaded"
+    assert "proxy_http lane" in payload["error"]["message"]
+
+
 @pytest.mark.asyncio
 async def test_bulkhead_compact_lane_isolated_from_general_proxy_http():
     app = FastAPI()

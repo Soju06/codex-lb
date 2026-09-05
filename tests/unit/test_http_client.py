@@ -2,26 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import app.core.clients.codex as codex_module
 import app.core.clients.http as http_module
-from app.core.upstream_proxy import ResolvedProxyEndpoint
 
 pytestmark = pytest.mark.unit
-
-
-@pytest.fixture(autouse=True)
-def _clear_shared_ssl_context_cache():
-    """The shared context is memoized for the process; a sentinel built while
-    ``_build_ssl_context`` is patched must never escape into another test, and a
-    real context cached by an earlier test must never hide a patched builder."""
-    http_module.shared_ssl_context.cache_clear()
-    yield
-    http_module.shared_ssl_context.cache_clear()
 
 
 def _settings() -> SimpleNamespace:
@@ -35,6 +24,15 @@ def _settings() -> SimpleNamespace:
 async def _drain_close_tasks() -> None:
     await asyncio.sleep(0)
     await asyncio.sleep(0)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_shared_ssl_context() -> Iterator[None]:
+    # The shared context is a process-wide cache; every test starts from an
+    # empty cache so ``_build_ssl_context`` patches take effect per test.
+    http_module._reset_shared_ssl_context()
+    yield
+    http_module._reset_shared_ssl_context()
 
 
 @pytest.mark.asyncio
@@ -350,6 +348,76 @@ def test_build_ssl_context_preserves_default_roots_and_adds_certifi_bundle() -> 
     assert context is ssl_context
 
 
+def test_build_ssl_context_is_not_cached() -> None:
+    first_context = MagicMock()
+    second_context = MagicMock()
+    with (
+        patch("app.core.clients.http.certifi.where", return_value="/tmp/cacert.pem"),
+        patch(
+            "app.core.clients.http.ssl.create_default_context",
+            side_effect=[first_context, second_context],
+        ) as create_default_context,
+    ):
+        assert http_module._build_ssl_context() is first_context
+        assert http_module._build_ssl_context() is second_context
+
+    assert create_default_context.call_count == 2
+
+
+def test_shared_ssl_context_builds_once_and_returns_the_same_instance() -> None:
+    ssl_context = MagicMock()
+    with patch("app.core.clients.http._build_ssl_context", return_value=ssl_context) as build:
+        first = http_module._shared_ssl_context()
+        second = http_module._shared_ssl_context()
+
+    assert first is ssl_context
+    assert first is second
+    build.assert_called_once_with()
+
+
+def test_reset_shared_ssl_context_forces_rebuild() -> None:
+    first_context = MagicMock()
+    second_context = MagicMock()
+    with patch(
+        "app.core.clients.http._build_ssl_context",
+        side_effect=[first_context, second_context],
+    ) as build:
+        assert http_module._shared_ssl_context() is first_context
+        http_module._reset_shared_ssl_context()
+        assert http_module._shared_ssl_context() is second_context
+        assert http_module._shared_ssl_context() is second_context
+
+    assert build.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_close_http_client_resets_shared_ssl_context() -> None:
+    first_context = MagicMock()
+    second_context = MagicMock()
+    with patch(
+        "app.core.clients.http._build_ssl_context",
+        side_effect=[first_context, second_context],
+    ):
+        assert http_module._shared_ssl_context() is first_context
+        await http_module.close_http_client()
+        assert http_module._shared_ssl_context() is second_context
+
+
+def test_shared_ssl_context_matches_a_fresh_build_verification_policy() -> None:
+    # Sharing must not change what the wire sees: same verification policy
+    # and the same trust store as a per-call build of the context.
+    shared = http_module._shared_ssl_context()
+    fresh = http_module._build_ssl_context()
+
+    assert shared is not fresh
+    assert shared.verify_mode == fresh.verify_mode
+    assert shared.check_hostname == fresh.check_hostname
+    assert shared.minimum_version == fresh.minimum_version
+    assert shared.options == fresh.options
+    assert shared.cert_store_stats() == fresh.cert_store_stats()
+    assert sorted(map(repr, shared.get_ca_certs())) == sorted(map(repr, fresh.get_ca_certs()))
+
+
 @pytest.mark.asyncio
 async def test_refresh_http_client_closes_idle_previous_sessions() -> None:
     await http_module.close_http_client()
@@ -632,80 +700,3 @@ async def test_refresh_http_client_cancellation_keeps_current_generation() -> No
         assert http_module.get_http_client() is initial
 
     await http_module.close_http_client()
-
-
-def test_shared_ssl_context_is_memoized_and_builder_stays_uncached() -> None:
-    with patch("app.core.clients.http._build_ssl_context") as build_ssl_context:
-        first = http_module.shared_ssl_context()
-        second = http_module.shared_ssl_context()
-
-    assert first is second is build_ssl_context.return_value
-    build_ssl_context.assert_called_once_with()
-
-
-@pytest.mark.asyncio
-async def test_shared_ssl_context_is_built_once_across_client_generations() -> None:
-    """Issue #2029: every connector generation used to load the CA bundle again
-    on the event loop. Crossing a construction boundary (startup + refresh) is
-    what makes this sensitive: the two connectors built inside a single
-    ``_build_http_client`` call already shared one context before the fix."""
-    await http_module.close_http_client()
-
-    ssl_context = MagicMock()
-    connectors = [MagicMock() for _ in range(4)]
-    sessions = []
-    for _ in range(4):
-        session = MagicMock()
-        session.close = AsyncMock()
-        sessions.append(session)
-    retry_client = MagicMock()
-    retry_client.close = AsyncMock()
-
-    with (
-        patch("app.core.clients.http.get_settings", return_value=_settings()),
-        patch("app.core.clients.http._build_ssl_context", return_value=ssl_context) as build_ssl_context,
-        patch("app.core.clients.http.aiohttp.TCPConnector", side_effect=connectors) as tcp_connector_cls,
-        patch("app.core.clients.http.aiohttp.ClientSession", side_effect=sessions),
-        patch("app.core.clients.http.RetryClient", return_value=retry_client),
-    ):
-        await http_module.init_http_client()
-        await http_module.refresh_http_client()
-        await _drain_close_tasks()
-
-    assert build_ssl_context.call_count == 1
-    assert [call.kwargs["ssl"] for call in tcp_connector_cls.call_args_list] == [ssl_context] * 4
-
-    await http_module.close_http_client()
-    await _drain_close_tasks()
-
-
-def test_create_codex_session_uses_the_shared_ssl_context() -> None:
-    ssl_context = MagicMock()
-    connector = MagicMock()
-    session = MagicMock()
-
-    with (
-        patch("app.core.clients.http.shared_ssl_context", return_value=ssl_context) as shared_context,
-        patch("app.core.clients.codex.aiohttp.TCPConnector", return_value=connector) as tcp_connector_cls,
-        patch("app.core.clients.codex.aiohttp.ClientSession", return_value=session) as client_session_cls,
-    ):
-        assert codex_module.create_codex_session() is session
-
-    shared_context.assert_called_once_with()
-    assert tcp_connector_cls.call_args.kwargs["ssl"] is ssl_context
-    assert client_session_cls.call_args.kwargs["connector"] is connector
-
-
-def test_socks_proxy_connector_uses_the_shared_ssl_context() -> None:
-    ssl_context = MagicMock()
-    connector = MagicMock()
-    endpoint = ResolvedProxyEndpoint("ep_1", "socks5h", "proxy.test", 1080)
-
-    with (
-        patch("app.core.clients.http.shared_ssl_context", return_value=ssl_context) as shared_context,
-        patch("app.core.clients.codex.ProxyConnector", return_value=connector) as proxy_connector_cls,
-    ):
-        assert codex_module._socks_proxy_connector(endpoint) is connector
-
-    shared_context.assert_called_once_with()
-    assert proxy_connector_cls.call_args.kwargs["ssl"] is ssl_context

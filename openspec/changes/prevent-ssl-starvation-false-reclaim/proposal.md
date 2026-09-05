@@ -1,46 +1,25 @@
 ## Why
 
-On a single-instance SQLite deployment, every upstream turn built a fresh
-`aiohttp.TCPConnector` whose `ssl.create_default_context()` +
-`load_verify_locations(certifi.where())` read the whole CA bundle on the event
-loop. Sampling the live process during a 74.8 s event-loop stall put the main
-thread inside `SSLContext.set_default_verify_paths` for at least 17 s of it
-(issue #2029).
-
-That stall then breaks an unrelated invariant. The bounded SQLite teardown
-(issue #1682) measures its 5 s deadline in wall-clock time, so a starved loop
-reaches the deadline while the aiosqlite worker has already finished and only
-its completion callback is queued. The reclaim then fences a healthy session
-and invalidates a live connection, and the interrupt fails with
-`ValueError: no active connection` or
-`sqlite3.ProgrammingError: Cannot operate on a closed database`. Over 24 h this
-instance logged 82 such reclaims, 100% of them inside an `event_loop_lag`
-window, with 8 of the 13 on the current build failing that way.
+A file-backed SQLite worker can finish rollback or close while the event loop is delayed, leaving successful completion unobserved when the initial teardown deadline expires. Reclaiming solely from that deadline can fence a healthy session and invalidate an already released connection.
 
 ## What Changes
 
-- Build the outbound SSL context once per process (`shared_ssl_context`) and
-  reuse it from the shared HTTP/WebSocket connectors, Codex direct sessions,
-  Codex SOCKS sessions, and the SOCKS form of the settings upstream-proxy probe
-  (the HTTP(S) form stays on httpx's own context, since httpcore mutates the
-  ALPN configuration of any context it is given).
-  `_build_ssl_context` stays the uncached constructor.
-- After the teardown bound expires, observe the abandoned rollback/close for a
-  short shielded grace. When it has *successfully* completed, skip the reclaim
-  entirely and report the elapsed bound instead. Failed, cancelled, and still
-  pending teardowns keep the existing reclaim unchanged. The sibling
-  `bound-sqlite-wedged-teardown` delta is reworded so only a teardown that
-  does not complete successfully within the grace (pending, cancelled, or
-  failed) must be reclaimed.
-- Carry `elapsed_seconds` into both teardown log lines, and raise a failed
-  connection invalidation from debug to warning so a real permanent hold
-  (issue #1981) stays visible.
+- Keep the successful-completion grace from PR2030 and implement its wait through the existing `_shielded_bounded` owner.
+- Preserve fencing, captured-connection reclamation and tracked late cleanup for pending, failed or cancelled teardown.
+- Describe the initial wait, completion grace and cleanup separately; log observed outcomes without asserting event-loop lag or a permanent writer hold from elapsed time or an invalidation error.
+- Add real-worker completion-during-loop-starvation coverage at the file-SQLite session teardown path.
+- Retain pinned main's shipped private aiohttp SSL cache and consumers; remove this change's superseded TLS delta and duplicate TLS tests.
+
+## Capabilities
+
+### New Capabilities
+
+None.
+
+### Modified Capabilities
+
+- `database-backends`: Successful bounded-grace completion avoids reclamation; other teardown outcomes retain owned cleanup and evidence-based diagnostics. The active `bound-sqlite-wedged-teardown` delta uses the same deadline/grace distinction.
 
 ## Impact
 
-- Removes a per-turn synchronous CA-bundle read from the event loop; trust-root
-  changes on disk now take effect at process restart instead of per connector.
-- A healthy session is no longer fenced, and a live connection no longer
-  invalidated, because the loop was late.
-- No new setting, dependency, migration, or compatibility path. Public
-  request/response schemas, routing, and account ownership are untouched.
+Remaining product changes are confined to `app/db/session.py` and owning regression coverage. PostgreSQL and in-memory SQLite behavior stay unchanged. No migration, configuration, pool change or new cleanup registry. This is the DB-only reconciliation of PR2030, with partial relevance to issue #2029; elapsed-time evidence does not identify the historical source of starvation.

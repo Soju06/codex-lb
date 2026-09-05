@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,34 @@ import yaml
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize("compose_name", ["docker-compose.yml", "docker-compose.prod.yml"])
+def test_stock_compose_keeps_host_callback_port_unpublished(compose_name: str) -> None:
+    compose = yaml.safe_load((_REPO_ROOT / compose_name).read_text(encoding="utf-8"))
+    ports = compose["services"]["server"]["ports"]
+    host_ports = {int(str(port).split(":")[-2]) for port in ports}
+    assert 2455 in host_ports
+    assert 1455 not in host_ports
+
+
+@pytest.mark.parametrize(
+    "doc_path", ["README.md", "README.zh-CN.md", "docs/getting-started.md", "docs/deployment/docker.md"]
+)
+def test_portable_docker_commands_keep_host_callback_port_unpublished(doc_path: str) -> None:
+    document = (_REPO_ROOT / doc_path).read_text(encoding="utf-8")
+    portable_commands = 0
+    for block in re.findall(r"```(?:bash|sh)?\n(.*?)```", document, flags=re.DOTALL):
+        for command in re.findall(r"docker run\b(?:[^\n]*\\\n)*[^\n]*", block):
+            tokens = shlex.split(command.replace("\\\n", " "))
+            if "--network" in tokens and tokens[tokens.index("--network") + 1] == "host":
+                continue
+            mappings = [tokens[index + 1] for index, token in enumerate(tokens[:-1]) if token in {"-p", "--publish"}]
+            host_ports = {int(mapping.split(":")[-2]) for mapping in mappings}
+            assert 2455 in host_ports
+            assert 1455 not in host_ports
+            portable_commands += 1
+    assert portable_commands > 0
 
 
 @pytest.mark.parametrize("compose_name", ["docker-compose.yml", "docker-compose.prod.yml"])

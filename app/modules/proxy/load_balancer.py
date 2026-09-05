@@ -2767,9 +2767,6 @@ def background_recovery_state_from_account(
         secondary_entry=secondary_entry,
         runtime=runtime,
     )
-    quota_available = usage_windows_allow_recovery(
-        state.used_percent, state.secondary_used_percent, *_extract_credit_status(primary_entry, secondary_entry)
-    )
     if account.status == AccountStatus.RATE_LIMITED:
         freshness_entry = _rate_limited_freshness_entry(
             account=account,
@@ -2782,11 +2779,7 @@ def background_recovery_state_from_account(
             minimum_floor_deadline = blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
             # An early explicit reset does not let scheduler reconciliation
             # bypass the persisted post-429 minimum floor.
-            if (
-                now < minimum_floor_deadline
-                or not quota_available
-                or not _usage_entry_recorded_after_block(freshness_entry, blocked_at)
-            ):
+            if now < minimum_floor_deadline or not _usage_entry_recorded_after_block(freshness_entry, blocked_at):
                 return replace(
                     state,
                     status=AccountStatus.RATE_LIMITED,
@@ -2795,7 +2788,7 @@ def background_recovery_state_from_account(
                     cooldown_until=max(reset_at, minimum_floor_deadline),
                 )
         elif blocked_at is None and reset_at is not None and reset_at <= now:
-            if not quota_available or not _usage_entry_is_recent_enough(getattr(freshness_entry, "recorded_at", None)):
+            if not _usage_entry_is_recent_enough(getattr(freshness_entry, "recorded_at", None)):
                 return replace(
                     state,
                     status=AccountStatus.RATE_LIMITED,

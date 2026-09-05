@@ -915,6 +915,11 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
     assert "response.completed" in response.text
     assert seen == [acc_b.id]
     async with SessionLocal() as session:
+        persisted_acc_a = await AccountsRepository(session).get_by_id(acc_a.id)
+        assert persisted_acc_a is not None
+        assert persisted_acc_a.status == AccountStatus.RATE_LIMITED
+        assert persisted_acc_a.reset_at is not None
+        assert persisted_acc_a.blocked_at is not None
         assert (
             await StickySessionsRepository(session).get_account_id(
                 "thread_rl",

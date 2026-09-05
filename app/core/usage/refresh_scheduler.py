@@ -536,7 +536,11 @@ def _select_long_window_entry(
     monthly_entry: UsageHistory | None,
     secondary_entry: UsageHistory | None,
 ) -> UsageHistory | None:
-    capacity_plan = resolve_capacity_plan_type(account.plan_type)
+    capacity_plan = (
+        resolve_capacity_plan_type(account.plan_type)
+        if account.status in _RECOVERABLE_ACCOUNT_STATUSES
+        else account.plan_type
+    )
     if monthly_entry is not None and capacity_for_plan(capacity_plan, "monthly") is not None:
         return monthly_entry
     return secondary_entry

@@ -1153,7 +1153,7 @@ async def test_reconcile_recoverable_account_statuses_restores_quota_exceeded_fr
 
 
 @pytest.mark.asyncio
-async def test_reconcile_keeps_rate_limited_when_fresh_primary_and_secondary_is_exhausted(
+async def test_reconcile_allows_elapsed_reset_when_secondary_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = 1_700_000_000.0
@@ -1200,9 +1200,38 @@ async def test_reconcile_keeps_rate_limited_when_fresh_primary_and_secondary_is_
         accounts=[account],
     )
 
-    assert recovered == 0
-    assert account.status == AccountStatus.RATE_LIMITED
-    assert accounts_repo.status_updates == []
+    assert recovered == 1
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
+    assert account.blocked_at is None
+
+
+def test_select_long_window_entry_preserves_active_alias_advisory_behavior() -> None:
+    account = _make_account("acc_active_guest", plan_type="guest", status=AccountStatus.ACTIVE)
+    monthly = _make_usage(
+        "acc_active_guest",
+        window="monthly",
+        used_percent=10.0,
+        reset_at=1_700_100_000,
+        recorded_at=_epoch_to_naive_utc(1_700_000_000),
+        window_minutes=43_200,
+    )
+    secondary = _make_usage(
+        "acc_active_guest",
+        window="secondary",
+        used_percent=20.0,
+        reset_at=1_700_100_000,
+        recorded_at=_epoch_to_naive_utc(1_700_000_000),
+        window_minutes=10_080,
+    )
+
+    selected = refresh_scheduler_module._select_long_window_entry(
+        account=account,
+        monthly_entry=monthly,
+        secondary_entry=secondary,
+    )
+
+    assert selected is secondary
 
 
 @pytest.mark.asyncio

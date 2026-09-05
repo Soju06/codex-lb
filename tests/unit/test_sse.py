@@ -16,6 +16,7 @@ from app.core.utils.sse import (
     SSE_KEEPALIVE_FRAME,
     ParsedSseBlock,
     extract_sse_data,
+    format_local_sse_event,
     format_sse_data,
     format_sse_event,
     format_sse_event_from_text,
@@ -362,10 +363,11 @@ def test_format_sse_event_from_text_round_trips_arbitrary_json_objects(payload, 
     assert sse_event_type_from_block(block) == sse_event_type_from_block(format_sse_event(payload))
 
 
-def test_parsed_sse_block_behaves_like_str_and_short_circuits_parse() -> None:
+@pytest.mark.parametrize("is_local", [False, True])
+def test_parsed_sse_block_behaves_like_str_and_short_circuits_parse(is_local: bool) -> None:
     payload: dict[str, JsonValue] = {"type": "response.output_text.delta", "delta": "hi"}
     plain = format_sse_event(payload)
-    block = sse_block_with_payload(plain, payload)
+    block = format_local_sse_event(payload) if is_local else sse_block_with_payload(plain, payload)
 
     assert isinstance(block, ParsedSseBlock)
     assert isinstance(block, str)
@@ -379,6 +381,12 @@ def test_parsed_sse_block_behaves_like_str_and_short_circuits_parse() -> None:
     assert parse_sse_data_json(block + "") == payload
     # Re-attaching the same payload is an identity operation.
     assert sse_block_with_payload(block, payload) is block
+    assert block.is_local is is_local
+    copied_payload = dict(payload)
+    reattached = sse_block_with_payload(block, copied_payload)
+    assert reattached == plain
+    assert parse_sse_data_json(reattached) is copied_payload
+    assert reattached.is_local is is_local
 
 
 def test_parsed_sse_block_with_none_payload_matches_unparseable_parse() -> None:

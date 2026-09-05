@@ -1857,6 +1857,7 @@ class HttpBridgeOperationState(str, Enum):
     SUBMITTED = "submitted"
     UNKNOWN = "unknown"
     ACKNOWLEDGED = "acknowledged"
+    ABANDONED = "abandoned"
     COMPLETED = "completed"
     FAILED = "failed"
 

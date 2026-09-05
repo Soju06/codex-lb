@@ -18,7 +18,7 @@ futures-util.workspace = true
 hyper.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["brotli", "deflate", "gzip", "zstd"] }
 rustls.workspace = true
 rustls-native-certs.workspace = true
 serde_json.workspace = true

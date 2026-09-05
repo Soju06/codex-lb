@@ -62,6 +62,7 @@ from app.core.resilience.degradation import set_degraded, set_normal
 from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
+from app.db.snapshot import clone_row
 from app.modules.proxy._load_balancer.model_eligibility import (
     _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES,
     CatalogOmissionQuotaAdmission,
@@ -1355,15 +1356,9 @@ class LoadBalancer:
             )
             selection_inputs = _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
-                latest_primary={
-                    account_id: _clone_usage_history(entry) for account_id, entry in latest_primary.items()
-                },
-                latest_secondary={
-                    account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
-                },
-                latest_monthly={
-                    account_id: _clone_standard_usage_history(entry) for account_id, entry in latest_monthly.items()
-                },
+                latest_primary={account_id: clone_row(entry) for account_id, entry in latest_primary.items()},
+                latest_secondary={account_id: clone_row(entry) for account_id, entry in latest_secondary.items()},
+                latest_monthly={account_id: clone_row(entry) for account_id, entry in latest_monthly.items()},
                 continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
                 sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                 quota_planner_settings=quota_planner_settings,
@@ -2945,32 +2940,14 @@ def _first_not_none(
     return None
 
 
-def _clone_usage_history(entry: UsageHistory | AdditionalUsageHistory) -> UsageHistory | AdditionalUsageHistory:
-    if isinstance(entry, AdditionalUsageHistory):
-        data = {column.name: getattr(entry, column.name) for column in AdditionalUsageHistory.__table__.columns}
-        return AdditionalUsageHistory(**data)
-    data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
-    return UsageHistory(**data)
-
-
-def _clone_standard_usage_history(entry: UsageHistory) -> UsageHistory:
-    data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
-    return UsageHistory(**data)
-
-
 def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInputs:
     return _SelectionInputs(
         accounts=[_clone_account(account) for account in selection_inputs.accounts],
-        latest_primary={
-            account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_primary.items()
-        },
+        latest_primary={account_id: clone_row(entry) for account_id, entry in selection_inputs.latest_primary.items()},
         latest_secondary={
-            account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_secondary.items()
+            account_id: clone_row(entry) for account_id, entry in selection_inputs.latest_secondary.items()
         },
-        latest_monthly={
-            account_id: _clone_standard_usage_history(entry)
-            for account_id, entry in selection_inputs.latest_monthly.items()
-        },
+        latest_monthly={account_id: clone_row(entry) for account_id, entry in selection_inputs.latest_monthly.items()},
         continuity_owner_candidates=(
             None
             if selection_inputs.continuity_owner_candidates is None

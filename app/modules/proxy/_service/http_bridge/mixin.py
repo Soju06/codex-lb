@@ -10,7 +10,6 @@ from typing import Any, Literal, TypeVar, overload
 from uuid import uuid4
 
 import aiohttp
-import anyio
 
 from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import RefreshError
@@ -45,6 +44,7 @@ from app.core.metrics.prometheus import (
     bridge_prompt_cache_locality_miss_total,
     bridge_soft_local_rebind_total,
 )
+from app.core.utils.locks import fast_lock
 from app.core.utils.request_id import ensure_request_scope_id
 from app.core.utils.shared_future import wait_on_shared_future
 from app.db.models import (
@@ -818,7 +818,7 @@ class _HTTPBridgeMixin(
                 )
                 if owner_check_required or key.affinity_kind == "prompt_cache":
                     owner_instance = _durable_bridge_lookup_active_owner(durable_lookup)
-                    hard_continuity_lookup = owner_check_required or previous_response_id is not None
+                    hard_continuity_lookup = owner_check_required or bool(incoming_turn_state or previous_response_id)
                     ring_lookup_failed = False
                     if key == locally_owned_fork_key:
                         owner_instance = settings.http_responses_session_bridge_instance_id
@@ -887,7 +887,7 @@ class _HTTPBridgeMixin(
                         if PROMETHEUS_AVAILABLE and bridge_owner_mismatch_total is not None:
                             bridge_owner_mismatch_total.labels(strength=_http_bridge_key_strength(key)).inc()
                         if (
-                            owner_check_required
+                            hard_continuity_lookup
                             and not (previous_response_id is not None and allow_previous_response_recovery_rebind)
                             and not allow_bootstrap_owner_rebind
                         ):
@@ -1298,7 +1298,8 @@ class _HTTPBridgeMixin(
                                 model_class=_extract_model_class(request_model) if request_model else None,
                                 owner_check_applied=owner_check_required,
                             )
-                    elif session_to_return_after_close is None and inflight_future is None:
+                    elif session_to_return_after_close is None and inflight_future is None and owner_forward is None:
+                        # Owner forwards never resolve a local inflight reservation; skip admission.
                         # Detached generations remain globally capacity-owned
                         # until close finalization. This request may discount
                         # only the idle generations it has committed to close
@@ -1965,15 +1966,15 @@ class _HTTPBridgeMixin(
             upstream=upstream,
             upstream_control=_WebSocketUpstreamControl(),
             pending_requests=deque(),
-            pending_lock=anyio.Lock(),
+            pending_lock=fast_lock(),
             response_create_gate=asyncio.Semaphore(1),
             queued_request_count=0,
-            lifecycle_lock=anyio.Lock(),
+            lifecycle_lock=fast_lock(),
             last_used_at=_service_time().monotonic(),
             idle_ttl_seconds=idle_ttl_seconds,
             codex_session=(affinity.kind == StickySessionKind.CODEX_SESSION or key.affinity_kind == "thread_header"),
             access_token_expires_at=_token_expiry(account, self._encryptor),
-            prewarm_lock=anyio.Lock(),
+            prewarm_lock=fast_lock(),
             upstream_turn_state=_upstream_turn_state_from_socket(upstream),
             downstream_turn_state=None,
             account_lease=selected_account_lease,

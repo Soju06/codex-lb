@@ -9,6 +9,7 @@ injected time source.
 
 from __future__ import annotations
 
+import time
 from collections import deque
 from types import SimpleNamespace
 from typing import Any, cast
@@ -107,3 +108,133 @@ async def test_websocket_continuity_gap_wait_follows_virtual_time() -> None:
     await scheduler.advance(0.001)
 
     assert await timed_out is False
+
+
+def test_account_capacity_wait_payload_uses_caller_clock_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``waited_seconds`` compares the owner clock's wait start with the owner clock's ``now``."""
+
+    monkeypatch.setattr(time, "monotonic", lambda: 1_000_000.0)
+    request_state = SimpleNamespace(request_id="req-wait", account_capacity_wait_started_at=100.0)
+
+    payload = support._account_capacity_wait_payload(
+        cast(Any, request_state),
+        request_id=None,
+        reason="Account capacity exhausted",
+        retry_after_seconds=30.0,
+        now=125.4,
+    )
+    owner_less = support._account_capacity_wait_payload(
+        None,
+        request_id="req-owner-less",
+        reason=None,
+        retry_after_seconds=None,
+        started_at=90.0,
+        now=100.0,
+    )
+
+    assert payload["waited_seconds"] == 25
+    assert payload["request_id"] == "req-wait"
+    assert payload["retry_after_seconds"] == 30
+    assert owner_less["waited_seconds"] == 10
+    assert owner_less["request_id"] == "req-owner-less"
+
+
+def test_account_capacity_wait_payload_defaults_to_the_real_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(time, "monotonic", lambda: 130.0)
+
+    payload = support._account_capacity_wait_payload(
+        None,
+        request_id="req-default",
+        reason=None,
+        retry_after_seconds=None,
+        started_at=100.0,
+    )
+    unstarted = support._account_capacity_wait_payload(None, request_id=None, reason=None, retry_after_seconds=None)
+
+    assert payload["waited_seconds"] == 30
+    assert unstarted["waited_seconds"] == 0
+
+
+def test_downstream_websocket_activity_stamps_the_injected_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(time, "monotonic", lambda: 1_000_000.0)
+    clock = VirtualClock(monotonic_value=5.0)
+
+    activity = support._DownstreamWebSocketActivity(clock=clock)
+    assert activity.last_activity_at == 5.0
+    assert activity.disconnected is False
+
+    clock.advance(2.5)
+    activity.mark()
+    assert activity.last_activity_at == 7.5
+
+    clock.advance(1.0)
+    activity.mark_disconnected()
+    assert activity.disconnected is True
+    assert activity.last_activity_at == 8.5
+
+
+def test_downstream_websocket_activity_defaults_to_the_real_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(time, "monotonic", lambda: 42.0)
+
+    activity = support._DownstreamWebSocketActivity()
+
+    assert activity.last_activity_at == 42.0
+    monkeypatch.setattr(time, "monotonic", lambda: 43.0)
+    activity.mark()
+    assert activity.last_activity_at == 43.0
+
+
+def test_record_response_event_stamps_the_caller_clock_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(time, "monotonic", lambda: 1_000_000.0)
+    request_state = SimpleNamespace(
+        response_create_attempt=None, last_upstream_activity_at=None, response_event_count=0
+    )
+
+    support._record_response_event(cast(Any, request_state), "response.created", now=42.0)
+    assert request_state.last_upstream_activity_at == 42.0
+    assert request_state.response_event_count == 1
+
+    support._record_response_event(cast(Any, request_state), "response.failed", now=43.0)
+    assert request_state.last_upstream_activity_at == 43.0
+    assert request_state.response_event_count == 1
+
+    support._record_response_event(cast(Any, request_state), "codex.keepalive", now=44.0)
+    assert request_state.last_upstream_activity_at == 43.0
+
+
+def test_record_response_event_defaults_to_the_real_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(time, "monotonic", lambda: 77.0)
+    request_state = SimpleNamespace(
+        response_create_attempt=None, last_upstream_activity_at=None, response_event_count=0
+    )
+
+    support._record_response_event(cast(Any, request_state), "response.in_progress")
+
+    assert request_state.last_upstream_activity_at == 77.0
+
+
+def test_ttft_visibility_helpers_use_the_caller_clock_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(time, "monotonic", lambda: 1_000_000.0)
+
+    assert support._ttft_event_visible_at("response.output_text.delta", {"delta": "hi"}, now=7.0) == 7.0
+    assert support._is_ttft_event("response.output_text.delta", {"delta": "hi"}, now=7.0) is True
+    assert support._ttft_event_latency_ms("response.output_text.delta", {"delta": "hi"}, {}, 5.0, now=7.0) == 2000
+
+    pending: dict[tuple[str | None, int | None, int | None], support._TTFTReasoningDeltaState] = {
+        ("item", 0, 0): support._TTFTReasoningDeltaState("visible reasoning")
+    }
+    assert support._finalize_ttft_reasoning_deltas(dict(pending), now=9.0) == 9.0
+    assert support._finalize_ttft_latency_ms(dict(pending), 5.0, now=9.0) == 4000
+    # A pending reasoning delta finalized by a later non-reasoning event is
+    # stamped with the same caller sample.
+    assert support._ttft_event_visible_at("response.output_text.delta", {"delta": "x"}, dict(pending), now=9.5) == 9.5
+
+
+def test_ttft_visibility_helpers_default_to_the_real_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(time, "monotonic", lambda: 11.0)
+
+    assert support._ttft_event_visible_at("response.output_text.delta", {"delta": "hi"}) == 11.0
+    pending: dict[tuple[str | None, int | None, int | None], support._TTFTReasoningDeltaState] = {
+        ("item", 0, 0): support._TTFTReasoningDeltaState("visible reasoning")
+    }
+    assert support._finalize_ttft_reasoning_deltas(pending) == 11.0

@@ -50,6 +50,7 @@ from app.core.types import JsonValue
 from app.core.usage.live_hub import publish_live_usage
 from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
 from app.core.utils.request_id import reset_request_id, set_request_id
+from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.sse import format_sse_event, format_sse_event_from_text, parse_sse_data_json_text
 from app.db.models import Account
 from app.modules.proxy._service.api_key_usage import (
@@ -1666,6 +1667,32 @@ async def _retire_denied_http_bridge_anchor(
 
 
 class _HTTPBridgeUpstreamEventsMixin:
+    def _spawn_http_bridge_upstream_reader(self: Any, session: "_HTTPBridgeSession") -> asyncio.Task[None]:
+        """Start the per-session upstream reader on the owner's scheduler."""
+
+        return scheduler_for(self).create_task(self._relay_http_bridge_upstream_messages(session))
+
+    async def _cancel_http_bridge_previous_reader(self: Any, old_reader: asyncio.Task[Any]) -> bool:
+        """Cancel and drain a replaced upstream reader before a reconnect."""
+
+        return await _await_cancelled_task(
+            old_reader,
+            label="http bridge upstream reader",
+            cleanup_tasks=self._background_cleanup_tasks,
+            scheduler=scheduler_for(self),
+        )
+
+    async def _await_http_bridge_registry_wait(self: Any, future: asyncio.Future[T], *, timeout: float) -> T:
+        """Await a shared inflight/capacity registry future with a bounded timeout.
+
+        Not ``wait_for(shield(...))``: shield attaches per-waiter callbacks to
+        the shared registry future, which livelocks the event loop under mass
+        timeout (see shared_future.py). The timed wait runs on the owner's
+        scheduler so virtual time can expire it.
+        """
+
+        return await wait_on_shared_future(future, timeout=timeout, scheduler=scheduler_for(self))
+
     async def _fail_http_bridge_reader_and_maybe_retire(
         self: Any,
         session: "_HTTPBridgeSession",

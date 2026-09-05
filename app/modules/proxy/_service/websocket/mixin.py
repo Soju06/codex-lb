@@ -3455,6 +3455,7 @@ class _WebSocketMixin:
         deadline = _websocket_connect_deadline(
             request_state,
             _facade().get_settings().proxy_request_budget_seconds,
+            now=clock_for(proxy).monotonic(),
         )
         selection = await proxy._select_account_with_budget_compatible(
             deadline,
@@ -3518,6 +3519,7 @@ class _WebSocketMixin:
                 base_settings,
                 request_transport="websocket",
             ),
+            now=clock_for(proxy).monotonic(),
         )
         # Model sources are only reachable from the HTTP request path. Fail the
         # WebSocket connect instead of dispatching a source-owned model to a

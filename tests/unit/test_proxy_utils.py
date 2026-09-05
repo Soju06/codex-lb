@@ -1098,7 +1098,6 @@ async def test_account_selection_recovery_sleep_clamps_to_remaining_budget(monke
     async def heartbeat(remaining_seconds: float) -> None:
         heartbeats.append(remaining_seconds)
 
-    monkeypatch.setattr(proxy_support.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(proxy_support, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 10.0)
 
     waited = await _sleep_for_account_selection_recovery(
@@ -1113,6 +1112,7 @@ async def test_account_selection_recovery_sleep_clamps_to_remaining_budget(monke
         model="gpt-5.4",
         max_sleep_seconds=3.0,
         heartbeat=heartbeat,
+        scheduler=cast(Any, SimpleNamespace(sleep=fake_sleep)),
     )
 
     assert waited is True

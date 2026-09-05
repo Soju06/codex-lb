@@ -82,13 +82,33 @@ _ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS = {
         {"call_id", "caller", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "output", "status", "type"}
     ),
     "custom_tool_call": frozenset(
-        {"call_id", "caller", "id", "input", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "name", "status", "type"}
+        {
+            "async",
+            "call_id",
+            "caller",
+            "id",
+            "input",
+            _INTERNAL_CHAT_MESSAGE_METADATA_FIELD,
+            "name",
+            "status",
+            "type",
+        }
     ),
     "custom_tool_call_output": frozenset(
         {"call_id", "caller", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "output", "status", "type"}
     ),
     "function_call": frozenset(
-        {"arguments", "call_id", "caller", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "name", "status", "type"}
+        {
+            "arguments",
+            "async",
+            "call_id",
+            "caller",
+            "id",
+            _INTERNAL_CHAT_MESSAGE_METADATA_FIELD,
+            "name",
+            "status",
+            "type",
+        }
     ),
     "function_call_output": frozenset(
         {"call_id", "caller", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "output", "status", "type"}
@@ -280,6 +300,8 @@ def responses_input_items_are_self_contained_fresh_replay(input_items: list[Json
             ):
                 return False
             seen_call_ids.add(call_id)
+            if item.get("async") is True:
+                continue
             unsettled_call_ids_by_type[item_type].add(call_id)
             continue
         call_item_type = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE.get(item_type or "")
@@ -437,6 +459,8 @@ def responses_input_suffix_matches_pending_tool_calls(
         item_type = cast(str, item["type"])
         call_id = cast(str, item["call_id"])
         if item_type in _TOOL_CALL_TYPES:
+            if item.get("async") is True:
+                continue
             suffix_calls[call_id] = item_type
         else:
             suffix_outputs[call_id] = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE[item_type]

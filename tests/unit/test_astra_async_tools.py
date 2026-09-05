@@ -13,6 +13,10 @@ from fastapi import WebSocket
 from app.core.types import JsonValue
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy.replay_safety import (
+    responses_input_items_are_self_contained_fresh_replay,
+    responses_input_suffix_matches_pending_tool_calls,
+)
 from tests.unit.test_proxy_http_bridge import _make_bridge_session
 from tests.unit.test_proxy_utils import (
     _make_account,
@@ -249,3 +253,26 @@ def test_pending_tools_reset_when_durable_anchor_owner_changes() -> None:
     _http_bridge_reset_pending_tools_for_anchor(session, response_id="resp-shared", account_id="acc-new")
     assert session.last_pending_tool_calls == {}
     assert session.pending_async_tool_calls == {}
+
+
+def test_account_neutral_replay_accepts_unsettled_async_function_call() -> None:
+    items: list[JsonValue] = [
+        {"type": "function_call", "call_id": "async_1", "name": "slow", "arguments": "{}", "async": True},
+        {"type": "function_call", "call_id": "sync_1", "name": "now", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "sync_1", "output": "ok"},
+    ]
+    assert responses_input_items_are_self_contained_fresh_replay(items)
+
+
+def test_durable_suffix_ignores_async_calls_when_matching_sync_manifest() -> None:
+    stored: list[JsonValue] = [{"role": "user", "content": "first"}]
+    suffix: list[JsonValue] = [
+        {"type": "function_call", "call_id": "async_1", "name": "slow", "arguments": "{}", "async": True},
+        {"type": "function_call", "call_id": "sync_1", "name": "now", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "sync_1", "output": "ok"},
+    ]
+    assert responses_input_suffix_matches_pending_tool_calls(
+        [*stored, *suffix],
+        stored_count=1,
+        pending_tool_calls={"sync_1": "function_call"},
+    )

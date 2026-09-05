@@ -6375,6 +6375,7 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
 
     assert created_2["type"] == "response.created"
     assert created_2["response"]["id"] == "resp_ws_prev_retry"
+    assert completed_2 is not None
     assert completed_2["type"] == "response.completed"
     assert "previous_response_not_found" not in json.dumps(created_2)
     assert connect_count == 2

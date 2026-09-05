@@ -1190,6 +1190,9 @@ class _WebSocketRequestState:
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)
+    steering_parent_response_id: str | None = None
+    steering_continuation_started: bool = False
+    steering_configuration: dict[str, JsonValue] | None = None
     added_tool_call_types: dict[str, str] = field(default_factory=dict)
     tool_call_manifest_invalid: bool = False
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
@@ -1499,7 +1502,30 @@ class _WebSocketContinuityAnchor:
 
 
 @dataclass(slots=True)
+class _WebSocketSteerSubmission:
+    input: JsonValue
+    wire_bytes: int
+    request_usage_budget: ApiKeyRequestUsageBudget
+    request_service_tier: str | None
+    id: str | None = None
+
+
+@dataclass(slots=True)
+class _WebSocketSteeringContinuation:
+    parent: _WebSocketRequestState
+    request_state: _WebSocketRequestState
+    submissions: list[_WebSocketSteerSubmission] = field(default_factory=list)
+    required_input: list[JsonValue] | None = None
+    explicit_request_prepared: bool = False
+    queued_input_bytes: int = 0
+
+
+@dataclass(slots=True)
 class _WebSocketUpstreamControl:
+    steering_continuations: dict[str, _WebSocketSteeringContinuation] = field(default_factory=dict)
+    suppressed_steering_response_ids: set[str] = field(default_factory=set)
+    suppressed_steering_anonymous_terminals: int = 0
+    last_completed_request: _WebSocketRequestState | None = None
     reconnect_requested: bool = False
     retire_after_drain: bool = False
     suppress_downstream_event: bool = False

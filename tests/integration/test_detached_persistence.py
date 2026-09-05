@@ -209,7 +209,7 @@ async def test_failed_detached_settlement_retries_failed_release_until_persisted
     assert stored.status == "released"
     assert len(limits) == 1
     assert limits[0].current_value == 0
-    assert reservation_read_attempts == 3
+    assert reservation_read_attempts == 4
     assert retry_was_tracked is True
 
 

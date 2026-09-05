@@ -734,6 +734,49 @@ class ApiKeysRepository:
             ],
         )
 
+    async def get_usage_reservation_for_update(self, reservation_id: str) -> UsageReservationData | None:
+        result = await self._session.execute(
+            select(ApiKeyUsageReservation)
+            .options(selectinload(ApiKeyUsageReservation.items))
+            .where(ApiKeyUsageReservation.id == reservation_id)
+            .with_for_update()
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        return UsageReservationData(
+            reservation_id=row.id,
+            api_key_id=row.api_key_id,
+            model=row.model,
+            status=row.status,
+            items=[
+                UsageReservationItemData(
+                    limit_id=item.limit_id,
+                    limit_type=LimitType(item.limit_type),
+                    reserved_delta=item.reserved_delta,
+                    expected_reset_at=item.expected_reset_at,
+                    actual_delta=item.actual_delta,
+                )
+                for item in row.items
+            ],
+        )
+
+    async def set_usage_reservation_item_reserved_delta(
+        self,
+        reservation_id: str,
+        *,
+        limit_id: int,
+        reserved_delta: int,
+    ) -> bool:
+        result = await self._session.execute(
+            update(ApiKeyUsageReservationItem)
+            .where(ApiKeyUsageReservationItem.reservation_id == reservation_id)
+            .where(ApiKeyUsageReservationItem.limit_id == limit_id)
+            .values(reserved_delta=reserved_delta)
+            .returning(ApiKeyUsageReservationItem.id)
+        )
+        return result.scalar_one_or_none() is not None
+
     async def transition_usage_reservation_status(
         self,
         reservation_id: str,

@@ -37644,12 +37644,16 @@ async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_
     assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
     owner_lookup.assert_awaited_once()
     select_account.assert_not_called()
-    get_usage_reservation_mock.assert_awaited_once_with(reservation.reservation_id)
     if release_read_fails:
+        get_usage_reservation_mock.assert_awaited_once_with(reservation.reservation_id)
         transition_usage_reservation_status_mock.assert_not_awaited()
         settle_usage_reservation_mock.assert_not_awaited()
         commit_mock.assert_not_awaited()
     else:
+        assert [call.args for call in get_usage_reservation_mock.await_args_list] == [
+            (reservation.reservation_id,),
+            (reservation.reservation_id,),
+        ]
         transition_usage_reservation_status_mock.assert_awaited_once_with(
             reservation.reservation_id,
             expected_status="reserved",

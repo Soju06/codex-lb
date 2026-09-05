@@ -629,12 +629,14 @@ class _StreamingMixin(_StreamingRetryMixin):
                     preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
                 )
                 return
-            await record_context_dispatch(payload.to_payload(), api_key, account.id)
             response_create_lease.release()
             await proxy._load_balancer.release_account_lease(account_response_create_lease)
             account_response_create_lease = None
             first_payload = parse_sse_data_json(first)
             event_type = classify_event_type(first_payload)
+            context_participant_recorded = event_type is not None
+            if context_participant_recorded:
+                await record_context_dispatch(payload.to_payload(), api_key, account.id)
             event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
             malformed_error_rewrite = _rewrite_malformed_stream_error_event(
@@ -785,7 +787,9 @@ class _StreamingMixin(_StreamingRetryMixin):
             if terminal_stream_error is not None:
                 raise terminal_stream_error
             async for line in iterator:
-                if verbatim_type := _verbatim_relay_event_type(line, latency_first_token_ms, ttft_reasoning_deltas):
+                if context_participant_recorded and (
+                    verbatim_type := _verbatim_relay_event_type(line, latency_first_token_ms, ttft_reasoning_deltas)
+                ):
                     await _touch_api_key_reservation()
                     if verbatim_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                         saw_text_delta = settlement.downstream_text_visible = True
@@ -794,6 +798,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                     continue
                 event_payload = parse_sse_data_json(line)
                 event_type = classify_event_type(event_payload)
+                if not context_participant_recorded and event_type is not None:
+                    await record_context_dispatch(payload.to_payload(), api_key, account.id)
+                    context_participant_recorded = True
                 event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
                 malformed_error_rewrite = _rewrite_malformed_stream_error_event(

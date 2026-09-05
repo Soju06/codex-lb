@@ -13,6 +13,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.clients.proxy import CodexControlResponse, ProxyResponseError
 from app.core.config.settings_cache import get_settings_cache
 from app.core.openai.requests import ResponsesRequest
+from app.core.utils.sse import parse_sse_data_json
 from app.db.models import Account, AccountStatus, CodexContextParticipant, CodexContextSession
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -190,23 +191,35 @@ async def test_ambiguous_note_write_is_not_retried(async_client, monkeypatch, fa
     upstream.assert_awaited_once()
 
 
-async def test_http_responses_dispatch_is_recorded(async_client, monkeypatch):
+@pytest.mark.parametrize("keepalive", [False, True])
+async def test_http_responses_dispatch_is_recorded(async_client, monkeypatch, keepalive):
     a, b, headers, key = await setup_pool(async_client)
 
     seen = []
 
     async def stream(*args, **kwargs):
         seen.append(args[0].to_payload())
+        if keepalive:
+            for frame in [": ping\n\n", "data: {}\n\n", ": ping again\n\n"]:
+                yield frame
+                async with SessionLocal() as session:
+                    assert await session.scalar(select(CodexContextParticipant.account_id)) is None
         async with SessionLocal() as session:
             binding = await session.get(CodexContextSession, SID)
             assert binding is not None and binding.api_key_id == key.id
             assert await session.scalar(select(CodexContextParticipant.account_id)) is None
+        yield 'data: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+        async with SessionLocal() as session:
+            assert await session.scalar(select(CodexContextParticipant.account_id)) is not None
         yield 'data: {"type":"response.completed","response":{"id":"resp_ctx","status":"completed","output":[]}}\n\n'
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", stream)
     r = await async_client.post("/backend-api/codex/responses", headers=headers, json=envelope())
     assert r.status_code == 200
-    assert "response.completed" in r.text
+    assert any(
+        (event := parse_sse_data_json(block)) and event.get("type") == "response.completed"
+        for block in r.text.split("\n\n")
+    ), r.text
     async with SessionLocal() as session:
         row = await session.get(CodexContextSession, SID)
         assert row is not None and row.api_key_id == key.id and row.owner_account_id in [a, b], [
@@ -475,9 +488,10 @@ def test_context_dispatch_and_ciphertext_expansion_on_websocket_transports(
             assert connect.call_args_list[0].args[2] != connect.call_args_list[1].args[2]
 
 
+@pytest.mark.parametrize("keepalive", [False, True])
 @pytest.mark.parametrize("startup_failure", ["error", "empty"])
 async def test_http_startup_failure_keeps_key_fence_without_history_participant(
-    async_client, monkeypatch, startup_failure
+    async_client, monkeypatch, startup_failure, keepalive
 ):
     _, _, headers, key = await setup_pool(async_client)
     calls = []
@@ -487,18 +501,20 @@ async def test_http_startup_failure_keeps_key_fence_without_history_participant(
         async with SessionLocal() as session:
             binding = await session.get(CodexContextSession, SID)
             assert binding is not None and binding.api_key_id == key.id
+        if keepalive:
+            yield ": ping\n\n"
+            yield ": still waiting\n\n"
         if startup_failure == "error":
             raise ProxyResponseError(400, {"error": {"code": "invalid_request_error", "message": "startup failed"}})
         return
-        yield  # This upstream starts but never yields an event.
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", stream)
     response = await async_client.post("/backend-api/codex/responses", headers=headers, json=envelope())
-    if startup_failure == "error":
+    if startup_failure == "error" and not keepalive:
         assert response.status_code == 400
     else:
         assert response.status_code == 200
-        assert "stream_incomplete" in response.text
+        assert ("invalid_request_error" if startup_failure == "error" else "stream_incomplete") in response.text
     assert calls
     async with SessionLocal() as session:
         binding = await session.get(CodexContextSession, SID)

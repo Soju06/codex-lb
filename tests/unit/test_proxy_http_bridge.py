@@ -31581,7 +31581,7 @@ async def test_http_bridge_retry_circuit_does_not_claim_attempt_when_response_wi
     )
     await asyncio.wait_for(lookup_started.wait(), timeout=0.5)
 
-    proxy_support_module._record_response_event(request_state, "response.created")
+    proxy_support_module._record_response_event(request_state, "response.created", now=time.monotonic())
     release_lookup.set()
 
     assert await asyncio.wait_for(record_task, timeout=0.5) is None

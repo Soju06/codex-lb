@@ -1038,6 +1038,7 @@ async def _wait_before_http_bridge_model_capacity_retry(
                             request_id=request_state.request_log_id or request_state.request_id,
                             reason=error_message,
                             retry_after_seconds=remaining_sleep_seconds,
+                            now=clock.monotonic(),
                         )
                     )
                 )
@@ -3182,10 +3183,10 @@ class _HTTPBridgeUpstreamEventsMixin:
 
         if not deferred_reasoning_prelude_event:
             if matched_request_state is terminal_request_state:
-                _record_response_event(matched_request_state, event_type)
+                _record_response_event(matched_request_state, event_type, now=clock.monotonic())
             else:
-                _record_response_event(matched_request_state, event_type)
-                _record_response_event(terminal_request_state, event_type)
+                _record_response_event(matched_request_state, event_type, now=clock.monotonic())
+                _record_response_event(terminal_request_state, event_type, now=clock.monotonic())
 
         status_request_state = terminal_request_state or matched_request_state
         if status_request_state is None and is_previous_response_not_found_event:

@@ -1426,7 +1426,7 @@ class _WebSocketMixin:
             _sticky_key_from_turn_state_header(filtered_headers) if synthesized_turn_state is None else None
         )
         upstream_account_id: str | None = None
-        downstream_activity = _DownstreamWebSocketActivity()
+        downstream_activity = _DownstreamWebSocketActivity(clock=clock)
         replay_request_state: _WebSocketRequestState | None = None
         request_state_to_fail: _WebSocketRequestState | None = None
         request_state_failure_task: asyncio.Task[None] | None = None
@@ -3902,6 +3902,7 @@ class _WebSocketMixin:
                     request_id=request_state.request_log_id or request_state.request_id,
                     reason=selection.error_message,
                     retry_after_seconds=remaining_seconds,
+                    now=clock_for(proxy).monotonic(),
                 )
                 await proxy._send_downstream_websocket_text(
                     websocket,
@@ -5322,7 +5323,7 @@ class _WebSocketMixin:
         parsed_frame: _ParsedUpstreamWebSocketFrame | None = None,
     ) -> str:
         proxy = cast(_WebSocketServiceProtocol, self)
-        _ = proxy
+        clock = clock_for(proxy)
         if parsed_frame is None:
             parsed_frame = _parse_upstream_websocket_text_frame(text)
         payload = parsed_frame.payload
@@ -5419,15 +5420,15 @@ class _WebSocketMixin:
                         f"watermark={request_state.last_downstream_sequence_number} replay={sequence_number}"
                     )
                 if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                    _record_response_event(request_state, event_type)
-                elapsed_ms = int((clock_for(proxy).monotonic() - request_state.started_at) * 1000)
+                    _record_response_event(request_state, event_type, now=clock.monotonic())
+                elapsed_ms = int((clock.monotonic() - request_state.started_at) * 1000)
                 if request_state.latency_first_upstream_event_ms is None:
                     request_state.latency_first_upstream_event_ms = elapsed_ms
                 if event_type == "response.created" and request_state.latency_response_created_ms is None:
                     request_state.latency_response_created_ms = elapsed_ms
                 if request_state.latency_first_token_ms is None:
                     ttft_visible_at = _facade()._ttft_event_visible_at(
-                        event_type, payload, request_state.ttft_reasoning_deltas
+                        event_type, payload, request_state.ttft_reasoning_deltas, now=clock.monotonic()
                     )
                     if ttft_visible_at is not None:
                         request_state.latency_first_token_ms = max(
@@ -5640,7 +5641,7 @@ class _WebSocketMixin:
         if len(grouped_previous_response_request_states) == 1 and request_state is None:
             request_state = grouped_previous_response_request_states[0]
 
-        _record_response_event(request_state, event_type)
+        _record_response_event(request_state, event_type, now=clock.monotonic())
 
         if request_state is None:
             if is_previous_response_not_found_matching_event:
@@ -6186,7 +6187,9 @@ class _WebSocketMixin:
             return
 
         if request_state.latency_first_token_ms is None:
-            ttft_visible_at = _finalize_ttft_reasoning_deltas(request_state.ttft_reasoning_deltas)
+            ttft_visible_at = _finalize_ttft_reasoning_deltas(
+                request_state.ttft_reasoning_deltas, now=clock_for(proxy).monotonic()
+            )
             if ttft_visible_at is not None:
                 request_state.latency_first_token_ms = max(0, int((ttft_visible_at - request_state.started_at) * 1000))
 
@@ -6829,7 +6832,9 @@ class _WebSocketMixin:
                 continue
             latency_ms = int((clock_for(proxy).monotonic() - request_state.started_at) * 1000)
             if request_state.latency_first_token_ms is None:
-                ttft_visible_at = _finalize_ttft_reasoning_deltas(request_state.ttft_reasoning_deltas)
+                ttft_visible_at = _finalize_ttft_reasoning_deltas(
+                    request_state.ttft_reasoning_deltas, now=clock_for(proxy).monotonic()
+                )
                 if ttft_visible_at is not None:
                     request_state.latency_first_token_ms = max(
                         0, int((ttft_visible_at - request_state.started_at) * 1000)

@@ -1688,6 +1688,8 @@ class _HTTPBridgeMixin(
             reasoning_effort=None,
             api_key_reservation=None,
             started_at=clock_for(self).monotonic(),
+            thread_affinity_last_touch_at=clock_for(self).monotonic(),
+            api_key_reservation_last_touch_at=clock_for(self).monotonic(),
             transport=_REQUEST_TRANSPORT_HTTP,
         )
         deadline = (

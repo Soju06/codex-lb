@@ -727,6 +727,7 @@ async def _iter_account_capacity_wait_sse(
                         reason=reason,
                         retry_after_seconds=remaining_sleep_seconds,
                         started_at=wait_started_at,
+                        now=clock.monotonic(),
                     ),
                 )
             )
@@ -4830,6 +4831,7 @@ class _HTTPBridgeStreamingMixin:
                                         request_id=request_state.request_id,
                                         reason=request_state.account_capacity_wait_reason,
                                         retry_after_seconds=request_state.account_capacity_wait_retry_after_seconds,
+                                        now=clock.monotonic(),
                                     ),
                                 )
                             )
@@ -5212,7 +5214,7 @@ class _HTTPBridgeStreamingMixin:
                 block_event_type = _event_type_from_payload(None, block_payload)
                 if request_state.latency_first_token_ms is None:
                     ttft_visible_at = _ttft_event_visible_at(
-                        block_event_type, block_payload, request_state.ttft_reasoning_deltas
+                        block_event_type, block_payload, request_state.ttft_reasoning_deltas, now=clock.monotonic()
                     )
                     if ttft_visible_at is not None:
                         request_state.latency_first_token_ms = max(

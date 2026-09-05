@@ -774,7 +774,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         terminal_event_seen = True
                     if latency_first_token_ms is None:
                         latency_first_token_ms = _ttft_event_latency_ms(
-                            event_type, first_payload, ttft_reasoning_deltas, attempt_started_at
+                            event_type, first_payload, ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
                         )
                     settlement.downstream_visible = True
                     if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
@@ -930,7 +930,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     settlement.account_health_error = False
                 if latency_first_token_ms is None:
                     latency_first_token_ms = _ttft_event_latency_ms(
-                        event_type, event_payload, ttft_reasoning_deltas, attempt_started_at
+                        event_type, event_payload, ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
                     )
                 if mark_duplicate_tool_call_downstream_event(
                     event_payload,
@@ -1036,7 +1036,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                 usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
             )
             if latency_first_token_ms is None:
-                latency_first_token_ms = _finalize_ttft_latency_ms(ttft_reasoning_deltas, attempt_started_at)
+                latency_first_token_ms = _finalize_ttft_latency_ms(
+                    ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
+                )
             settlement.status = status
             settlement.model = model
             settlement.service_tier = service_tier

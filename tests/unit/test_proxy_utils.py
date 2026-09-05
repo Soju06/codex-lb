@@ -48,6 +48,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     WebsocketsUpstreamWebSocket,
 )
+from app.core.clock import REAL_CLOCK, REAL_SCHEDULER
 from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
 from app.core.errors import SYNTHETIC_TRANSPORT_FAILURE_MARKER, OpenAIErrorParam, openai_error
@@ -1113,6 +1114,7 @@ async def test_account_selection_recovery_sleep_clamps_to_remaining_budget(monke
         max_sleep_seconds=3.0,
         heartbeat=heartbeat,
         scheduler=cast(Any, SimpleNamespace(sleep=fake_sleep)),
+        clock=REAL_CLOCK,
     )
 
     assert waited is True
@@ -1136,6 +1138,8 @@ async def test_account_selection_recovery_sleep_refuses_exhausted_budget(monkeyp
         request_stage="initial",
         model="gpt-5.4",
         max_sleep_seconds=0.0,
+        scheduler=REAL_SCHEDULER,
+        clock=REAL_CLOCK,
     )
 
     assert waited is False
@@ -16030,7 +16034,7 @@ async def test_stream_with_retry_post_refresh_model_capacity_retries_same_accoun
     stream_once_calls = 0
     sleeps: list[float] = []
 
-    async def fake_sleep(delay: float) -> None:
+    async def fake_sleep(delay: float, result: None = None) -> None:
         sleeps.append(delay)
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
@@ -16126,7 +16130,7 @@ async def test_stream_with_retry_post_refresh_confirmed_proxy_connect_failure_fa
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
 
-    async def fake_sleep(delay: float) -> None:
+    async def fake_sleep(delay: float, result: None = None) -> None:
         sleeps.append(delay)
 
     monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", fake_sleep)
@@ -19259,7 +19263,7 @@ async def test_stream_with_retry_capacity_wait_keeps_original_request_deadline(m
     def monotonic() -> float:
         return now
 
-    async def fake_sleep(seconds: float) -> None:
+    async def fake_sleep(seconds: float, result: None = None) -> None:
         nonlocal now
         sleeps.append(seconds)
         now += seconds
@@ -19267,7 +19271,6 @@ async def test_stream_with_retry_capacity_wait_keeps_original_request_deadline(m
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(time, "monotonic", monotonic)
-    monkeypatch.setattr(streaming_retry_module.time, "monotonic", monotonic)
     monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(
         streaming_retry_module,
@@ -27070,6 +27073,8 @@ async def test_websocket_full_replay_waits_for_pending_continuity_gap():
             pending_requests,
             pending_lock=pending_lock,
             timeout_seconds=1.0,
+            scheduler=REAL_SCHEDULER,
+            clock=REAL_CLOCK,
         )
     finally:
         await clear_task
@@ -45519,7 +45524,7 @@ async def test_open_upstream_websocket_passes_absolute_deadline_to_recovery(monk
     monotonic = MagicMock(side_effect=[100.0, 100.0])
     monkeypatch.setattr(service, "_open_upstream_websocket", open_upstream)
     monkeypatch.setattr(websocket_mixin_module, "_wait_for_process_network_recovery", wait_for_recovery)
-    monkeypatch.setattr(websocket_mixin_module, "time", SimpleNamespace(monotonic=monotonic))
+    monkeypatch.setattr(service, "_clock", SimpleNamespace(monotonic=monotonic))
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await service._open_upstream_websocket_with_budget(
@@ -45911,9 +45916,9 @@ async def test_reconnect_http_bridge_session_serializes_lease_swap_with_reacquis
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    # Keep the deterministic service clock local; mutating the shared time
-    # module also freezes asyncio's event-loop timers.
-    monkeypatch.setattr(proxy_service, "time", SimpleNamespace(monotonic=lambda: 10.0), raising=False)
+    # Pin the deterministic clock on the service's owner seam; mutating the
+    # shared time module would also freeze asyncio's event-loop timers.
+    monkeypatch.setattr(service, "_clock", SimpleNamespace(monotonic=lambda: 10.0))
 
     async def release_account_lease_side_effect(released_lease: proxy_service.AccountLease) -> None:
         assert released_lease is reacquired_lease
@@ -50653,11 +50658,7 @@ async def test_retry_http_bridge_precreated_request_does_not_send_after_admissio
         "_get_work_admission",
         lambda: SimpleNamespace(acquire_response_create=acquire_admission),
     )
-    monkeypatch.setattr(
-        proxy_http_bridge_request_submit,
-        "_service_time",
-        lambda: SimpleNamespace(monotonic=lambda: next(retry_times)),
-    )
+    monkeypatch.setattr(service, "_clock", SimpleNamespace(monotonic=lambda: next(retry_times)))
 
     assert await service._retry_http_bridge_precreated_request(session) is False
 

@@ -25,6 +25,12 @@ class AppError(Exception):
 # --- OpenAI-envelope errors (proxy routes) ---
 
 
+class ProxyInvalidRequestError(AppError):
+    status_code = 400
+    code = "invalid_request_error"
+    error_type = "invalid_request_error"
+
+
 class ProxyAuthError(AppError):
     status_code = 401
     code = "invalid_api_key"

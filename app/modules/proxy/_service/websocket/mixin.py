@@ -498,6 +498,8 @@ from app.modules.proxy.request_policy import (
     openai_invalid_payload_error,
     openai_validation_error,
     responses_source_route_excluded,
+    validate_astra_request,
+    validate_configuration_update_policy,
     validate_model_access,
     validate_top_level_compaction_trigger_input_shape,
 )
@@ -3150,6 +3152,17 @@ class _WebSocketMixin:
                     previous_response_input_items
                 )
                 responses_payload = responses_payload.model_copy(update={"input": trimmed_input_items})
+        source_owned = False
+        if not source_route_excluded and responses_payload.model.strip().lower() == "gpt-6-astra":
+            source_owned = await responses_model_is_source_owned(
+                responses_payload.model,
+                refreshed_api_key,
+                raw_model=raw_source_model,
+            )
+        if source_owned:
+            validate_configuration_update_policy(responses_payload, refreshed_api_key, subscription=False)
+        else:
+            validate_astra_request(responses_payload, refreshed_api_key)
         full_resend_client_metadata = client_metadata
         if client_full_resend_retry_safe and client_full_resend_input_items is not None:
             if trusted_incremental_responses_lite and client_metadata is not None:
@@ -3263,8 +3276,9 @@ class _WebSocketMixin:
                 client_metadata=client_metadata,
                 headers=headers,
                 session_id=session_id,
+                apply_astra_subscription_schema=not source_owned,
             )
-        except ProxyResponseError:
+        except (ProxyResponseError, AppError):
             await proxy._release_websocket_reservation(reservation)
             raise
         request_state.useragent = useragent

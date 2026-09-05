@@ -47,6 +47,7 @@ from app.core.clients.proxy_websocket import (
     is_account_neutral_websocket_error_code,
 )
 from app.core.errors import OpenAIErrorEnvelope, openai_error
+from app.core.exceptions import ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
     ResponsesRequest,
@@ -231,6 +232,11 @@ from app.modules.proxy.helpers import (
     _parse_openai_error,
 )
 from app.modules.proxy.load_balancer import effective_account_concurrency_caps
+from app.modules.proxy.request_policy import (
+    prepare_astra_reasoning_policy_continuation,
+    validate_astra_request,
+    validate_configuration_update_policy,
+)
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
 )
@@ -612,7 +618,39 @@ def _text_without_account_installation_id(text_data: str) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
-def _text_with_previous_response_id(text_data: str, response_id: str | None) -> str:
+def _astra_client_update_efforts(payload: ResponsesRequest) -> tuple[str, ...]:
+    if payload.model.strip().lower() != "gpt-6-astra" or not isinstance(payload.input, list):
+        return ()
+    efforts: list[str] = []
+    for item in payload.input:
+        if not isinstance(item, dict) or item.get("type") != "configuration_update":
+            continue
+        reasoning = item.get("reasoning")
+        effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+        if isinstance(effort, str) and effort.strip():
+            efforts.append(effort.strip().lower())
+    return tuple(efforts)
+
+
+def _restore_astra_client_update_efforts(request: ResponsesRequest, stored: tuple[str, ...]) -> None:
+    if not stored or not isinstance(request.input, list):
+        return
+    updates = [item for item in request.input if isinstance(item, dict) and item.get("type") == "configuration_update"]
+    if len(updates) != len(stored):
+        return
+    for item, effort in zip(updates, stored, strict=True):
+        reasoning = item.get("reasoning")
+        if isinstance(reasoning, dict):
+            item["reasoning"] = {**reasoning, "effort": effort}
+
+
+def _text_with_previous_response_id(
+    text_data: str,
+    response_id: str | None,
+    *,
+    api_key: ApiKeyData | None = None,
+    request_state: _WebSocketRequestState | None = None,
+) -> str:
     if not response_id:
         return text_data
     try:
@@ -622,6 +660,30 @@ def _text_with_previous_response_id(text_data: str, response_id: str | None) -> 
     if not isinstance(payload, dict) or not response_id:
         return text_data
     payload["previous_response_id"] = response_id
+    payload.pop("conversation", None)
+    model = payload.get("model")
+    if api_key is not None and isinstance(model, str) and model.strip().lower() == "gpt-6-astra":
+        request = ResponsesRequest.model_validate(payload)
+        client_effort = getattr(request_state, "reasoning_effort", None) if request_state is not None else None
+        if isinstance(client_effort, str) and client_effort:
+            request._codex_lb_client_reasoning_effort = client_effort
+        stored_updates = getattr(request_state, "astra_client_update_efforts", ()) if request_state is not None else ()
+        if stored_updates:
+            _restore_astra_client_update_efforts(request, stored_updates)
+        prepare_astra_reasoning_policy_continuation(request, api_key)
+        validate_astra_request(request, api_key)
+        if request_state is not None:
+            request_state.astra_client_update_efforts = _astra_client_update_efforts(request)
+        forwarded_payload = request.to_payload()
+        payload["input"] = forwarded_payload.get("input")
+        if request_state is not None and isinstance(request.input, list):
+            prepared_input = cast(list[JsonValue], request.input)
+            request_state.input_item_count = len(prepared_input)
+            request_state.input_full_fingerprint = _fingerprint_input_items(prepared_input)
+            request_state.request_usage_budget = estimate_api_key_request_usage(
+                request,
+                upstream_payload=forwarded_payload,
+            )
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
@@ -767,7 +829,14 @@ class _HTTPBridgeRequestSubmitMixin:
         request_log_id: str | None = None,
         enforce_openai_sdk_contract: bool = True,
         upstream_payload_base: JsonObject | None = None,
+        apply_astra_subscription_schema: bool = True,
     ) -> tuple[_WebSocketRequestState, str]:
+        if apply_astra_subscription_schema:
+            if prepare_astra_reasoning_policy_continuation(payload, api_key):
+                upstream_payload_base = None
+            validate_astra_request(payload, api_key)
+        else:
+            validate_configuration_update_policy(payload, api_key, subscription=False)
         deduped_replayed_input_count: int | None = None
         deduped_replayed_input_fingerprint: str | None = None
         deduped_replayed_tool_call_count = 0
@@ -831,6 +900,7 @@ class _HTTPBridgeRequestSubmitMixin:
             model=payload.model,
             service_tier=forwarded_service_tier,
             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+            astra_client_update_efforts=_astra_client_update_efforts(payload),
             api_key_reservation=api_key_reservation,
             started_at=_service_time().monotonic(),
             requested_service_tier=forwarded_service_tier,
@@ -1450,7 +1520,12 @@ class _HTTPBridgeRequestSubmitMixin:
                         # successive response anchors.
                         seen_hard_turn_response_ids.add(terminal_hard_turn_response_id)
                         hard_turn_chain_advanced = True
-                        text_data = _text_with_previous_response_id(text_data, terminal_hard_turn_response_id)
+                        text_data = _text_with_previous_response_id(
+                            text_data,
+                            terminal_hard_turn_response_id,
+                            api_key=request_state.api_key,
+                            request_state=request_state,
+                        )
                         request_state.request_text = text_data
                         _bind_http_bridge_proxy_injected_anchor(
                             self,
@@ -1503,7 +1578,12 @@ class _HTTPBridgeRequestSubmitMixin:
                                     )
                             completed_response_id = getattr(completed_operation, "response_id", None)
                             if completed_response_id and completed_response_id != request_state.previous_response_id:
-                                text_data = _text_with_previous_response_id(text_data, completed_response_id)
+                                text_data = _text_with_previous_response_id(
+                                    text_data,
+                                    completed_response_id,
+                                    api_key=request_state.api_key,
+                                    request_state=request_state,
+                                )
                                 request_state.request_text = text_data
                                 _bind_http_bridge_proxy_injected_anchor(
                                     self,
@@ -1552,6 +1632,18 @@ class _HTTPBridgeRequestSubmitMixin:
                     parent_response_id=operation_parent_response_id,
                     request_text=text_data,
                 )
+            except (ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed):
+                # Late operation anchors revalidate restored Astra input.
+                # Client-policy failures must keep their 400/403 envelope
+                # and must not leave the already-created reservation hanging.
+                try:
+                    await self._release_websocket_request_state_reservation(request_state)
+                except Exception:
+                    logger.exception(
+                        "Failed to release reservation after Astra policy rejection request_id=%s",
+                        request_state.request_id,
+                    )
+                raise
             except Exception as exc:
                 session.closed = True
                 session.upstream_control.reconnect_requested = True

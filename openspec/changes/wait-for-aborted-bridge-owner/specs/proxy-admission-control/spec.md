@@ -81,15 +81,28 @@ MUST NOT return an unregistered bridge session to the caller.
   has been stuck past the stuck-gate retirement threshold
 - **THEN** the stuck session retirement check still runs on that attempt
 
-#### Scenario: In-flight bridge session creation does not finish
+#### Scenario: Ownerless in-flight bridge session creation does not finish
 
 - **WHEN** a bridged Responses request waits on another request's in-flight
-  session creation
+  session creation marker that has no exact owner task provenance
 - **AND** the in-flight creation does not finish before the configured proxy
   admission wait timeout
 - **THEN** the waiter is rejected locally with HTTP 429 and
   `error.code = "capacity_exhausted_active_sessions"`
 - **AND** the stalled in-flight marker is evicted if it is still pending
+
+#### Scenario: Exact-owner in-flight bridge session creation resists cancellation
+
+- **WHEN** a bridged Responses request waits on another request's in-flight
+  session creation marker that records an exact non-handoff owner task
+- **AND** the in-flight creation does not finish before the configured proxy
+  admission wait timeout
+- **AND** that exact owner remains running through the additional bounded owner
+  observation interval
+- **THEN** the waiter is rejected locally with HTTP 429 and
+  `error.code = "capacity_exhausted_active_sessions"`
+- **AND** the owner-held marker remains registered and capacity-owned until that
+  owner finalizes
 
 #### Scenario: Bridge capacity waiter does not make progress
 

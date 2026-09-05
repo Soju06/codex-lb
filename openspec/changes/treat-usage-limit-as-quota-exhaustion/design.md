@@ -22,6 +22,7 @@ The state builder's early-recovery gate previously accepted any fresh primary sa
 ## Decisions
 
 - Keep `usage_limit_reached` and `rate_limit_exceeded` classified as `rate_limit`, preserving existing deadlines and dashboard semantics.
+- Both error codes share the persisted `RATE_LIMITED` state; the evidence gate governs early usage-based recovery, not deadline expiry. It does not change unrelated health penalties. Unsupported monthly rows are ignored before evaluating long-window exhaustion, including raw rows supplied by background recovery.
 - Require available usage in the sample used for early recovery. An exhausted long window cannot be hidden by an available primary sample. Preserve the existing newer-long-window recovery path after the primary reset expires.
 - Preserve marking-replica versus peer behavior: only the replica with runtime evidence of the current rate-limit block can recover before its persisted deadline. Peers honor the deadline until a valid recovery is persisted.
 - Preserve the public upstream code and response body. The change affects account-health state only, so clients continue receiving the original error if failover is unsafe or no replacement can be selected.

@@ -19,7 +19,7 @@ None.
 
 ### Modified Capabilities
 
-- `account-routing`: Require available quota evidence before clearing account-scoped health penalties.
+- `account-routing`: Fix usage-limit recovery and explicit quota exhaustion within the existing rate-limit/quota state paths. Require applicable available usage for evidence-based early recovery; preserve ordinary `rate_limit_exceeded` cooldown and deadline expiry, and leave unrelated account-health penalties unchanged.
 
 ## Impact
 

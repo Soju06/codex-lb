@@ -2811,17 +2811,19 @@ def _rate_limited_freshness_entry(
     primary_entry: _UsageWindowEntry | None,
     long_window_entry: _UsageWindowEntry | None,
 ) -> _UsageWindowEntry | None:
+    if (
+        long_window_entry is not None
+        and long_window_entry.window == "monthly"
+        and usage_core.capacity_for_plan(account.plan_type, "monthly") is None
+    ):
+        long_window_entry = None
     # Freshness cannot prove recovery while an applicable long window is
     # still exhausted, even if the primary sample reports available quota.
     if long_window_entry is not None and not (
         long_window_entry.used_percent is not None and float(long_window_entry.used_percent) < 100.0
     ):
         return None
-    if (
-        long_window_entry is not None
-        and long_window_entry.window == "monthly"
-        and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None
-    ):
+    if long_window_entry is not None and long_window_entry.window == "monthly":
         return long_window_entry
     if primary_entry is None:
         return long_window_entry

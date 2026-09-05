@@ -190,6 +190,45 @@ async def test_usage_limit_requires_available_windows_before_early_recovery(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("use_peer_replica", [False, True], ids=["marking_replica", "peer_replica"])
+async def test_rate_limit_deadline_expires_without_usage_refresh(db_setup, monkeypatch, use_peer_replica):
+    blocked_at = int(time.time())
+    now = blocked_at
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    account = _make_account("rate_limit_expiry")
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+
+    service = ProxyService(_repo_factory)
+    classified = await service._handle_stream_error(
+        account,
+        {"message": "Rate limit exceeded.", "resets_in_seconds": 180},
+        "rate_limit_exceeded",
+        429,
+    )
+    assert classified["failure_class"] == "rate_limit"
+    row = await _fetch_account(account.id)
+    assert row.status == AccountStatus.RATE_LIMITED
+    assert row.reset_at == blocked_at + 180
+
+    balancer = LoadBalancer(_repo_factory) if use_peer_replica else service._load_balancer
+    now = blocked_at + 179
+    selection = await balancer.select_account(account_ids={account.id})
+    assert selection.account is None
+    row = await _fetch_account(account.id)
+    assert row.status == AccountStatus.RATE_LIMITED
+    assert row.reset_at == blocked_at + 180
+
+    now = blocked_at + 181
+    selection = await balancer.select_account(account_ids={account.id})
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    row = await _fetch_account(account.id)
+    assert row.status == AccountStatus.ACTIVE
+    assert row.reset_at is None
+
+
+@pytest.mark.asyncio
 async def test_peer_replica_honors_metadata_free_rate_limit_cooldown(db_setup):
     """Regression: on main the peer flips the row back to ACTIVE and selects it.
 

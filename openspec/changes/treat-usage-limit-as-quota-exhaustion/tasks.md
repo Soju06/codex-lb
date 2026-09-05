@@ -17,3 +17,5 @@
 - [x] 3.3 Verify repeated foreground selection and recovery across replicas.
 - [x] 3.4 Reproduce primary/long-window exhaustion through the shared handler, persistence, and both replicas; prove valid recovery still works.
 - [x] 3.5 Validate the revised PR with focused regressions, static checks, and strict OpenSpec validation.
+- [x] 3.6 Ignore unsupported monthly rows during background recovery and verify applicable monthly exhaustion still blocks recovery.
+- [x] 3.7 Clarify recovery scope and verify ordinary rate-limit deadline expiry without usage refresh.

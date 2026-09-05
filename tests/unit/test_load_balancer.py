@@ -3760,6 +3760,51 @@ def test_background_recovery_state_recovers_rate_limited_after_reset_elapses(mon
     assert state.status == AccountStatus.ACTIVE
 
 
+@pytest.mark.parametrize("plan_type", ["plus", "free"])
+@pytest.mark.parametrize("has_block_marker", [False, True])
+def test_background_recovery_state_ignores_only_unsupported_monthly_exhaustion(
+    monkeypatch, plan_type, has_block_marker
+):
+    now = 1_700_000_000.0
+    blocked = int(now - 7200)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=int(now - 300),
+        blocked_at=blocked if has_block_marker else None,
+        plan_type=plan_type,
+    )
+    primary = _make_test_usage(
+        window="primary",
+        used_percent=10.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+    monthly = _make_test_usage(
+        window="monthly",
+        used_percent=100.0,
+        reset_at=int(now + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+        window_minutes=43200,
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=primary,
+        secondary_entry=monthly,
+    )
+
+    if usage_core.capacity_for_plan(plan_type, "monthly") is None:
+        assert state.status == AccountStatus.ACTIVE
+        assert state.reset_at is None
+        assert state.blocked_at is None
+    else:
+        assert state.status == AccountStatus.RATE_LIMITED
+        assert state.reset_at == account.reset_at
+        assert state.blocked_at == account.blocked_at
+
+
 def test_background_recovery_state_recovers_monthly_only_rate_limited_after_reset_elapses(monkeypatch):
     now = 1_700_000_000.0
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)

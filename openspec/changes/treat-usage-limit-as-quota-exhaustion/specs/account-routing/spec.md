@@ -8,6 +8,8 @@ Upstream `rate_limit_exceeded` and `usage_limit_reached` responses MUST retain t
 
 After the quota debounce expires, a fresh applicable long-window sample at 100% MUST preserve an explicit quota-exhausted state when no usable credit override exists. When that exhausted sample supplies its reset time, routing MUST use that observed long-window reset instead of an earlier fallback deadline.
 
+The evidence gate MUST apply only to usage-based recovery of rate-limit and explicit quota-exhaustion states, not unrelated account-health penalties. Ordinary `rate_limit_exceeded` cooldown and persisted-deadline expiry during foreground selection MUST remain unchanged and MUST NOT require a new quota sample. Monthly usage unsupported by the account's plan MUST NOT block recovery based on an available post-block primary sample.
+
 When an applicable exhausted sample omits reset metadata, an elapsed fallback deadline MUST NOT reactivate the account. Credit overrides of an explicit quota block MUST use credit evidence recorded strictly after the block; cached pre-block credit availability MUST NOT clear the persisted quota status or block markers on any replica.
 
 #### Scenario: Upstream 429 marks only the selected account
@@ -33,6 +35,19 @@ When an applicable exhausted sample omits reset metadata, an elapsed fallback de
 - **WHEN** a post-block primary sample reports less than 100% usage and no applicable long-window sample reports exhaustion
 - **THEN** the marking replica can recover the account through the existing persisted state transition
 - **AND** peer replicas observe the recovered state
+
+#### Scenario: Unsupported monthly usage does not veto background recovery
+
+- **GIVEN** an account whose plan has no monthly quota and whose persisted rate-limit deadline has elapsed
+- **AND** storage contains an exhausted monthly row and an available post-block primary row
+- **WHEN** background recovery evaluates the account
+- **THEN** it ignores the unsupported monthly row and permits recovery from the primary evidence
+
+#### Scenario: Ordinary rate-limit cooldown expires without usage refresh
+
+- **GIVEN** an account blocked by `rate_limit_exceeded` with a persisted reset deadline
+- **WHEN** foreground selection runs after that deadline without new usage data
+- **THEN** the existing cooldown-expiry path can recover the account without requiring quota evidence
 
 #### Scenario: Fresh exhausted long-window usage does not recover quota state
 

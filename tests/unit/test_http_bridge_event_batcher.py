@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -171,6 +172,53 @@ class _DelayedFailingDrainDurableBridge(_FakeDurableBridge):
         self.append_started.set()
         await self.release_append.wait()
         return False
+
+
+class _ShieldedStall:
+    """Mimic ``close_session()``'s ``_shielded`` teardown: every cancellation is absorbed."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancel_count = 0
+
+    async def stall(self) -> None:
+        self.started.set()
+        while True:
+            try:
+                await self.release.wait()
+                return
+            except asyncio.CancelledError:
+                self.cancel_count += 1
+                self.cancelled.set()
+
+
+class _ShieldedTerminalAppendDurableBridge(_FakeDurableBridge):
+    def __init__(self) -> None:
+        super().__init__()
+        self.append_stall = _ShieldedStall()
+
+    async def append_terminal_operation_event(self, **kwargs) -> bool:
+        del kwargs
+        await self.append_stall.stall()
+        return False
+
+    async def append_terminal_operation_chunk(self, **kwargs) -> bool:
+        del kwargs
+        await self.append_stall.stall()
+        return False
+
+
+class _ShieldedFinalizeDurableBridge(_FakeDurableBridge):
+    def __init__(self) -> None:
+        super().__init__()
+        self.finalize_stall = _ShieldedStall()
+
+    async def finalize_operation_event_spool(self, **kwargs) -> bool:
+        del kwargs
+        await self.finalize_stall.stall()
+        return True
 
 
 async def _enqueue(
@@ -713,6 +761,119 @@ async def test_discard_operation_releases_partial_nonterminal_context() -> None:
         assert durable.finalized == []
     finally:
         await batcher.close()
+
+
+async def _wait_for_warning(caplog: pytest.LogCaptureFixture, needle: str) -> logging.LogRecord:
+    async with asyncio.timeout(1.0):
+        while True:
+            for record in caplog.records:
+                if record.levelno == logging.WARNING and needle in record.getMessage():
+                    return record
+            await asyncio.sleep(0.005)
+
+
+@pytest.mark.asyncio
+async def test_close_owns_terminal_append_pending_past_bound(caplog: pytest.LogCaptureFixture) -> None:
+    durable = _ShieldedTerminalAppendDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+        terminal_append_timeout_seconds=0.01,
+    )
+    # A failed assertion must not leave the shielded stall absorbing the loop's
+    # teardown cancellation forever; always release it.
+    try:
+        result = await asyncio.wait_for(
+            batcher.append_terminal_event(
+                operation_id="op-1",
+                session_id="session-1",
+                instance_id="instance-1",
+                owner_epoch=7,
+                event_text="terminal",
+                max_bytes=1024,
+                state="completed",
+                response_id="resp-1",
+            ),
+            timeout=1.0,
+        )
+        assert result.persisted is False
+        assert result.settlement_required is True
+        await asyncio.wait_for(durable.append_stall.cancelled.wait(), timeout=1.0)
+        late_tasks = tuple(batcher._terminal_append_tasks)
+        assert len(late_tasks) == 1
+        late_task = late_tasks[0]
+        assert not late_task.done()
+
+        with caplog.at_level(logging.WARNING, logger="app.modules.proxy.http_bridge_event_batcher"):
+            close_task = asyncio.create_task(batcher.close())
+            record = await _wait_for_warning(caplog, "http-bridge-terminal-spool-op-1")
+            # The bound elapsed with the shielded write still pending: close()
+            # must keep owning the task instead of returning and dropping it.
+            assert "terminal append tasks still pending after close bound" in record.getMessage()
+            assert "count=1" in record.getMessage()
+            assert not close_task.done()
+            assert not late_task.done()
+            assert late_task in batcher._terminal_append_tasks
+            assert durable.append_stall.cancel_count >= 1
+
+            durable.append_stall.release.set()
+            await asyncio.wait_for(close_task, timeout=1.0)
+
+        assert late_task.done()
+        assert not late_task.cancelled()
+        assert batcher._terminal_append_tasks == set()
+        assert batcher._contexts == {}
+        assert batcher._closing_operations == set()
+    finally:
+        durable.append_stall.release.set()
+
+
+@pytest.mark.asyncio
+async def test_close_owns_terminal_finalize_pending_past_bound(caplog: pytest.LogCaptureFixture) -> None:
+    durable = _ShieldedFinalizeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+        terminal_append_timeout_seconds=0.01,
+    )
+    try:
+        result = await asyncio.wait_for(
+            batcher.append_terminal_event(
+                operation_id="op-1",
+                session_id="session-1",
+                instance_id="instance-1",
+                owner_epoch=7,
+                event_text="terminal",
+                max_bytes=1024,
+                state="completed",
+                response_id="resp-1",
+            ),
+            timeout=1.0,
+        )
+        assert result.persisted is True
+        await asyncio.wait_for(durable.finalize_stall.started.wait(), timeout=1.0)
+        finalize_tasks = tuple(batcher._terminal_finalize_tasks)
+        assert len(finalize_tasks) == 1
+        finalize_task = finalize_tasks[0]
+
+        with caplog.at_level(logging.WARNING, logger="app.modules.proxy.http_bridge_event_batcher"):
+            close_task = asyncio.create_task(batcher.close())
+            record = await _wait_for_warning(caplog, "http-bridge-terminal-spool-finalize-op-1")
+            assert "terminal finalize tasks still pending after close bound" in record.getMessage()
+            assert not close_task.done()
+            assert not finalize_task.done()
+            assert finalize_task in batcher._terminal_finalize_tasks
+
+            durable.finalize_stall.release.set()
+            await asyncio.wait_for(close_task, timeout=1.0)
+
+        assert finalize_task.done()
+        assert not finalize_task.cancelled()
+        assert batcher._terminal_finalize_tasks == set()
+    finally:
+        durable.finalize_stall.release.set()
 
 
 @pytest.mark.asyncio

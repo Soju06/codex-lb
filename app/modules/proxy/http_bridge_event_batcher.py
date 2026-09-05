@@ -559,13 +559,30 @@ class HttpBridgeOperationEventBatcher:
                 await task
             except asyncio.CancelledError:
                 pass
-        terminal_append_tasks = tuple(self._terminal_append_tasks)
-        for terminal_append_task in terminal_append_tasks:
-            terminal_append_task.cancel()
-        if terminal_append_tasks:
-            await asyncio.wait(terminal_append_tasks, timeout=max(self._terminal_append_timeout_seconds, 0.0))
-        terminal_finalize_tasks = tuple(self._terminal_finalize_tasks)
-        for terminal_finalize_task in terminal_finalize_tasks:
-            terminal_finalize_task.cancel()
-        if terminal_finalize_tasks:
-            await asyncio.wait(terminal_finalize_tasks, timeout=max(self._terminal_append_timeout_seconds, 0.0))
+        await self._drain_terminal_tasks(tuple(self._terminal_append_tasks), kind="append")
+        await self._drain_terminal_tasks(tuple(self._terminal_finalize_tasks), kind="finalize")
+
+    async def _drain_terminal_tasks(self, tasks: tuple[asyncio.Task[Any], ...], *, kind: str) -> None:
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        _, pending = await asyncio.wait(tasks, timeout=max(self._terminal_append_timeout_seconds, 0.0))
+        if not pending:
+            return
+        # A cancelled append/finalize whose session rollback/close is shielded
+        # behind the SQLite writer absorbs the cancellation and keeps owning an
+        # AsyncSession until the durable layer's own bounded teardown returns.
+        # Dropping it from the tracking set here would leave a live task to be
+        # destroyed with the event loop; own it to completion instead, as the
+        # pre-batcher handler did when it awaited the write directly. The
+        # durable layer bounds a wedged SQLite teardown, so this cannot hang.
+        logger.warning(
+            "HTTP bridge terminal %s tasks still pending after close bound; awaiting completion "
+            "count=%d timeout_seconds=%.1f task_names=%s",
+            kind,
+            len(pending),
+            self._terminal_append_timeout_seconds,
+            sorted(task.get_name() for task in pending),
+        )
+        await asyncio.gather(*pending, return_exceptions=True)

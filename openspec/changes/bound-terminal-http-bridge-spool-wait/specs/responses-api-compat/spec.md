@@ -11,7 +11,9 @@ The bounded failure MUST NOT make a partial or uncertain transcript replayable.
 A terminal append MUST remain incomplete until it finishes within the bound, at
 which point the proxy MUST schedule an attempt-fenced finalization; only a
 successful finalization makes it replayable. Cleanup that removes the in-memory
-operation context MUST still require fallback settlement.
+operation context MUST still require fallback settlement. When the event spooler
+closes, a terminal append or finalization task still pending after the bound
+MUST be cancelled and awaited to completion rather than abandoned.
 
 #### Scenario: Busy transcript writer does not hold live completion
 
@@ -28,3 +30,11 @@ operation context MUST still require fallback settlement.
 - **THEN** the terminal event and intended operation state are persisted
 - **AND** the proxy schedules attempt-fenced finalization
 - **AND** successful finalization makes the completed event spool eligible for replay
+
+#### Scenario: Shutdown owns a terminal write pending past the bound
+
+- **GIVEN** a terminal append or finalization task absorbs cancellation while its
+  shielded session teardown waits on the transcript writer
+- **WHEN** the event spooler closes and the persistence bound expires
+- **THEN** the spooler logs a warning naming the still-pending tasks
+- **AND** the spooler awaits those tasks to completion before close returns

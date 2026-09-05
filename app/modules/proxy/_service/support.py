@@ -180,9 +180,10 @@ def _visible_reasoning_prefix_before_blank_comment_candidate(text: str) -> str:
 
 def _finalize_ttft_reasoning_deltas(
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
+    *,
+    now: float | None = None,
 ) -> float | None:
     visible_at_values: list[float] = []
-    now: float | None = None
     for pending in pending_reasoning_deltas.values():
         if not _strip_blank_html_comment_lines(pending.text):
             continue
@@ -190,7 +191,7 @@ def _finalize_ttft_reasoning_deltas(
             visible_at_values.append(pending.visible_at)
             continue
         if now is None:
-            now = time.monotonic()
+            now = REAL_CLOCK.monotonic()
         visible_at_values.append(now)
     pending_reasoning_deltas.clear()
     return min(visible_at_values) if visible_at_values else None
@@ -200,8 +201,15 @@ def _ttft_event_visible_at(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState] | None = None,
+    *,
+    now: float | None = None,
 ) -> float | None:
-    now = time.monotonic()
+    # ``now`` is the caller's clock sample. The finalize helpers below receive
+    # the caller's argument rather than the resolved value so the real default
+    # keeps sampling lazily, exactly as before, while an injected clock stamps
+    # every visible_at value.
+    caller_now = now
+    now = REAL_CLOCK.monotonic() if now is None else now
     pending = pending_reasoning_deltas if pending_reasoning_deltas is not None else {}
     event_key = _reasoning_summary_delta_key(payload) if payload is not None else (None, None, None)
     if (
@@ -209,7 +217,7 @@ def _ttft_event_visible_at(
         and not _is_reasoning_summary_interleavable_event(event_type)
         and not (event_type in _TTFT_REASONING_EVENT_TYPES and event_key in pending)
     ):
-        visible_at = _finalize_ttft_reasoning_deltas(pending)
+        visible_at = _finalize_ttft_reasoning_deltas(pending, now=caller_now)
         if visible_at is not None:
             return visible_at
     if event_type == "response.reasoning_summary_text.delta":
@@ -233,7 +241,7 @@ def _ttft_event_visible_at(
             return None
         return previous.visible_at if previous is not None and previous.visible_at is not None else now
     if event_type == "response.reasoning_summary_text.done" and event_key in pending:
-        visible_at = _finalize_ttft_reasoning_deltas({event_key: pending.pop(event_key)})
+        visible_at = _finalize_ttft_reasoning_deltas({event_key: pending.pop(event_key)}, now=caller_now)
         return visible_at
     if event_type in _TTFT_TOOL_DELTA_EVENT_TYPES:
         if payload is None:
@@ -261,8 +269,10 @@ def _is_ttft_event(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState] | None = None,
+    *,
+    now: float | None = None,
 ) -> bool:
-    return _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas) is not None
+    return _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas, now=now) is not None
 
 
 def _ttft_latency_ms_from_visible_at(visible_at: float | None, started_at: float) -> int | None:
@@ -274,17 +284,23 @@ def _ttft_event_latency_ms(
     payload: dict[str, JsonValue] | None,
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
     started_at: float,
+    *,
+    now: float | None = None,
 ) -> int | None:
     return _ttft_latency_ms_from_visible_at(
-        _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas), started_at
+        _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas, now=now), started_at
     )
 
 
 def _finalize_ttft_latency_ms(
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
     started_at: float,
+    *,
+    now: float | None = None,
 ) -> int | None:
-    return _ttft_latency_ms_from_visible_at(_finalize_ttft_reasoning_deltas(pending_reasoning_deltas), started_at)
+    return _ttft_latency_ms_from_visible_at(
+        _finalize_ttft_reasoning_deltas(pending_reasoning_deltas, now=now), started_at
+    )
 
 
 # Stream frames whose parsed payload feeds a real per-event consumer:
@@ -481,9 +497,16 @@ def _account_capacity_wait_payload(
     reason: str | None,
     retry_after_seconds: float | None,
     started_at: float | None = None,
+    now: float | None = None,
 ) -> dict[str, JsonValue]:
     wait_started_at = request_state.account_capacity_wait_started_at if request_state is not None else started_at
-    waited_seconds = int(max(0.0, time.monotonic() - wait_started_at)) if wait_started_at is not None else 0
+    if wait_started_at is not None:
+        # ``now`` must come from the clock that stamped ``wait_started_at``;
+        # callers pass their owner clock sample.
+        now = REAL_CLOCK.monotonic() if now is None else now
+        waited_seconds = int(max(0.0, now - wait_started_at))
+    else:
+        waited_seconds = 0
     payload: dict[str, JsonValue] = {
         "type": "codex.keepalive",
         "status": "waiting_for_account_capacity",
@@ -1516,11 +1539,21 @@ class _WebSocketUpstreamControl:
 
 @dataclass(slots=True)
 class _DownstreamWebSocketActivity:
-    last_activity_at: float = field(default_factory=time.monotonic)
+    """Downstream websocket liveness stamps, read with the owner's clock.
+
+    ``clock`` is the owner's collaborator (``clock_for(proxy)``); the real
+    default keeps the previous ``time.monotonic`` stamps verbatim.
+    """
+
+    clock: Clock = field(default=REAL_CLOCK, kw_only=True)
+    last_activity_at: float = field(init=False)
     disconnected: bool = False
 
+    def __post_init__(self) -> None:
+        self.last_activity_at = self.clock.monotonic()
+
     def mark(self) -> None:
-        self.last_activity_at = time.monotonic()
+        self.last_activity_at = self.clock.monotonic()
 
     def mark_disconnected(self) -> None:
         self.disconnected = True
@@ -1612,11 +1645,18 @@ def _mark_response_create_attempt_observed(
             attempt.non_terminal_response_observed = True
 
 
-def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
+def _record_response_event(
+    request_state: _WebSocketRequestState | None,
+    event_type: str | None,
+    *,
+    now: float | None = None,
+) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
     _mark_response_create_attempt_observed(request_state, event_type)
-    request_state.last_upstream_activity_at = time.monotonic()
+    # ``now`` is the owner clock sample the bridge/websocket idle deadlines are
+    # later compared against; callers pass ``clock_for(owner).monotonic()``.
+    request_state.last_upstream_activity_at = REAL_CLOCK.monotonic() if now is None else now
     if event_type in {"response.failed", "response.incomplete"}:
         return
     request_state.response_event_count += 1

@@ -1061,8 +1061,7 @@ def test_account_selection_recovery_sleep_ignores_permanent_selection_failures(m
     assert _account_selection_recovery_sleep_seconds(selection) is None
 
 
-def test_account_capacity_wait_payload_reports_status_and_wait_time(monkeypatch):
-    monkeypatch.setattr(proxy_support.time, "monotonic", lambda: 125.4)
+def test_account_capacity_wait_payload_reports_status_and_wait_time():
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_capacity_wait",
         model="gpt-5.1",
@@ -1078,6 +1077,7 @@ def test_account_capacity_wait_payload_reports_status_and_wait_time(monkeypatch)
         request_id="req_capacity_wait",
         reason="Rate limit exceeded. Try again in 120s",
         retry_after_seconds=119.8,
+        now=125.4,
     )
 
     assert payload["type"] == "codex.keepalive"

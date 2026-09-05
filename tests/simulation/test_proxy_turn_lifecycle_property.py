@@ -17,9 +17,10 @@ rather than a re-implementation of it.
 
 After settlement, retry requests run through the production pre-created retry
 operation against the same pending-owner deque. The canaries at the bottom
-plant double-release-on-cancel and post-settlement retry-reacquisition bugs and
-assert that the checker rejects both. A checker that cannot catch a planted bug
-proves nothing.
+plant double-release-on-cancel, post-settlement retry-reacquisition,
+lost-terminal-claim and dropped-API-key-release bugs and assert that the
+checker rejects each one by the invariant it violates. A checker that cannot
+catch a planted bug proves nothing.
 """
 
 from __future__ import annotations
@@ -148,6 +149,9 @@ class _RecordingProxyService(proxy_service.ProxyService):
 class _ProductionBridgeTurn:
     """One bridge turn driven through the production lease-release helpers."""
 
+    # Canaries swap in a service subclass carrying a planted bug.
+    service_class: type[_RecordingProxyService] = _RecordingProxyService
+
     def __init__(self, scheduler: VirtualScheduler) -> None:
         self.scheduler = scheduler
         self.terminal_outcomes: list[Terminal] = []
@@ -167,7 +171,7 @@ class _ProductionBridgeTurn:
             admission_wait_timeout_seconds=_ADMISSION_TIMEOUT_SECONDS,
             scheduler=scheduler,
         )
-        self.service = _RecordingProxyService(
+        self.service = self.service_class(
             cast(Any, SimpleNamespace()),
             clock=scheduler.clock,
             scheduler=scheduler,
@@ -379,6 +383,44 @@ class _RetryReacquiresAfterSettlementBridgeTurn(_ProductionBridgeTurn):
                 )
 
 
+class _LostTerminalClaimBridgeTurn(_ProductionBridgeTurn):
+    """Toy turn whose terminal claim records no ownership.
+
+    The claim appends the outcome but neither marks
+    ``terminal_settlement_phase`` nor removes the request from
+    ``pending_requests``, so every terminal event in a schedule wins the claim
+    and the turn settles more than once. The duplicated terminal outcome is
+    the invariant the exactly-once release counts hang off, so the checker
+    must reject it first.
+    """
+
+    async def _claim_terminal(self, terminal: Terminal) -> bool:
+        self.terminal_attempts.append(terminal)
+        async with self.session.pending_lock:
+            if self.request_state not in self.session.pending_requests:
+                return False
+            self.terminal_outcomes.append(terminal)
+            return True
+
+
+class _DroppedApiKeyReleaseProxyService(_RecordingProxyService):
+    """Service whose API-key reservation release silently does nothing."""
+
+    async def _release_websocket_reservation(self, reservation: ApiKeyUsageReservationData | None) -> None:
+        del reservation
+
+
+class _DroppedApiKeyReleaseBridgeTurn(_ProductionBridgeTurn):
+    """Toy turn whose settlement drops the API-key reservation release.
+
+    Terminal bookkeeping, the response-create permit and the account lease
+    all settle exactly once, so only the ``api_key_releases`` count exposes
+    the planted bug: a release path that returns without releasing.
+    """
+
+    service_class = _DroppedApiKeyReleaseProxyService
+
+
 def _schedule_for_seed(seed: int) -> Schedule:
     """Build one deterministic schedule.
 
@@ -398,18 +440,24 @@ def _schedule_for_seed(seed: int) -> Schedule:
 def _assert_bridge_turn_invariants(turn: _BridgeTurn, *, seed: int, schedule: Schedule) -> None:
     snapshot = turn.snapshot()
     context = f"seed={seed} schedule={schedule} snapshot={snapshot}"
+
+    def violated(invariant: str) -> str:
+        # The snapshot repr names every field, so canaries match on this
+        # leading marker rather than on a field name anywhere in the message.
+        return f"violated={invariant} {context}"
+
     expected_terminal_attempts = sum(event in {"upstream_terminal", "downstream_cancel"} for event, _delay in schedule)
     expected_retry_attempts = sum(event == "retry_request" for event, _delay in schedule)
-    assert len(snapshot.terminal_outcomes) == 1, context
-    assert len(snapshot.terminal_attempts) == expected_terminal_attempts, context
-    assert snapshot.response_create_releases == 1, context
-    assert snapshot.api_key_releases == 1, context
-    assert snapshot.account_releases == 1, context
-    assert len(snapshot.retry_results) == expected_retry_attempts, context
-    assert not any(snapshot.retry_results), context
+    assert len(snapshot.terminal_outcomes) == 1, violated("terminal_outcomes")
+    assert len(snapshot.terminal_attempts) == expected_terminal_attempts, violated("terminal_attempts")
+    assert snapshot.response_create_releases == 1, violated("response_create_releases")
+    assert snapshot.api_key_releases == 1, violated("api_key_releases")
+    assert snapshot.account_releases == 1, violated("account_releases")
+    assert len(snapshot.retry_results) == expected_retry_attempts, violated("retry_results")
+    assert not any(snapshot.retry_results), violated("retry_results")
     # Liveness: the permit really went back to the real admission gate, so the
     # release counters above cannot be satisfied by never releasing at all.
-    assert snapshot.admission_waiters_admitted == snapshot.admission_waiters, context
+    assert snapshot.admission_waiters_admitted == snapshot.admission_waiters, violated("admission_waiters_admitted")
 
 
 async def _run_schedule(turn: _BridgeTurn, schedule: Schedule, scheduler: VirtualScheduler) -> None:
@@ -463,11 +511,23 @@ async def test_bridge_turn_lifecycle_schedule_set_is_large_and_varied() -> None:
 
 @pytest.mark.asyncio
 async def test_bridge_turn_lifecycle_checker_catches_double_release_canary() -> None:
-    with pytest.raises(AssertionError, match="response_create_releases"):
+    with pytest.raises(AssertionError, match=r"^violated=response_create_releases "):
         await _check_schedules(_DoubleReleaseOnCancelBridgeTurn)
 
 
 @pytest.mark.asyncio
 async def test_bridge_turn_lifecycle_checker_catches_retry_reacquisition_canary() -> None:
-    with pytest.raises(AssertionError, match="retry_results"):
+    with pytest.raises(AssertionError, match=r"^violated=retry_results "):
         await _check_schedules(_RetryReacquiresAfterSettlementBridgeTurn)
+
+
+@pytest.mark.asyncio
+async def test_bridge_turn_lifecycle_checker_catches_lost_terminal_claim_canary() -> None:
+    with pytest.raises(AssertionError, match=r"^violated=terminal_outcomes "):
+        await _check_schedules(_LostTerminalClaimBridgeTurn)
+
+
+@pytest.mark.asyncio
+async def test_bridge_turn_lifecycle_checker_catches_dropped_api_key_release_canary() -> None:
+    with pytest.raises(AssertionError, match=r"^violated=api_key_releases "):
+        await _check_schedules(_DroppedApiKeyReleaseBridgeTurn)

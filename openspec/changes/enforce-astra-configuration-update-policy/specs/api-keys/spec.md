@@ -50,6 +50,8 @@ preparation SHALL be idempotent.
 - **GIVEN** a previous_response_id full resend that starts with stored assistant or reasoning output followed by a tool output
 - **WHEN** a restricted key requires a continuation reset
 - **THEN** the proxy trims that stored prefix before inserting the reset
+- **AND** streaming and collected HTTP routes preserve the original full-resend item count and fingerprint for bridge completion bookkeeping
+- **AND** a subsequent full resend matching that stored prefix remains eligible for continuation anchoring and fresh-replay recovery
 
 #### Scenario: Injected Ultra resets survive repeated anchor advances
 

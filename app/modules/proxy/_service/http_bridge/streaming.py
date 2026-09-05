@@ -1045,6 +1045,11 @@ class _HTTPBridgeStreamingMixin:
                 runtime_config = dataclasses.replace(runtime_config, enabled=False)
             force_upstream_stream_transport = "http"
         if not runtime_config.enabled:
+            if payload.previous_response_id is not None and isinstance(payload.input, list):
+                payload = payload.model_copy(
+                    update={"input": _trim_http_bridge_previous_response_input_items(payload.input)}
+                )
+            validate_astra_request(payload, api_key)
             stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
             async for line in stream_with_retry(
                 payload,
@@ -1307,6 +1312,8 @@ class _HTTPBridgeStreamingMixin:
             *,
             reservation: ApiKeyUsageReservationData | None = api_key_reservation,
         ) -> tuple[_WebSocketRequestState, str]:
+            # Astra resets must not shift the client prefix used by later trimming.
+            request_payload = request_payload.model_copy()
             prepare_astra_reasoning_policy_continuation(request_payload, api_key)
             validate_astra_request(request_payload, api_key)
             if bridge_uses_responses_lite:

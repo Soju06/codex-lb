@@ -32,4 +32,11 @@ Fingerprint HTTP-bridge input from `payload.input` after Astra
 preparation mutates that list, so Astra prepends are counted without a
 global rewrite of non-Astra requests.
 
+For anchored HTTP full resends, validate a trimmed copy before admission,
+but retain the original payload for the bridge trim detector. Its existing
+count and fingerprint override must describe client history, not the
+delta plus injected reset. Non-bridge forwarding keeps the validated copy.
+Bridge preparation also uses a copy so a late injected reset cannot shift
+the client prefix before the subsequent stored-context comparison.
+
 Rejected: landing the full #2089 branch. Maintainer required a split.

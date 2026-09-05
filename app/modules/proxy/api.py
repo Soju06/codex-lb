@@ -6045,8 +6045,9 @@ async def _stream_responses(
             service_tier_was_enforced=service_tier_was_enforced,
         )
     apply_prohibit_fast_mode(payload, prohibit_fast_mode=prohibit_fast_mode)
+    untrimmed_payload = payload
     if payload.previous_response_id is not None and isinstance(payload.input, list):
-        payload.input = _trim_http_bridge_previous_response_input_items(payload.input)
+        payload = payload.model_copy(update={"input": _trim_http_bridge_previous_response_input_items(payload.input)})
     validate_astra_request(payload, api_key)
     validate_model_access(api_key, payload.model)
     compact_payload: ResponsesCompactRequest | None = None
@@ -6133,6 +6134,9 @@ async def _stream_responses(
         preferred=prefer_http_bridge,
         policy_already_applied=forwarded_request,
     )
+    if bridge_active:
+        # The bridge must see the original history to preserve its stored prefix.
+        payload = untrimmed_payload
     bridge_recovery_eligible = _http_bridge_recovery_request_eligible(
         payload,
         bridge_active=bridge_active,
@@ -6559,8 +6563,9 @@ async def _collect_responses(
         payload,
         service_tier_was_enforced=service_tier_was_enforced,
     )
+    untrimmed_payload = payload
     if payload.previous_response_id is not None and isinstance(payload.input, list):
-        payload.input = _trim_http_bridge_previous_response_input_items(payload.input)
+        payload = payload.model_copy(update={"input": _trim_http_bridge_previous_response_input_items(payload.input)})
     validate_astra_request(payload, api_key)
     validate_model_access(api_key, payload.model)
     admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
@@ -6594,6 +6599,9 @@ async def _collect_responses(
         api_key,
         preferred=prefer_http_bridge,
     )
+    if bridge_active:
+        # The bridge must see the original history to preserve its stored prefix.
+        payload = untrimmed_payload
     bridge_recovery_eligible = _http_bridge_recovery_request_eligible(
         payload,
         bridge_active=bridge_active,

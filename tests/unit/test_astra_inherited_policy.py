@@ -253,9 +253,12 @@ def test_http_bridge_trims_full_resend_before_astra_reset() -> None:
             ],
         }
     )
-    request.input = _trim_http_bridge_previous_response_input_items(cast(list[JsonValue], request.input))
+    original_input = request.input
+    assert isinstance(original_input, list)
+    request.input = _trim_http_bridge_previous_response_input_items(original_input)
     validate_astra_request(request, _key(allowed=["high"]))
-    prepared_input = cast(list[JsonValue], request.input)
+    prepared_input = request.input
+    assert isinstance(prepared_input, list)
     assert prepared_input[0] == {"type": "configuration_update", "reasoning": {"effort": "high"}}
     second = prepared_input[1]
     assert isinstance(second, dict)

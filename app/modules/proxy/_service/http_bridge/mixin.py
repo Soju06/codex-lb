@@ -73,6 +73,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _alias_fallback_key,
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
+    _evict_http_bridge_retained_capacity_waiter_after_error,
     _forwarded_http_bridge_session_key,
     _http_bridge_alias_target_is_stale,
     _http_bridge_allow_durable_takeover,
@@ -1378,7 +1379,11 @@ class _HTTPBridgeMixin(
                 except ProxyResponseError:
                     raise
                 except Exception:
-                    pass
+                    await _evict_http_bridge_retained_capacity_waiter_after_error(
+                        self,
+                        capacity_wait_future,
+                        timeout=wait_timeout_seconds,
+                    )
                 continue
             if inflight_future is not None and not owns_creation:
                 wait_timeout_seconds = _proxy_admission_wait_timeout_seconds()

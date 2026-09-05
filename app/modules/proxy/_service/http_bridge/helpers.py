@@ -842,6 +842,11 @@ def _mark_http_bridge_inflight_creation_owner(future: Any, *, started_at: float)
     setattr(future, _HTTP_BRIDGE_INFLIGHT_OWNER_TASK_ATTR, owner_task)
 
 
+def _http_bridge_inflight_owner_running(future: Any) -> bool:
+    owner_task = getattr(future, _HTTP_BRIDGE_INFLIGHT_OWNER_TASK_ATTR, None)
+    return isinstance(owner_task, asyncio.Task) and not owner_task.done()
+
+
 def _http_bridge_key_is_synthesized_turn_state(key: "_HTTPBridgeSessionKey") -> bool:
     return key.affinity_kind == "turn_state_header" and _is_synthesized_turn_state(key.affinity_key)
 
@@ -898,8 +903,18 @@ async def _wait_for_http_bridge_aborted_owner(
     timeout: float,
 ) -> bool:
     abort_error = getattr(future, _HTTP_BRIDGE_INFLIGHT_ABORT_ERROR_ATTR, None)
+    if abort_error is None:
+        return False
+    return await _wait_for_http_bridge_retained_owner(future, timeout=timeout)
+
+
+async def _wait_for_http_bridge_retained_owner(
+    future: Any,
+    *,
+    timeout: float,
+) -> bool:
     owner_task = getattr(future, _HTTP_BRIDGE_INFLIGHT_OWNER_TASK_ATTR, None)
-    if abort_error is None or not isinstance(owner_task, asyncio.Task):
+    if not isinstance(owner_task, asyncio.Task):
         return False
     if owner_task.done():
         return True
@@ -917,6 +932,23 @@ async def _wait_for_http_bridge_aborted_owner(
     except BaseException:
         return True
     return True
+
+
+async def _evict_http_bridge_retained_capacity_waiter_after_error(
+    service: Any,
+    future: Any,
+    *,
+    timeout: float,
+) -> None:
+    error = _http_bridge_startup_wait_timeout_error(
+        "http_bridge_capacity",
+        code="capacity_exhausted_active_sessions",
+    )
+    if _http_bridge_inflight_owner_running(future) and not (
+        await _wait_for_http_bridge_retained_owner(future, timeout=timeout)
+    ):
+        raise error
+    await service._evict_http_bridge_inflight_waiter(future, error)
 
 
 def _http_bridge_inflight_creation_can_register(future: Any) -> bool:
@@ -1040,7 +1072,7 @@ def _cleanup_http_bridge_inflight_sessions_nowait(service: Any) -> dict[str, int
             owner_task = getattr(future, _HTTP_BRIDGE_INFLIGHT_OWNER_TASK_ATTR, None)
             owner_running = isinstance(owner_task, asyncio.Task) and not owner_task.done()
             if future.done():
-                if owner_running and hasattr(future, _HTTP_BRIDGE_INFLIGHT_ABORT_ERROR_ATTR):
+                if owner_running:
                     continue
                 cleanup_reason = "done"
             else:
@@ -1609,8 +1641,10 @@ async def _raise_if_http_bridge_creation_superseded(
     closes this session without releasing the winner's row.
     """
     async with service._http_bridge_lock:
-        superseded = service._http_bridge_inflight_sessions.get(key) is not inflight_future
-    if superseded:
+        current_future = service._http_bridge_inflight_sessions.get(key)
+        superseded = current_future is not inflight_future
+        aborted = current_future is inflight_future and not _http_bridge_inflight_creation_can_register(inflight_future)
+    if superseded or aborted:
         raise _http_bridge_startup_wait_timeout_error(
             "http_bridge_session_registration",
             code="capacity_exhausted_active_sessions",

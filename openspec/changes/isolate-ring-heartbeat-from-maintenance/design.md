@@ -1,6 +1,6 @@
 ## Context
 
-See `proposal.md` for motivation and the delta specs for behavioral contracts. Today `_heartbeat_only()` in `app/main.py` serially performs the ring upsert, durable-ownership reconciliation, idle-session sweep, and cap-partition refresh. The latter phases open their own database sessions and may walk local bridge state, but have no phase deadline. A blocked phase therefore delays every later phase and the next ring renewal.
+See `proposal.md` for motivation and the delta specs for behavioral contracts. Before this change, the heartbeat loop in `app/main.py` serially performed the ring upsert, durable-ownership reconciliation, stale-operation abandonment, idle-session sweep, and cap-partition refresh. The latter phases open their own database sessions and may walk local bridge state, but have no phase deadline. A blocked phase therefore delays every later phase and the next ring renewal.
 
 Registration is intentionally background work: startup can complete while bridge registration retries, and bridge-aware readiness stays false until registration succeeds. Shutdown currently owns one combined heartbeat task, cancels it, then marks the shared row stale. Health derives active membership from the database, but treats an empty active ring as ready after registration. The 2026-08-29 incident demonstrated both failure modes.
 
@@ -30,11 +30,11 @@ This change assumes the cancellation-safe owned-task primitive from `prevent-lev
 After bridge registration succeeds, the lifespan coordinator will start four separately supervised periodic owners:
 
 1. ring heartbeat;
-2. durable bridge ownership reconciliation;
+2. durable bridge ownership reconciliation, including stale-operation abandonment;
 3. idle bridge-session sweep;
 4. cap-partition membership refresh.
 
-Each owner uses the existing ten-second cadence, but no owner awaits another. Registration still performs the initial ring write and readiness transition; the cap-partition owner runs its first refresh immediately after registration while the other owners wait for their first cadence boundary, so a blocked initial refresh cannot delay renewal. A supervisor catches ordinary phase failures, consumes task exceptions, records the outcome, and schedules the next eligible cycle. If the periodic worker itself exits unexpectedly while lifespan remains active, its supervisor logs the exit and restarts it after a small fixed backoff.
+The two durable reconciliation passes remain sequential within one owner, but each is attempted even if the other fails; a failure is then surfaced to the owner as one bounded `durable_ownership` outcome. This preserves the merged stale-operation cleanup without adding another worker or metric label. Each owner uses the existing ten-second cadence, but no owner awaits another. Registration still performs the initial ring write and readiness transition; the cap-partition owner runs its first refresh immediately after registration while the other owners wait for their first cadence boundary, so a blocked initial refresh cannot delay renewal. A supervisor catches ordinary phase failures, consumes task exceptions, records the outcome, and schedules the next eligible cycle. If the periodic worker itself exits unexpectedly while lifespan remains active, its supervisor logs the exit and restarts it after a small fixed backoff.
 
 Alternatives rejected:
 

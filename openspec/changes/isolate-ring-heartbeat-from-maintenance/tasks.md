@@ -1,6 +1,6 @@
 ## 1. Integration Baseline and Periodic Owner Contract
 
-- [ ] 1.1 After `prevent-level-cancellation-busy-spin` and any selected spool-cleanup lifecycle change land, rebase this branch on current `main`, inspect every shared-file change in `app/main.py` and shutdown tests, and verify the OpenSpec change still passes strict validation.
+- [x] 1.1 After `prevent-level-cancellation-busy-spin` and any selected spool-cleanup lifecycle change land, rebase this branch on current `main`, inspect every shared-file change in `app/main.py` and shutdown tests, and verify the OpenSpec change still passes strict validation.
 - [x] 1.2 Add deterministic unit coverage for a periodic owner whose phase succeeds, fails, exceeds its deadline, finishes late, and exits unexpectedly; verify tests prove monotonic cadence, one in-flight child, consumed exceptions, bounded restart delay, and no catch-up burst.
 - [x] 1.3 Implement the shared periodic phase owner/supervisor with fixed internal heartbeat and maintenance deadlines, strong task references, low-cardinality outcome hooks, and cancellation-safe shutdown; verify the periodic-owner tests pass.
 
@@ -8,7 +8,7 @@
 
 - [x] 2.1 Extract bridge registration from the current serial heartbeat loop and start separately supervised ring-heartbeat, durable-ownership, idle-sweep, and cap-partition owners only after registration succeeds; verify registration retry and startup readiness tests still pass.
 - [x] 2.2 Make heartbeat success, failure, timeout, late completion, and recovery flow through the supervised owner without overlapping heartbeat attempts; verify a blocked attempt ages the row out while a later successful upsert restores membership.
-- [x] 2.3 Move durable-ownership reconciliation and idle-session sweeping to separate bounded owners while preserving existing eligibility, fencing, and close behavior; verify a blocked or failed reconciliation neither delays heartbeat nor skips idle sweeping.
+- [x] 2.3 Move durable-ownership reconciliation (including stale-operation abandonment) and idle-session sweeping to separate bounded owners while preserving existing eligibility, fencing, and close behavior; verify a blocked or failed reconciliation neither delays heartbeat nor skips stale-operation cleanup or idle sweeping.
 - [x] 2.4 Move cap-partition refresh to its own bounded owner while preserving initial refresh, self-counting, last-known partition fallback, and hysteresis; verify blocked refresh does not delay heartbeat and is not invoked concurrently.
 - [x] 2.5 Update lifespan shutdown to cancel and drain every supervisor and phase child before `mark_stale()`, including shutdown during registration and during overdue maintenance; verify no periodic task remains untracked and no renewal occurs after stale-marking.
 

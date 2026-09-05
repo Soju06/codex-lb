@@ -33,3 +33,11 @@ Use SQLite with explicit full startup validation:
 ```bash
 CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE=full codex-lb
 ```
+
+## SQLite teardown completion grace
+
+A file-backed SQLite worker can finish rollback or close while the event loop is delayed and has not delivered the completion callbacks. The initial teardown bound therefore begins a separate bounded opportunity to observe successful task completion. Only success avoids reclamation; failed, cancelled or still-pending teardown retains the pre-teardown connection snapshot, session fence and tracked cleanup owner. The existing 0.75-second grace can add that delay before a genuine wedge is reclaimed; it is not a measured optimum.
+
+For example, a native rollback may finish while the loop is blocked across the initial bound. Grace observes its success, normal session close proceeds and a second writer can commit. Real file-SQLite regression checks reproduce this ordering on asyncio and uvloop; disabling grace restores false interruption. This demonstrates a reachable ordering failure, not the cause or duration of historical production stalls.
+
+Warnings distinguish observed completion, attempted reclamation and failed cleanup. Elapsed time at the initial bound is not an event-loop lag measurement, and a failed invalidation does not prove a permanent writer hold. No database migration, pool change or operator setting is required. The [owning requirement](spec.md#requirement-a-completed-sqlite-teardown-is-never-reclaimed) defines the completion and cleanup contract.

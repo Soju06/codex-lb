@@ -14,6 +14,6 @@
 - [x] 3.1 Run `uv run pytest tests/unit/test_db_session.py tests/unit/test_defer_cancellation_shield_leak.py tests/unit/test_graceful_shutdown.py -q`, including the new real-worker nodes; run `make lint` and `make typecheck`.
 - [x] 3.2 Use CI-pinned OpenSpec1.11.0 to validate this change, the sibling `bound-sqlite-wedged-teardown`, and the owning `database-backends` capability strictly; run CI-equivalent `validate --specs`. Run full `validate --specs --strict` and record the 22 inherited placeholder-Purpose warnings whose spec files match pinned main exactly.
 - [x] 3.3 Refresh the exact PR worktree index/content witness, run `gitnexus detect-changes --scope all --repo /Users/dpearson/repos/codex-lb/.agents/worktrees/pr-2030`, confirm only DB product/test changes remain relative to pinned main, and commit the cohesive remediation locally.
-- [ ] 3.4 Include the accepted PR head in the later local integration build and combined wheel validation; no installation or live-service restart.
+- [x] 3.4 Supply this accepted input to the combined integration and complete DB worker completion, cancellation/reclamation and shutdown ownership acceptance. Final wheel packaging and isolated built-product launch remain separate phase-five delivery gates.
 
-- [ ] 3.5 Verify, sync and archive the change after combined implementation acceptance, using CI-pinned OpenSpec1.11.0.
+- [x] 3.5 Verify, sync and archive the change after combined implementation acceptance, using CI-pinned OpenSpec1.11.0.

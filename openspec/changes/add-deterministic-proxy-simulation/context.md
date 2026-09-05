@@ -43,3 +43,36 @@ terminal double-releases. That proves the checker fails a known bad state
 machine. The same checker also rejects a lost terminal claim, a dropped API-key
 reservation release, and a permit that is never handed back to the admission
 gate.
+
+## Takeover notes (PR A)
+
+`Scheduler.wait` exists so the proxy's timed `asyncio.wait(fs, timeout=...)`
+sites can be injected without rewriting them as
+`scheduler.wait_for(asyncio.wait(fs), timeout)`. That rewrite changed
+semantics (a task completing in the deadline tick was reported as a timeout
+instead of done) and produced dead `if not done:` branches and "recheck"
+hacks. With `wait`, every such site keeps main's control flow character for
+character apart from the `asyncio.` -> `scheduler.` prefix.
+
+`Scheduler.fail_after` exists for the same reason: main already bounds the
+whole account-selection block with `anyio.fail_after(remaining_budget)`.
+Injecting the scope gives the harness the same deadline with zero production
+change, instead of adding a second scheduler-owned timeout inside it.
+
+`RealScheduler` owns nothing. A registry of every rerouted task would extend
+task lifetimes in production and let `cancel_owned_tasks()` on the
+process-wide singleton cancel live work; ownership tracking belongs to the
+virtual scheduler only. `tests/unit/test_clock_real_parity.py` pins that each
+real adapter behaves exactly like the primitive it wraps.
+
+Budget math is a clock-domain concern: a deadline computed from the injected
+clock must be compared against that clock. `ProxyService._remaining_budget_seconds`
+(from `_service/clock_budget.py`) is the reader on the turn path; the
+module-level function of the same name stays wall-clock for the endpoints
+outside the simulation scope (compact, codex_control, file_ops, transcribe).
+
+Known virtual-scheduler divergences (all pinned by
+`tests/simulation/test_virtual_time.py`): `wait_for` runs a coroutine in an
+owned child task where real 3.12+ awaits it inline; a same-tick tie between
+an awaitable and its deadline prefers the result; `fail_after` cancels the
+entering task once where anyio re-delivers on every loop iteration.

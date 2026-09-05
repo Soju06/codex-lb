@@ -13,6 +13,16 @@
       WebSocket service protocols.
 - [x] 1.6 Read the collaborators through `scheduler_for`/`clock_for` inside the
       mixins so partial service objects keep the real production default.
+- [x] 1.7 Add `Scheduler.wait` and `Scheduler.fail_after` so timed multi-future
+      waits and the anyio selection budget stay verbatim instead of being
+      rewritten around `wait_for`.
+- [ ] 1.8 Re-plumb the raw timing/task sites main added after the fork
+      (#1891/#1902/#1958/#1977/#1986 spawns and waits across http_bridge,
+      websocket, streaming, api_key_usage, request_log) through the seam.
+- [x] 1.9 Route every turn-path budget read (bridge admission, bridge/websocket/
+      streaming retry budgets, websocket receive and connect deadlines) through
+      the owner's injected clock so no virtual deadline is compared against the
+      wall clock.
 
 ## 2. Deterministic tests
 
@@ -25,6 +35,11 @@
       dispatches events as concurrent scheduler tasks.
 - [x] 2.5 Add a canary proving the property checker catches a planted
       double-release bug.
+- [x] 2.6 Add virtual_time regressions: non-positive `wait_for` timeouts raise
+      like asyncio, `advance` moves chronologically so sequential sleeps
+      complete, `wait` reports deadline-tick completions as done,
+      `fail_after` raises `TimeoutError` and re-raises a racing external
+      cancellation.
 
 ## 3. Verification
 
@@ -34,3 +49,7 @@
       documented baseline.
 - [x] 3.4 Run `ruff check`, `ruff format --check`, the proxy architecture
       ratchet, and `ty check`.
+- [x] 3.5 Collect `tests/simulation` in `make test-unit` so CI runs the
+      harness.
+- [x] 3.6 Compare each real adapter against the `asyncio`/`anyio` primitive it
+      wraps (`tests/unit/test_clock_real_parity.py`).

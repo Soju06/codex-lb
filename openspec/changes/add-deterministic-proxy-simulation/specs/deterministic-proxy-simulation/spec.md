@@ -4,9 +4,12 @@
 
 Proxy lifecycle code that participates in deterministic simulation MUST accept
 clock and scheduler collaborators while preserving real-time production defaults.
-The scheduler MUST provide sleep, timeout wait, task creation, drain, and
-owned-task cancellation operations. Tests MAY supply a virtual implementation
-that advances time explicitly instead of sleeping on the wall clock.
+The scheduler MUST provide sleep, timeout wait, timed multi-future wait,
+anyio-style fail-after scope, task creation, drain, and owned-task cancellation
+operations. Tests MAY supply a virtual implementation that advances time
+explicitly instead of sleeping on the wall clock. Budget arithmetic on the
+proxy turn path MUST compare deadlines against the same injected clock that
+produced them.
 
 #### Scenario: Production uses real time by default
 
@@ -14,6 +17,25 @@ that advances time explicitly instead of sleeping on the wall clock.
   collaborators
 - **THEN** they use real clock and `asyncio` scheduler behavior
 - **AND** no operator setting or runtime configuration is required
+
+#### Scenario: Production uses real primitives verbatim
+
+- **WHEN** no collaborator is injected
+- **THEN** each scheduler operation is the corresponding `asyncio`/`anyio` call
+  (`sleep`, `wait_for`, `wait`, `create_task`, `fail_after`) with no task
+  registry and no extra timeout
+- **AND** timed waits keep the control flow of the surrounding production code
+  (a future completing in the deadline tick is reported done, as with
+  `asyncio.wait`)
+
+#### Scenario: Budget reads follow the injected clock
+
+- **WHEN** a proxy service runs under a virtual clock and a request deadline is
+  computed from that clock
+- **THEN** the remaining-budget checks on the bridge, websocket and streaming
+  retry paths read the same virtual clock
+- **AND** advancing the virtual clock to the deadline exhausts the budget without
+  any wall-clock time passing
 
 #### Scenario: Test harness advances admission timeout deterministically
 

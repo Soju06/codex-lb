@@ -26620,7 +26620,6 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    await service._pin_file_account("file_from_other_account", "acc-file")
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.4",
@@ -26638,6 +26637,7 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
         }
     )
     get_or_create = AsyncMock()
+    resolve_file_account = AsyncMock(return_value="acc-file")
 
     monkeypatch.setattr(
         proxy_service,
@@ -26660,6 +26660,7 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_http_bridge_local_owner_account_id", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_forwarded_file_account_for_responses", resolve_file_account)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
 
     with pytest.raises(ProxyResponseError) as exc_info:
@@ -26681,6 +26682,7 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
 
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    resolve_file_account.assert_not_awaited()
     get_or_create.assert_not_awaited()
 
 

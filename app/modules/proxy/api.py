@@ -10070,7 +10070,12 @@ def _status_for_error(error_value: OpenAIError | None) -> int:
         return 503
     if error_value and error_value.code in {"rate_limit_exceeded", "usage_limit_reached", "insufficient_quota"}:
         return 429
-    if error_value and error_value.code in {"invalid_api_key", "invalid_authentication", "token_invalidated"}:
+    if error_value and error_value.code in {
+        "invalid_api_key",
+        "invalid_authentication",
+        "token_invalidated",
+        "token_revoked",
+    }:
         return 401
     if error_value and error_value.code == "invalid_request_error":
         return 400

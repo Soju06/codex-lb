@@ -1340,6 +1340,7 @@ async def test_backend_compact_permanent_forced_refresh_failure_fails_over(async
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
 
     assert response.status_code == 200
+    assert response.json()["object"] == "response.compaction"
     assert len(upstream_account_ids) == 2
     assert upstream_account_ids[0] == failed_upstream_account_id
     assert upstream_account_ids[1] != failed_upstream_account_id
@@ -1348,6 +1349,7 @@ async def test_backend_compact_permanent_forced_refresh_failure_fails_over(async
         failed_account = await session.get(Account, failed_account_id)
         assert failed_account is not None
         assert failed_account.status == AccountStatus.REAUTH_REQUIRED
+        assert failed_account.deactivation_reason == "Refresh token was revoked - re-login required"
 
 
 @pytest.mark.asyncio

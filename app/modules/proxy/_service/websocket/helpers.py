@@ -916,7 +916,11 @@ def _websocket_precreated_auth_error_code(
         _websocket_event_error_type(event_type, payload),
     )
     error_type = _websocket_event_error_type(event_type, payload)
-    if error_code in _facade()._WEBSOCKET_AUTH_FAILURE_CODES or error_type == "authentication_error":
+    if (
+        error_code in _facade()._WEBSOCKET_AUTH_FAILURE_CODES
+        or error_code == "token_revoked"
+        or error_type == "authentication_error"
+    ):
         return "invalid_api_key"
     return None
 

@@ -596,6 +596,8 @@ async def test_compact_responses_routed_terminal_sse_error_keeps_openai_envelope
         ("authentication_error", "invalid_api_key", 401),
         ("authentication_error", "invalid_authentication", 401),
         ("authentication_error", "token_invalidated", 401),
+        ("authentication_error", "token_revoked", 401),
+        ("server_error", "token_revoked", 401),
         ("rate_limit_error", "rate_limit_exceeded", 429),
         ("server_error", "insufficient_quota", 429),
     ],

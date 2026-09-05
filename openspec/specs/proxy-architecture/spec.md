@@ -28,6 +28,71 @@ incomplete, or otherwise invalid threshold definition SHALL fail the
 architecture check without preventing unrelated architecture checks from
 reporting their own independently evaluable violations.
 
+The proxy turn-lifecycle timing seams are enforced by
+`scripts/check_proxy_timing_seams.py`, which loads its required-keyword list
+and per-module raw-site allowances from the marked TOML block below. Unlisted
+modules have an allowance of zero; a raw site is exempted only by editing this
+block in the same change that introduces it, and the committed allowances SHALL
+equal the counts the checker reports (restore or lower rather than increase).
+
+<!-- proxy-timing-seams:start -->
+```toml
+[scheduler_kwarg_required]
+_await_cancelled_task = "scheduler"
+_await_cleanup_deferring_cancellation = "scheduler"
+_await_owned_websocket_task_after_reader_cancellation = "scheduler"
+_await_result_deferring_cancellation = "scheduler"
+_cancel_and_track_cancelled_task = "scheduler"
+_cancel_http_bridge_reader_child = "scheduler_owner"
+_create_first_stream_probe_task = "scheduler"
+_iter_account_capacity_recovery_wait = ["scheduler", "clock"]
+_iter_account_capacity_wait_sse = ["scheduler", "clock"]
+_iter_sse_event_blocks = ["scheduler", "clock"]
+_probe_chat_stream_startup_error = ["scheduler", "clock"]
+_probe_stream_startup_error = ["scheduler", "clock"]
+_process_parsed_http_bridge_upstream_event = ["scheduler", "clock"]
+_release_reservation_best_effort = "scheduler"
+_release_websocket_response_create_gate = "scheduler"
+_sleep_for_account_selection_recovery = ["scheduler", "clock"]
+_stream_proxy_errors_as_response_failed = "scheduler"
+_stream_response_error_events = "scheduler"
+_wait_before_http_bridge_model_capacity_retry = ["scheduler", "clock"]
+_wait_for_first_stream_probe = ["scheduler", "clock"]
+_wait_for_websocket_continuity_gap = ["scheduler", "clock"]
+
+[allowances.timing]  # raw-sleep + raw-timeout + raw-task-spawn + missing-scheduler-kwarg; unlisted modules = 0
+"app/core/utils/shared_future.py" = 1
+"app/modules/proxy/_service/compact.py" = 3
+"app/modules/proxy/_service/http_bridge/mixin.py" = 1
+"app/modules/proxy/_service/realtime_live.py" = 5
+"app/modules/proxy/_service/request_log.py" = 1
+"app/modules/proxy/api.py" = 19
+"app/modules/proxy/http_bridge_event_batcher.py" = 2
+
+[allowances.clock]  # raw-clock-read; unlisted modules = 0
+"app/modules/proxy/_service/clock_budget.py" = 1
+"app/modules/proxy/_service/codex_control.py" = 2
+"app/modules/proxy/_service/compact.py" = 6
+"app/modules/proxy/_service/file_ops.py" = 2
+"app/modules/proxy/_service/http_bridge/helpers.py" = 1
+"app/modules/proxy/_service/rate_limit.py" = 2
+"app/modules/proxy/_service/realtime_live.py" = 2
+"app/modules/proxy/_service/request_log.py" = 2
+"app/modules/proxy/_service/support.py" = 2
+"app/modules/proxy/_service/transcribe.py" = 2
+"app/modules/proxy/_service/warmup.py" = 2
+"app/modules/proxy/_service/websocket/helpers.py" = 3
+"app/modules/proxy/account_cache.py" = 2
+"app/modules/proxy/account_eligibility.py" = 1
+"app/modules/proxy/api.py" = 8
+"app/modules/proxy/durable_bridge_repository.py" = 2
+"app/modules/proxy/images_observability.py" = 1
+"app/modules/proxy/images_service.py" = 2
+"app/modules/proxy/load_balancer.py" = 3
+"app/modules/proxy/rate_limit_cache.py" = 2
+```
+<!-- proxy-timing-seams:end -->
+
 #### Scenario: OpenSpec-owned ratchets drive the checker
 
 - **WHEN** the normative threshold block changes while the checker implementation remains unchanged

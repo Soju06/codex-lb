@@ -74,7 +74,7 @@ from app.core.clients.usage import (
     ConsumeRateLimitResetCreditResponse as UpstreamConsumeRateLimitResetCreditResponse,
 )
 from app.core.clients.usage import UsageFetchError, consume_rate_limit_reset_credit
-from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
+from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler, clock_for, scheduler_for
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -4413,8 +4413,10 @@ async def v1_chat_completions(
         if cursor_compat_client
         else _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS
     )
+    turn_scheduler = scheduler_for(context.service)
+    turn_clock = clock_for(context.service)
     capacity_wait_event = asyncio.Event()
-    capacity_ready_event = _CapacityStartupReadyEvent()
+    capacity_ready_event = _CapacityStartupReadyEvent(clock=turn_clock)
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
     capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
     try:
@@ -4423,6 +4425,8 @@ async def v1_chat_completions(
             timeout_seconds=startup_probe_timeout,
             capacity_wait_event=capacity_wait_event,
             capacity_ready_event=capacity_ready_event,
+            scheduler=turn_scheduler,
+            clock=turn_clock,
         )
     finally:
         _reset_propagated_capacity_startup_ready(capacity_ready_token)
@@ -4444,7 +4448,7 @@ async def v1_chat_completions(
         stream_options = payload.stream_options
         include_usage = cursor_compat_client or bool(stream_options and stream_options.include_usage)
         chat_stream = stream_chat_chunks(
-            _stream_proxy_errors_as_response_failed(stream),
+            _stream_proxy_errors_as_response_failed(stream, scheduler=turn_scheduler),
             model=responses_payload.model,
             include_usage=include_usage,
         )
@@ -6237,8 +6241,10 @@ async def _stream_responses(
                 service_cleanup_ready_event=responses_service_cleanup_ready_event
             ):
                 await reservation_cleanup.release(action="terminal compaction response")
+    turn_scheduler = scheduler_for(context.service)
+    turn_clock = clock_for(context.service)
     capacity_wait_event = asyncio.Event()
-    capacity_ready_event = _CapacityStartupReadyEvent()
+    capacity_ready_event = _CapacityStartupReadyEvent(clock=turn_clock)
     payload.stream = True
 
     def build_response_stream() -> AsyncIterator[str]:
@@ -6353,6 +6359,8 @@ async def _stream_responses(
                 service_cleanup_ready_event=(
                     responses_service_cleanup_ready_event if forwarded_request and reservation is not None else None
                 ),
+                scheduler=turn_scheduler,
+                clock=turn_clock,
             )
         finally:
             _reset_propagated_responses_service_cleanup_ready(responses_cleanup_ready_token)
@@ -6450,6 +6458,7 @@ async def _stream_responses(
             allow_client_full_history_once=bridge_recovery_eligible,
             require_durable_recovery_fence=bridge_recovery_eligible,
             preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
+            scheduler=turn_scheduler,
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
@@ -7784,15 +7793,19 @@ async def _probe_chat_stream_startup_error(
     max_startup_events: int = 8,
     capacity_wait_event: asyncio.Event | None = None,
     capacity_ready_event: asyncio.Event | None = None,
+    scheduler: Scheduler = REAL_SCHEDULER,
+    clock: Clock = REAL_CLOCK,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     buffered: list[str] = []
     for _ in range(max_startup_events):
-        first_task = _create_first_stream_probe_task(stream)
+        first_task = _create_first_stream_probe_task(stream, scheduler=scheduler)
         probe_done = await _wait_for_first_stream_probe(
             first_task,
             timeout_seconds=timeout_seconds,
             capacity_wait_event=capacity_wait_event,
             capacity_ready_event=capacity_ready_event,
+            scheduler=scheduler,
+            clock=clock,
         )
         if not probe_done:
             return _prepend_items(buffered, _prepend_first_task(first_task, stream)), None
@@ -7924,8 +7937,17 @@ async def _close_responses_stream_best_effort(
         logger.warning("Failed to close Responses %s stream", action, exc_info=True)
 
 
-async def _stream_proxy_errors_as_response_failed(stream: AsyncIterator[str]) -> AsyncIterator[str]:
-    async for line in _stream_response_error_events(stream, owns_reservation=False, reservation=None):
+async def _stream_proxy_errors_as_response_failed(
+    stream: AsyncIterator[str],
+    *,
+    scheduler: Scheduler = REAL_SCHEDULER,
+) -> AsyncIterator[str]:
+    async for line in _stream_response_error_events(
+        stream,
+        owns_reservation=False,
+        reservation=None,
+        scheduler=scheduler,
+    ):
         yield line
 
 
@@ -7942,7 +7964,11 @@ async def _stream_response_error_events(
     allow_client_full_history_once: bool = False,
     require_durable_recovery_fence: bool = False,
     preserve_native_failure_lifecycle: bool = False,
+    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> AsyncIterator[str]:
+    # ``_ResponsesReservationCleanup.scheduler`` is the cancel-safe cleanup
+    # owner (none here); the timing ``scheduler`` seam above owns the recovery
+    # sleep below.
     cleanup = reservation_cleanup or _ResponsesReservationCleanup(
         owns_reservation=owns_reservation,
         reservation=reservation,
@@ -7993,7 +8019,7 @@ async def _stream_response_error_events(
             server_recovery_max_attempts = settings.http_responses_session_bridge_server_recovery_max_attempts
             while recovery_attempts < server_recovery_max_attempts:
                 yield ": codex-lb recovery in progress\n\n"
-                await asyncio.sleep(retry_delay)
+                await scheduler.sleep(retry_delay)
                 recovery_attempts += 1
                 try:
                     retry_stream = recovery_stream_factory()

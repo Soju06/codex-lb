@@ -3198,7 +3198,9 @@ class _WebSocketMixin:
             original_input_items = cast(list[JsonValue], responses_payload.input)
             original_input_item_count = len(original_input_items)
             original_input_fingerprint = _facade()._fingerprint_input_items(original_input_items)
-            original_full_resend_payload = responses_payload
+            original_full_resend_payload = responses_payload.model_copy(
+                update={"input": _sanitize_websocket_previous_response_input_items(original_input_items)}
+            )
             responses_payload = responses_payload.model_copy(
                 update={
                     "previous_response_id": session_anchor.previous_response_id,

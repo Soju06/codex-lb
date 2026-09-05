@@ -23,6 +23,7 @@ from app.modules.proxy._service.realtime_live import (
     _REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS,
     realtime_call_affinity_key,
 )
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.affinity import _codex_backend_identity, _codex_session_selection_key
 from app.modules.usage.repository import UsageRepository
 
@@ -787,7 +788,10 @@ async def test_codex_goal_restart_cannot_retire_owner_outside_api_key_scope(
 
 
 @pytest.mark.asyncio
-async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monkeypatch):
+@pytest.mark.parametrize("error_code", ["rate_limit_exceeded", "usage_limit_reached"])
+async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monkeypatch, error_code):
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
     await _set_routing_settings(async_client, sticky_threads_enabled=True)
     encryptor = TokenEncryptor()
     now = utcnow()
@@ -842,18 +846,25 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         seen.append(account_id)
+        assert payload.model == "gpt-5.6-sol"
+        assert payload.reasoning is not None
+        assert payload.reasoning.effort == "xhigh"
         if account_id == acc_a.id:
-            yield (
-                'data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded",'
-                '"message":"slow down"}}}\n\n'
-            )
+            event = {
+                "type": "response.failed",
+                "response": {
+                    "error": {"code": error_code, "message": "usage limit reached", "resets_at": now_epoch + 3600}
+                },
+            }
+            yield f"data: {json.dumps(event)}\n\n"
             return
         yield 'data: {"type":"response.completed","response":{"id":"resp_ok"}}\n\n'
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
     payload = {
-        "model": "gpt-5.1",
+        "model": "gpt-5.6-sol",
+        "reasoning": {"effort": "xhigh"},
         "instructions": "hi",
         "input": [],
         "stream": True,
@@ -864,6 +875,58 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
 
     # First attempt is pinned acc_a, which rate limits; retry should switch to acc_b and update stickiness.
     assert seen[:2] == [acc_a.id, acc_b.id]
+
+    # A fresh usage sample is not proof the upstream block ended. Reconnects
+    # must not revive the soft-sticky owner while its weekly quota is exhausted.
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now_epoch + 5)
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a.id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_a.id,
+            used_percent=100.0,
+            window="secondary",
+            reset_at=now_epoch + 5 * 24 * 3600,
+            window_minutes=10080,
+        )
+        sticky_repo = StickySessionsRepository(session)
+        await sticky_repo.upsert(
+            "thread_rl",
+            acc_a.id,
+            kind=StickySessionKind.PROMPT_CACHE,
+        )
+        assert (
+            await sticky_repo.get_account_id(
+                "thread_rl",
+                kind=StickySessionKind.PROMPT_CACHE,
+            )
+            == acc_a.id
+        )
+    seen.clear()
+    get_account_selection_cache().invalidate()
+    response = await async_client.post("/backend-api/codex/responses", json=payload)
+    assert response.status_code == 200
+    assert "response.completed" in response.text
+    assert seen == [acc_b.id]
+    async with SessionLocal() as session:
+        persisted_acc_a = await AccountsRepository(session).get_by_id(acc_a.id)
+        assert persisted_acc_a is not None
+        assert persisted_acc_a.status == AccountStatus.RATE_LIMITED
+        assert persisted_acc_a.reset_at is not None
+        assert persisted_acc_a.blocked_at is not None
+        assert (
+            await StickySessionsRepository(session).get_account_id(
+                "thread_rl",
+                kind=StickySessionKind.PROMPT_CACHE,
+            )
+            == acc_b.id
+        )
 
 
 @pytest.mark.asyncio

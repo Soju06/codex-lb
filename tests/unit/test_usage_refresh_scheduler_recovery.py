@@ -1153,6 +1153,131 @@ async def test_reconcile_recoverable_account_statuses_restores_quota_exceeded_fr
 
 
 @pytest.mark.asyncio
+async def test_reconcile_allows_elapsed_reset_when_secondary_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 7200)
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_scheduler_exhausted_secondary",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="plus",
+        reset_at=past_reset,
+        blocked_at=blocked_at,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: _make_usage(
+                account.id,
+                window="primary",
+                used_percent=10.0,
+                reset_at=int(now + 3600),
+                recorded_at=_epoch_to_naive_utc(now - 30),
+                window_minutes=300,
+            )
+        },
+        secondary={
+            account.id: _make_usage(
+                account.id,
+                window="secondary",
+                used_percent=100.0,
+                reset_at=int(now + 5 * 24 * 3600),
+                recorded_at=_epoch_to_naive_utc(now - 30),
+                window_minutes=10080,
+            )
+        },
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=accounts_repo,
+        usage_repo=usage_repo,
+        accounts=[account],
+    )
+
+    assert recovered == 1
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
+    assert account.blocked_at is None
+
+
+@pytest.mark.parametrize("status", [AccountStatus.ACTIVE, AccountStatus.QUOTA_EXCEEDED])
+def test_select_long_window_entry_preserves_non_rate_limited_alias_behavior(status: AccountStatus) -> None:
+    account = _make_account("acc_guest", plan_type="guest", status=status)
+    monthly = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=10.0,
+        reset_at=1_700_100_000,
+        recorded_at=_epoch_to_naive_utc(1_700_000_000),
+        window_minutes=43_200,
+    )
+    secondary = _make_usage(
+        account.id,
+        window="secondary",
+        used_percent=20.0,
+        reset_at=1_700_100_000,
+        recorded_at=_epoch_to_naive_utc(1_700_000_000),
+        window_minutes=10_080,
+    )
+
+    selected = refresh_scheduler_module._select_long_window_entry(
+        account=account,
+        monthly_entry=monthly,
+        secondary_entry=secondary,
+    )
+
+    assert selected is secondary
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recovers_free_alias_from_monthly_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 7200)
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_scheduler_guest_alias",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="guest",
+        reset_at=past_reset,
+        blocked_at=blocked_at,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        monthly={
+            account.id: _make_usage(
+                account.id,
+                window="monthly",
+                used_percent=10.0,
+                reset_at=int(now + 30 * 24 * 3600),
+                recorded_at=_epoch_to_naive_utc(now - 30),
+                window_minutes=43200,
+            )
+        }
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=accounts_repo,
+        usage_repo=usage_repo,
+        accounts=[account],
+    )
+
+    assert recovered == 1
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
+    assert account.blocked_at is None
+
+
+@pytest.mark.asyncio
 async def test_reconcile_recoverable_account_statuses_recovers_quota_exceeded_and_clears_advisory_primary_reset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

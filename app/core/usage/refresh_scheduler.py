@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Protocol, TypeVar, cast
 
-from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS
+from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS, resolve_capacity_plan_type
 from app.core.config.settings import get_settings
 from app.core.plan_types import normalize_account_plan_type
 from app.core.usage import capacity_for_plan
@@ -536,7 +536,12 @@ def _select_long_window_entry(
     monthly_entry: UsageHistory | None,
     secondary_entry: UsageHistory | None,
 ) -> UsageHistory | None:
-    if monthly_entry is not None and capacity_for_plan(account.plan_type, "monthly") is not None:
+    capacity_plan = (
+        resolve_capacity_plan_type(account.plan_type)
+        if account.status == AccountStatus.RATE_LIMITED
+        else account.plan_type
+    )
+    if monthly_entry is not None and capacity_for_plan(capacity_plan, "monthly") is not None:
         return monthly_entry
     return secondary_entry
 

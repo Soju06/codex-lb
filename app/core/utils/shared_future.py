@@ -26,6 +26,8 @@ from typing import TypeVar, cast
 import anyio
 from anyio.lowlevel import checkpoint_if_cancelled
 
+from app.core.clock import REAL_SCHEDULER, Scheduler
+
 _T = TypeVar("_T")
 _TaskResultT = TypeVar("_TaskResultT")
 
@@ -55,6 +57,7 @@ async def wait_on_shared_future(
     shared: "asyncio.Future[_T]",
     *,
     timeout: float | None = None,
+    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> _T:
     """Drop-in equivalent of ``wait_for(shield(shared), timeout)`` for futures
     awaited by many concurrent waiters.
@@ -65,6 +68,9 @@ async def wait_on_shared_future(
       otherwise mutated by a waiter timing out or being cancelled.
     - Cancelling the awaiting task detaches its proxy in O(1) and leaves
       ``shared`` (and the work it represents) running.
+    - ``scheduler`` only matters for tests: a timed wait runs through its
+      ``wait_for`` so virtual time can expire it. The production default is
+      the real scheduler, i.e. ``asyncio.wait_for`` verbatim.
     """
     if shared.done():
         return shared.result()
@@ -80,7 +86,7 @@ async def wait_on_shared_future(
     try:
         if timeout is None:
             return await proxy
-        return await asyncio.wait_for(proxy, timeout)
+        return await scheduler.wait_for(proxy, timeout)
     finally:
         waiters.discard(proxy)
 

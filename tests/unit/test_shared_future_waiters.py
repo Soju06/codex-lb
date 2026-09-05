@@ -134,3 +134,26 @@ async def test_shared_task_keeps_running_when_all_waiters_cancel():
         await waiter
     assert await task == "refreshed"
     assert finished.is_set()
+
+
+async def test_timed_wait_runs_through_injected_scheduler_and_untimed_wait_does_not():
+    recorded: list[tuple[object, float | None]] = []
+
+    class RecordingScheduler:
+        async def wait_for(self, awaitable, timeout):
+            recorded.append((awaitable, timeout))
+            return await asyncio.wait_for(awaitable, timeout)
+
+    scheduler = RecordingScheduler()
+    shared: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    timed = asyncio.create_task(wait_on_shared_future(shared, timeout=5, scheduler=scheduler))
+    untimed = asyncio.create_task(wait_on_shared_future(shared, scheduler=scheduler))
+    await asyncio.sleep(0)
+    shared.set_result("session")
+
+    assert await asyncio.gather(timed, untimed) == ["session", "session"]
+    # Only the timed wait is a timing seam; ``timeout=None`` keeps the plain
+    # ``await proxy`` fast path so level-cancelled loops behave as before.
+    assert [timeout for _awaitable, timeout in recorded] == [5]
+    assert isinstance(recorded[0][0], asyncio.Future)
+    assert recorded[0][0] is not shared

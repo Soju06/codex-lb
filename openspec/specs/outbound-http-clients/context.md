@@ -19,3 +19,11 @@ Before the `perf-shared-ssl-context` change each of those call sites built a fre
 The one operational consequence: updates to the certifi bundle or system CA store on disk are picked up only after a process restart. Per-call sessions previously re-read the bundle on every upstream call; the shared client had always behaved this way per generation, and there is no supported flow that swaps CA bundles under a running codex-lb, so no requirement changes. `close_http_client()` clears the cache during shutdown, and `_reset_shared_ssl_context()` exists for test isolation (tests that patch `_build_ssl_context` rely on the cache being empty when they start).
 
 Deferred on purpose: sharing one routed `TCPConnector`/`ClientSession` across per-call Codex clients (connection reuse through the proxy) is a separate change with connection-lifetime semantics of its own; on Docker deployments the native egress helper already pools routed connections.
+
+## Python WSS system verification context
+
+The Python `websockets` fallback uses a separate private `_shared_system_ssl_context()` for upstream `wss://` server verification. It calls `ssl.create_default_context()` with the system/environment trust inputs and preserves certificate and hostname checking. It does not add the certifi bundle used by the aiohttp context above. The [owning requirement](spec.md#requirement-python-wss-connections-reuse-system-verification-context) defines that boundary.
+
+Normal outbound-client initialization warms this context. Direct callers before initialization fill the same cache lazily, and shared HTTP-client refresh retains it. Full close/reinitialization rebuilds it from the then-current trust inputs; restarting the process also picks up changed roots. Plain `ws://` receives no server-TLS context. Proxy TLS, routed/native selection and cancellation ownership retain their existing behavior.
+
+This removes repeated default trust loading when separate Python WSS connections open. It does not save that work on every retained turn: those turns already reuse an upstream connection. The real TLS lifecycle regression checks repeated opens and refresh, trusted success, wrong-host and untrusted rejection, and full lifecycle reset. It does not attribute historical multi-second or minute-scale waits to TLS loading.

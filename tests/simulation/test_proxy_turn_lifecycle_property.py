@@ -74,6 +74,7 @@ import asyncio
 import contextvars
 import random
 from collections import Counter, deque
+from collections.abc import Iterable
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Literal, Protocol, cast
@@ -88,6 +89,10 @@ from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.websocket.helpers import _release_websocket_response_create_gate
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
+from tests.simulation.test_anyio_lock_cancelled_waiter import (
+    ANYIO_LOCK_RELEASE_SKIPS_CANCELLED_WAITERS,
+    ANYIO_LOCK_WEDGE_REASON,
+)
 from tests.simulation.virtual_time import ABANDONED_SHIELD_ORACLE_SUPPORTED, VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.unit
@@ -122,6 +127,12 @@ _SETTLEMENT_YIELDS: tuple[int, ...] = (0, 0, 1, 2, 3, 5, 8)
 # the settlement transfer (0.02+); the coverage test proves each is reached.
 _SETTLEMENT_CANCEL_OFFSETS: tuple[float, ...] = (0.0, 0.0, 0.005, 0.015, 0.025)
 _SCHEDULE_COUNT = 200
+# Seeds (default latency, first 3000) whose injected reader cancellation races
+# a ``pending_lock`` release in the same tick and wedges the lock on the pinned
+# anyio 4.13 (see ``test_anyio_lock_cancelled_waiter.py``). Outside the default
+# 200-seed run; pinned as a strict expected failure so a widened schedule count
+# or a dependency bump reports the change instead of looking like harness rot.
+_ANYIO_LOCK_WEDGE_SEEDS: tuple[int, ...] = (1234,)
 _MAX_EXTRA_EVENTS = 3
 _ADVANCE_SECONDS = 0.05
 _ADVANCE_STEPS = 12
@@ -890,9 +901,10 @@ async def _check_schedules(
     *,
     latency: _ReleaseLatency = _DEFAULT_LATENCY,
     schedule_count: int = _SCHEDULE_COUNT,
+    seeds: Iterable[int] | None = None,
 ) -> list[_TurnSnapshot]:
     snapshots: list[_TurnSnapshot] = []
-    for seed in range(schedule_count):
+    for seed in range(schedule_count) if seeds is None else seeds:
         schedule = _schedule_for_seed(seed)
         scheduler = VirtualScheduler(VirtualClock())
         turn = turn_factory(scheduler, latency=latency)
@@ -944,6 +956,24 @@ async def test_bridge_turn_lifecycle_settles_reservation_with_a_single_write() -
             snapshot.redundant_reservation_releases for snapshot in snapshots if snapshot.redundant_reservation_releases
         ]
         assert not redundant, f"latency={latency} redundant releases in {len(redundant)} schedules: {redundant[:3]}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(
+    ANYIO_LOCK_RELEASE_SKIPS_CANCELLED_WAITERS,
+    strict=True,
+    raises=AssertionError,
+    reason=ANYIO_LOCK_WEDGE_REASON,
+)
+async def test_bridge_turn_lifecycle_known_anyio_lock_wedge_seeds_quiesce() -> None:
+    """The production turn's own shape of the anyio wedge: the reader cancel races a ``pending_lock`` release.
+
+    On the pinned anyio the schedule does not quiesce (``pending_lock`` is left
+    unowned with a live waiter); with the 4.14 ``Lock.release`` fix these seeds
+    pass the full invariant set.
+    """
+
+    await _check_schedules(_ProductionBridgeTurn, seeds=_ANYIO_LOCK_WEDGE_SEEDS)
 
 
 @pytest.mark.asyncio

@@ -297,12 +297,19 @@ async def test_direct_adapter_classifies_keepalive_timeout_after_close_ack() -> 
 
 
 @pytest.mark.asyncio
-async def test_native_direct_adapter_classifies_helper_pong_timeout() -> None:
+@pytest.mark.parametrize(
+    "phase,code",
+    [
+        ("liveness_timeout", UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE),
+        ("consumer_backpressure", "proxy_websocket_buffer_exhausted"),
+    ],
+)
+async def test_native_direct_adapter_classifies_helper_pong_timeout(phase: str, code: str) -> None:
     class NativeConnection(_FakeNativeWebSocket):
         async def receive(self) -> NativeWebSocketMessage:
             raise NativeEgressTransportError(
                 "native websocket pong timed out",
-                failure_phase="liveness_timeout",
+                failure_phase=phase,
             )
 
     websocket = NativeUpstreamWebSocket(cast(Any, NativeConnection()))
@@ -310,9 +317,9 @@ async def test_native_direct_adapter_classifies_helper_pong_timeout() -> None:
     message = await websocket.receive()
 
     assert message.kind == "error"
-    assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
-    assert message.failure_phase == "liveness_timeout"
-    assert message.failure_detail == "native_websocket_phase=liveness_timeout"
+    assert message.error_code == code
+    assert message.failure_phase == phase
+    assert message.failure_detail == f"native_websocket_phase={phase}"
 
 
 @pytest.mark.asyncio

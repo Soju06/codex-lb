@@ -10714,7 +10714,12 @@ def test_backend_responses_websocket_attributes_generated_turns_on_prewarm_conne
     assert log_calls[1]["connection_request_kind"] == "prewarm"
 
 
-def test_backend_responses_websocket_emits_response_failed_before_close_on_upstream_eof(app_instance, monkeypatch):
+@pytest.mark.parametrize("native_pressure", [False, True], ids=["upstream-eof", "native-buffer-pressure"])
+def test_backend_responses_websocket_emits_response_failed_before_close_on_upstream_eof(
+    app_instance,
+    monkeypatch,
+    native_pressure: bool,
+):
     def upstream_created_then_eof(
         response_id: str,
         *,
@@ -10732,7 +10737,15 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
                     "text",
                     text=json.dumps(created_payload, separators=(",", ":")),
                 ),
-                _FakeUpstreamMessage("close", close_code=1011),
+                (
+                    _FakeUpstreamMessage(
+                        "error",
+                        error="Upstream websocket receive failed",
+                        error_code="proxy_websocket_buffer_exhausted",
+                    )
+                    if native_pressure
+                    else _FakeUpstreamMessage("close", close_code=1011)
+                ),
             ]
         )
 
@@ -10741,6 +10754,9 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
         upstream_created_then_eof("resp_ws_eof_retry", sequence_number=1),
     ]
     log_calls: list[dict[str, object]] = []
+    health_error = AsyncMock()
+    if native_pressure:
+        monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", health_error)
 
     class _FakeSettingsCache:
         async def get(self):
@@ -10814,12 +10830,17 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
     assert created_event["type"] == "response.created"
     assert failed_event["type"] == "response.failed"
     assert failed_event["response"]["id"] == "resp_ws_eof"
-    assert failed_event["response"]["error"]["code"] == "stream_incomplete"
-    assert "close_code=1011" in failed_event["response"]["error"]["message"]
+    expected_code = "proxy_websocket_buffer_exhausted" if native_pressure else "stream_incomplete"
+    assert failed_event["response"]["error"]["code"] == expected_code
+    if native_pressure:
+        assert len(upstreams) == 1  # Never replay an ambiguously accepted request.
+        health_error.assert_not_awaited()
+    else:
+        assert "close_code=1011" in failed_event["response"]["error"]["message"]
     assert len(log_calls) == 1
-    assert log_calls[0]["request_id"] == "resp_ws_eof_retry"
+    assert log_calls[0]["request_id"] == ("resp_ws_eof" if native_pressure else "resp_ws_eof_retry")
     assert log_calls[0]["status"] == "error"
-    assert log_calls[0]["error_code"] == "stream_incomplete"
+    assert log_calls[0]["error_code"] == expected_code
 
 
 def test_backend_responses_websocket_closes_before_replaying_exposed_sequence(

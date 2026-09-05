@@ -7,13 +7,18 @@ import json
 import logging
 import os
 import shutil
+import sys
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Protocol, cast
+from weakref import WeakSet
 
 from multidict import CIMultiDict
+
+from app.core.clients.native_buffer import BufferBudget, BufferFull, ByteQueue, event_size
+from app.core.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +35,8 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
     }
 )
 _NATIVE_EVENT_LINE_LIMIT = 24 * 1024 * 1024
-_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT = 64
+_NATIVE_WEBSOCKET_CONNECTION_BUFFER_BYTES = 128 * 1024 * 1024
+_NATIVE_EVENT_BATCH_SIZE = 32
 _NATIVE_CANCEL_TIMEOUT_SECONDS = 2.0
 _NATIVE_WEBSOCKET_COMMAND_TIMEOUT_SECONDS = 30.0
 
@@ -102,6 +108,14 @@ class NativeWebSocketMessage:
     data: bytes | None = None
     close_code: int | None = None
     close_reason: str | None = None
+
+
+def _websocket_message_size(message: NativeWebSocketMessage | BaseException) -> int:
+    if isinstance(message, BaseException) or message.kind == "close":
+        return 0
+    return sys.getsizeof(message) + sum(
+        sys.getsizeof(value) for value in (message.kind, message.text, message.data, message.close_reason)
+    )
 
 
 class NativeEgressClient(Protocol):
@@ -228,9 +242,12 @@ class NativeEgressWebSocket:
         self._request_id = request_id
         self._generation = generation
         self._events = events
-        self._messages: asyncio.Queue[NativeWebSocketMessage | BaseException] = asyncio.Queue(
-            maxsize=_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT
+        if not isinstance(events, ByteQueue):
+            raise TypeError("native websocket requires a byte-accounted event queue")
+        self._messages: ByteQueue[NativeWebSocketMessage | BaseException] = ByteQueue(
+            events.connection, events.shared, _websocket_message_size
         )
+        client._websockets.add(self)
         self._pending: dict[str, asyncio.Future[None]] = {}
         self._command_sequence = 0
         self._completed = False
@@ -263,7 +280,10 @@ class NativeEgressWebSocket:
         return item
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
-        if self._completed or self._closing:
+        if self._completed:
+            self._discard_buffers()
+            return
+        if self._closing:
             return
         self._closing = True
         try:
@@ -312,6 +332,23 @@ class NativeEgressWebSocket:
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._pump_task
             self._finish()
+            self._discard_buffers()
+
+    def _discard_buffers(self) -> None:
+        while not self._events.empty():
+            self._events.get_nowait()
+        # Preserve the observable peer close frame, release abandoned data.
+        close_message: NativeWebSocketMessage | None = None
+        while not self._messages.empty():
+            item = self._messages.get_nowait()
+            if isinstance(item, NativeWebSocketMessage) and item.kind == "close":
+                close_message = item
+        if close_message is not None:
+            self._queue_message(close_message)
+        # A receiver may already be awaiting Queue.get(); retain an uncharged
+        # terminal after discard so clearing data cannot strand that waiter.
+        self._queue_terminal(self._terminal_failure or NativeEgressTransportError("native websocket is closed"))
+        self._client._websockets.discard(self)
 
     def response_header(self, name: str) -> str | None:
         return self.headers.get(name)
@@ -351,9 +388,14 @@ class NativeEgressWebSocket:
 
     async def _pump(self) -> None:
         terminal_failure: BaseException | None = None
+        processed = 0
         try:
             while True:
+                if processed == _NATIVE_EVENT_BATCH_SIZE:
+                    processed = 0
+                    await asyncio.sleep(0)
                 item = await self._events.get()
+                processed += 1
                 if isinstance(item, BaseException):
                     terminal_failure = item
                     return
@@ -434,22 +476,18 @@ class NativeEgressWebSocket:
             if terminal_failure is not None:
                 self._fail_pending(terminal_failure)
                 self._queue_terminal(terminal_failure)
+            while not self._events.empty():
+                self._events.get_nowait()
             self._finish()
 
     def _queue_message(self, message: NativeWebSocketMessage) -> None:
         try:
             self._messages.put_nowait(message)
-        except asyncio.QueueFull as exc:
-            queue_depth = self._messages.qsize()
-            while not self._messages.empty():
-                with contextlib.suppress(asyncio.QueueEmpty):
-                    self._messages.get_nowait()
+        except BufferFull as exc:
             raise NativeEgressTransportError(
-                "native websocket consumer exceeded the bounded message queue",
+                "native websocket consumer exceeded the queue byte budget",
                 failure_phase="consumer_backpressure",
-                failure_detail=(
-                    f"message_queue_depth={queue_depth};message_queue_limit={_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT}"
-                ),
+                failure_detail=exc.detail,
             ) from exc
 
     def _queue_terminal(self, failure: BaseException) -> None:
@@ -502,6 +540,9 @@ class SubprocessNativeEgressClient:
         self._start_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._closed = False
+        self._websocket_budget = BufferBudget(get_settings().native_websocket_buffer_max_bytes)
+        self._websockets: WeakSet[NativeEgressWebSocket] = WeakSet()
+        self._cancel_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def available(self) -> bool:
@@ -591,7 +632,9 @@ class SubprocessNativeEgressClient:
         process, generation = await self._ensure_process()
         self._request_sequence += 1
         request_id = f"{generation}:{self._request_sequence}"
-        events: asyncio.Queue[dict[str, object] | BaseException] = asyncio.Queue()
+        events = ByteQueue[dict[str, object] | BaseException](
+            BufferBudget(_NATIVE_WEBSOCKET_CONNECTION_BUFFER_BYTES), self._websocket_budget, event_size
+        )
         self._streams[request_id] = (generation, events)
         try:
             await self._send_command(
@@ -678,6 +721,16 @@ class SubprocessNativeEgressClient:
                 generation,
                 NativeEgressTransportError("native helper closed", failure_phase="shutdown"),
             )
+            for websocket in tuple(self._websockets):
+                if not websocket._pump_task.done():
+                    websocket._pump_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await websocket._pump_task
+                websocket._discard_buffers()
+            cancel_tasks = tuple(self._cancel_tasks)
+            for task in cancel_tasks:
+                task.cancel()
+            await asyncio.gather(*cancel_tasks, return_exceptions=True)
             self._process = None
             self._reader_task = None
 
@@ -777,9 +830,14 @@ class SubprocessNativeEgressClient:
             "native helper exited with active requests",
             failure_phase="helper_exit",
         )
+        processed = 0
         try:
             while True:
+                if processed == _NATIVE_EVENT_BATCH_SIZE:
+                    processed = 0
+                    await asyncio.sleep(0)
                 event = await _read_event(stdout)
+                processed += 1
                 request_id = event.get("request_id")
                 if not isinstance(request_id, str):
                     raise NativeEgressProtocolError("native helper event is missing request_id")
@@ -794,20 +852,22 @@ class SubprocessNativeEgressClient:
                         # helper with already-buffered output can fill the body
                         # queue in this reader task's scheduling turn.
                         await asyncio.sleep(0)
-                except asyncio.QueueFull:
+                except BufferFull as exc:
                     overflow_failure = NativeEgressTransportError(
-                        "native stream consumer exceeded the bounded event queue",
+                        "native websocket consumer exceeded the queue byte budget",
                         failure_phase="consumer_backpressure",
+                        failure_detail=exc.detail,
                     )
                     self._finish_request(request_id, generation, events)
-                    while not events.empty():
-                        with contextlib.suppress(asyncio.QueueEmpty):
-                            events.get_nowait()
+                    # Preserve accepted data ahead of the terminal error. The
+                    # failed stream is detached; other sockets keep advancing.
                     events.put_nowait(overflow_failure)
-                    asyncio.create_task(
+                    task = asyncio.create_task(
                         self._cancel_orphaned_request(process, generation, request_id),
                         name=f"native-egress-overflow-cancel-{request_id}",
                     )
+                    self._cancel_tasks.add(task)
+                    task.add_done_callback(self._cancel_tasks.discard)
         except NativeEgressProtocolError as exc:
             failure = exc
         except BaseException as exc:
@@ -846,6 +906,8 @@ class SubprocessNativeEgressClient:
             except (TimeoutError, NativeEgressError):
                 pass
         self._finish_request(request_id, generation, events)
+        if isinstance(events, ByteQueue):
+            events.clear()
 
     async def _cancel_orphaned_request(
         self,
@@ -853,12 +915,13 @@ class SubprocessNativeEgressClient:
         generation: int,
         request_id: str,
     ) -> None:
-        with contextlib.suppress(NativeEgressError):
-            await self._send_command(
-                process,
-                generation,
-                {"type": "cancel", "request_id": request_id},
-            )
+        with contextlib.suppress(NativeEgressError, TimeoutError):
+            async with asyncio.timeout(_NATIVE_CANCEL_TIMEOUT_SECONDS):
+                await self._send_command(
+                    process,
+                    generation,
+                    {"type": "cancel", "request_id": request_id},
+                )
 
     async def _abort_request(
         self,
@@ -873,12 +936,13 @@ class SubprocessNativeEgressClient:
             return
         process = self._process
         if process is not None and generation == self._generation and process.returncode is None:
-            with contextlib.suppress(NativeEgressError):
-                await self._send_command(
-                    process,
-                    generation,
-                    {"type": "cancel", "request_id": request_id},
-                )
+            with contextlib.suppress(NativeEgressError, TimeoutError):
+                async with asyncio.timeout(_NATIVE_CANCEL_TIMEOUT_SECONDS):
+                    await self._send_command(
+                        process,
+                        generation,
+                        {"type": "cancel", "request_id": request_id},
+                    )
         self._finish_request(request_id, generation, events)
 
     def _finish_request(

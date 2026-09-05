@@ -639,7 +639,7 @@ for line in sys.stdin:
     )
 
     assert websocket._events.maxsize == 0
-    assert websocket._messages.maxsize == 64
+    assert websocket._messages.maxsize == 0
     assert await asyncio.wait_for(websocket.receive(), timeout=2.0) == NativeWebSocketMessage(
         kind="text",
         text="after-burst",
@@ -812,7 +812,7 @@ for line in sys.stdin:
 
 
 @pytest.mark.asyncio
-async def test_native_websocket_message_queue_overflow_preserves_bounded_diagnostic(tmp_path: Path) -> None:
+async def test_native_websocket_message_burst_preserves_order(tmp_path: Path) -> None:
     helper = tmp_path / "native-helper"
     _write_helper(
         helper,
@@ -843,11 +843,9 @@ for line in sys.stdin:
     )
 
     await asyncio.sleep(0.05)
-    with pytest.raises(NativeEgressTransportError) as exc_info:
-        await asyncio.wait_for(websocket.receive(), timeout=2.0)
-
-    assert exc_info.value.failure_phase == "consumer_backpressure"
-    assert exc_info.value.failure_detail == "message_queue_depth=64;message_queue_limit=64"
+    for index in range(65):
+        assert (await asyncio.wait_for(websocket.receive(), timeout=2.0)).text == str(index)
+    assert client._websocket_budget.used == 0
     await client.aclose()
 
 

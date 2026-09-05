@@ -57,91 +57,96 @@ For PostgreSQL profiles and the Postgres 16 → 18 upgrade runbook, see [Databas
 
 ## Active-active deployment with HAProxy
 
-The opt-in HA Compose topology keeps HAProxy bound to public port `2455` while `server-blue` and
-`server-green` both receive traffic at equal weight. This spreads normal CPU load across two
-application processes. `server-surge` is a third private backend that remains stopped and at weight
-zero outside deployments. A healthy rollout activates surge first, replaces blue and green one at
-a time, then retires surge. The stock Compose files above remain the simpler single-replica option.
+The opt-in topology runs three private application backends, `blue`, `green` and `amber`,
+behind HAProxy on public port `2455`. A fourth `surge` backend is stopped/weight zero outside
+rollouts. HAProxy uses `leastconn` for new connections; requests within an established WebSocket
+stay on its selected backend. Stock Compose remains single-replica.
 
-This topology has multi-replica prerequisites. Before bootstrapping it:
+Source of truth: [deployment requirements](../../openspec/specs/deployment-installation/spec.md)
+and [operational context](../../openspec/specs/deployment-installation/context.md).
 
-- Set `CODEX_LB_DATABASE_URL` in `.env.local` to one shared PostgreSQL database. SQLite is rejected.
-- Keep leader election enabled; omit `CODEX_LB_LEADER_ELECTION_ENABLED` or set it to `true`.
-- Keep the encryption key in the shared `codex-lb-data` volume. The default
-  `/var/lib/codex-lb/encryption.key` does this automatically.
-- Reserve enough host CPU and memory for three application containers during a deployment. The
-  checked-in limit permits up to 1 GiB per application container; Docker and HAProxy also need
-  headroom.
-- Back up the database and `codex-lb-data` volume, and use expand/contract database migrations that
-  remain compatible while the old and new application versions overlap.
+### Capacity profile and prerequisites
 
-From the repository root, migrate an existing stock Compose deployment once:
+- Use shared PostgreSQL in `CODEX_LB_DATABASE_URL`; SQLite is rejected. Keep leader election enabled.
+- Keep encryption material in the shared `codex-lb-data` volume.
+- Each backend has a 3-GiB memory ceiling, including a 1-GiB aggregate native WebSocket queue
+  budget. Four overlapping containers can therefore consume 12 GiB. On a roughly 16-GiB host,
+  reserve the remainder for the OS, PostgreSQL, HAProxy, build processes and other services.
+  A memory ceiling is not an allocation or a throughput guarantee.
+- HA overrides each of two database pools to size 8 plus overflow 2: at most 20 connections per
+  candidate replica, 80 across four. PostgreSQL's 100-connection setting is not changed.
+  Legacy replicas retain their larger pools until replaced; monitor connection use/pool waits
+  during the first migration. These overrides intentionally take precedence over `.env.local`.
+- Native WebSocket queues account raw and decoded data together, with a 128-MiB per-socket cap.
+  Buffer bytes are not whole-process RSS; JSON parsing, active messages and the native process
+  require headroom. Slow consumers exceeding budget fail locally without penalizing an account
+  or replaying ambiguously accepted work. Native HTTP buffering is a separate mechanism.
+- Back up shared data and keep migrations rolling-compatible. Measure event-loop lag, CPU, RSS,
+  queue-pressure errors, DB waits and upstream quota under realistic load before claiming capacity.
+
+### Bootstrap and deployment
+
+A first-time bootstrap requires explicit acknowledgement of the one-time public-port rebind:
 
 ```bash
 ./scripts/deploy-compose-ha.sh bootstrap
 ```
 
-The command builds and checks both blue and green before stopping the stock server. Rebinding port
-`2455` from the stock container to HAProxy causes one short interruption during this initial
-topology migration. If HAProxy fails its public readiness check, the script restarts the previous
-stock server. Later healthy deployments do not restart the public HAProxy listener:
+It checks all three backends before stopping the stock port owner and starting HAProxy. A failed
+public-readiness check restores the stock server when present. Later deployments use only:
 
 ```bash
 ./scripts/deploy-compose-ha.sh deploy
 ./scripts/deploy-compose-ha.sh status
 ```
 
-For Codex-driven operations, the repository includes the implicitly discoverable
-`$codex-lb-ha-deploy` skill. After this one-time bootstrap, a request such as “deploy the current
-changes” automatically uses the command above, waits for every drain phase, and verifies blue plus
-green are eligible, surge is retired, and public readiness succeeds. The skill does not commit or
-push code. On an uninitialized host it asks for acknowledgement before bootstrap because the
-initial public-port rebind is not downtime-free.
+The repository's automatically discoverable `$codex-lb-ha-deploy` skill uses this script, waits
+through all phases and verifies `blue,green,amber`, exactly three eligible base backends, surge
+retired and public readiness. A deploy request does not authorize commit, push or rollback.
 
-The deployment sequence is:
+1. Build and activate surge after strict readiness.
+2. Drain and replace blue, green and amber sequentially using the same candidate image.
+   An established healthy 3+1 topology retains three eligible backends during replacement.
+3. If the checked-in proxy configuration changed, validate it, snapshot runtime state, gracefully
+   reload the HAProxy master and verify a new worker plus public readiness. Do not recreate the
+   public-facing container. Existing connections remain with old workers.
+4. Drain/stop surge and persist `blue,green,amber`.
 
-1. Build and start surge; require container, backend, and public readiness before changing a base
-   backend.
-2. Give surge positive weight. At least two healthy backends must now be eligible.
-3. Set blue to weight zero, drain it, replace it from the already-built candidate image, check it,
-   and restore positive weight while green and surge keep serving.
-4. Repeat for green while blue and surge keep serving.
-5. Set surge to weight zero, drain and stop it, then persist `blue,green` as the serving topology.
+Existing `blue`, `green` and `blue,green` markers migrate through the same command. Missing
+servers are registered through the private Runtime API. Legacy migration preserves a two-backend
+floor after surge activation, replaces the larger-pool legacy backends, then brings up amber.
+It does not claim three-backend capacity before that topology is established.
 
-The first deployment after upgrading an existing single-active HA host also follows this flow. If
-the running HAProxy process does not yet declare surge, the script registers surge through the
-private HAProxy Runtime API; it does not restart or rebind the front door.
+The default per-backend drain bound is 300 seconds. Supply a positive second argument to change
+it. If old HAProxy workers still exist after a graceful reload, the script conservatively waits
+the full bound because their connections are not in the new worker's per-server counters.
+A transient inability to read drain state stops replacement rather than treating it as zero.
 
-The default HAProxy drain window is 300 seconds. Pass a positive number of seconds as the second
-argument to `bootstrap`, `deploy`, or `rollback` when a different bound is required. During a
-visible blue or green drain, a second terminal can cancel that drain and abort the rest of the
-rollout:
+An explicitly requested rollback can cancel the currently visible healthy base-backend drain:
 
 ```bash
 ./scripts/deploy-compose-ha.sh rollback 300
 ```
 
-Rollback is unavailable after that backend stops or while surge is retiring. If an earlier backend
-was already replaced, rollback leaves a safe mixed-version `blue + green` state; deploy the desired
-revision as the next rollout instead. If replacement startup fails after an old backend stops, the
-other base backend and surge remain eligible, `status` reports the incomplete phase, and running
-`deploy` again resumes it from the candidate image already built for that rollout. Source edits made
-after the failure are not rebuilt during this recovery; finish the recorded rollout before
-deploying another revision.
+This aborts later replacements; it does not undo earlier replacements. Rollback is unavailable
+during replacement, proxy reload or surge retirement. If cancellation happens during legacy
+migration before amber exists, a `retained` phase keeps surge serving until a later deploy completes
+the recorded candidate. A serving surge is never silently rebuilt/recreated.
 
-Here, “zero downtime” means continuous admission of new HTTP, SSE, and WebSocket connections during
-a healthy application cutover. “Capacity-preserving” means at least two healthy application
-backends remain eligible after surge activates. A topology that is already unhealthy or degraded
-cannot guarantee that two-backend capacity. Connections already assigned to a draining backend can
-be terminated when the configured HAProxy drain bound and the application's bounded SIGTERM drain
-expire. The Docker host, Docker daemon, and single HAProxy container remain one front-door failure
-domain; use the Helm multi-replica deployment across failure domains when host-level availability
-is required.
+A later `deploy` resumes a recorded retained-candidate, replacement, reload or retirement phase using the already
+built candidate, without rebuilding source edits made after interruption. Inspect the intended
+revision first. Failed proxy adoption leaves the base backends and surge serving for recovery.
+If the running container's mounted configuration differs from the checkout, the script refuses
+the reload; do not bypass this check with manual runtime commands.
 
-Port `1455` is intentionally not proxied because the OAuth callback listener is opened temporarily
-inside one application process. Add accounts before migrating, or perform account onboarding in a
-planned maintenance window with port `1455` published directly to one base backend. Never publish
-the backend application ports during normal HA operation.
+“Zero downtime” refers to admission of new connections during healthy application rollout, not
+unlimited lifetime for old streams. Connections can terminate at the bounded drain deadline.
+An already degraded topology cannot promise three-backend capacity. The single host and HAProxy
+remain one failure domain; this is not host-level HA.
+
+Port `1455` is intentionally not proxied. Account onboarding that requires publishing the temporary
+OAuth callback listener needs a separately planned maintenance window. Never publish backend
+application ports during normal HA operation.
 
 ## Auth mode examples
 

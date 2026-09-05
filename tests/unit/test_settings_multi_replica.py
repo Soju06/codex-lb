@@ -32,6 +32,7 @@ def test_settings_multi_replica_defaults():
     assert settings.proxy_downstream_websocket_idle_timeout_seconds == 120.0
     assert settings.http_responses_stream_request_budget_seconds == 7200.0
     assert settings.max_sse_event_bytes == 16 * 1024 * 1024
+    assert settings.native_websocket_buffer_max_bytes == 256 * 1024 * 1024
     assert settings.proxy_refresh_failure_cooldown_seconds == 5.0
     assert settings.conversation_archive_queue_max_bytes == 256 * 1024 * 1024
     assert settings.usage_refresh_auth_failure_cooldown_seconds == 300.0
@@ -60,6 +61,18 @@ def test_settings_metrics_enabled_from_env(monkeypatch):
     monkeypatch.setenv("CODEX_LB_METRICS_ENABLED", "true")
     settings = Settings()
     assert settings.metrics_enabled is True
+
+
+def test_native_websocket_budget_has_explicit_ha_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_LB_NATIVE_WEBSOCKET_BUFFER_MAX_BYTES", "1073741824")
+    assert Settings().native_websocket_buffer_max_bytes == 1024 * 1024 * 1024
+
+
+@pytest.mark.parametrize("budget", ["0", "-1", "unlimited"])
+def test_native_websocket_budget_rejects_unbounded_values(monkeypatch: pytest.MonkeyPatch, budget: str) -> None:
+    monkeypatch.setenv("CODEX_LB_NATIVE_WEBSOCKET_BUFFER_MAX_BYTES", budget)
+    with pytest.raises(ValidationError, match="native_websocket_buffer_max_bytes"):
+        Settings()
 
 
 @pytest.mark.parametrize("port", [1, 65535])

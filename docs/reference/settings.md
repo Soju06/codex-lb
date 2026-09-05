@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 133 settings. Every setting is an environment
+codex-lb currently exposes 134 settings. Every setting is an environment
 variable with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process). All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
@@ -62,6 +62,7 @@ the env-file locations have to be known before env files are read.
 
 | Environment variable | Type | Default |
 | --- | --- | --- |
+| `CODEX_LB_NATIVE_WEBSOCKET_BUFFER_MAX_BYTES` | `int` | `268435456` |
 | `CODEX_LB_UPSTREAM_BASE_URL` | `str` | `'https://chatgpt.com/backend-api'` |
 | `CODEX_LB_UPSTREAM_COMPACT_TIMEOUT_SECONDS` | `float \| None` | `None` |
 | `CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS` | `float` | `8.0` |

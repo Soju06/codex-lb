@@ -36,9 +36,9 @@ x-codex-lb-server: &codex-lb-server
   deploy:
     resources:
       limits:
-        memory: 1G
+        memory: 3G
       reservations:
-        memory: 256M
+        memory: 1G
 
 services:
   haproxy:
@@ -61,11 +61,15 @@ services:
   server-blue:
     <<: *codex-lb-server
     environment:
+      # Two pools x (8 + 2) x four replicas = 80 PostgreSQL connections.
+      CODEX_LB_DATABASE_POOL_SIZE: "8"
+      CODEX_LB_DATABASE_MAX_OVERFLOW: "2"
+      CODEX_LB_NATIVE_WEBSOCKET_BUFFER_MAX_BYTES: "1073741824"
       FORWARDED_ALLOW_IPS: 172.31.245.254
       CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS: "true"
       CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS: 172.31.245.254/32
       CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID: server-blue
-      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: server-blue,server-green,server-surge
+      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: server-blue,server-green,server-amber,server-surge
       CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL: http://server-blue:2455
     networks:
       ha-edge: {}
@@ -74,12 +78,33 @@ services:
   server-green:
     <<: *codex-lb-server
     environment:
+      # Two pools x (8 + 2) x four replicas = 80 PostgreSQL connections.
+      CODEX_LB_DATABASE_POOL_SIZE: "8"
+      CODEX_LB_DATABASE_MAX_OVERFLOW: "2"
+      CODEX_LB_NATIVE_WEBSOCKET_BUFFER_MAX_BYTES: "1073741824"
       FORWARDED_ALLOW_IPS: 172.31.245.254
       CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS: "true"
       CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS: 172.31.245.254/32
       CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID: server-green
-      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: server-blue,server-green,server-surge
+      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: server-blue,server-green,server-amber,server-surge
       CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL: http://server-green:2455
+    networks:
+      ha-edge: {}
+      data: {}
+
+  server-amber:
+    <<: *codex-lb-server
+    environment:
+      # Two pools x (8 + 2) x four replicas = 80 PostgreSQL connections.
+      CODEX_LB_DATABASE_POOL_SIZE: "8"
+      CODEX_LB_DATABASE_MAX_OVERFLOW: "2"
+      CODEX_LB_NATIVE_WEBSOCKET_BUFFER_MAX_BYTES: "1073741824"
+      FORWARDED_ALLOW_IPS: 172.31.245.254
+      CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS: "true"
+      CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS: 172.31.245.254/32
+      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID: server-amber
+      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: server-blue,server-green,server-amber,server-surge
+      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL: http://server-amber:2455
     networks:
       ha-edge: {}
       data: {}
@@ -88,11 +113,15 @@ services:
   server-surge:
     <<: *codex-lb-server
     environment:
+      # Two pools x (8 + 2) x four replicas = 80 PostgreSQL connections.
+      CODEX_LB_DATABASE_POOL_SIZE: "8"
+      CODEX_LB_DATABASE_MAX_OVERFLOW: "2"
+      CODEX_LB_NATIVE_WEBSOCKET_BUFFER_MAX_BYTES: "1073741824"
       FORWARDED_ALLOW_IPS: 172.31.245.254
       CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS: "true"
       CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS: 172.31.245.254/32
       CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID: server-surge
-      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: server-blue,server-green,server-surge
+      CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: server-blue,server-green,server-amber,server-surge
       CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL: http://server-surge:2455
     networks:
       ha-edge: {}

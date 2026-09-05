@@ -89,6 +89,7 @@ REALTIME_LIVE_CALL_ID_ROUTE_REGEX = (
 )
 _LIVE_CALL_ID_PATTERN = re.compile(rf"{REALTIME_LIVE_CALL_ID_ROUTE_REGEX}\Z")
 UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE = "upstream_websocket_liveness_timeout"
+NATIVE_WEBSOCKET_BACKPRESSURE_CODE = "proxy_websocket_buffer_exhausted"
 _WEBSOCKETS_KEEPALIVE_TIMEOUT_REASON = "keepalive ping timeout"
 _AIOHTTP_HEARTBEAT_TIMEOUT_PREFIX = "No PONG received after "
 
@@ -230,6 +231,7 @@ def is_account_neutral_websocket_error_code(error_code: str | None) -> bool:
     # replay while leaving the account eligible for unrelated requests. Keep
     # the compatibility keepalive code here as long as adapters can emit it.
     return error_code in {
+        NATIVE_WEBSOCKET_BACKPRESSURE_CODE,
         PROCESS_NETWORK_UNAVAILABLE_CODE,
         UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
         "upstream_keepalive_timeout",
@@ -486,6 +488,13 @@ def _native_websocket_transport_error(
         return UpstreamWebSocketTransportError(
             f"Upstream websocket {operation} failed",
             error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+            failure_phase=phase,
+            failure_detail=detail,
+        )
+    if phase == "consumer_backpressure":
+        return UpstreamWebSocketTransportError(
+            f"Upstream websocket {operation} failed",
+            error_code=NATIVE_WEBSOCKET_BACKPRESSURE_CODE,
             failure_phase=phase,
             failure_detail=detail,
         )

@@ -49,6 +49,7 @@ _PREFIX_SECTIONS: tuple[tuple[str, str], ...] = (
     ("database_", "Database"),
     ("encryption_", "Encryption"),
     ("upstream_", "Upstream transport"),
+    ("native_websocket_", "Upstream transport"),
     ("http_responses_session_bridge_", "HTTP Responses session bridge"),
     ("http_responses_", "HTTP & streaming"),
     ("http_downstream_", "HTTP & streaming"),

@@ -34288,8 +34288,8 @@ async def test_relay_upstream_websocket_latches_transport_end_before_pending_loc
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error_code",
-    ["proxy_network_unavailable", UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE],
-    ids=["process-network", "liveness-timeout"],
+    ["proxy_network_unavailable", UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE, "proxy_websocket_buffer_exhausted"],
+    ids=["process-network", "liveness-timeout", "native-backpressure"],
 )
 async def test_relay_upstream_websocket_account_neutral_failure_is_not_replayed(
     monkeypatch: pytest.MonkeyPatch,

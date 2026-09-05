@@ -27886,8 +27886,10 @@ async def test_retry_http_bridge_fresh_hard_request_excludes_silent_account(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_code", [UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE, "proxy_websocket_buffer_exhausted"])
 async def test_http_bridge_liveness_timeout_is_neutral_not_replayed_and_forces_retirement(
     monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = proxy_service._WebSocketRequestState(
@@ -27906,7 +27908,7 @@ async def test_http_bridge_liveness_timeout_is_neutral_not_replayed_and_forces_r
         pending_requests=deque([request_state]),
         queued_request_count=1,
     )
-    session.admission_waiter_count = 1
+    session.admission_waiter_count = int(error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE)
     session.upstream = cast(
         UpstreamWebSocket,
         SimpleNamespace(
@@ -27914,7 +27916,7 @@ async def test_http_bridge_liveness_timeout_is_neutral_not_replayed_and_forces_r
                 return_value=UpstreamWebSocketMessage(
                     kind="error",
                     error="Upstream websocket liveness failed",
-                    error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+                    error_code=error_code,
                 )
             ),
             close=AsyncMock(),
@@ -27934,11 +27936,11 @@ async def test_http_bridge_liveness_timeout_is_neutral_not_replayed_and_forces_r
     fail_pending.assert_awaited_once()
     fail_pending_args = fail_pending.await_args
     assert fail_pending_args is not None
-    assert fail_pending_args.kwargs["error_code"] == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    assert fail_pending_args.kwargs["error_code"] == error_code
     assert fail_pending_args.kwargs["penalize_account"] is False
     retire.assert_awaited_once_with(
         session,
-        detail=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+        detail=error_code,
         response_events_seen=0,
         retired_request_count=1,
         retired_request_states=ANY,

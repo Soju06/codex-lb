@@ -206,6 +206,17 @@ async def test_real_scheduler_owns_nothing() -> None:
     await asyncio.gather(unrelated, rerouted)
 
 
+def test_real_scheduler_members_are_the_asyncio_primitives_themselves() -> None:
+    """Aliases, not wrappers: a seam call on the relay path is the raw primitive call."""
+
+    scheduler = RealScheduler()
+
+    assert scheduler.wait_for is asyncio.wait_for
+    assert scheduler.wait is asyncio.wait
+    assert scheduler.create_task is asyncio.create_task
+    assert scheduler.fail_after is anyio.fail_after
+
+
 @pytest.mark.asyncio
 async def test_real_scheduler_timing_methods_return_the_asyncio_coroutine_itself() -> None:
     """No wrapper frame: the per-event relay sites await the raw asyncio coroutine."""
@@ -217,7 +228,7 @@ async def test_real_scheduler_timing_methods_return_the_asyncio_coroutine_itself
         await future
 
     inner = never()
-    coroutines = {
+    coroutines: dict[Any, Any] = {
         asyncio.sleep: scheduler.sleep(0),
         asyncio.wait_for: scheduler.wait_for(inner, 1.0),
         asyncio.wait: scheduler.wait({future}, timeout=1.0),

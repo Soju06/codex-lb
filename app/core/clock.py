@@ -6,11 +6,12 @@ protocols so a test can substitute a virtual implementation
 wall-clock sleeps. The real adapters are *verbatim* passthroughs: every
 ``RealScheduler`` method is the corresponding ``asyncio``/``anyio`` call with
 no task registry, no extra timeout and no wrapper task, so injecting the
-defaults changes nothing about production behavior. The timing methods are
-plain functions that return the ``asyncio`` coroutine object itself, so the
-per-event relay sites (``scheduler.wait_for(queue.get(), ...)`` per delivered
-block, ``scheduler.wait(...)`` per upstream message) pay no extra coroutine
-frame over the raw call.
+defaults changes nothing about production behavior. The scheduler's timing
+and spawn members *are* the ``asyncio``/``anyio`` functions (``staticmethod``
+aliases), so the per-event relay sites (``scheduler.create_task`` and
+``scheduler.wait`` per upstream message, ``scheduler.wait_for(queue.get(), ...)``
+per delivered block) pay neither a wrapper frame nor a bound-method allocation
+over the raw call.
 
 Usage rules (also enforced by ``scripts/check_proxy_timing_seams.py`` once it
 lands):
@@ -53,12 +54,14 @@ class Scheduler(Protocol):
     The timing members are declared as plain functions returning a coroutine
     (an ``async def`` implementation satisfies them too) so the real adapter
     can hand back the ``asyncio`` coroutine object without a wrapper frame.
+    The awaitable/coroutine parameters are positional-only so the
+    ``asyncio`` functions themselves (``fut``, ``coro``) satisfy the protocol.
     """
 
     def sleep(self, delay: float, result: T | None = None) -> Coroutine[Any, Any, T | None]: ...
 
-    def wait_for(self, awaitable: Awaitable[T], timeout: float | None) -> Coroutine[Any, Any, T]:
-        """Bound ``awaitable`` by ``timeout``.
+    def wait_for(self, fut: Awaitable[T], /, timeout: float | None) -> Coroutine[Any, Any, T]:
+        """Bound ``fut`` by ``timeout``.
 
         Real: ``asyncio.wait_for`` verbatim. Virtual: the same inline
         ``asyncio.timeout`` shape on a virtual deadline (same task, same
@@ -76,7 +79,7 @@ class Scheduler(Protocol):
         """Mirror ``asyncio.wait``: never cancels ``fs``, reports done at the deadline."""
         ...
 
-    def create_task(self, coroutine: Coroutine[Any, Any, T], *, name: str | None = None) -> asyncio.Task[T]: ...
+    def create_task(self, coro: Coroutine[Any, Any, T], /, *, name: str | None = None) -> asyncio.Task[T]: ...
 
     def fail_after(self, delay: float) -> AbstractContextManager[Any]:
         """Mirror ``anyio.fail_after``: cancel the enclosing scope after ``delay``."""
@@ -88,6 +91,15 @@ class Scheduler(Protocol):
 
 
 class RealClock:
+    """Wall-clock reads through one Python frame each.
+
+    Kept as ``def`` wrappers (unlike ``RealScheduler``'s aliases) on purpose:
+    the unit suite steers production time in well over a hundred places with
+    ``monkeypatch.setattr(time, "time" | "monotonic", ...)``, which an
+    import-time alias would silently bypass. The cost is one frame per read
+    (two reads per relayed upstream message) on top of the clock read itself.
+    """
+
     def monotonic(self) -> float:
         return time.monotonic()
 
@@ -105,30 +117,28 @@ class RealScheduler:
     lifetimes and let ``cancel_owned_tasks`` on the process-wide singleton
     cancel production work. Ownership tracking exists only in the virtual
     scheduler used by tests.
+
+    The per-event members are the primitives themselves, bound as
+    ``staticmethod`` so ``scheduler.create_task(...)`` compiles to the raw
+    ``asyncio.create_task(...)`` call: no Python frame and no bound-method
+    object per seam call on the relay paths (``create_task`` + ``wait`` per
+    upstream message, ``wait_for`` per delivered block). The aliases bind at
+    import, so a test that needs to observe or replace a timed wait must
+    subclass this class or inject a virtual scheduler (``tests/simulation``);
+    monkeypatching ``asyncio.wait`` afterwards does not reach them.
+    ``tests/unit/test_clock_real_parity.py`` pins the identities. ``sleep``
+    stays a one-frame wrapper: ``asyncio.sleep`` is overloaded on ``result``
+    in typeshed, which ty 0.0.73 cannot match against the protocol member,
+    and no per-event site sleeps (backoff and recovery waits only).
     """
 
-    # Plain functions on purpose: ``await scheduler.sleep(d)`` then awaits the
-    # ``asyncio.sleep`` coroutine object itself, with no extra frame per call.
+    wait_for = staticmethod(asyncio.wait_for)
+    wait = staticmethod(asyncio.wait)
+    create_task = staticmethod(asyncio.create_task)
+    fail_after = staticmethod(anyio.fail_after)
+
     def sleep(self, delay: float, result: T | None = None) -> Coroutine[Any, Any, T | None]:
         return asyncio.sleep(delay, result=result)
-
-    def wait_for(self, awaitable: Awaitable[T], timeout: float | None) -> Coroutine[Any, Any, T]:
-        return asyncio.wait_for(awaitable, timeout=timeout)
-
-    def wait(
-        self,
-        fs: Iterable[asyncio.Future[Any]],
-        *,
-        timeout: float | None = None,
-        return_when: str = asyncio.ALL_COMPLETED,
-    ) -> Coroutine[Any, Any, tuple[set[asyncio.Future[Any]], set[asyncio.Future[Any]]]]:
-        return asyncio.wait(fs, timeout=timeout, return_when=return_when)
-
-    def create_task(self, coroutine: Coroutine[Any, Any, T], *, name: str | None = None) -> asyncio.Task[T]:
-        return asyncio.create_task(coroutine, name=name)
-
-    def fail_after(self, delay: float) -> AbstractContextManager[Any]:
-        return anyio.fail_after(delay)
 
     def drain(self) -> Coroutine[Any, Any, None]:
         return asyncio.sleep(0)

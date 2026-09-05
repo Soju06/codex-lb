@@ -131,6 +131,19 @@ jobs:
             --base-ref "origin/${BASE_REF}" \
             --head-ref "${HEAD_REF}"
 
+  openspec:
+    name: OpenSpec validation
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Validate canonical OpenSpec capabilities
+        run: npx --yes @fission-ai/openspec@1.11.0 validate --specs
+
   frontend-lint:
     name: Frontend lint (eslint)
     runs-on: ubuntu-24.04
@@ -369,6 +382,13 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.96.0 --profile minimal --component clippy,rustfmt
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          prune-cache: true
+
       - name: Cache Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
@@ -382,6 +402,14 @@ jobs:
 
       - name: Check formatting, lints, tests, and release build
         run: make rust-check
+
+      - name: Run native routed wire probe
+        env:
+          CODEX_LB_NATIVE_EGRESS_TEST_BINARY: ${{ github.workspace }}/target/debug/codex-lb-native-egress
+        run: |
+          uv sync --dev --frozen
+          cargo build --locked -p codex-lb-egress-worker --bin codex-lb-native-egress
+          uv run pytest -q -ra tests/integration/test_native_routed_egress.py
 
       - name: Audit Rust dependencies and licenses
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
@@ -905,6 +933,7 @@ jobs:
       - changes
       - contributors
       - beta-release-guard
+      - openspec
       - frontend-lint
       - frontend-typecheck
       - frontend-test

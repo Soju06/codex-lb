@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from hashlib import blake2b
 from typing import TypeAlias
 
 from app.core.usage.depletion import (
@@ -26,7 +25,7 @@ class _HistorySignature:
     row_count: int
     first: _RowEdgeSignature
     latest: _RowEdgeSignature
-    content_digest: str | None
+    content_digest: int | None
 
 
 class _SignedHistory(list):
@@ -222,25 +221,11 @@ def attach_depletion_history_signature(history: Iterable) -> list:
 
 
 def filter_depletion_history_since(history: Iterable, cutoff: datetime) -> list:
-    """Filter rows by cutoff and attach the cache signature in the same pass."""
-    rows = []
-    digest = blake2b(digest_size=16)
-    for entry in history:
-        if entry.recorded_at < cutoff:
-            continue
-        rows.append(entry)
-        _update_history_digest(digest, entry)
+    """Filter rows by cutoff and attach the cache signature."""
+    rows = [entry for entry in history if entry.recorded_at >= cutoff]
     if not rows:
         return []
-    return _SignedHistory(
-        rows,
-        _HistorySignature(
-            row_count=len(rows),
-            first=_row_edge_signature(rows[0]),
-            latest=_row_edge_signature(rows[-1]),
-            content_digest=digest.hexdigest(),
-        ),
-    )
+    return _SignedHistory(rows, _history_signature_from_rows(rows))
 
 
 def _history_signature(history: list) -> _HistorySignature:
@@ -253,14 +238,17 @@ def _history_signature(history: list) -> _HistorySignature:
 def _history_signature_from_rows(history: list) -> _HistorySignature:
     if not history:
         raise ValueError("history must not be empty")
-    digest = blake2b(digest_size=16)
-    for entry in history:
-        _update_history_digest(digest, entry)
+    # One fixed-width hash over every row's value-bearing fields: cheap
+    # enough to run per dashboard poll on dense histories, and still
+    # detects in-place corrections that leave the edges and count intact.
+    # The signature cache is process-local, so a process-local ``hash`` is
+    # sufficient; only the int is retained, never the per-row tuples.
+    edges = tuple(map(_row_edge_signature, history))
     return _HistorySignature(
-        row_count=len(history),
-        first=_row_edge_signature(history[0]),
-        latest=_row_edge_signature(history[-1]),
-        content_digest=digest.hexdigest(),
+        row_count=len(edges),
+        first=edges[0],
+        latest=edges[-1],
+        content_digest=hash(edges),
     )
 
 
@@ -287,10 +275,3 @@ def _row_edge_signature(entry) -> _RowEdgeSignature:
         entry.reset_at,
         entry.window_minutes,
     )
-
-
-def _update_history_digest(digest, entry) -> None:
-    for value in _row_edge_signature(entry):
-        digest.update(repr(value).encode("utf-8"))
-        digest.update(b"\0")
-    digest.update(b"\1")

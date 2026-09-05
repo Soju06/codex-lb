@@ -10,7 +10,6 @@ from typing import Any, Literal, TypeVar, overload
 from uuid import uuid4
 
 import aiohttp
-import anyio
 
 from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import RefreshError
@@ -45,6 +44,7 @@ from app.core.metrics.prometheus import (
     bridge_prompt_cache_locality_miss_total,
     bridge_soft_local_rebind_total,
 )
+from app.core.utils.locks import fast_lock
 from app.core.utils.request_id import ensure_request_scope_id
 from app.core.utils.shared_future import wait_on_shared_future
 from app.db.models import (
@@ -1965,15 +1965,15 @@ class _HTTPBridgeMixin(
             upstream=upstream,
             upstream_control=_WebSocketUpstreamControl(),
             pending_requests=deque(),
-            pending_lock=anyio.Lock(),
+            pending_lock=fast_lock(),
             response_create_gate=asyncio.Semaphore(1),
             queued_request_count=0,
-            lifecycle_lock=anyio.Lock(),
+            lifecycle_lock=fast_lock(),
             last_used_at=_service_time().monotonic(),
             idle_ttl_seconds=idle_ttl_seconds,
             codex_session=(affinity.kind == StickySessionKind.CODEX_SESSION or key.affinity_kind == "thread_header"),
             access_token_expires_at=_token_expiry(account, self._encryptor),
-            prewarm_lock=anyio.Lock(),
+            prewarm_lock=fast_lock(),
             upstream_turn_state=_upstream_turn_state_from_socket(upstream),
             downstream_turn_state=None,
             account_lease=selected_account_lease,

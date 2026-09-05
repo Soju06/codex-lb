@@ -1102,7 +1102,10 @@ async def wham_agent_identities_jwks(
 )
 async def responses(
     request: Request,
-    payload: dict[str, JsonValue] = Body(...),
+    # ``dict[str, Any]``: the body is ``json.loads`` output that the request
+    # models validate right below; re-validating it against the recursive
+    # ``JsonValue`` union here only walked the whole tree a second time.
+    payload: dict[str, Any] = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
@@ -6591,6 +6594,7 @@ async def _collect_responses(
         if downstream_turn_state is not None
         else {}
     )
+    upstream_stream_false = preserve_upstream_stream_mode and payload.stream is False
     if not preserve_upstream_stream_mode:
         payload.stream = True
     if prefer_http_bridge:
@@ -6633,6 +6637,7 @@ async def _collect_responses(
         response_payload = await _collect_responses_payload(
             stream,
             captured_turn_state_headers=captured_turn_state_headers,
+            upstream_stream_false=upstream_stream_false,
         )
     except asyncio.CancelledError:
         if _responses_origin_may_release_reservation(
@@ -8701,6 +8706,7 @@ async def _collect_responses_payload(
     stream: AsyncIterator[str],
     *,
     captured_turn_state_headers: dict[str, str] | None = None,
+    upstream_stream_false: bool = False,
 ) -> OpenAIResponseResult:
     output_items: dict[int, dict[str, JsonValue]] = {}
     terminal_result: OpenAIResponseResult | None = None
@@ -8745,12 +8751,23 @@ async def _collect_responses_payload(
                 else:
                     parsed = None
                 if parsed is not None:
-                    if event_type in ("response.queued", "response.in_progress"):
+                    if event_type not in ("response.queued", "response.in_progress"):
+                        terminal_result = parsed
+                        continue
+                    if not upstream_stream_false:
                         if isinstance(parsed, OpenAIResponsePayload):
                             nonterminal_result = parsed
-                    else:
-                        terminal_result = parsed
-                    continue
+                        continue
+                    if isinstance(parsed, OpenAIResponsePayload) and proxy_service_module._is_background_json_ack(
+                        False,
+                        payload,
+                        event_type,
+                    ):
+                        nonterminal_result = parsed
+                        continue
+            # Unparsable queued/in-progress payloads are always contract violations.
+            # Parseable but noncanonical acknowledgements reach this branch only for
+            # the single-object stream:false HTTP JSON exchange.
             error_kind = contract_violation_kind or "invalid_json"
             terminal_result = _public_contract_error_envelope(
                 error_kind,
@@ -9850,6 +9867,10 @@ def _looks_like_sse_data_block(event_block: str) -> bool:
 
 
 def _looks_like_sse_comment_block(event_block: str) -> bool:
+    if event_block.startswith(("event: ", "data: ")):
+        # Canonical event blocks open with a field line, which is neither
+        # blank nor a comment; skip the per-line scan on the hot path.
+        return False
     return bool(event_block.strip()) and all(
         not line.strip() or line.lstrip().startswith(":") for line in event_block.splitlines()
     )

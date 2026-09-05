@@ -15,3 +15,4 @@
 
 - [x] 3.1 Unit and integration regressions for bypass, continuation reset, Ultra identity, source contract
 - [x] 3.2 Strict OpenSpec validation of this change
+- [x] 3.3 Refresh stored client-plane update efforts after each injected-anchor continuation

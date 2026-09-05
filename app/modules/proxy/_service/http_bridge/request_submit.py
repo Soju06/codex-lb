@@ -670,6 +670,8 @@ def _text_with_previous_response_id(
             _restore_astra_client_update_efforts(request, stored_updates)
         prepare_astra_reasoning_policy_continuation(request, api_key)
         validate_astra_request(request, api_key)
+        if request_state is not None:
+            request_state.astra_client_update_efforts = _astra_client_update_efforts(request)
         forwarded_payload = request.to_payload()
         payload["input"] = forwarded_payload.get("input")
         if request_state is not None and isinstance(request.input, list):

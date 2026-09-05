@@ -308,6 +308,17 @@ def test_http_bridge_injected_anchor_preserves_ultra_from_request_state() -> Non
         "type": "configuration_update",
         "reasoning": {"effort": "max"},
     }
+    assert request_state.astra_client_update_efforts == ("ultra",)
+    repeated_text = request_submit_module._text_with_previous_response_id(
+        updated_text,
+        "resp_injected_again",
+        api_key=_key(allowed=["ultra"]),
+        request_state=cast(Any, request_state),
+    )
+    assert json.loads(repeated_text)["input"][0] == {
+        "type": "configuration_update",
+        "reasoning": {"effort": "max"},
+    }
 
 
 def test_http_bridge_injected_anchor_preserves_ultra_configuration_update() -> None:
@@ -344,6 +355,58 @@ def test_http_bridge_injected_anchor_preserves_ultra_configuration_update() -> N
         "type": "configuration_update",
         "reasoning": {"effort": "max"},
     }
+
+
+def test_http_bridge_repeated_anchor_preserves_nonleading_ultra_update() -> None:
+    text_data = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-6-astra",
+            "instructions": "",
+            "reasoning": {"effort": "max"},
+            "input": [
+                {"role": "user", "content": "First"},
+                {"type": "configuration_update", "reasoning": {"effort": "max"}},
+                {"role": "user", "content": "Continue"},
+            ],
+        }
+    )
+    request_state = SimpleNamespace(
+        reasoning_effort="ultra",
+        astra_client_update_efforts=("ultra",),
+        input_item_count=3,
+        input_full_fingerprint=None,
+        request_usage_budget=None,
+    )
+
+    first_text = request_submit_module._text_with_previous_response_id(
+        text_data,
+        "resp_first",
+        api_key=_key(allowed=["ultra"]),
+        request_state=cast(Any, request_state),
+    )
+    first_payload = json.loads(first_text)
+
+    def _updates(payload: dict) -> list[dict]:
+        return [
+            item for item in payload["input"] if isinstance(item, dict) and item.get("type") == "configuration_update"
+        ]
+
+    updates = _updates(first_payload)
+    assert updates
+    assert all(item["reasoning"]["effort"] == "max" for item in updates)
+    assert request_state.astra_client_update_efforts == tuple("ultra" for _ in updates)
+
+    second_text = request_submit_module._text_with_previous_response_id(
+        first_text,
+        "resp_second",
+        api_key=_key(allowed=["ultra"]),
+        request_state=cast(Any, request_state),
+    )
+    second_payload = json.loads(second_text)
+    second_updates = _updates(second_payload)
+    assert len(second_updates) == len(updates)
+    assert all(item["reasoning"]["effort"] == "max" for item in second_updates)
 
 
 @pytest.mark.asyncio

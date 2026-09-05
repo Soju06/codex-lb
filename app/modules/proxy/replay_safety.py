@@ -274,6 +274,7 @@ def _project_account_neutral_replay_item(
 
 def responses_input_items_are_self_contained_fresh_replay(input_items: list[JsonValue]) -> bool:
     unsettled_call_ids_by_type: dict[str, set[str]] = {item_type: set() for item_type in _TOOL_CALL_TYPES}
+    async_unsettled_call_ids_by_type: dict[str, set[str]] = {item_type: set() for item_type in _TOOL_CALL_TYPES}
     seen_call_ids: set[str] = set()
     settled_call_ids: set[str] = set()
     for item in input_items:
@@ -301,6 +302,7 @@ def responses_input_items_are_self_contained_fresh_replay(input_items: list[Json
                 return False
             seen_call_ids.add(call_id)
             if item.get("async") is True:
+                async_unsettled_call_ids_by_type[item_type].add(call_id)
                 continue
             unsettled_call_ids_by_type[item_type].add(call_id)
             continue
@@ -308,11 +310,16 @@ def responses_input_items_are_self_contained_fresh_replay(input_items: list[Json
         if call_item_type is not None:
             if (
                 call_id is None
-                or call_id not in unsettled_call_ids_by_type[call_item_type]
                 or call_id in settled_call_ids
                 or not _caller_is_self_contained(item)
                 or not _tool_output_is_self_contained(item_type or "", item)
             ):
+                return False
+            if call_id in async_unsettled_call_ids_by_type[call_item_type]:
+                async_unsettled_call_ids_by_type[call_item_type].remove(call_id)
+                settled_call_ids.add(call_id)
+                continue
+            if call_id not in unsettled_call_ids_by_type[call_item_type]:
                 return False
             unsettled_call_ids_by_type[call_item_type].remove(call_id)
             settled_call_ids.add(call_id)
@@ -455,15 +462,24 @@ def responses_input_suffix_matches_pending_tool_calls(
         return False
     suffix_calls: dict[str, str] = {}
     suffix_outputs: dict[str, str] = {}
+    async_calls: dict[str, str] = {}
     for item in cast(list[dict[str, JsonValue]], suffix):
         item_type = cast(str, item["type"])
         call_id = cast(str, item["call_id"])
         if item_type in _TOOL_CALL_TYPES:
             if item.get("async") is True:
+                async_calls[call_id] = item_type
                 continue
             suffix_calls[call_id] = item_type
         else:
-            suffix_outputs[call_id] = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE[item_type]
+            mapped = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE[item_type]
+            expected_async = async_calls.get(call_id)
+            if expected_async is not None:
+                if expected_async != mapped:
+                    return False
+                del async_calls[call_id]
+                continue
+            suffix_outputs[call_id] = mapped
     expected = dict(pending_tool_calls)
     return suffix_calls == expected and suffix_outputs == expected
 

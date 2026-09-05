@@ -276,3 +276,36 @@ def test_durable_suffix_ignores_async_calls_when_matching_sync_manifest() -> Non
         stored_count=1,
         pending_tool_calls={"sync_1": "function_call"},
     )
+
+
+def test_account_neutral_replay_accepts_settled_async_function_call() -> None:
+    items: list[JsonValue] = [
+        {"type": "function_call", "call_id": "async_1", "name": "slow", "arguments": "{}", "async": True},
+        {"type": "function_call_output", "call_id": "async_1", "output": "done"},
+        {"type": "function_call", "call_id": "sync_1", "name": "now", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "sync_1", "output": "ok"},
+    ]
+    assert responses_input_items_are_self_contained_fresh_replay(items)
+
+
+def test_account_neutral_replay_accepts_settled_async_custom_tool_call() -> None:
+    items: list[JsonValue] = [
+        {"type": "custom_tool_call", "call_id": "async_custom", "name": "slow", "input": "{}", "async": True},
+        {"type": "custom_tool_call_output", "call_id": "async_custom", "output": "done"},
+    ]
+    assert responses_input_items_are_self_contained_fresh_replay(items)
+
+
+def test_durable_suffix_ignores_settled_async_pairs_when_matching_sync_manifest() -> None:
+    stored: list[JsonValue] = [{"role": "user", "content": "first"}]
+    suffix: list[JsonValue] = [
+        {"type": "function_call", "call_id": "async_1", "name": "slow", "arguments": "{}", "async": True},
+        {"type": "function_call_output", "call_id": "async_1", "output": "done"},
+        {"type": "function_call", "call_id": "sync_1", "name": "now", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "sync_1", "output": "ok"},
+    ]
+    assert responses_input_suffix_matches_pending_tool_calls(
+        [*stored, *suffix],
+        stored_count=1,
+        pending_tool_calls={"sync_1": "function_call"},
+    )

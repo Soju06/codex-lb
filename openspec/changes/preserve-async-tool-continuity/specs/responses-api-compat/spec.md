@@ -28,3 +28,11 @@ calls.
 - **GIVEN** a completed response contains async `call_a` and synchronous `call_b`
 - **WHEN** the proxy persists the durable pending-tool manifest
 - **THEN** only `call_b` is stored for interrupted-output recovery
+
+#### Scenario: Account-neutral replay accepts settled async pairs
+
+- **GIVEN** a full-history retry contains an async function or custom tool call and its matching typed output
+- **WHEN** the proxy proves the input is a self-contained fresh replay
+- **THEN** the settled async pair is accepted
+- **AND** an unresolved async call without an output remains admissible
+- **AND** the durable suffix matcher ignores completed async pairs when comparing the synchronous pending-tool manifest

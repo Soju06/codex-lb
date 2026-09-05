@@ -15,3 +15,4 @@
 - [x] 3.1 Unit: async call survives an intervening turn; delayed output is forwarded
 - [x] 3.2 Integration: HTTP-bridge function_call and custom_tool_call variants
 - [x] 3.3 Strict OpenSpec validation of this change
+- [x] 3.4 Account-neutral replay and durable suffix matching accept settled async pairs

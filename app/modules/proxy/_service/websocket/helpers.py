@@ -360,6 +360,9 @@ def _facade() -> Any:
 # concurrent request, so discovery always invalidates the negative entry.
 _WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_TTL_SECONDS = 60.0
 _WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_LIMIT = 4096
+# The index is process-global and shared by every turn, so its TTL stamps stay
+# on the real monotonic clock instead of a per-turn injected clock; the
+# simulation harness never reaches it (its fake turns carry no stale anchor).
 _websocket_stale_previous_response_index: dict[tuple[str, str | None], float] = {}
 
 

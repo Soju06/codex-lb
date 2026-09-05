@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import sys
-import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -1308,7 +1307,7 @@ class _WebSocketMixin:
             or policy.max_age_seconds is None
         ):
             return
-        now = time.monotonic()
+        now = clock_for(proxy).monotonic()
         touch_interval = max(1.0, min(float(policy.max_age_seconds) / 2.0, 60.0))
         if now - request_state.thread_affinity_last_touch_at < touch_interval:
             return
@@ -1393,7 +1392,7 @@ class _WebSocketMixin:
         capability_header_values: tuple[str, ...] | None = None,
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
-        _ = proxy
+        clock = clock_for(proxy)
         filtered_headers = filter_inbound_websocket_headers(dict(headers))
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         runtime_settings = _facade().get_settings()
@@ -1666,7 +1665,7 @@ class _WebSocketMixin:
                                 idle_timeout_seconds=downstream_idle_timeout_seconds,
                             ):
                                 try:
-                                    message = await asyncio.wait_for(websocket.receive(), timeout=0.05)
+                                    message = await scheduler_for(proxy).wait_for(websocket.receive(), timeout=0.05)
                                 except asyncio.TimeoutError:
                                     try:
                                         await websocket.close(
@@ -1753,17 +1752,19 @@ class _WebSocketMixin:
                                     await proxy._release_websocket_request_state_reservation(
                                         prepared_request.request_state
                                     )
-                                    wait_started_at = time.monotonic()
+                                    wait_started_at = clock.monotonic()
                                     waited_for_anchor = await _wait_for_websocket_continuity_gap(
                                         pending_requests,
                                         pending_lock=pending_lock,
                                         timeout_seconds=runtime_settings.proxy_request_budget_seconds,
+                                        scheduler=scheduler_for(proxy),
+                                        clock=clock,
                                     )
                                     _facade().logger.info(
                                         "websocket_full_replay_waited_for_continuity waited=%s elapsed_ms=%s "
                                         "original_items=%s",
                                         waited_for_anchor,
-                                        int((time.monotonic() - wait_started_at) * 1000),
+                                        int((clock.monotonic() - wait_started_at) * 1000),
                                         prepared_request.request_state.input_item_count,
                                     )
                                     prepared_request = await proxy._prepare_websocket_response_create_request(
@@ -2701,7 +2702,7 @@ class _WebSocketMixin:
                                         error_type="server_error",
                                     ),
                                 )
-                            request_state.response_create_sent_at = time.monotonic()
+                            request_state.response_create_sent_at = clock.monotonic()
                         with _websocket_archive_request_context(archive_request_id):
                             await upstream.send_text(text_data)
                 except ProxyResponseError as exc:
@@ -3918,6 +3919,8 @@ class _WebSocketMixin:
                 max_sleep_seconds=proxy._remaining_budget_seconds(deadline),
                 request_state=request_state,
                 heartbeat=_heartbeat,
+                scheduler=scheduler_for(proxy),
+                clock=clock_for(proxy),
             ):
                 break
             # A wait clipped to the remaining request budget is still a
@@ -4588,8 +4591,8 @@ class _WebSocketMixin:
         request_state: "_WebSocketRequestState | None" = None,
     ) -> UpstreamWebSocket:
         proxy = cast(_WebSocketServiceProtocol, self)
-        _ = proxy
-        started_at = time.monotonic()
+        clock = clock_for(proxy)
+        started_at = clock.monotonic()
         deadline = started_at + timeout_seconds
         recovery = ProcessNetworkRecovery(
             transport="websocket",
@@ -4597,12 +4600,12 @@ class _WebSocketMixin:
             account_id=account.id,
         )
         while True:
-            remaining_seconds = deadline - time.monotonic()
+            remaining_seconds = deadline - clock.monotonic()
             if remaining_seconds <= 0:
                 _raise_proxy_budget_exhausted()
             connect_progress = _WebSocketConnectProgress()
             try:
-                with anyio.fail_after(remaining_seconds):
+                with scheduler_for(proxy).fail_after(remaining_seconds):
                     upstream = await proxy._open_upstream_websocket(
                         account,
                         headers,
@@ -4638,7 +4641,7 @@ class _WebSocketMixin:
                     _raise_proxy_budget_exhausted()
                 raise
             except TimeoutError:
-                if time.monotonic() - started_at < timeout_seconds:
+                if clock.monotonic() - started_at < timeout_seconds:
                     raise
                 # The websocket open itself consumed the connect budget, which
                 # is the same transport evidence as a classified connect
@@ -4983,7 +4986,8 @@ class _WebSocketMixin:
         continuity_state: "_WebSocketContinuityState | None" = None,
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
-        _ = proxy
+        clock = clock_for(proxy)
+        scheduler = scheduler_for(proxy)
         try:
             while True:
                 receive_timeout = await proxy._next_websocket_receive_timeout(
@@ -4993,11 +4997,11 @@ class _WebSocketMixin:
                     stream_idle_timeout_seconds=stream_idle_timeout_seconds,
                 )
                 receive_deadline = (
-                    None if receive_timeout is None else time.monotonic() + receive_timeout.timeout_seconds
+                    None if receive_timeout is None else clock.monotonic() + receive_timeout.timeout_seconds
                 )
                 try:
                     while True:
-                        wait_timeout = None if receive_deadline is None else receive_deadline - time.monotonic()
+                        wait_timeout = None if receive_deadline is None else receive_deadline - clock.monotonic()
                         if wait_timeout is not None and wait_timeout <= 0:
                             raise asyncio.TimeoutError()
                         keepalive_interval = getattr(_facade().get_settings(), "sse_keepalive_interval_seconds", 10.0)
@@ -5005,7 +5009,7 @@ class _WebSocketMixin:
                             wait_timeout = (
                                 keepalive_interval if wait_timeout is None else min(wait_timeout, keepalive_interval)
                             )
-                        message = await asyncio.wait_for(
+                        message = await scheduler.wait_for(
                             upstream.receive(),
                             timeout=wait_timeout,
                         )
@@ -5028,7 +5032,7 @@ class _WebSocketMixin:
                             )
                         break
                 except asyncio.TimeoutError:
-                    if receive_deadline is None or time.monotonic() < receive_deadline:
+                    if receive_deadline is None or clock.monotonic() < receive_deadline:
                         try:
                             await proxy._emit_pending_websocket_keepalive(
                                 websocket,
@@ -5416,7 +5420,7 @@ class _WebSocketMixin:
                     )
                 if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
                     _record_response_event(request_state, event_type)
-                elapsed_ms = int((time.monotonic() - request_state.started_at) * 1000)
+                elapsed_ms = int((clock_for(proxy).monotonic() - request_state.started_at) * 1000)
                 if request_state.latency_first_upstream_event_ms is None:
                     request_state.latency_first_upstream_event_ms = elapsed_ms
                 if event_type == "response.created" and request_state.latency_response_created_ms is None:
@@ -6108,7 +6112,7 @@ class _WebSocketMixin:
         async with pending_lock:
             if pending_requests:
                 return False
-        return (time.monotonic() - downstream_activity.last_activity_at) >= idle_timeout_seconds
+        return (clock_for(proxy).monotonic() - downstream_activity.last_activity_at) >= idle_timeout_seconds
 
     async def _fail_expired_pending_websocket_requests(
         self,
@@ -6126,7 +6130,7 @@ class _WebSocketMixin:
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
-        now = time.monotonic()
+        now = clock_for(proxy).monotonic()
         async with pending_lock:
             expired_requests = [
                 request_state
@@ -6309,7 +6313,7 @@ class _WebSocketMixin:
                 # orphan the deferred health write.
                 if request_state.deferred_keyed_stream_health:
                     await proxy._drain_deferred_keyed_stream_health(request_state)
-        latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
+        latency_ms = int((clock_for(proxy).monotonic() - request_state.started_at) * 1000)
         cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
         reasoning_tokens = (
             usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
@@ -6469,7 +6473,7 @@ class _WebSocketMixin:
             request_id=request_state.request_log_id or request_state.request_id,
             archive_request_id=request_state.archive_request_id,
             model=request_state.model or "",
-            latency_ms=int((time.monotonic() - request_state.started_at) * 1000),
+            latency_ms=int((clock_for(proxy).monotonic() - request_state.started_at) * 1000),
             status="error",
             error_code=error_code,
             error_message=error_message,
@@ -6823,7 +6827,7 @@ class _WebSocketMixin:
                     )
             if account_id_value is None or request_state.skip_request_log:
                 continue
-            latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
+            latency_ms = int((clock_for(proxy).monotonic() - request_state.started_at) * 1000)
             if request_state.latency_first_token_ms is None:
                 ttft_visible_at = _finalize_ttft_reasoning_deltas(request_state.ttft_reasoning_deltas)
                 if ttft_visible_at is not None:

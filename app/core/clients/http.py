@@ -110,7 +110,7 @@ def _build_ssl_context() -> ssl.SSLContext:
 
 @functools.cache
 def _shared_ssl_context() -> ssl.SSLContext:
-    """Return the process-wide verification context shared by every outbound connector.
+    """Return the process-wide verification context shared by aiohttp connectors.
 
     Building a context parses the system store plus the certifi bundle
     (~7 ms CPU and ~700 KB per copy), and nothing mutates the context after
@@ -121,6 +121,16 @@ def _shared_ssl_context() -> ssl.SSLContext:
     """
 
     return _build_ssl_context()
+
+
+@functools.cache
+def _shared_system_ssl_context() -> ssl.SSLContext:
+    """Reuse Python WSS system/environment trust until outbound-client close.
+
+    Keep this separate from aiohttp's certifi-augmented verification policy.
+    The context remains immutable after its first construction.
+    """
+    return ssl.create_default_context()
 
 
 def _reset_shared_ssl_context() -> None:
@@ -362,6 +372,7 @@ async def init_http_client() -> HttpClient:
     async with _http_client_lock:
         if _http_client is not None:
             return _http_client.client
+        _shared_system_ssl_context()
         client = await _build_http_client()
         _http_client = _ManagedHttpClient(client=client)
         return client
@@ -418,6 +429,7 @@ async def close_http_client() -> None:
         _http_client = None
         _last_generationless_network_rotation_at = None
         _reset_shared_ssl_context()
+        _shared_system_ssl_context.cache_clear()
         clients = (
             *((client,) if client is not None else ()),
             *_retired_http_clients,

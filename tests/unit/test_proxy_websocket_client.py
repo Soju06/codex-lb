@@ -4,18 +4,27 @@ import asyncio
 import contextlib
 import errno
 import json
+import ssl
+from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import aiohttp
+import certifi
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 from websockets.asyncio.server import serve as websocket_serve
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake, InvalidProxy, InvalidStatus
 from websockets.frames import Close
 from websockets.http11 import Response
 
+import app.core.clients.http as http_module
 import app.core.clients.proxy_websocket as proxy_websocket_module
 from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
 from app.core.clients.native_egress import (
@@ -1794,6 +1803,121 @@ async def test_connect_responses_websocket_uses_https_proxy_fallback_for_ws(monk
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert seen["url"] == "ws://chatgpt.local/backend-api/codex/responses"
     assert kwargs["proxy"] == "http://127.0.0.1:7890"
+    assert "ssl" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_reuses_system_tls_across_client_lifecycle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # This local certificate is valid at the fixture's 2026-09-05 as-of date.
+    # A wide fixed window lets real TLS use the system clock without changing it.
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(datetime(2020, 1, 1, tzinfo=UTC))
+        .not_valid_after(datetime(2120, 1, 1, tzinfo=UTC))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    certificate_path = tmp_path / "localhost.pem"
+    certificate_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path = tmp_path / "localhost.key"
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    empty_cert_dir = tmp_path / "empty-cert-dir"
+    empty_cert_dir.mkdir()
+    monkeypatch.setenv("SSL_CERT_FILE", str(certificate_path))
+    monkeypatch.setenv("SSL_CERT_DIR", str(empty_cert_dir))
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(certificate_path, key_path)
+    default_contexts: list[ssl.SSLContext] = []
+    create_default_context = ssl.create_default_context
+
+    def observed_default_context(*args, **kwargs):
+        context = create_default_context(*args, **kwargs)
+        default_contexts.append(context)
+        return context
+
+    monkeypatch.setattr(ssl, "create_default_context", observed_default_context)
+
+    async def upstream_handler(connection):
+        assert await connection.recv() == "hello"
+        await connection.send('{"type":"response.completed"}')
+
+    async def exchange():
+        websocket = await connect_responses_websocket({}, "access-token", None, allow_direct_egress=True)
+        try:
+            await websocket.send_text("hello")
+            message = await websocket.receive()
+            assert message.kind == "text"
+            assert message.text == '{"type":"response.completed"}'
+        finally:
+            await websocket.close()
+
+    await http_module.close_http_client()
+    try:
+        async with websocket_serve(upstream_handler, "127.0.0.1", 0, ssl=server_context) as server:
+            port = server.sockets[0].getsockname()[1]
+            settings = SimpleNamespace(
+                upstream_base_url=f"https://localhost:{port}/backend-api",
+                upstream_connect_timeout_seconds=7.0,
+                proxy_downstream_websocket_idle_timeout_seconds=120.0,
+                max_sse_event_bytes=4321,
+                upstream_websocket_trust_env=False,
+            )
+            monkeypatch.setattr(proxy_websocket_module, "get_settings", lambda: settings)
+            await http_module.init_http_client()
+            warmed_contexts = list(default_contexts)
+            await exchange()
+            await exchange()
+            await http_module.refresh_http_client()
+            await exchange()
+            assert default_contexts == warmed_contexts, "WSS opens must not rebuild default trust contexts"
+
+            settings.upstream_base_url = f"https://127.0.0.1:{port}/backend-api"
+            with pytest.raises(ProxyResponseError) as wrong_host:
+                await exchange()
+            assert isinstance(wrong_host.value.__cause__, ssl.SSLCertVerificationError)
+            assert "IP address mismatch" in str(wrong_host.value.__cause__)
+            settings.upstream_base_url = f"https://localhost:{port}/backend-api"
+
+            monkeypatch.setenv("SSL_CERT_FILE", certifi.where())
+            await exchange()  # Trust inputs stay frozen until the full client lifecycle ends.
+            assert default_contexts == warmed_contexts
+            await http_module.close_http_client()
+            await http_module.init_http_client()
+            with pytest.raises(ProxyResponseError) as untrusted:
+                await exchange()
+            assert isinstance(untrusted.value.__cause__, ssl.SSLCertVerificationError)
+            assert "self-signed certificate" in str(untrusted.value.__cause__)
+    finally:
+        await http_module.close_http_client()
 
 
 @pytest.mark.asyncio

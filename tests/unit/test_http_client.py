@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import ssl
 from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,8 +33,10 @@ def _isolate_shared_ssl_context() -> Iterator[None]:
     # The shared context is a process-wide cache; every test starts from an
     # empty cache so ``_build_ssl_context`` patches take effect per test.
     http_module._reset_shared_ssl_context()
+    http_module._shared_system_ssl_context.cache_clear()
     yield
     http_module._reset_shared_ssl_context()
+    http_module._shared_system_ssl_context.cache_clear()
 
 
 @pytest.mark.asyncio
@@ -416,6 +420,29 @@ def test_shared_ssl_context_matches_a_fresh_build_verification_policy() -> None:
     assert shared.options == fresh.options
     assert shared.cert_store_stats() == fresh.cert_store_stats()
     assert sorted(map(repr, shared.get_ca_certs())) == sorted(map(repr, fresh.get_ca_certs()))
+
+
+def test_shared_system_ssl_context_lazily_preserves_default_verification_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    empty_cert_file = tmp_path / "empty.pem"
+    empty_cert_file.write_text("")
+    empty_cert_dir = tmp_path / "empty-cert-dir"
+    empty_cert_dir.mkdir()
+    monkeypatch.setenv("SSL_CERT_FILE", str(empty_cert_file))
+    monkeypatch.setenv("SSL_CERT_DIR", str(empty_cert_dir))
+    shared = http_module._shared_system_ssl_context()
+    fresh = ssl.create_default_context()
+
+    assert http_module._shared_system_ssl_context() is shared
+    assert shared is not fresh
+    assert shared.verify_mode == fresh.verify_mode == ssl.CERT_REQUIRED
+    assert shared.check_hostname is fresh.check_hostname is True
+    assert shared.minimum_version == fresh.minimum_version
+    assert shared.verify_flags == fresh.verify_flags
+    assert shared.options == fresh.options
+    assert shared.cert_store_stats() == fresh.cert_store_stats()
+    assert shared.get_ca_certs(binary_form=True) == fresh.get_ca_certs(binary_form=True)
 
 
 @pytest.mark.asyncio

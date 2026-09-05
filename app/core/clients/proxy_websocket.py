@@ -31,6 +31,7 @@ from app.core.clients.codex import (
     create_codex_session,
     require_route_or_direct_egress_opt_in,
 )
+from app.core.clients.http import _shared_system_ssl_context
 from app.core.clients.native_egress import (
     NativeEgressError,
     NativeEgressTransportError,
@@ -1074,6 +1075,7 @@ async def _connect_upstream_websocket(
     proxy_url = resolve_websocket_proxy_from_env(url, proxy_env) if settings.upstream_websocket_trust_env else None
     try:
         subprotocol_kwargs = {"subprotocols": cast(Sequence[Subprotocol], subprotocols)} if subprotocols else {}
+        ssl_kwargs = {"ssl": _shared_system_ssl_context()} if urlparse(url).scheme == "wss" else {}
         response = await websocket_connect(
             url,
             origin=origin,
@@ -1088,6 +1090,7 @@ async def _connect_upstream_websocket(
             # path (``compress=15`` above).
             compression="deflate",
             **subprotocol_kwargs,
+            **ssl_kwargs,
         )
     except asyncio.TimeoutError as exc:
         raise ProxyResponseError(

@@ -455,13 +455,25 @@ def responses_input_suffix_matches_pending_tool_calls(
         isinstance(item, dict)
         and isinstance(item.get("type"), str)
         and item.get("type") in (_TOOL_CALL_TYPES | _TOOL_CALL_TYPE_BY_OUTPUT_TYPE.keys())
+        and _is_nonblank_string(item.get("call_id"))
         for item in suffix
     ):
+        return False
+    # Validate async items before excluding them from the synchronous manifest.
+    # Outstanding prefix calls supply the context for delayed async outputs.
+    prefix_async_calls = [
+        item
+        for item in input_items[:stored_count]
+        if isinstance(item, dict)
+        and isinstance(call_id := item.get("call_id"), str)
+        and call_id in prefix_state[2]
+        and prefix_state[2][call_id] == item.get("type")
+    ]
+    if not responses_input_items_are_self_contained_fresh_replay([*prefix_async_calls, *suffix]):
         return False
     suffix_calls: dict[str, str] = {}
     suffix_outputs: dict[str, str] = {}
     async_calls: dict[str, str] = dict(prefix_state[2])
-    sync_items: list[JsonValue] = []
     for item in cast(list[dict[str, JsonValue]], suffix):
         item_type = cast(str, item["type"])
         call_id = cast(str, item["call_id"])
@@ -470,7 +482,6 @@ def responses_input_suffix_matches_pending_tool_calls(
                 async_calls[call_id] = item_type
                 continue
             suffix_calls[call_id] = item_type
-            sync_items.append(item)
         else:
             mapped = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE[item_type]
             expected_async = async_calls.get(call_id)
@@ -480,9 +491,6 @@ def responses_input_suffix_matches_pending_tool_calls(
                 del async_calls[call_id]
                 continue
             suffix_outputs[call_id] = mapped
-            sync_items.append(item)
-    if sync_items and not responses_input_items_are_self_contained_fresh_replay(sync_items):
-        return False
     expected = dict(pending_tool_calls)
     return suffix_calls == expected and suffix_outputs == expected
 

@@ -26,4 +26,11 @@ calls so a later replica does not treat async work as interrupted sync
 work. Unresolved async calls in a stored prefix are non-blocking for
 intervening user turns.
 
+Async manifest filtering does not waive self-contained item validation.
+Validate the complete suffix before comparing the synchronous manifest,
+including nonblank call IDs. Seed that validation with outstanding async
+calls from the stored prefix so delayed typed outputs remain admissible.
+For example, a suffix containing an async call without `call_id` rejects
+the recovery proof rather than raising `KeyError` on an HTTP request.
+
 Rejected: landing async tools inside #2089. Maintainer required a split.

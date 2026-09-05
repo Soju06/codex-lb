@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import AsyncMock
+
 import pytest
 
+from app.core.types import JsonValue
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy import service as proxy_module
 from app.modules.proxy.load_balancer import AccountSelection
@@ -66,3 +70,80 @@ async def test_http_bridge_async_result_spans_intervening_turn(async_client, app
     assert sent[2]["input"] == [actual]
     service = get_proxy_service_for_app(app_instance)
     assert await service.drain_persistence_tasks(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call_type", ["function_call", "custom_tool_call"])
+@pytest.mark.parametrize(
+    "path",
+    ["/v1/responses", "/v1/responses/", "/backend-api/codex/responses", "/backend-api/codex/responses/"],
+)
+async def test_http_bridge_malformed_async_suffix_fails_closed(
+    async_client, app_instance, monkeypatch, call_type: str, path: str
+) -> None:
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(async_client, "acc_async_malformed", "async-malformed@example.com")
+    paused = await async_client.post(f"/api/accounts/{account_id}/pause")
+    assert paused.status_code == 200, paused.text
+    service = get_proxy_service_for_app(app_instance)
+    stored: list[JsonValue] = [{"role": "user", "content": "first"}]
+    claimed = await service._durable_bridge.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="async-malformed",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="previous-process",
+        lease_ttl_seconds=60.0,
+        account_id=account_id,
+        model="gpt-6-astra",
+        service_tier=None,
+        latest_turn_state="http_turn_async_malformed",
+        latest_response_id="resp_async_malformed",
+        allow_takeover=True,
+    )
+    await service._durable_bridge.renew_live_session(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        lease_ttl_seconds=60.0,
+        latest_response_id="resp_async_malformed",
+        latest_input_item_count=1,
+        latest_input_full_fingerprint=proxy_module._fingerprint_input_items(stored),
+        latest_pending_tool_calls={"sync_1": "function_call"},
+    )
+    await service._durable_bridge.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=False,
+    )
+    connect = AsyncMock(side_effect=AssertionError("malformed replay must not connect upstream"))
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    call: dict[str, JsonValue] = {"type": call_type, "name": "slow", "async": True}
+    call["arguments" if call_type == "function_call" else "input"] = "{}"
+
+    result = await asyncio.wait_for(
+        async_client.post(
+            path,
+            headers={"session_id": "async-malformed"},
+            json={
+                "model": "gpt-6-astra",
+                "instructions": "",
+                "previous_response_id": "resp_async_malformed",
+                "input": [
+                    *stored,
+                    call,
+                    {"type": "function_call", "call_id": "sync_1", "name": "now", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "sync_1", "output": "ok"},
+                ],
+            },
+        ),
+        timeout=5,
+    )
+
+    assert result.status_code == 503, result.text
+    error = result.json()["error"]
+    assert error["code"] == "continuity_owner_policy_conflict"
+    assert error["type"] == "server_error"
+    connect.assert_not_awaited()

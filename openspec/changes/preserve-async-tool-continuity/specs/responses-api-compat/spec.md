@@ -43,3 +43,11 @@ calls.
 - **THEN** the settled async pair is accepted
 - **AND** an unresolved async call without an output remains admissible
 - **AND** the durable suffix matcher ignores completed async pairs when comparing the synchronous pending-tool manifest
+
+#### Scenario: Malformed async suffix items fail closed
+
+- **GIVEN** a durable full resend settles the synchronous pending-tool manifest but includes an async function or custom tool call, or its output, that is not self-contained
+- **WHEN** the proxy validates the recovery proof
+- **THEN** every suffix item MUST have a nonblank string `call_id` and satisfy the existing self-contained tool-item rules before async items are excluded from manifest comparison
+- **AND** invalid items MUST reject the proof without raising an internal error
+- **AND** an unavailable continuity owner MUST produce the existing fail-closed compatibility error instead of an upstream replay

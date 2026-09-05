@@ -278,6 +278,73 @@ def test_durable_suffix_ignores_async_calls_when_matching_sync_manifest() -> Non
     )
 
 
+@pytest.mark.parametrize("call_type", ["function_call", "custom_tool_call"])
+@pytest.mark.parametrize(
+    "fields",
+    [
+        pytest.param({}, id="missing-call-id"),
+        pytest.param({"call_id": None}, id="null-call-id"),
+        pytest.param({"call_id": ""}, id="empty-call-id"),
+        pytest.param({"call_id": " \t"}, id="blank-call-id"),
+        pytest.param({"call_id": 7}, id="numeric-call-id"),
+        pytest.param({"call_id": []}, id="list-call-id"),
+        pytest.param({"call_id": {}}, id="object-call-id"),
+        pytest.param({"call_id": "async_1", "name": ""}, id="blank-name"),
+        pytest.param({"call_id": "async_1", "caller": {"type": "hosted"}}, id="hosted-caller"),
+        pytest.param({"call_id": "async_1", "status": "in_progress"}, id="incomplete-call"),
+        pytest.param({"call_id": "async_1", "unknown": True}, id="unknown-field"),
+        pytest.param({"call_id": "async_1", "id": "owned"}, id="response-owned-id"),
+        pytest.param(
+            {"call_id": "async_1", "internal_chat_message_metadata_passthrough": {"turn_id": ""}},
+            id="invalid-metadata",
+        ),
+    ],
+)
+def test_durable_suffix_rejects_malformed_async_calls(call_type: str, fields: dict[str, JsonValue]) -> None:
+    call: dict[str, JsonValue] = {"type": call_type, "name": "slow", "async": True, **fields}
+    call["arguments" if call_type == "function_call" else "input"] = "{}"
+    items: list[JsonValue] = [
+        {"role": "user", "content": "first"},
+        call,
+        {"type": "function_call", "call_id": "sync_1", "name": "now", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "sync_1", "output": "ok"},
+    ]
+
+    assert not responses_input_suffix_matches_pending_tool_calls(
+        items, stored_count=1, pending_tool_calls={"sync_1": "function_call"}
+    )
+
+
+@pytest.mark.parametrize("call_type", ["function_call", "custom_tool_call"])
+@pytest.mark.parametrize("call_in_prefix", [False, True], ids=["suffix-call", "prefix-call"])
+@pytest.mark.parametrize(
+    "fields",
+    [
+        pytest.param({"output": None}, id="missing-output"),
+        pytest.param({"output": []}, id="empty-output-parts"),
+        pytest.param({"caller": {"type": "hosted"}}, id="hosted-caller"),
+        pytest.param({"status": "in_progress"}, id="incomplete-output"),
+        pytest.param({"unknown": True}, id="unknown-field"),
+    ],
+)
+def test_durable_suffix_rejects_malformed_async_outputs(
+    call_type: str, call_in_prefix: bool, fields: dict[str, JsonValue]
+) -> None:
+    call: dict[str, JsonValue] = {"type": call_type, "call_id": "async_1", "name": "slow", "async": True}
+    call["arguments" if call_type == "function_call" else "input"] = "{}"
+    items: list[JsonValue] = [
+        {"role": "user", "content": "first"},
+        call,
+        {"type": f"{call_type}_output", "call_id": "async_1", "output": "done", **fields},
+        {"type": "function_call", "call_id": "sync_1", "name": "now", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "sync_1", "output": "ok"},
+    ]
+
+    assert not responses_input_suffix_matches_pending_tool_calls(
+        items, stored_count=2 if call_in_prefix else 1, pending_tool_calls={"sync_1": "function_call"}
+    )
+
+
 def test_account_neutral_replay_accepts_settled_async_function_call() -> None:
     items: list[JsonValue] = [
         {"type": "function_call", "call_id": "async_1", "name": "slow", "arguments": "{}", "async": True},

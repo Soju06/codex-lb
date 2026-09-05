@@ -16,3 +16,4 @@
 - [x] 3.2 Integration: HTTP-bridge function_call and custom_tool_call variants
 - [x] 3.3 Strict OpenSpec validation of this change
 - [x] 3.4 Account-neutral replay and durable suffix matching accept settled async pairs
+- [x] 3.5 Reject malformed async suffix items before manifest comparison, with failing-first unit and HTTP-route regressions and focused validation

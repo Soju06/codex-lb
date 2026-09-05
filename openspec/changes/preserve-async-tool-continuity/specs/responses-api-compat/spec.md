@@ -22,3 +22,9 @@ calls.
 - **GIVEN** the previous response contains async `call_a` and interrupted synchronous `call_b`
 - **WHEN** an anchored follow-up omits both outputs
 - **THEN** only `call_b` receives the existing synthetic interrupted output
+
+#### Scenario: Durable recovery keeps synchronous pending calls
+
+- **GIVEN** a completed response contains async `call_a` and synchronous `call_b`
+- **WHEN** the proxy persists the durable pending-tool manifest
+- **THEN** only `call_b` is stored for interrupted-output recovery

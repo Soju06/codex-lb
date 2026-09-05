@@ -13,6 +13,7 @@ from fastapi import WebSocket
 from app.core.types import JsonValue
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
+from tests.unit.test_proxy_http_bridge import _make_bridge_session
 from tests.unit.test_proxy_utils import (
     _make_account,
     _make_proxy_settings,
@@ -177,3 +178,74 @@ async def test_async_call_survives_intervening_turn_and_delayed_output(monkeypat
     synthetic = [item for item in second if item.get("type") in {"function_call_output", "custom_tool_call_output"}]
     assert [item["call_id"] for item in synthetic] == ["b"]
     assert upstream.sent[2]["input"] == [output]
+
+
+def test_durable_manifest_keeps_synchronous_calls_when_async_is_pending() -> None:
+    from app.modules.proxy._service.http_bridge import upstream_events as upstream_events_module
+    from app.modules.proxy._service.support import record_async_tool_call
+
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-mixed-manifest",
+        model="gpt-6-astra",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        pending_tool_call_types={"async_1": "function_call", "sync_1": "function_call"},
+        added_tool_call_types={"async_1": "function_call", "sync_1": "function_call"},
+    )
+    async_call = {"type": "function_call", "call_id": "async_1", "name": "slow", "arguments": "{}", "async": True}
+    sync_call = {"type": "function_call", "call_id": "sync_1", "name": "now", "arguments": "{}"}
+    record_async_tool_call(
+        state,
+        {"type": "response.completed", "response": {"output": [async_call, sync_call]}},
+    )
+
+    assert upstream_events_module._durable_pending_tool_call_manifest(
+        state,
+        {"type": "response.completed", "response": {"output": [async_call, sync_call]}},
+    ) == {"sync_1": "function_call"}
+
+
+def test_durable_manifest_omits_async_only_pending_calls() -> None:
+    from app.modules.proxy._service.http_bridge import upstream_events as upstream_events_module
+    from app.modules.proxy._service.support import record_async_tool_call
+
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-async-only-manifest",
+        model="gpt-6-astra",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        pending_tool_call_types={"async_1": "function_call"},
+        added_tool_call_types={"async_1": "function_call"},
+    )
+    async_call = {"type": "function_call", "call_id": "async_1", "name": "slow", "arguments": "{}", "async": True}
+    record_async_tool_call(state, {"type": "response.completed", "response": {"output": [async_call]}})
+
+    assert (
+        upstream_events_module._durable_pending_tool_call_manifest(
+            state,
+            {"type": "response.completed", "response": {"output": [async_call]}},
+        )
+        is None
+    )
+
+
+def test_pending_tools_reset_when_durable_anchor_owner_changes() -> None:
+    from app.modules.proxy._service.http_bridge.streaming import _http_bridge_reset_pending_tools_for_anchor
+
+    session = _make_bridge_session(key_value="owner-reset")
+    session.last_completed_response_id = "resp-shared"
+    session.last_completed_response_account_id = "acc-old"
+    session.last_pending_tool_calls = {"sync_1": "function_call", "async_1": "function_call"}
+    session.pending_async_tool_calls = {"async_1": "function_call"}
+
+    _http_bridge_reset_pending_tools_for_anchor(session, response_id="resp-shared", account_id="acc-old")
+    assert session.last_pending_tool_calls == {"sync_1": "function_call", "async_1": "function_call"}
+    assert session.pending_async_tool_calls == {"async_1": "function_call"}
+
+    _http_bridge_reset_pending_tools_for_anchor(session, response_id="resp-shared", account_id="acc-new")
+    assert session.last_pending_tool_calls == {}
+    assert session.pending_async_tool_calls == {}

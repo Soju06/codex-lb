@@ -980,12 +980,19 @@ def _durable_pending_tool_call_manifest(
     payload: dict[str, JsonValue] | None,
 ) -> dict[str, str] | None:
     terminal_calls = _response_completed_tool_call_types(payload)
-    if request_state.tool_call_manifest_invalid or request_state.async_tool_call_types or terminal_calls is None:
+    if request_state.tool_call_manifest_invalid or terminal_calls is None:
         return None
     if request_state.added_tool_call_types != request_state.pending_tool_call_types:
         return None
     if terminal_calls and terminal_calls != request_state.pending_tool_call_types:
         return None
+    sync_calls = {
+        call_id: call_type
+        for call_id, call_type in request_state.pending_tool_call_types.items()
+        if call_id not in request_state.async_tool_call_types
+    }
+    if request_state.async_tool_call_types:
+        return sync_calls or None
     return dict(request_state.pending_tool_call_types)
 
 
@@ -3705,11 +3712,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 input_full_fingerprint=(
                     matched_request_state.input_full_fingerprint if matched_request_state.input_item_count > 0 else None
                 ),
-                pending_tool_calls=(
-                    None
-                    if session.pending_async_tool_calls
-                    else _durable_pending_tool_call_manifest(matched_request_state, payload)
-                ),
+                pending_tool_calls=_durable_pending_tool_call_manifest(matched_request_state, payload),
             )
             completion_anchor_registration_confirmed = alias_registered
             if not alias_registered and anchor_advance_supersession is not None:

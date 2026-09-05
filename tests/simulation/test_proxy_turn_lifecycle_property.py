@@ -39,10 +39,23 @@ model of them:
 The API-key reservation is settled by whichever production path gets there
 first (finalize, detach or abort); the recording service attributes each
 settlement to its path so "exactly one terminal outcome" is checked against
-what production actually did. Lease releases go through the real
+what production actually did. The repository boundary is modelled the way
+production has it: a reservation write suspends on a virtual timer (the DB
+round trip it stands in for), the finalizer's settlement runs as a detached
+scheduler-owned write like ``_settle_stream_api_key_usage``, and the first
+write to reach a reservation id flips it while later writes are recorded as
+*redundant*: production's ``status == "reserved"`` compare-and-set in
+``ApiKeysService`` makes them no-ops. "Released exactly once" therefore means
+exactly one effective flip. Pristine production does issue redundant release
+calls in reachable detach/terminal/abort races (the detach decides under
+``pending_lock``, awaits the gate release and only then reads the
+reservation the terminal path may already be settling), so the redundant
+count is reported in every snapshot and pinned by a known-failing test
+rather than folded into the invariant. The modelled write latencies are
+parametrized (``_LATENCY_PROFILES``) so the invariant is not an artifact of
+one timer ordering. Lease releases go through the real
 ``WorkAdmissionController`` gate and the request state's own release
-callbacks; the modelled releases suspend on a virtual timer, standing in for
-the DB writes they replace, so cancellations can land inside them.
+callbacks.
 
 The canaries at the bottom plant production-shaped bugs (a detach that
 releases ownership it does not hold, an abort path that never settles, a
@@ -66,6 +79,7 @@ import anyio
 import pytest
 
 from app.core.clients.proxy_websocket import UpstreamWebSocket
+from app.core.utils.shared_future import wait_on_shared_future
 from app.db.models import AccountStatus
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
@@ -103,9 +117,30 @@ _MAX_EXTRA_EVENTS = 3
 _ADVANCE_SECONDS = 0.05
 _ADVANCE_STEPS = 12
 _ADMISSION_TIMEOUT_SECONDS = 10.0
-# The modelled lease releases suspend on a virtual timer, like the DB writes
-# they stand in for, so a settlement cancel can land inside a release.
-_RELEASE_LATENCY_SECONDS = 0.01
+
+
+@dataclass(frozen=True, slots=True)
+class _ReleaseLatency:
+    """Virtual durations of the modelled DB writes.
+
+    ``reservation_write`` is the API-key reservation settlement/release round
+    trip, ``account_lease_release`` the account create-lease release. The
+    writes suspend on a virtual timer so a settlement cancel can land inside
+    them; several profiles are checked because which write finishes first
+    decides which production path reads a still-set reservation.
+    """
+
+    reservation_write: float
+    account_lease_release: float
+
+
+_DEFAULT_LATENCY = _ReleaseLatency(reservation_write=0.01, account_lease_release=0.01)
+_LATENCY_PROFILES: dict[str, _ReleaseLatency] = {
+    "uniform-10ms": _DEFAULT_LATENCY,
+    "uniform-30ms": _ReleaseLatency(reservation_write=0.03, account_lease_release=0.03),
+    "reservation-slower": _ReleaseLatency(reservation_write=0.02, account_lease_release=0.01),
+    "account-lease-slower": _ReleaseLatency(reservation_write=0.01, account_lease_release=0.02),
+}
 # A completed frame without a response id: the terminal claim goes through the
 # anonymous match and the request stays retryable-looking until finalization.
 _COMPLETED_TERMINAL_TEXT = '{"type":"response.completed","response":{"object":"response","status":"completed"}}'
@@ -134,6 +169,8 @@ class _BridgeTurn(Protocol):
 @dataclass(frozen=True, slots=True)
 class _TurnSnapshot:
     reservation_settlements: tuple[SettlementPath, ...]
+    redundant_reservation_releases: tuple[SettlementPath, ...]
+    interrupted_reservation_writes: int
     finalizations: int
     abort_settlements: int
     response_create_releases: int
@@ -178,6 +215,17 @@ class _RecordingProxyService(proxy_service.ProxyService):
     reconnect) and the settlement-path wrappers only tag the context so the
     reservation settlement can be attributed to the production path that
     performed it.
+
+    The reservation boundary keeps production's shape: ``_release_websocket_reservation``
+    awaits its write in the calling task (production's ``anyio`` shield does
+    not stop a raw ``Task.cancel()``, so the write can be interrupted there),
+    while ``_settle_stream_api_key_usage`` spawns the write as a detached
+    scheduler-owned task and, when asked to wait, waits under a shield that
+    absorbs the caller's cancellation until the write finishes, exactly as
+    production does. Every completed write goes through ``_write_reservation``,
+    the model of ``ApiKeysService``'s ``status == "reserved"`` compare-and-set:
+    the first write per reservation id is the effective settlement, any later
+    one is recorded as redundant.
     """
 
     def __init__(
@@ -187,9 +235,15 @@ class _RecordingProxyService(proxy_service.ProxyService):
         clock: VirtualClock,
         scheduler: VirtualScheduler,
         work_admission: WorkAdmissionController,
+        latency: _ReleaseLatency = _DEFAULT_LATENCY,
     ) -> None:
         super().__init__(repo_factory, clock=clock, scheduler=scheduler)
+        self.latency = latency
         self.reservation_settlements: list[SettlementPath] = []
+        self.redundant_reservation_releases: list[SettlementPath] = []
+        self.interrupted_reservation_writes = 0
+        self.reservation_writes_in_flight = 0
+        self._settled_reservation_ids: set[str] = set()
         self.finalizations = 0
         self.abort_settlements = 0
         self.account_successes = 0
@@ -200,11 +254,27 @@ class _RecordingProxyService(proxy_service.ProxyService):
         del account
         self.account_successes += 1
 
+    async def _write_reservation(self, reservation: ApiKeyUsageReservationData, path: SettlementPath) -> None:
+        """One modelled DB round trip ending in the compare-and-set on the reservation row."""
+
+        self.reservation_writes_in_flight += 1
+        try:
+            await self._scheduler.sleep(self.latency.reservation_write)
+        except asyncio.CancelledError:
+            self.interrupted_reservation_writes += 1
+            raise
+        finally:
+            self.reservation_writes_in_flight -= 1
+        if reservation.reservation_id in self._settled_reservation_ids:
+            self.redundant_reservation_releases.append(path)
+            return
+        self._settled_reservation_ids.add(reservation.reservation_id)
+        self.reservation_settlements.append(path)
+
     async def _release_websocket_reservation(self, reservation: ApiKeyUsageReservationData | None) -> None:
         if reservation is None:
             return
-        await self._scheduler.sleep(_RELEASE_LATENCY_SECONDS)
-        self.reservation_settlements.append(_settlement_path.get())
+        await self._write_reservation(reservation, _settlement_path.get())
 
     async def _settle_stream_api_key_usage(
         self,
@@ -215,11 +285,27 @@ class _RecordingProxyService(proxy_service.ProxyService):
         *,
         wait_for_settlement: bool = False,
     ) -> bool:
-        del settlement, request_id, wait_for_settlement
+        del settlement
         if api_key is None or api_key_reservation is None:
             return True
-        await self._scheduler.sleep(_RELEASE_LATENCY_SECONDS)
-        self.reservation_settlements.append(_settlement_path.get())
+        # Production detaches the settlement transaction into a tracked task
+        # and, for ordering-sensitive callers, waits for it under a shield
+        # that keeps waiting through the caller's own cancellation.
+        task = self._scheduler.create_task(
+            self._write_reservation(api_key_reservation, _settlement_path.get()),
+            name=f"proxy-stream-api-key-settle-{request_id}",
+        )
+        if wait_for_settlement:
+            with anyio.CancelScope(shield=True):
+                while True:
+                    try:
+                        await wait_on_shared_future(task, scheduler=self._scheduler)
+                        break
+                    except asyncio.CancelledError:
+                        if task.cancelled():
+                            break
+                    except Exception:
+                        break
         return True
 
     async def _finalize_websocket_request_state(self, *args: Any, **kwargs: Any) -> None:
@@ -286,8 +372,9 @@ class _ProductionBridgeTurn:
     # Canaries swap in a service subclass carrying a planted bug.
     service_class: type[_RecordingProxyService] = _RecordingProxyService
 
-    def __init__(self, scheduler: VirtualScheduler) -> None:
+    def __init__(self, scheduler: VirtualScheduler, *, latency: _ReleaseLatency = _DEFAULT_LATENCY) -> None:
         self.scheduler = scheduler
+        self.latency = latency
         self.retry_results: list[bool] = []
         self.detach_results: list[bool] = []
         self.account_releases = 0
@@ -315,6 +402,7 @@ class _ProductionBridgeTurn:
             clock=scheduler.clock,
             scheduler=scheduler,
             work_admission=self.admission,
+            latency=latency,
         )
         self.response_create_gate = asyncio.Semaphore(0)
         self.admission_lease: _CountingAdmissionLease | None = None
@@ -389,7 +477,7 @@ class _ProductionBridgeTurn:
 
     async def _release_account_create_lease(self, lease: object) -> None:
         assert lease == "account-create-lease"
-        await self.scheduler.sleep(_RELEASE_LATENCY_SECONDS)
+        await self.scheduler.sleep(self.latency.account_lease_release)
         self.account_releases += 1
 
     async def _record_retry_send(self, _text: str) -> None:
@@ -510,6 +598,8 @@ class _ProductionBridgeTurn:
         request_state = self.request_state
         return _TurnSnapshot(
             reservation_settlements=tuple(self.service.reservation_settlements),
+            redundant_reservation_releases=tuple(self.service.redundant_reservation_releases),
+            interrupted_reservation_writes=self.service.interrupted_reservation_writes,
             finalizations=self.service.finalizations,
             abort_settlements=self.service.abort_settlements,
             response_create_releases=0 if lease is None else lease.release_count,
@@ -600,8 +690,8 @@ class _RetryReacquiresAfterSettlementBridgeTurn(_ProductionBridgeTurn):
     because ``retry_request`` only toggled a flag.
     """
 
-    def __init__(self, scheduler: VirtualScheduler) -> None:
-        super().__init__(scheduler)
+    def __init__(self, scheduler: VirtualScheduler, *, latency: _ReleaseLatency = _DEFAULT_LATENCY) -> None:
+        super().__init__(scheduler, latency=latency)
         self._retry_canary_lock = asyncio.Lock()
 
     async def _retry_after_claim(self, yields: int) -> None:
@@ -664,7 +754,7 @@ class _ReshieldingLeaseReleaseBridgeTurn(_ProductionBridgeTurn):
 
     async def _release_account_create_lease(self, lease: object) -> None:
         assert lease == "account-create-lease"
-        inner = self.scheduler.create_task(self.scheduler.sleep(_RELEASE_LATENCY_SECONDS))
+        inner = self.scheduler.create_task(self.scheduler.sleep(self.latency.account_lease_release))
         for _ in range(3):
             asyncio.shield(inner).cancel()
         await inner
@@ -700,6 +790,10 @@ def _assert_bridge_turn_invariants(turn: _BridgeTurn, *, seed: int, schedule: Sc
     expected_retry_attempts = sum(event == "retry_request" for event, _delay, _yields in schedule)
     # Exactly one production path settled the API-key reservation: the
     # finalizer, the downstream detach backstop or the shielded abort path.
+    # "Settled" is the effective compare-and-set flip the recording service
+    # models; redundant release calls that hit an already settled reservation
+    # are reported separately (``redundant_reservation_releases``) and pinned
+    # by ``test_bridge_turn_lifecycle_settles_reservation_with_a_single_write``.
     assert len(snapshot.reservation_settlements) == 1, violated("terminal_outcomes")
     assert snapshot.finalizations <= 1, violated("finalizations")
     assert snapshot.response_create_releases == 1, violated("response_create_releases")
@@ -745,20 +839,21 @@ async def _run_schedule(turn: _BridgeTurn, schedule: Schedule, scheduler: Virtua
 async def _check_schedules(
     turn_factory: type[_ProductionBridgeTurn],
     *,
+    latency: _ReleaseLatency = _DEFAULT_LATENCY,
     schedule_count: int = _SCHEDULE_COUNT,
 ) -> list[_TurnSnapshot]:
     snapshots: list[_TurnSnapshot] = []
     for seed in range(schedule_count):
         schedule = _schedule_for_seed(seed)
         scheduler = VirtualScheduler(VirtualClock())
-        turn = turn_factory(scheduler)
+        turn = turn_factory(scheduler, latency=latency)
         try:
             await _run_schedule(turn, schedule, scheduler)
             _assert_bridge_turn_invariants(turn, seed=seed, schedule=schedule)
             snapshots.append(turn.snapshot())
         except BaseException:
             # Reproduce this exact interleaving with _schedule_for_seed(<seed>).
-            print(f"bridge turn schedule check failed seed={seed} schedule={schedule}")
+            print(f"bridge turn schedule check failed seed={seed} latency={latency} schedule={schedule}")
             raise
         finally:
             await turn.aclose()
@@ -767,8 +862,39 @@ async def _check_schedules(
 
 
 @pytest.mark.asyncio
-async def test_bridge_turn_lifecycle_seeded_schedules_settle_exactly_once() -> None:
-    await _check_schedules(_ProductionBridgeTurn)
+@pytest.mark.parametrize("latency", list(_LATENCY_PROFILES.values()), ids=list(_LATENCY_PROFILES))
+async def test_bridge_turn_lifecycle_seeded_schedules_settle_exactly_once(latency: _ReleaseLatency) -> None:
+    """Exactly one effective settlement under every modelled write-latency ordering."""
+
+    await _check_schedules(_ProductionBridgeTurn, latency=latency)
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "known production behavior: reachable detach/terminal/abort races issue a second (or third) release call "
+        "for the same reservation; the DB compare-and-set makes it a no-op, so only the redundant round trip "
+        "remains. Flips to XPASS when production settles with a single write; then drop the marker."
+    ),
+)
+async def test_bridge_turn_lifecycle_settles_reservation_with_a_single_write() -> None:
+    """Pins the redundant-release observation so nobody mistakes it for harness rot.
+
+    `_detach_http_bridge_request` decides `detached` under `pending_lock`,
+    awaits the gate release and only then reads `request_state.api_key_reservation`,
+    which the terminal path (draining-branch finalizer or the shielded abort
+    settlement) may already be writing; both paths clear the reservation only
+    after their awaited write returns. The seeded schedules reach that shape
+    under every latency profile.
+    """
+
+    for latency in _LATENCY_PROFILES.values():
+        snapshots = await _check_schedules(_ProductionBridgeTurn, latency=latency)
+        redundant = [
+            snapshot.redundant_reservation_releases for snapshot in snapshots if snapshot.redundant_reservation_releases
+        ]
+        assert not redundant, f"latency={latency} redundant releases in {len(redundant)} schedules: {redundant[:3]}"
 
 
 @pytest.mark.asyncio

@@ -17,3 +17,4 @@
 - [x] 3.4 Consume anonymous terminals from suppressed late successors
 - [x] 3.5 Infer apply_patch_call output for explicit continuations
 - [x] 3.6 Sanitize upstream response.steer.failed before forwarding
+- [x] 3.7 Revalidate and atomically swap explicit continuations after preparation, owner resolution and admission; prove reader rejection/assignment races and cleanup on the WebSocket surface

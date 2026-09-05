@@ -2412,6 +2412,20 @@ class _WebSocketMixin:
                             response_create_gate=response_create_gate,
                         )
                         async with pending_lock:
+                            if pending_steering_continuation is not None and (
+                                upstream_control is None
+                                or upstream_control.steering_continuations.get(
+                                    response_create_request_state.previous_response_id
+                                )
+                                is not pending_steering_continuation
+                                or steering_placeholder is None
+                                or pending_steering_continuation.request_state is not steering_placeholder
+                                or steering_placeholder not in pending_requests
+                                or steering_placeholder.response_id is not None
+                            ):
+                                raise steering_error(
+                                    "response_not_found", "The steering continuation is no longer available."
+                                )
                             pending_requests.append(response_create_request_state)
                             if shutdown_state.is_draining():
                                 # Register-first makes this barrier fail-closed
@@ -2421,20 +2435,16 @@ class _WebSocketMixin:
                                 # already visible as active when drain began.
                                 pending_requests.remove(response_create_request_state)
                             else:
-                                if (
-                                    pending_steering_continuation is not None
-                                    and steering_placeholder is not None
-                                    and steering_placeholder in pending_requests
-                                ):
+                                if pending_steering_continuation is not None and steering_placeholder is not None:
                                     pending_requests.remove(steering_placeholder)
+                                    pending_steering_continuation.request_state = response_create_request_state
+                                    pending_steering_continuation.explicit_request_prepared = True
                                 request_state_registered = True
                         if (
                             request_state_registered
                             and pending_steering_continuation is not None
                             and steering_placeholder is not None
                         ):
-                            pending_steering_continuation.request_state = response_create_request_state
-                            pending_steering_continuation.explicit_request_prepared = True
                             try:
                                 await release_steering_request(proxy, steering_placeholder)
                             except Exception:

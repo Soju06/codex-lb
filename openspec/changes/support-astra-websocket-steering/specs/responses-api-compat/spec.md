@@ -106,6 +106,13 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 - **WHEN** releasing the replaced placeholder reservation fails
 - **THEN** the continuation remains pending and the socket continues
 
+#### Scenario: Steering ownership changes while an explicit continuation awaits registration
+- **GIVEN** a matching explicit response.create is awaiting preparation, owner resolution, or admission
+- **WHEN** the upstream reader rejects the final steer or assigns its placeholder to an automatic successor
+- **THEN** registration SHALL revalidate the exact continuation and its pending, unassigned placeholder under the pending lock
+- **AND** the stale explicit create SHALL fail with response_not_found before dispatch and release its own reservation and admission
+- **AND** the reader-owned successor and unrelated requests SHALL retain their identity and accounting
+
 #### Scenario: Apply-patch output is required for explicit continuation
 - **GIVEN** a completed steered response with a synchronous apply_patch_call
 - **WHEN** the client sends the matching apply_patch_call_output before response.steer.pending
@@ -114,4 +121,3 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 #### Scenario: Upstream steering failures are sanitized before forwarding
 - **WHEN** upstream sends response.steer.failed with a malformed or structured error.param
 - **THEN** the forwarded client payload omits the non-public parameter value
-

@@ -1764,7 +1764,7 @@ class ProxyService(
             remaining_budget,
         )
         try:
-            with anyio.fail_after(remaining_budget):
+            with self._scheduler.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
                 concurrency_caps = effective_account_concurrency_caps(settings)
                 stream_reserve_slots = (
@@ -1850,7 +1850,7 @@ class ProxyService(
                         sticky_source,
                         legacy_sticky_key,
                     )
-                    preferred_selection = await self._scheduler.wait_for(self._load_balancer.select_account(
+                    preferred_selection = await self._load_balancer.select_account(
                         sticky_key=preferred_sticky_inputs[0],
                         sticky_kind=preferred_sticky_inputs[1],
                         reallocate_sticky=preferred_sticky_inputs[2],
@@ -1892,7 +1892,7 @@ class ProxyService(
                         allow_usage_exhaustion_error=not required_preferred_account,
                         api_key_id=api_key_id,
                         api_key_stream_fair_share_threshold_pct=api_key_fair_share_threshold_pct,
-                    ), timeout=self._remaining_budget_seconds(deadline))  # fmt: skip
+                    )
                     if preferred_selection.account is not None:
                         logger.info(
                             "Selected preferred account request_id=%s kind=%s request_stage=%s account_id=%s",
@@ -1914,7 +1914,7 @@ class ProxyService(
                             preferred_selection.error_message,
                         )
                         return preferred_selection
-                selection = await self._scheduler.wait_for(self._load_balancer.select_account(
+                selection = await self._load_balancer.select_account(
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,
                     reallocate_sticky=reallocate_sticky,
@@ -1953,7 +1953,7 @@ class ProxyService(
                     redact_sensitive_details=redact_sensitive_details,
                     api_key_id=api_key_id,
                     api_key_stream_fair_share_threshold_pct=api_key_fair_share_threshold_pct,
-                ), timeout=self._remaining_budget_seconds(deadline))  # fmt: skip
+                )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
                     logger.warning(
                         "Proxy account selection returned excluded account request_id=%s kind=%s request_stage=%s "

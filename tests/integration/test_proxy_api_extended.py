@@ -1387,9 +1387,10 @@ async def test_codex_realtime_call_shared_freshness_budget_log_redacts_account_i
     async def unexpected_codex_control_request(*_args, **_kwargs):
         raise AssertionError("freshness budget exhaustion must prevent the upstream call")
 
-    # Account selection now consumes its own scheduler-owned timeout budget;
-    # keep that stage live, then exhaust the shared deadline at freshness.
-    remaining_budget = iter((1.0, 1.0, 0.0))
+    # Selection is bounded by the scheduler-owned anyio budget, not a second
+    # wait_for, so it samples the remaining budget once; the next sample is
+    # the freshness stage, which must observe the exhausted shared deadline.
+    remaining_budget = iter((1.0, 0.0))
     monkeypatch.setattr(proxy_module, "core_codex_control_request", unexpected_codex_control_request)
     monkeypatch.setattr(
         proxy_module.ProxyService,

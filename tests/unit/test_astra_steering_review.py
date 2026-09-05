@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from app.core.clients.proxy import ProxyResponseError
+from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
+from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.support import (
     _WebSocketRequestState,
     _WebSocketSteeringContinuation,
@@ -33,6 +37,22 @@ def _request_state(request_id: str) -> _WebSocketRequestState:
         api_key_reservation=None,
         started_at=0.0,
     )
+
+
+def test_steering_configuration_omits_synthesized_empty_tools() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request = ResponsesRequest.model_validate({"model": "gpt-6-astra", "instructions": "", "input": "Hi"})
+    request_state, _ = service._prepare_response_bridge_request_state(
+        request,
+        api_key=None,
+        api_key_reservation=None,
+        include_type_field=True,
+        attach_event_queue=False,
+        transport="websocket",
+        client_metadata=None,
+    )
+    assert request_state.steering_configuration is not None
+    assert "tools" not in request_state.steering_configuration
 
 
 def test_empty_input_text_is_rejected_as_nonempty_steering_input() -> None:

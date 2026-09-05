@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections import deque
 from collections.abc import Mapping
@@ -39,6 +40,7 @@ from app.modules.proxy.request_policy import (
 )
 
 _MAX_QUEUED_STEERS = 32
+logger = logging.getLogger("app.modules.proxy.service")
 
 
 def steering_error(code: str, message: str) -> ProxyResponseError:
@@ -496,7 +498,15 @@ async def process_websocket_steering_event(
                 reduce_submission = submission
                 reduce_reservation = continuation.request_state.api_key_reservation
     if release_state is not None:
-        await release_steering_request(proxy, release_state)
+        try:
+            await release_steering_request(proxy, release_state)
+        except Exception:
+            # Match the queued-reduce path: a failed refund must not abort the
+            # reader or fail unrelated in-flight responses on this socket.
+            logger.exception(
+                "Failed to release steering placeholder reservation request_id=%s",
+                release_state.request_id,
+            )
     elif reduce_submission is not None:
         await proxy._reduce_websocket_api_key_usage(
             reduce_reservation,

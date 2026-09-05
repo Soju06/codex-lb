@@ -1207,6 +1207,13 @@ class ApiKeysService:
             if not claimed:
                 await self._repository.rollback()
                 return
+            # Extend/reduce may have committed a new reserved_delta after the
+            # unlocked read above. Reload items after claiming the status so
+            # settlement does not reconcile against a stale budget.
+            reservation = await self._repository.get_usage_reservation(reservation_id)
+            if reservation is None:
+                await self._repository.rollback()
+                return
 
             effective_input_tokens = input_tokens or 0
             effective_output_tokens = output_tokens or 0

@@ -5375,9 +5375,7 @@ class _WebSocketMixin:
         finally:
             async with pending_lock:
                 has_pending_requests = bool(pending_requests)
-            if (
-                not upstream_control.reconnect_requested and has_pending_requests
-            ) or upstream_control.steering_continuations:
+            if not upstream_control.reconnect_requested and has_pending_requests:
                 try:
                     await websocket.close()
                 except Exception:

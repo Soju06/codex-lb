@@ -602,6 +602,44 @@ async def test_steering_failure_releases_only_successor_reservation(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_failed_final_steer_refund_does_not_abort_socket(monkeypatch, caplog):
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    socket = ScriptedSocket([(create(), lambda _: True), (steer, saw("response.created", "r1"))])
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [
+                {"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}},
+                {
+                    "type": "response.steer.failed",
+                    "steer": {"id": "s1", "previous_response_id": "r1", "input": "Correction"},
+                    "error": {"code": "successor_creation_failed", "message": "Rejected"},
+                },
+                response("response.completed", "r1"),
+            ],
+        ]
+    )
+    socket.finish_when = lambda event: event.get("type") == "response.completed" and event["response"]["id"] == "r1"
+
+    def configure(service, account):
+        del account
+        original = service._release_websocket_request_state_reservation
+
+        async def release(state, *args, **kwargs):
+            if getattr(state, "steering_parent_response_id", None) == "r1":
+                raise RuntimeError("refund failed")
+            return await original(state, *args, **kwargs)
+
+        monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release)
+
+    _, reservations, settled, _, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
+    assert len(reservations) == 2
+    assert [value[0] for value in settled] == ["res_0"]
+    assert saw("response.steer.failed")(socket.sent)
+    assert "Failed to release steering placeholder reservation" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_automatic_successor_never_claims_unrelated_queued_create(monkeypatch):
     steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
     socket = ScriptedSocket(

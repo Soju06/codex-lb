@@ -60,7 +60,7 @@ from app.core.resilience.overload import local_overload_error
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
-from app.core.utils.sse import parse_sse_data_json
+from app.core.utils.sse import ParsedSseBlock, parse_sse_data_json
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ModelSource, StickySessionKind
 from app.modules.accounts import auth_manager as auth_manager_module
@@ -9194,6 +9194,9 @@ async def test_stream_responses_websocket_normalizes_typeless_error_as_terminal(
     assert failed_error["code"] == "invalid_request_error"
     assert failed_error["message"] == "No tool output found for function call call_missing."
     assert failed_error["param"] == "input"
+    assert isinstance(events[1], ParsedSseBlock)
+    assert events[1].response_id_is_local is True
+    assert events[1].is_local is False
     assert websocket._index == 2
 
 
@@ -10091,7 +10094,8 @@ async def test_stream_responses_via_websocket_preserves_raw_error_when_sdk_contr
 
 
 @pytest.mark.asyncio
-async def test_stream_codex_websocket_events_treats_raw_error_as_terminal_when_sdk_contract_disabled():
+@pytest.mark.parametrize("enforce_sdk", [False, True])
+async def test_stream_codex_websocket_events_preserves_error_origin_when_normalizing(enforce_sdk: bool):
     raw_payload = {"type": "error", "code": "rate_limit_exceeded", "message": "OpenCode stream failed"}
 
     websocket = _WsResponse(
@@ -10110,14 +10114,20 @@ async def test_stream_codex_websocket_events_treats_raw_error_as_terminal_when_s
             idle_timeout_seconds=45.0,
             total_timeout_seconds=5.0,
             max_event_bytes=1024,
-            enforce_openai_sdk_contract=False,
+            enforce_openai_sdk_contract=enforce_sdk,
         )
     ]
 
     assert len(events) == 1
     event_block, event_type = events[0]
-    assert parse_sse_data_json(event_block) == raw_payload
-    assert event_type == "error"
+    if enforce_sdk:
+        assert event_type == "response.failed"
+        assert isinstance(event_block, ParsedSseBlock)
+        assert event_block.response_id_is_local is True
+        assert event_block.is_local is False
+    else:
+        assert parse_sse_data_json(event_block) == raw_payload
+        assert event_type == "error"
     assert websocket._index == 1
 
 
@@ -52823,6 +52833,9 @@ def test_normalize_stream_payload_for_http_block_still_rewrites_error_frames():
 
     assert normalized_type == "response.failed"
     assert '"boom"' in normalized_block
+    assert isinstance(normalized_block, ParsedSseBlock)
+    assert normalized_block.response_id_is_local is True
+    assert normalized_block.is_local is False
 
 
 def test_normalize_stream_payload_for_http_block_still_rewrites_error_envelopes_on_non_error_types():
@@ -52846,7 +52859,7 @@ async def test_stream_with_retry_relays_unmodified_canonical_delta_frames_verbat
     # relayed with upstream bytes (raw UTF-8, upstream spacing) and are never
     # JSON-parsed; usage settlement from the parsed terminal frame is
     # unchanged.
-    from app.modules.proxy._service.streaming import mixin as streaming_mixin_module
+    from app.modules.proxy._service.streaming import helpers as streaming_helpers_module
 
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
@@ -52861,8 +52874,8 @@ async def test_stream_with_retry_relays_unmodified_canonical_delta_frames_verbat
         AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
     )
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
-    mixin_parse = MagicMock(wraps=streaming_mixin_module.parse_sse_data_json)
-    monkeypatch.setattr(streaming_mixin_module, "parse_sse_data_json", mixin_parse)
+    stream_parse = MagicMock(wraps=streaming_helpers_module.parse_sse_data_json)
+    monkeypatch.setattr(streaming_helpers_module, "parse_sse_data_json", stream_parse)
 
     verbatim_delta = (
         'event: response.output_text.delta\ndata: {"type": "response.output_text.delta", "delta": "안녕 upstream"}\n\n'
@@ -52899,7 +52912,7 @@ async def test_stream_with_retry_relays_unmodified_canonical_delta_frames_verbat
     # created (lifecycle), the first delta (TTFT window still open), and
     # completed (lifecycle) are parsed; the settled second delta is relayed
     # without any JSON parse.
-    assert mixin_parse.call_count == 3
+    assert stream_parse.call_count == 3
     # Upstream bytes are preserved exactly: raw UTF-8 and upstream key
     # spacing, not the ensure_ascii canonical re-encode.
     assert chunks[2] == verbatim_delta

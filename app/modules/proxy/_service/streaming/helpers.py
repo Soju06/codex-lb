@@ -5,7 +5,8 @@ import json
 import sys
 from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, AsyncIterator, Literal, Mapping, cast
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Literal, Mapping, TypedDict, cast
 
 from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
@@ -41,6 +42,7 @@ from app.core.errors import (
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     SYNTHETIC_TRANSPORT_FAILURE_CODES,
+    SYNTHETIC_TRANSPORT_FAILURE_MARKER,
     OpenAIErrorParam,
     openai_error,
     response_failed_event,
@@ -64,12 +66,13 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
-from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.sse import ParsedSseBlock, format_sse_event, parse_sse_data_json
 from app.core.utils.time import utcnow as utcnow
 from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
 )
+from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -280,6 +283,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_WEBSOCKET,  # noqa: F401
@@ -407,6 +411,46 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.load_balancer import AccountSelection
 
 
+class _HTTPPhaseLogFields(TypedDict):
+    latency_first_token_ms: int | None
+    latency_queue_ms: int
+    latency_first_upstream_event_ms: int | None
+    latency_response_created_ms: int | None
+
+
+@dataclass(slots=True)
+class _HTTPPhaseLatencies:
+    first_token_ms: int | None = None
+    first_upstream_event_ms: int | None = None
+    response_created_ms: int | None = None
+
+    def parse_event(
+        self, line: str, started_at: float, observed_at: float
+    ) -> tuple[dict[str, JsonValue] | None, str | None]:
+        payload = parse_sse_data_json(line)
+        event_type = classify_event_type(payload)
+        if (
+            payload is not None
+            and event_type != "codex.keepalive"
+            and not (isinstance(line, ParsedSseBlock) and line.is_local)
+            and payload.get(SYNTHETIC_TRANSPORT_FAILURE_MARKER) is not True
+        ):
+            elapsed_ms = max(0, int((observed_at - started_at) * 1000))
+            if self.first_upstream_event_ms is None:
+                self.first_upstream_event_ms = elapsed_ms
+            if self.response_created_ms is None and event_type == "response.created":
+                self.response_created_ms = elapsed_ms
+        return payload, event_type
+
+    def log_fields(self, queue_ms: int) -> _HTTPPhaseLogFields:
+        return {
+            "latency_first_token_ms": self.first_token_ms,
+            "latency_queue_ms": queue_ms,
+            "latency_first_upstream_event_ms": self.first_upstream_event_ms,
+            "latency_response_created_ms": self.response_created_ms,
+        }
+
+
 def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
@@ -454,6 +498,29 @@ def _is_background_json_ack(
     event_type: str | None,
 ) -> bool:
     return stream is False and _canonical_background_ack_response_id(event_payload, event_type) is not None
+
+
+def _publish_http_response_owner(
+    proxy: _StreamingServiceProtocol,
+    event: OpenAIEvent | None,
+    event_payload: dict[str, JsonValue] | None,
+    block: str,
+    account_id: str,
+    api_key: ApiKeyData | None,
+    session_id: str | None,
+) -> None:
+    if event is None or event.response is None or not event.response.id or event_payload is None:
+        return
+    if isinstance(block, ParsedSseBlock) and (block.is_local or block.response_id_is_local):
+        return
+    if event_payload.get(SYNTHETIC_TRANSPORT_FAILURE_MARKER):
+        return
+    proxy._remember_websocket_previous_response_owner(
+        previous_response_id=event.response.id,
+        api_key_id=api_key.id if api_key is not None else None,
+        account_id=account_id,
+        session_id=session_id,
+    )
 
 
 def _settle_background_ack(

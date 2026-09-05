@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 from collections.abc import AsyncIterator, Mapping
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -15,6 +16,7 @@ import app.core.clients.proxy as proxy_client_module
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
+from app.core.clients.http import get_http_client
 from app.core.config.settings import Settings
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesRequest
@@ -22,12 +24,193 @@ from app.core.types import JsonValue
 from app.core.utils.time import utcnow
 from app.db.models import Account, DashboardSettings, RequestLog, StickySessionKind
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from app.modules.api_keys.service import ApiKeyUsageReservationData
+from app.modules.proxy._service import request_log as request_log_module
+from app.modules.proxy._service import support as proxy_support_module
+from app.modules.proxy._service.streaming import helpers as streaming_helpers_module
+from app.modules.proxy._service.streaming import mixin as streaming_mixin_module
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
+from app.modules.proxy.affinity import _extract_model_class
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "distinct_phases",
+        "zero_created",
+        "missing_created",
+        "empty",
+        "no_headers",
+        "oversized",
+        "upstream_error",
+        "normalized_upstream_error",
+    ],
+)
+async def test_http_phase_timings_use_observed_upstream_events_and_persist(
+    async_client, app_instance, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    auth = _make_auth_json("phase-account", "phase-timing@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth), "application/json")}
+    )
+    assert imported.status_code == 200
+    dashboard_settings = await proxy_module.get_settings_cache().get()
+    dashboard_settings.upstream_stream_transport = "http"
+    proxy_module.get_settings().proxy_request_budget_seconds = 4.0
+    monkeypatch.setattr(proxy_client_module, "discover_native_egress_client", lambda: None)
+
+    # Change only each owning module's clock binding; asyncio deadlines keep
+    # their real monotonic clock. Quarter-second offsets are exact in binary.
+    started_at = time.monotonic()
+    clock = SimpleNamespace(now=started_at)
+    controlled_time = SimpleNamespace(monotonic=lambda: clock.now)
+    for module in (streaming_retry_module, streaming_mixin_module, proxy_support_module):
+        monkeypatch.setattr(module, "time", controlled_time)
+    service = get_proxy_service_for_app(app_instance)
+    admission = service._get_work_admission()
+    acquire = admission.acquire_response_create
+
+    async def timed_admission(*args, **kwargs):
+        lease = await acquire(*args, **kwargs)
+        clock.now = started_at + 0.5
+        return lease
+
+    monkeypatch.setattr(admission, "acquire_response_create", timed_admission)
+    created = 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_http_phase"}}\n\n'
+    delta = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+    fast_delta = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta", "delta":" world"}\n\n'
+    completed = (
+        'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_http_phase",'
+        '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":2}}}\n\n'
+    )
+    blocks = [(1.5, delta), (1.75, fast_delta), (2.0, completed)]
+    expected_first, expected_created, expected_ttft = 250, None, 1000
+    if case == "distinct_phases":
+        blocks[:0] = [
+            (0.75, 'event: response.in_progress\ndata: {"type":"response.in_progress"}\n\n'),
+            (1.0, created),
+        ]
+        expected_created = 500
+    elif case == "zero_created":
+        blocks[:0] = [(0.5, created), (0.75, created)]
+        expected_first = expected_created = 0
+    elif case == "missing_created":
+        blocks[0] = (0.75, delta)
+        expected_ttft = 250
+    elif case in {"empty", "no_headers"}:
+        blocks = []
+        expected_first = expected_ttft = None
+    elif case == "oversized":
+        monkeypatch.setattr(proxy_client_module.get_settings(), "max_sse_event_bytes", 1024)
+        blocks = [(0.75, 'data: {"type":"response.output_text.delta","delta":"' + "x" * 2048 + '"}\n\n')]
+        expected_first = expected_ttft = None
+    elif case == "normalized_upstream_error":
+        blocks = [
+            (0.75, 'data: {"error":{"code":"server_error","message":"Upstream failure","type":"server_error"}}\n\n')
+        ]
+        expected_ttft = None
+    else:
+        blocks = [
+            (
+                0.75,
+                'event: response.failed\ndata: {"type":"response.failed","response":{"id":"resp_http_phase",'
+                '"error":{"code":"stream_incomplete","message":"Upstream failure","type":"server_error"}}}\n\n',
+            )
+        ]
+        expected_ttft = None
+
+    class ScriptedContent:
+        async def iter_chunked(self, _size):
+            for offset, block in blocks:
+                clock.now = started_at + offset
+                yield block.encode()
+
+    class ScriptedResponse:
+        status = 200
+        headers = {"content-type": "text/event-stream"}
+        content = ScriptedContent()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    calls = 0
+
+    def scripted_post(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if case == "no_headers":
+            raise proxy_client_module.aiohttp.SocketTimeoutError("Timeout on reading data from socket")
+        return ScriptedResponse()
+
+    monkeypatch.setattr(get_http_client().session, "post", scripted_post)
+    parsed_lines: list[str] = []
+    parse = streaming_helpers_module.parse_sse_data_json
+
+    def observed_parse(line: str):
+        parsed_lines.append(line)
+        return parse(line)
+
+    monkeypatch.setattr(streaming_helpers_module, "parse_sse_data_json", observed_parse)
+
+    def phase_samples() -> dict[tuple[str, str], float]:
+        metric = request_log_module.proxy_phase_latency_seconds
+        if metric is None:
+            return {}
+        return {
+            (sample.name, sample.labels["phase"]): float(sample.value)
+            for family in cast(Any, metric).collect()
+            for sample in family.samples
+            if sample.name.endswith(("_sum", "_count"))
+            and sample.labels["transport"] == "http"
+            and sample.labels["upstream_transport"] == "http"
+            and sample.labels["model_class"] == _extract_model_class("gpt-5.4")
+        }
+
+    before_metrics = phase_samples()
+
+    async def request():
+        return await async_client.post(
+            "/v1/responses"
+            if case in {"empty", "no_headers", "oversized", "normalized_upstream_error"}
+            else "/backend-api/codex/responses",
+            json={"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True},
+            headers={"user-agent": "codex_cli_rs/0.153.2", "x-request-id": "req_http_phase"},
+        )
+
+    response = await request()
+    assert calls == 1
+    assert await service.drain_persistence_tasks(timeout_seconds=5)
+    async with SessionLocal() as session:
+        rows = (await session.execute(select(RequestLog).where(RequestLog.account_id.is_not(None)))).scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.latency_queue_ms == 500
+    assert row.latency_first_token_ms == expected_ttft
+    assert row.latency_first_upstream_event_ms == expected_first
+    assert row.latency_response_created_ms == expected_created
+    if expected_ttft is not None:
+        assert response is not None
+        assert response.status_code == 200
+        assert fast_delta not in parsed_lines, "Later token frames must bypass payload parsing"
+        assert fast_delta in response.text
+    after_metrics = phase_samples()
+    if request_log_module.PROMETHEUS_AVAILABLE:
+        for phase, expected in (("first_upstream_event", expected_first), ("response_created", expected_created)):
+            count_key = ("codex_lb_proxy_phase_latency_seconds_count", phase)
+            sum_key = ("codex_lb_proxy_phase_latency_seconds_sum", phase)
+            assert after_metrics.get(count_key, 0) - before_metrics.get(count_key, 0) == (expected is not None)
+            assert after_metrics.get(sum_key, 0) - before_metrics.get(sum_key, 0) == pytest.approx(
+                (expected or 0) / 1000
+            )
 
 
 def _encode_jwt(payload: dict) -> str:
@@ -1721,6 +1904,225 @@ async def test_v1_responses_previous_response_owner_lookup_failure_without_http_
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "upstream_unavailable"
     assert response.json()["error"]["message"] == "Previous response owner lookup failed; retry later."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "delivery_point",
+    [
+        "created",
+        "completed",
+        "in_progress",
+        "queued_json",
+        "in_progress_json",
+        "synthetic",
+        "oversized",
+        "normalized_error",
+    ],
+)
+async def test_http_previous_response_owner_is_ready_before_persistence(
+    app_instance, monkeypatch: pytest.MonkeyPatch, delivery_point: str
+):
+    """Real sockets expose the ID while its originating log cannot exist yet."""
+    import uvicorn
+    from aiohttp import web
+
+    from app.core.config.settings import get_settings
+
+    dashboard_settings = await proxy_module.get_settings_cache().get()
+    dashboard_settings.upstream_stream_transport = "http"
+    origin_accounts: list[str | None] = []
+    finish_origin = asyncio.Event()
+    persist_started = asyncio.Event()
+    finish_persistence = asyncio.Event()
+    background_json = delivery_point.endswith("_json")
+    synthesized_id = delivery_point in {"synthetic", "oversized", "normalized_error"}
+    anchor_id = "req_http_owner_unobserved" if synthesized_id else "resp_http_owner_before_persistence"
+    original_persist = proxy_module.ProxyService._persist_request_log
+
+    async def delayed_persist(self, **kwargs):
+        if kwargs["request_id"] == anchor_id:
+            persist_started.set()
+            await finish_persistence.wait()
+        await original_persist(self, **kwargs)
+
+    async def upstream(request: web.Request) -> web.StreamResponse:
+        payload = await request.json()
+        origin_accounts.append(request.headers.get("chatgpt-account-id"))
+        followup = payload.get("previous_response_id") is not None
+        response_id = "resp_http_owner_followup" if followup else anchor_id
+        if background_json and not followup:
+            assert payload["stream"] is False
+            assert payload["background"] is True
+            return web.json_response(
+                {"id": response_id, "object": "response", "status": delivery_point.removesuffix("_json"), "output": []}
+            )
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        if synthesized_id:
+            if delivery_point == "oversized":
+                await response.write(b"data: " + b"x" * 2048 + b"\n\n")
+            elif delivery_point == "normalized_error":
+                await response.write(
+                    (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "type": "error",
+                                "error": {
+                                    "type": "server_error",
+                                    "code": "upstream_error",
+                                    "message": "origin failure",
+                                },
+                            }
+                        )
+                        + "\n\n"
+                    ).encode()
+                )
+            await response.write_eof()
+            return response
+        if not followup:
+            if delivery_point in {"created", "in_progress"}:
+                if delivery_point == "in_progress":
+                    await response.write(b'data: {"type":"response.output_text.delta","delta":"hello"}\n\n')
+                event = {"type": f"response.{delivery_point}", "response": {"id": response_id, "status": "in_progress"}}
+            else:
+                # The supported no-created stream exposes its ID in a later terminal event.
+                event = {"type": "response.output_text.delta", "delta": "hello"}
+            await response.write(("data: " + json.dumps(event) + "\n\n").encode())
+            if delivery_point in {"created", "in_progress"}:
+                await finish_origin.wait()
+        await response.write(
+            (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "object": "response",
+                            "status": "completed",
+                            "output": [],
+                            "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
+                        },
+                    }
+                )
+                + "\n\n"
+            ).encode()
+        )
+        await response.write_eof()
+        return response
+
+    origin_app = web.Application()
+    origin_app.router.add_post("/codex/responses", upstream)
+    runner = web.AppRunner(origin_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    origin_port = runner.addresses[0][1]
+    monkeypatch.setenv("CODEX_LB_UPSTREAM_BASE_URL", f"http://127.0.0.1:{origin_port}")
+    monkeypatch.setenv("CODEX_LB_UPSTREAM_STREAM_TRANSPORT", "http")
+    monkeypatch.setenv("CODEX_LB_MAX_SSE_EVENT_BYTES", "1024")
+    get_settings.cache_clear()
+    monkeypatch.setattr(proxy_module, "get_settings", get_settings)
+    monkeypatch.setattr(proxy_module.ProxyService, "_persist_request_log", delayed_persist)
+    server = uvicorn.Server(uvicorn.Config(app_instance, host="127.0.0.1", port=0, log_level="warning"))
+    serve_task = asyncio.create_task(server.serve())
+    try:
+        async with asyncio.timeout(10):
+            while not server.started:
+                if serve_task.done():
+                    await serve_task
+                await asyncio.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        async with AsyncClient(base_url=f"http://127.0.0.1:{port}", timeout=10) as client:
+            for number in range(2):
+                auth = _make_auth_json(f"acc_http_owner_{number}", f"http-owner-{number}@example.com")
+                imported = await client.post(
+                    "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth), "application/json")}
+                )
+                assert imported.status_code == 200
+            async with client.stream(
+                "POST",
+                "/backend-api/codex/responses" if background_json else "/v1/responses",
+                json={
+                    "model": "gpt-5.4",
+                    "input": "start",
+                    "stream": not background_json,
+                    **({"background": True, "instructions": "hi"} if background_json else {}),
+                },
+                headers={
+                    "session_id": "sid_http_owner_before_persistence",
+                    "x-request-id": anchor_id if synthesized_id else "req_http_owner_start",
+                },
+            ) as first:
+                try:
+                    if synthesized_id:
+                        await first.aread()
+                        assert first.status_code == 200
+                        failure = next(
+                            event
+                            for event in _iter_sse_events(first.text.splitlines())
+                            if event["type"] == "response.failed"
+                        )
+                        assert failure["response"]["id"] == anchor_id
+                        await asyncio.wait_for(persist_started.wait(), 5)
+                        attempts = len(origin_accounts)
+                        followup = await client.post(
+                            "/v1/responses",
+                            json={"model": "gpt-5.4", "input": "continue", "previous_response_id": anchor_id},
+                            headers={"session_id": "sid_http_owner_before_persistence"},
+                        )
+                        assert followup.status_code == 502
+                        assert followup.json()["error"]["code"] == "previous_response_owner_unavailable"
+                        assert len(origin_accounts) == attempts
+                        return
+                    assert first.status_code == 200
+                    if background_json:
+                        await first.aread()
+                        assert first.json()["id"] == anchor_id
+                        assert first.json()["status"] == delivery_point.removesuffix("_json")
+                        await asyncio.wait_for(persist_started.wait(), 5)
+                    else:
+                        lines = first.aiter_lines()
+                        async for line in lines:
+                            if not line.startswith("data: "):
+                                continue
+                            event = json.loads(line[6:])
+                            if event.get("type") == f"response.{delivery_point}":
+                                if event.get("response", {}).get("id") == anchor_id:
+                                    break
+                        else:
+                            pytest.fail("the upstream response ID was never delivered")
+                        if delivery_point == "completed":
+                            _ = [line async for line in lines]
+                            await asyncio.wait_for(persist_started.wait(), 5)
+                        else:
+                            assert not persist_started.is_set()
+                    async with SessionLocal() as session:
+                        assert (
+                            await session.execute(select(RequestLog).where(RequestLog.request_id == anchor_id))
+                        ).scalar_one_or_none() is None
+                    second = await client.post(
+                        "/v1/responses",
+                        json={"model": "gpt-5.4", "input": "continue", "previous_response_id": anchor_id},
+                        headers={"session_id": "sid_http_owner_before_persistence"},
+                    )
+                    assert second.status_code == 200, second.text
+                    assert second.json()["id"] == "resp_http_owner_followup"
+                    assert len(origin_accounts) == 2
+                    assert origin_accounts[0] in {"acc_http_owner_0", "acc_http_owner_1"}
+                    assert origin_accounts[0] == origin_accounts[1]
+                finally:
+                    finish_origin.set()
+                    finish_persistence.set()
+    finally:
+        finish_origin.set()
+        finish_persistence.set()
+        server.should_exit = True
+        await asyncio.wait_for(serve_task, 10)
+        await runner.cleanup()
+        get_settings.cache_clear()
 
 
 @pytest.mark.asyncio

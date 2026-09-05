@@ -12,6 +12,6 @@
 ## 3. Validate and prepare delivery
 
 - [ ] 3.1 Run `uv run pytest tests/unit/test_db_session.py tests/unit/test_defer_cancellation_shield_leak.py tests/unit/test_graceful_shutdown.py -q`, including the new real-worker nodes; run `make lint` and `make typecheck`.
-- [ ] 3.2 Strictly validate `prevent-ssl-starvation-false-reclaim`, `bound-sqlite-wedged-teardown` and all main specs; verify/sync and archive only after implementation acceptance.
+- [ ] 3.2 Run `npx --yes @fission-ai/openspec@1.11.0 validate prevent-ssl-starvation-false-reclaim --strict --no-interactive`, `npx --yes @fission-ai/openspec@1.11.0 validate bound-sqlite-wedged-teardown --strict --no-interactive` and `npx --yes @fission-ai/openspec@1.11.0 validate --specs --strict --no-interactive`; use the CI-pinned version for verification/sync and archive only after implementation acceptance.
 - [ ] 3.3 Refresh the exact PR worktree index/content witness, run `gitnexus detect-changes --scope all --repo /Users/dpearson/repos/codex-lb/.agents/worktrees/pr-2030`, confirm only DB product/test changes remain relative to pinned main, and commit the cohesive remediation locally.
 - [ ] 3.4 Include the accepted PR head in the later local integration build and combined wheel validation; no installation or live-service restart.

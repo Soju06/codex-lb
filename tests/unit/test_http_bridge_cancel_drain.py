@@ -359,6 +359,43 @@ async def test_cancelled_task_cleanup_is_scheduler_owned() -> None:
 
 
 @pytest.mark.asyncio
+async def test_await_cancelled_task_reports_settled_child_at_zero_timeout(caplog: pytest.LogCaptureFixture) -> None:
+    """An already-settled child is reported done even with no time budget left.
+
+    ``asyncio.wait({task}, timeout=0)`` reports a done task as done; the
+    takeover branch's ``wait_for(asyncio.wait(...), timeout=0)`` shape raised
+    ``TimeoutError`` instead, tracked the settled child as a stubborn cleanup
+    and returned ``False``. Both the virtual and the real scheduler must keep
+    main's answer.
+    """
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+
+    async def finished() -> str:
+        return "done"
+
+    for candidate in (scheduler, http_bridge_helpers.REAL_SCHEDULER):
+        cleanup_tasks: set[asyncio.Task[None]] = set()
+        child = scheduler.create_task(finished())
+        await scheduler.drain()
+        assert child.done()
+
+        with caplog.at_level(logging.WARNING):
+            result = await http_bridge_helpers._await_cancelled_task(
+                child,
+                timeout_seconds=0.0,
+                label="settled child",
+                cleanup_tasks=cleanup_tasks,
+                scheduler=candidate,
+            )
+
+        assert result is True
+        assert cleanup_tasks == set()
+        assert "Timed out waiting for settled child cancellation" not in caplog.text
+    assert scheduler.pending_timers == 0
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_reader_child_uses_owner_scheduler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

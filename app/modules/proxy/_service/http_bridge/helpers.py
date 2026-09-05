@@ -2708,17 +2708,7 @@ async def _await_cancelled_task(
     if cancel:
         task.cancel()
     try:
-        await scheduler.wait_for(asyncio.wait({task}), timeout=effective_timeout)
-    except TimeoutError:
-        logger.warning("Timed out waiting for %s cancellation", label)
-        _cancel_and_track_cancelled_task(
-            task,
-            label=label,
-            cleanup_tasks=cleanup_tasks,
-            cancel_task=False,
-            scheduler=scheduler,
-        )
-        return False
+        done, _ = await scheduler.wait({task}, timeout=effective_timeout)
     except asyncio.CancelledError:
         if not task.done():
             _cancel_and_track_cancelled_task(
@@ -2729,6 +2719,16 @@ async def _await_cancelled_task(
                 scheduler=scheduler,
             )
         raise
+    if task not in done:
+        logger.warning("Timed out waiting for %s cancellation", label)
+        _cancel_and_track_cancelled_task(
+            task,
+            label=label,
+            cleanup_tasks=cleanup_tasks,
+            cancel_task=False,
+            scheduler=scheduler,
+        )
+        return False
     try:
         task.result()
     except asyncio.CancelledError:

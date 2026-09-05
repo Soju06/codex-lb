@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator, Callable, Mapping
+from typing import cast
 
 from app.core.errors import ResponseFailedEvent
 from app.core.types import JsonValue
@@ -156,24 +157,34 @@ class ParsedSseBlock(str):
     chain of stream stages parses each block once. The payload object is shared
     by every stage that receives the block: consumers MUST treat it as read-only
     and copy before mutating. Derived strings (``strip()``, concatenation) are
-    plain ``str`` and take the full parse path again.
+    plain ``str`` and take the full parse path again. ``is_local`` records a
+    producer-generated block without changing its wire payload or retry markers.
     """
 
     # ``__slots__`` is not supported on ``str`` subclasses; the instance dict
     # costs ~100-200 B per block, far less than a redundant JSON parse.
     payload: dict[str, JsonValue] | None
+    is_local: bool
 
-    def __new__(cls, block: str, payload: dict[str, JsonValue] | None) -> ParsedSseBlock:
+    def __new__(cls, block: str, payload: dict[str, JsonValue] | None, *, is_local: bool = False) -> ParsedSseBlock:
         instance = super().__new__(cls, block)
         instance.payload = payload
+        instance.is_local = is_local
         return instance
+
+
+def format_local_sse_event(payload: dict[str, JsonValue] | ResponseFailedEvent) -> ParsedSseBlock:
+    """Frame a locally generated event with provenance confined to the carrier."""
+    return ParsedSseBlock(format_sse_event(payload), cast(dict[str, JsonValue], payload), is_local=True)
 
 
 def sse_block_with_payload(event_block: str, payload: dict[str, JsonValue] | None) -> ParsedSseBlock:
     """Attach ``payload`` (the result of ``parse_sse_data_json(event_block)``) to the block."""
     if isinstance(event_block, ParsedSseBlock) and event_block.payload is payload:
         return event_block
-    return ParsedSseBlock(event_block, payload)
+    return ParsedSseBlock(
+        event_block, payload, is_local=isinstance(event_block, ParsedSseBlock) and event_block.is_local
+    )
 
 
 def parse_sse_data_json_text(text: str) -> dict[str, JsonValue] | None:

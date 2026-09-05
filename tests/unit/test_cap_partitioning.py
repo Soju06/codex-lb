@@ -393,8 +393,9 @@ async def test_refresh_cap_partition_retains_partition_on_failed_read(
     async def _failing_list_active() -> list[str]:
         raise RuntimeError("db unavailable")
 
-    await refresh_cap_partition(_failing_list_active, "replica-a")
+    refreshed = await refresh_cap_partition(_failing_list_active, "replica-a")
 
+    assert refreshed is False
     assert get_cap_partition() == CapPartition(replica_count=2, rank=0)
 
 
@@ -473,8 +474,9 @@ async def test_refresh_cap_partition_reads_active_members(monkeypatch: pytest.Mo
     async def _list_active() -> list[str]:
         return ["replica-a", "replica-b", "replica-c"]
 
-    await refresh_cap_partition(_list_active, "replica-b")
+    refreshed = await refresh_cap_partition(_list_active, "replica-b")
 
+    assert refreshed is True
     assert get_cap_partition() == CapPartition(replica_count=3, rank=1)
 
 

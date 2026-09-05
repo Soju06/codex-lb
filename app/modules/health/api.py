@@ -4,15 +4,18 @@ import math
 from datetime import timedelta
 from hashlib import sha256
 from ipaddress import ip_address
+from typing import cast
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy import or_ as sa_or
 from sqlalchemy import select as sa_select
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
 from app.core.shutdown import DRAIN_DEADLINE_HEADER
-from app.core.utils.time import utcnow
+from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import BridgeRingMember
 from app.db.session import get_session
 from app.modules.health.schemas import BridgeRingInfo, HealthCheckResponse, HealthResponse
@@ -70,6 +73,17 @@ async def health_ready() -> HealthCheckResponse:
 
                 bridge_ring = await _get_bridge_ring_info(session)
                 failure_detail = _bridge_readiness_failure_detail(bridge_ring)
+                if failure_detail in {
+                    "Service is not an active bridge ring member",
+                    "Service bridge ring metadata is unavailable",
+                }:
+                    payload = HealthCheckResponse(
+                        status="unavailable",
+                        checks=checks,
+                        bridge_ring=bridge_ring,
+                    ).model_dump(mode="json")
+                    payload["detail"] = failure_detail
+                    return cast(HealthCheckResponse, JSONResponse(status_code=503, content=payload))
                 if failure_detail is not None:
                     raise HTTPException(status_code=503, detail=failure_detail)
 
@@ -191,8 +205,6 @@ def _bridge_readiness_failure_detail(bridge_ring: BridgeRingInfo) -> str | None:
         return "Service bridge registration is not complete"
     if bridge_ring.error is not None:
         return "Service bridge ring metadata is unavailable"
-    if bridge_ring.ring_size == 0:
-        return None
     if bridge_ring.is_member:
         return None
     return "Service is not an active bridge ring member"
@@ -203,14 +215,32 @@ async def _get_bridge_ring_info(session: AsyncSession) -> BridgeRingInfo:
         settings = get_settings()
         instance_id = getattr(settings, "http_responses_session_bridge_instance_id", None)
 
-        cutoff = utcnow() - timedelta(seconds=RING_STALE_THRESHOLD_SECONDS)
-        result = await session.execute(
-            sa_select(BridgeRingMember.instance_id)
-            .where(BridgeRingMember.last_heartbeat_at >= cutoff)
-            .order_by(BridgeRingMember.instance_id)
+        now = utcnow()
+        cutoff = now - timedelta(seconds=RING_STALE_THRESHOLD_SECONDS)
+        statement = sa_select(
+            BridgeRingMember.instance_id,
+            BridgeRingMember.last_heartbeat_at,
         )
-        active_members = list(result.scalars().all())
-        data = ",".join(sorted(active_members))
+        if instance_id:
+            statement = statement.where(
+                sa_or(
+                    BridgeRingMember.last_heartbeat_at >= cutoff,
+                    BridgeRingMember.instance_id == instance_id,
+                )
+            )
+        else:
+            statement = statement.where(BridgeRingMember.last_heartbeat_at >= cutoff)
+        result = await session.execute(statement.order_by(BridgeRingMember.instance_id))
+        rows = [(member_id, to_utc_naive(heartbeat_at)) for member_id, heartbeat_at in result.all()]
+        active_members = [member_id for member_id, heartbeat_at in rows if heartbeat_at >= cutoff]
+        local_heartbeat_at = next(
+            (heartbeat_at for member_id, heartbeat_at in rows if member_id == instance_id),
+            None,
+        )
+        heartbeat_age_seconds = (
+            max((now - local_heartbeat_at).total_seconds(), 0.0) if local_heartbeat_at is not None else None
+        )
+        data = ",".join(active_members)
         fingerprint = sha256(data.encode()).hexdigest()
         is_member = instance_id in active_members if instance_id else False
 
@@ -219,6 +249,7 @@ async def _get_bridge_ring_info(session: AsyncSession) -> BridgeRingInfo:
             ring_size=len(active_members),
             instance_id=instance_id,
             is_member=is_member,
+            heartbeat_age_seconds=heartbeat_age_seconds,
         )
     except Exception as e:
         return BridgeRingInfo(

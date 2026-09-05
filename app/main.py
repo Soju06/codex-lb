@@ -7,7 +7,7 @@ import os
 import stat
 import sys
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from functools import lru_cache
@@ -18,6 +18,7 @@ from typing import Any, Protocol, cast
 from urllib.parse import urlparse
 
 import aiohttp
+import anyio
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from starlette.staticfiles import StaticFiles
@@ -76,6 +77,7 @@ from app.core.timeout_invariants import validate_runtime_timeout_invariants, val
 from app.core.usage.metadata_scheduler import build_metadata_refresh_scheduler
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
+from app.core.utils.cancellation import await_task_deferring_cancellation
 from app.core.utils.time import utcnow
 from app.db.session import (
     SessionLocal,
@@ -117,6 +119,7 @@ from app.modules.proxy.durable_bridge_repository import (
 )
 from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
+from app.modules.proxy.ring_lifecycle import BridgeRingPeriodicLifecycle, stop_bridge_periodic_work
 from app.modules.proxy.ring_membership import (
     RING_HEARTBEAT_INTERVAL_SECONDS,
     RING_STALE_GRACE_SECONDS,
@@ -176,30 +179,43 @@ def _ensure_web_asset_mime_types() -> None:
 _ensure_web_asset_mime_types()
 
 
-async def run_http_bridge_heartbeat_maintenance(proxy_service: Any) -> None:
-    """Per-replica bridge upkeep driven by the ring heartbeat.
+async def run_http_bridge_durable_ownership_maintenance(proxy_service: Any) -> None:
+    """Run durable ownership and stale-operation reconciliation independently."""
 
-    All passes are request-independent by design: durable ownership must be
-    reconciled even on a replica nothing is routing to, and the idle sweep is
-    otherwise only reached from ``_get_or_create_http_bridge_session``, so a
-    replica that stops taking bridge requests would keep its idle sessions'
-    upstream WebSockets open until restart (issue #1354). Each pass is isolated
-    so one failing cannot skip the others or stop the heartbeat.
-    """
     if proxy_service is None:
         return
+    failures: list[Exception] = []
     for attribute, failure_message in (
         ("reconcile_durable_http_bridge_ownership", "HTTP bridge durable ownership reconciliation failed"),
         ("abandon_stale_http_bridge_operations", "HTTP bridge stale operation abandonment failed"),
-        ("prune_idle_http_bridge_sessions", "HTTP bridge idle sweep failed"),
     ):
         pass_callable = getattr(proxy_service, attribute, None)
         if pass_callable is None:
             continue
         try:
             await pass_callable()
-        except Exception:
+        except Exception as exc:
             logger.warning(failure_message, exc_info=True)
+            failures.append(exc)
+    if failures:
+        raise RuntimeError("HTTP bridge durable ownership maintenance failed") from failures[0]
+
+
+async def run_http_bridge_idle_sweep_maintenance(proxy_service: Any) -> None:
+    """Sweep idle bridge sessions when the service supports it."""
+
+    if proxy_service is None:
+        return
+    sweep = getattr(proxy_service, "prune_idle_http_bridge_sessions", None)
+    if sweep is not None:
+        await sweep()
+
+
+async def run_cap_partition_maintenance(svc: RingMembershipService, instance_id: str) -> None:
+    """Refresh cap partitioning while surfacing retained-read failures."""
+
+    if not await refresh_cap_partition(svc.list_active, instance_id):
+        raise RuntimeError("bridge cap-partition membership read failed")
 
 
 def _log_abandoned_lease_release(task: asyncio.Task[bool]) -> None:
@@ -240,6 +256,86 @@ async def _release_leader_lease_within(timeout: float) -> bool:
         return False
     if release_task.result() is False:
         logger.warning("Scheduler leader lease release did not complete; suppressing the SQLite clean marker")
+        return False
+    return True
+
+
+async def _run_owned_lifespan_shutdown(
+    shutdown: Callable[[], Coroutine[Any, Any, None]],
+) -> asyncio.CancelledError | None:
+    """Run the complete ordered lifespan cleanup before propagating cancellation."""
+
+    with anyio.CancelScope(shield=True):
+        shutdown_task = asyncio.create_task(
+            shutdown(),
+            name="application-lifespan-shutdown",
+        )
+        _, cancellation = await await_task_deferring_cancellation(shutdown_task)
+    return cancellation
+
+
+async def _shutdown_bridge_ring_membership(
+    *,
+    registration_task: asyncio.Task[None] | None,
+    periodic_lifecycle: BridgeRingPeriodicLifecycle | None,
+    ring_service: RingMembershipService | None,
+    instance_id: str | None,
+) -> tuple[bool, asyncio.CancelledError | None]:
+    """Stop every local ring owner before deliberately aging the shared row."""
+
+    shutdown_task = asyncio.create_task(
+        _shutdown_bridge_ring_membership_impl(
+            registration_task=registration_task,
+            periodic_lifecycle=periodic_lifecycle,
+            ring_service=ring_service,
+            instance_id=instance_id,
+        ),
+        name="bridge-ring-membership-shutdown",
+    )
+    stopped, cancellation = await await_task_deferring_cancellation(shutdown_task)
+    return stopped, cancellation
+
+
+async def _shutdown_bridge_ring_membership_impl(
+    *,
+    registration_task: asyncio.Task[None] | None,
+    periodic_lifecycle: BridgeRingPeriodicLifecycle | None,
+    ring_service: RingMembershipService | None,
+    instance_id: str | None,
+) -> bool:
+    periodic_shutdown = await stop_bridge_periodic_work(
+        registration_task,
+        periodic_lifecycle,
+        timeout_seconds=2,
+    )
+    if not periodic_shutdown.all_stopped:
+        logger.warning(
+            "Bridge periodic work did not stop within shutdown deadline; allowing membership to expire",
+            extra={
+                "phase": "shutdown",
+                "outcome": "timeout",
+                "heartbeat_stopped": periodic_shutdown.heartbeat_stopped,
+                "registration_stopped": periodic_shutdown.registration_stopped,
+            },
+        )
+        return False
+    if ring_service is None or instance_id is None:
+        return True
+    try:
+        await asyncio.wait_for(
+            ring_service.mark_stale(
+                instance_id,
+                stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
+                grace_seconds=RING_STALE_GRACE_SECONDS,
+            ),
+            timeout=3,
+        )
+        logger.info(
+            "Marked bridge ring membership stale for shutdown",
+            extra={"instance_id": instance_id},
+        )
+    except Exception:
+        logger.warning("Failed to mark bridge ring membership stale during shutdown", exc_info=True)
         return False
     return True
 
@@ -499,7 +595,6 @@ async def lifespan(app: FastAPI):
     metrics_server = None
     metrics_server_task: asyncio.Task[None] | None = None
     ring_service = None
-    heartbeat_task: asyncio.Task[None] | None = None
     instance_id = None
 
     shutdown_state.prepare_lifespan_start()
@@ -771,17 +866,11 @@ async def lifespan(app: FastAPI):
         await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
         startup_module.mark_bridge_registration_complete()
 
-    async def _heartbeat_only(svc: RingMembershipService, iid: str) -> None:
-        while True:
-            await asyncio.sleep(RING_HEARTBEAT_INTERVAL_SECONDS)
-            try:
-                await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
-            except Exception:
-                logger.warning("Ring heartbeat failed", exc_info=True)
-            await run_http_bridge_heartbeat_maintenance(getattr(app.state, "proxy_service", None))
-            await refresh_cap_partition(svc.list_active, iid)
+    bridge_periodic_lifecycle: BridgeRingPeriodicLifecycle | None = None
+    bridge_periodic_stop_requested = asyncio.Event()
 
-    async def _register_and_heartbeat(svc: RingMembershipService, iid: str) -> None:
+    async def _register_and_start_periodic_work(svc: RingMembershipService, iid: str) -> None:
+        nonlocal bridge_periodic_lifecycle
         attempt = 0
         while True:
             attempt += 1
@@ -793,8 +882,33 @@ async def lifespan(app: FastAPI):
                 delay = min(5.0 * (2 ** min(attempt - 1, 5)), 60.0)
                 logger.warning("Ring registration attempt %d failed, retrying in %.0fs", attempt, delay, exc_info=True)
                 await asyncio.sleep(delay)
-        await refresh_cap_partition(svc.list_active, iid)
-        await _heartbeat_only(svc, iid)
+
+        # Shutdown can time out while cancellation-safe database teardown still
+        # owns the registration task. Re-check the latch without an intervening
+        # await so no periodic lifecycle can start after shutdown snapshots it.
+        if bridge_periodic_stop_requested.is_set():
+            return
+
+        async def _heartbeat() -> None:
+            await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
+
+        async def _durable_ownership() -> None:
+            await run_http_bridge_durable_ownership_maintenance(getattr(app.state, "proxy_service", None))
+
+        async def _idle_sweep() -> None:
+            await run_http_bridge_idle_sweep_maintenance(getattr(app.state, "proxy_service", None))
+
+        async def _cap_partition() -> None:
+            await run_cap_partition_maintenance(svc, iid)
+
+        bridge_periodic_lifecycle = BridgeRingPeriodicLifecycle(
+            heartbeat=_heartbeat,
+            durable_ownership=_durable_ownership,
+            idle_sweep=_idle_sweep,
+            cap_partition=_cap_partition,
+        )
+        bridge_periodic_lifecycle.start()
+        await asyncio.Future()
 
     async def _activate_bridge_membership(svc: RingMembershipService, iid: str) -> None:
         if bridge_endpoint_base_url is None:
@@ -804,10 +918,13 @@ async def lifespan(app: FastAPI):
 
     ring_service: RingMembershipService | None = None
     instance_id: str | None = None
-    heartbeat_task: asyncio.Task[None] | None = None
+    bridge_registration_task: asyncio.Task[None] | None = None
     ring_service = RingMembershipService(SessionLocal)
     instance_id = settings.http_responses_session_bridge_instance_id
-    heartbeat_task = asyncio.create_task(_register_and_heartbeat(ring_service, instance_id))
+    bridge_registration_task = asyncio.create_task(
+        _register_and_start_periodic_work(ring_service, instance_id),
+        name="bridge-ring-registration",
+    )
     loop_lag_task: asyncio.Task[None] | None = None
     if settings.event_loop_lag_warn_threshold_seconds > 0:
         loop_lag_task = asyncio.create_task(
@@ -817,9 +934,7 @@ async def lifespan(app: FastAPI):
         )
     startup_module._startup_complete = True
 
-    try:
-        yield
-    finally:
+    async def _shutdown_lifespan() -> None:
         shutdown_state.commit_shutdown(timeout_seconds=settings.shutdown_drain_timeout_seconds)
         remaining_drain_seconds = shutdown_state.remaining_drain_timeout_seconds() or 0.0
         drained = await shutdown_state.wait_for_in_flight_drain(timeout_seconds=remaining_drain_seconds)
@@ -860,13 +975,15 @@ async def lifespan(app: FastAPI):
         )
         database_tasks_drained = database_tasks_drained and final_proxy_persistence_drained
 
-        # Cancel heartbeat and age the shared ring row near expiry.
-        if heartbeat_task is not None:
-            heartbeat_task.cancel()
-            try:
-                await asyncio.wait_for(heartbeat_task, timeout=2)
-            except (asyncio.CancelledError, TimeoutError):
-                pass
+        # Stop registration and every periodic owner before aging the shared
+        # row. If any owner cannot drain, leave the row to expire naturally so
+        # a late heartbeat cannot race after an intentional stale mark.
+        _, bridge_shutdown_cancellation = await _shutdown_bridge_ring_membership(
+            registration_task=bridge_registration_task,
+            periodic_lifecycle=bridge_periodic_lifecycle,
+            ring_service=ring_service,
+            instance_id=instance_id,
+        )
 
         if loop_lag_task is not None:
             loop_lag_task.cancel()
@@ -874,23 +991,6 @@ async def lifespan(app: FastAPI):
                 await asyncio.wait_for(loop_lag_task, timeout=2)
             except (asyncio.CancelledError, TimeoutError):
                 pass
-
-        if ring_service is not None and instance_id is not None:
-            try:
-                await asyncio.wait_for(
-                    ring_service.mark_stale(
-                        instance_id,
-                        stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
-                        grace_seconds=RING_STALE_GRACE_SECONDS,
-                    ),
-                    timeout=3,
-                )
-                logger.info(
-                    "Marked bridge ring membership stale for shutdown",
-                    extra={"instance_id": instance_id},
-                )
-            except Exception:
-                logger.warning("Failed to mark bridge ring membership stale during shutdown", exc_info=True)
 
         if metrics_server is not None:
             metrics_server.should_exit = True
@@ -975,6 +1075,19 @@ async def lifespan(app: FastAPI):
                     )
                 finally:
                     shutdown_state.mark_lifespan_completed()
+        if bridge_shutdown_cancellation is not None:
+            raise bridge_shutdown_cancellation
+
+    try:
+        yield
+    finally:
+        # Close the startup race before the independently owned shutdown task
+        # reaches its first await. A cancellation-suppressing registration can
+        # no longer create periodic workers after shutdown has begun.
+        bridge_periodic_stop_requested.set()
+        shutdown_cancellation = await _run_owned_lifespan_shutdown(_shutdown_lifespan)
+        if shutdown_cancellation is not None:
+            raise shutdown_cancellation
 
 
 def create_app() -> FastAPI:

@@ -2125,6 +2125,8 @@ def test_host_automation_heartbeat_is_account_neutral_fresh_input() -> None:
         ("name", "other_tool"),
         ("namespace", "other_host"),
         ("output", "ordinary tool output"),
+        ("output", "<heartbeat></heartbeat>trailing-data"),
+        ("output", "<heartbeat></heartbeat></heartbeat>"),
         ("call_id", "call_owner_bound"),
     ],
 )
@@ -2140,6 +2142,21 @@ def test_noncanonical_host_automation_output_is_not_account_neutral(field: str, 
         },
     }
     heartbeat[field] = value
+
+    assert not responses_payload_is_account_neutral_fresh_replay({"input": [heartbeat]})
+
+
+def test_host_automation_heartbeat_rejects_oversized_create_time() -> None:
+    heartbeat: JsonValue = {
+        "type": "function_call_output",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn_current",
+            "create_time": 10**400,
+        },
+    }
 
     assert not responses_payload_is_account_neutral_fresh_replay({"input": [heartbeat]})
 

@@ -967,10 +967,71 @@ async def test_stream_previsible_429_replays_scheduled_heartbeat_on_another_acco
     assert isinstance(replay_input, list)
     assert all(isinstance(item, dict) and "id" not in item for item in replay_input)
     assert all(item.get("type") != "reasoning" for item in replay_input if isinstance(item, dict))
+    replay_message_roles = [
+        item.get("role") for item in replay_input if isinstance(item, dict) and item.get("type") in (None, "message")
+    ]
+    assert replay_message_roles == ["user", "assistant", "assistant"]
     replay_heartbeats = [
         item for item in replay_input if isinstance(item, dict) and item.get("namespace") == "codex_app"
     ]
     assert len(replay_heartbeats) == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_previsible_429_does_not_replay_malformed_scheduled_heartbeat(
+    async_client,
+    monkeypatch,
+):
+    await _import_account(async_client, "acc_bad_heartbeat_429_a", "bad-heartbeat429a@example.com")
+    await _import_account(async_client, "acc_bad_heartbeat_429_b", "bad-heartbeat429b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_bad_heartbeat_429_a":
+            raise ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "usage limit reached"),
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_bad_heartbeat_should_not_replay")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.6-sol",
+        "reasoning": {"effort": "xhigh"},
+        "prompt_cache_key": "malformed-scheduled-heartbeat",
+        "instructions": "monitor the pull request",
+        "input": [
+            {"type": "message", "id": "msg_user", "role": "user", "content": "monitor this"},
+            {
+                "type": "message",
+                "id": "msg_answer",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "Still waiting."}],
+            },
+            {
+                "type": "function_call_output",
+                "id": "host_heartbeat_malformed",
+                "name": "automation_update",
+                "namespace": "codex_app",
+                "output": "<heartbeat></heartbeat>trailing-data",
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn_current",
+                    "create_time": 1_788_526_697,
+                },
+            },
+        ],
+        "stream": True,
+    }
+    response = await async_client.post("/backend-api/codex/responses", json=payload)
+
+    assert response.status_code == 429
+    assert response.json().get("error", {}).get("code") == "usage_limit_reached"
+    assert seen_account_ids == ["acc_bad_heartbeat_429_a"]
 
 
 @pytest.mark.asyncio

@@ -218,6 +218,107 @@ async def test_metrics_middleware_records_request_metrics(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
+async def test_metrics_middleware_bounds_unmatched_path_labels(monkeypatch: pytest.MonkeyPatch) -> None:
+    prometheus_module, middleware_module = _load_metrics_modules(
+        monkeypatch,
+        prometheus_client_module=_fake_prometheus_client_module(),
+    )
+
+    app = FastAPI()
+    app.add_middleware(middleware_module.MetricsMiddleware, enabled=True)
+
+    paths = [f"/probe-{index}" for index in range(50)]
+    paths.append("/dashboard/settings/profile")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        for path in paths:
+            response = await client.get(path)
+            assert response.status_code == 404
+
+    path_values = {dict(labels)["path"] for labels in prometheus_module.requests_total.samples}
+    assert path_values == {"/other"}
+
+
+@pytest.mark.asyncio
+async def test_metrics_middleware_bounds_primary_proxy_path_labels(monkeypatch: pytest.MonkeyPatch) -> None:
+    prometheus_module, middleware_module = _load_metrics_modules(
+        monkeypatch,
+        prometheus_client_module=_fake_prometheus_client_module(),
+    )
+
+    app = FastAPI()
+    app.add_middleware(middleware_module.MetricsMiddleware, enabled=True)
+
+    paths = (
+        "/backend-api/codex/responses",
+        "/backend-api/files/file_abc/uploaded",
+        "/backend-api/files/file_xyz/uploaded",
+        "/internal/bridge/instance-123",
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        for path in paths:
+            response = await client.get(path)
+            assert response.status_code == 404
+
+    expected_path_values = {"/backend-api/...", "/internal/..."}
+    request_path_values = {dict(labels)["path"] for labels in prometheus_module.requests_total.samples}
+    duration_path_values = {dict(labels)["path"] for labels in prometheus_module.request_duration_seconds.samples}
+    assert request_path_values == expected_path_values
+    assert duration_path_values == expected_path_values
+
+
+@pytest.mark.asyncio
+async def test_metrics_middleware_classifies_mounted_proxy_path_application_relative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prometheus_module, middleware_module = _load_metrics_modules(
+        monkeypatch,
+        prometheus_client_module=_fake_prometheus_client_module(),
+    )
+
+    app = FastAPI()
+    middleware = middleware_module.MetricsMiddleware(app, enabled=True)
+    cases = (
+        ("", "/backend-api/codex/responses"),
+        ("/prefix", "/prefix/backend-api/codex/responses"),
+    )
+    for root_path, path in cases:
+        transport = ASGITransport(app=middleware, root_path=root_path)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(path)
+        assert response.status_code == 404
+
+    expected_path_values = {"/backend-api/..."}
+    request_path_values = {dict(labels)["path"] for labels in prometheus_module.requests_total.samples}
+    duration_path_values = {dict(labels)["path"] for labels in prometheus_module.request_duration_seconds.samples}
+    assert request_path_values == expected_path_values
+    assert duration_path_values == expected_path_values
+
+
+@pytest.mark.asyncio
+async def test_metrics_middleware_normalizes_unknown_method(monkeypatch: pytest.MonkeyPatch) -> None:
+    prometheus_module, middleware_module = _load_metrics_modules(
+        monkeypatch,
+        prometheus_client_module=_fake_prometheus_client_module(),
+    )
+
+    app = FastAPI()
+    app.add_middleware(middleware_module.MetricsMiddleware, enabled=True)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.request("BREW", "/unmatched")
+
+    assert response.status_code == 404
+    request_sample = prometheus_module.requests_total.samples[
+        (("method", "OTHER"), ("path", "/other"), ("status", "404"))
+    ]
+    duration_sample = prometheus_module.request_duration_seconds.samples[(("method", "OTHER"), ("path", "/other"))]
+    assert request_sample.value == 1.0
+    assert len(duration_sample.observations) == 1
+
+
+@pytest.mark.asyncio
 async def test_metrics_middleware_noops_without_prometheus_client(monkeypatch: pytest.MonkeyPatch) -> None:
     prometheus_module, middleware_module = _load_metrics_modules(monkeypatch, prometheus_client_module=None)
 

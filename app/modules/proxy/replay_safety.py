@@ -642,19 +642,27 @@ def _is_host_automation_heartbeat_input(item: Mapping[str, JsonValue]) -> bool:
     ):
         return False
     output = item.get("output")
-    if not isinstance(output, str) or not output.lstrip().startswith("<heartbeat>") or "</heartbeat>" not in output:
+    if not isinstance(output, str):
+        return False
+    stripped_output = output.strip()
+    if (
+        not stripped_output.startswith("<heartbeat>")
+        or not stripped_output.endswith("</heartbeat>")
+        or stripped_output.count("<heartbeat>") != 1
+        or stripped_output.count("</heartbeat>") != 1
+    ):
         return False
     metadata = item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD)
     if not isinstance(metadata, dict) or set(metadata) != _HOST_AUTOMATION_HEARTBEAT_METADATA_FIELDS:
         return False
     create_time = metadata.get("create_time")
-    return (
-        _is_nonblank_string(metadata.get("turn_id"))
-        and isinstance(create_time, (int, float))
-        and not isinstance(create_time, bool)
-        and math.isfinite(create_time)
-        and create_time > 0
-    )
+    if not isinstance(create_time, (int, float)) or isinstance(create_time, bool):
+        return False
+    try:
+        finite_create_time = math.isfinite(create_time)
+    except OverflowError:
+        return False
+    return _is_nonblank_string(metadata.get("turn_id")) and finite_create_time and create_time > 0
 
 
 def _is_fresh_followup_input(item: Mapping[str, JsonValue]) -> bool:

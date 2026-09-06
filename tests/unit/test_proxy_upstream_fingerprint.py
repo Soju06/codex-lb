@@ -5,6 +5,7 @@ from unittest.mock import patch
 from app.core.clients import proxy as proxy_module
 from app.core.clients.proxy import (
     _build_upstream_headers,
+    _build_upstream_transcribe_headers,
     _build_upstream_websocket_headers,
     build_codex_user_agent,
 )
@@ -282,6 +283,41 @@ def test_non_native_request_strips_x_stainless_sdk_headers():
         headers = _build_upstream_headers(inbound, "tok", None)
     assert headers["User-Agent"].startswith("codex_cli_rs/")
     assert not any(key.lower().startswith("x-stainless-") for key in headers)
+
+
+def test_non_native_transcription_request_is_rewritten_to_codex_cli_fingerprint():
+    inbound = {
+        "User-Agent": "OpenAI/JS 4.104.0",
+        "x-stainless-lang": "js",
+        "x-stainless-package-version": "4.104.0",
+        "x-openai-client-version": "4.104.0",
+        "originator": "sdk",
+        "version": "4.104.0",
+    }
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_transcribe_headers(inbound, "tok", "acct-123")
+
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
+    assert headers["originator"] == "codex_cli_rs"
+    assert headers["version"] == "0.142.0"
+    assert headers["Authorization"] == "Bearer tok"
+    assert headers["chatgpt-account-id"] == "acct-123"
+    lowered = _lower_keys(headers)
+    assert "x-openai-client-version" not in lowered
+    assert not any(key.startswith("x-stainless-") for key in lowered)
+
+
+def test_native_transcription_request_keeps_existing_fingerprint():
+    native_ua = "codex_cli_rs/0.142.0 (Mac OS 27.0.0; arm64) iTerm.app/3.6.10"
+    headers = _build_upstream_transcribe_headers(
+        {"User-Agent": native_ua, "originator": "codex_cli_rs", "version": "0.142.0"},
+        "tok",
+        "acct-123",
+    )
+
+    assert headers["User-Agent"] == native_ua
+    assert "originator" not in headers
+    assert "version" not in headers
 
 
 def test_websocket_non_native_request_strips_x_stainless_sdk_headers():

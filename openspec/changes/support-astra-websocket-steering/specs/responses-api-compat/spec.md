@@ -143,3 +143,10 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 - **THEN** the proxy SHALL suppress that late lifecycle without assigning or settling an unrelated request
 - **AND** the parent correlation SHALL survive the failed reservation release and remain valid for the upstream connection lifetime
 - **AND** an explicit create or newly admitted steering continuation for the same parent SHALL retain priority over suppression
+
+#### Scenario: Automatic successor arrives before explicit dispatch
+- **GIVEN** an explicit continuation has replaced its placeholder but has not reached upstream dispatch
+- **WHEN** an automatic successor arrives while placeholder release or account admission is awaiting
+- **THEN** that automatic lifecycle SHALL be suppressed without binding the unsent explicit request or consuming its reservation
+- **AND** the explicit request SHALL retain its payload and parent correlation until its own dispatched lifecycle settles
+- **AND** unrelated queued creates SHALL retain their identity and admission

@@ -22,3 +22,4 @@
 - [x] 3.9 Retain final-steer release failures for tracked teardown retry, including cancellation and persistent failure
 - [x] 3.10 Clear rejected unsent explicit replacements and prove a corrected continuation succeeds
 - [x] 3.11 Retain rejected parent correlation through late created events, while preserving explicit and steering retry ownership; prove full WebSocket event sequences
+- [x] 3.12 Suppress automatic successors arriving after explicit registration but before dispatch; prove placeholder-refund and account-cap await windows

@@ -1262,3 +1262,115 @@ async def test_rejected_steering_parent_allows_owned_retry(monkeypatch, retry_ki
     assert saw("response.completed", "r-retry")(socket.sent)
     assert [(entry[0], entry[3]) for entry in settled] == [("res_0", "r1"), ("res_2", "r-retry")]
     assert [call.args[0].reservation_id for call in released.await_args_list if call.args[0]] == ["res_1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoint", ["placeholder-release", "account-cap"])
+@pytest.mark.parametrize("steer_failed", [False, True], ids=["active-steer", "rejected-steer"])
+async def test_automatic_successor_cannot_claim_registered_unsent_replacement(monkeypatch, checkpoint, steer_failed):
+    call = {"type": "function_call", "call_id": "tool", "name": "slow", "arguments": "{}"}
+    result = {"type": "function_call_output", "call_id": "tool", "output": "saved"}
+    socket = ScriptedSocket(
+        [
+            (create(), lambda _: True),
+            (
+                {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"},
+                saw("response.created", "r1"),
+            ),
+            (create(parent="r1", input_items=[result]), saw("response.completed", "r1")),
+            (create(input_items="Unrelated"), saw("response.completed", "r-explicit")),
+        ]
+    )
+    socket.finish_when = lambda event: saw("response.completed", "r-unrelated")([event])
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [
+                {"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}},
+                response("response.completed", "r1", output=[call]),
+            ],
+            [
+                response("response.created", "r-explicit", parent="r1"),
+                response("response.completed", "r-explicit", parent="r1"),
+            ],
+            [response("response.created", "r-unrelated"), response("response.completed", "r-unrelated")],
+        ]
+    )
+    processed = asyncio.Event()
+    raced = False
+    states = []
+    explicit_id = None
+
+    async def race():
+        nonlocal raced
+        assert not raced
+        raced = True
+        if steer_failed:
+            upstream.messages.put_nowait(
+                SimpleNamespace(
+                    kind="text",
+                    text=json.dumps(
+                        {
+                            "type": "response.steer.failed",
+                            "steer": {"id": "s1", "previous_response_id": "r1"},
+                            "error": {"code": "successor_creation_failed", "message": "Rejected"},
+                        }
+                    ),
+                )
+            )
+        for kind in ("response.created", "response.completed"):
+            upstream.messages.put_nowait(
+                SimpleNamespace(kind="text", text=json.dumps(response(kind, "r-auto", parent="r1")))
+            )
+        await asyncio.wait_for(processed.wait(), timeout=2)
+
+    def configure(service, _account):
+        original_process = service._process_upstream_websocket_text
+        original_release = service._release_websocket_request_state_reservation
+        original_cap = service._acquire_account_response_create_lease_or_overload
+        original_admit = service._acquire_request_state_response_create_admission
+
+        async def process(text, **kwargs):
+            value = await original_process(text, **kwargs)
+            if saw("response.completed", "r-auto")([json.loads(text)]):
+                processed.set()
+            return value
+
+        async def admit(state, **kwargs):
+            nonlocal explicit_id
+            states.append(state)
+            if state.previous_response_id == "r1" and state.request_text is not None:
+                explicit_id = state.request_log_id or state.request_id
+            await original_admit(state, **kwargs)
+
+        async def release(state):
+            if (
+                checkpoint == "placeholder-release"
+                and state.steering_parent_response_id == "r1"
+                and state.request_text is None
+            ):
+                await race()
+            await original_release(state)
+
+        async def cap(**kwargs):
+            if checkpoint == "account-cap" and kwargs["request_id"] == explicit_id:
+                await race()
+            return await original_cap(**kwargs)
+
+        monkeypatch.setattr(service, "_process_upstream_websocket_text", process)
+        monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release)
+        monkeypatch.setattr(service, "_acquire_account_response_create_lease_or_overload", cap)
+        monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", admit)
+
+    _, reservations, settled, released, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
+    assert raced and processed.is_set()
+    assert not any(event.get("response", {}).get("id") == "r-auto" for event in socket.sent)
+    assert upstream.sent[2]["input"] == [result]
+    assert len(reservations) == 4
+    assert [(entry[0], entry[3]) for entry in settled] == [
+        ("res_0", "r1"),
+        ("res_2", "r-explicit"),
+        ("res_3", "r-unrelated"),
+    ]
+    assert [call.args[0].reservation_id for call in released.await_args_list if call.args[0]] == ["res_1"]
+    assert all(state.response_create_admission is None and not state.response_create_gate_acquired for state in states)

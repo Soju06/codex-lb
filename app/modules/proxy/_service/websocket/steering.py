@@ -181,6 +181,10 @@ def assign_websocket_created_request_state(
     if isinstance(parent_id, str):
         explicit = pending_explicit_create_for_parent(parent_id, pending_requests)
         if explicit is not None:
+            if explicit.response_create_sent_at is None and parent_id in control.rejected_steering_parent_ids:
+                if response_id is not None:
+                    remember_suppressed_steering_response(control, response_id)
+                return None
             explicit.response_id = response_id
             return explicit
     continuation = continuation_for_created(payload, control)
@@ -191,7 +195,9 @@ def assign_websocket_created_request_state(
             return None
         return _assign_websocket_response_id(pending_requests, response_id)
     request_state = continuation.request_state
-    if request_state not in pending_requests:
+    if request_state not in pending_requests or (
+        continuation.explicit_request_prepared and request_state.response_create_sent_at is None
+    ):
         if response_id is not None:
             remember_suppressed_steering_response(control, response_id)
         return None

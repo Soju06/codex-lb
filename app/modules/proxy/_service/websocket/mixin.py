@@ -457,6 +457,7 @@ from app.modules.proxy._service.websocket.steering import (
     consume_suppressed_steering_anonymous_terminal,
     forget_suppressed_steering_response,
     process_websocket_steering_event,
+    public_steering_app_error,
     release_steering_request,
     required_steering_input_is_present,
     steering_error,
@@ -1774,11 +1775,14 @@ class _WebSocketMixin:
                                 ValidationError,
                                 ValueError,
                             ) as exc:
-                                error = (
-                                    exc
-                                    if isinstance(exc, ProxyResponseError)
-                                    else steering_error("invalid_input", "Invalid steering request.")
-                                )
+                                if isinstance(exc, ProxyResponseError):
+                                    error = exc
+                                elif isinstance(exc, AppError):
+                                    error = public_steering_app_error(exc) or steering_error(
+                                        "invalid_input", "Invalid steering request."
+                                    )
+                                else:
+                                    error = steering_error("invalid_input", "Invalid steering request.")
                                 async with client_send_lock:
                                     await websocket.send_text(json.dumps(steering_failure_payload(payload, error)))
                             continue

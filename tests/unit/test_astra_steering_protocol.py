@@ -304,7 +304,13 @@ async def test_second_queued_steer_quota_rejection_happens_before_upstream_send(
         monkeypatch.setattr(
             service,
             "_extend_websocket_api_key_usage",
-            AsyncMock(side_effect=ProxyRateLimitError("queued steer exceeds quota")),
+            AsyncMock(
+                side_effect=ProxyRateLimitError(
+                    "private queued quota detail",
+                    code="private-quota-code",
+                    param="private-quota-param",
+                )
+            ),
         )
 
     service, reservations, _, _, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
@@ -312,7 +318,121 @@ async def test_second_queued_steer_quota_rejection_happens_before_upstream_send(
     assert [item["input"] for item in upstream.sent[1:]] == ["First correction"]
     service._extend_websocket_api_key_usage.assert_awaited_once()
     assert socket.sent[-1]["type"] == "response.steer.failed"
-    assert socket.sent[-1]["error"]["code"] == "invalid_input"
+    assert socket.sent[-1]["error"] == {
+        "code": "rate_limit_exceeded",
+        "message": "API key quota exceeded.",
+        "type": "rate_limit_error",
+    }
+    assert "private" not in json.dumps(socket.sent[-1])
+
+
+@pytest.mark.asyncio
+async def test_new_steering_reservation_quota_failure_uses_canonical_public_error(monkeypatch):
+    from app.core.exceptions import ProxyRateLimitError
+
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    socket = ScriptedSocket([(create(), lambda _: True), (steer, saw("response.created", "r1"))])
+    upstream = ScriptedUpstream([[response("response.created", "r1")]])
+
+    def configure(service, account):
+        del account
+        original = service._reserve_websocket_api_key_usage
+        calls = 0
+
+        async def reserve(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return await original(*args, **kwargs)
+            raise ProxyRateLimitError("private reservation detail", code="private-code", param="private-param")
+
+        monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve)
+
+    _, reservations, _, _, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
+
+    assert len(reservations) == 1
+    assert [frame["type"] for frame in upstream.sent] == ["response.create"]
+    assert socket.sent[-1]["error"] == {
+        "code": "rate_limit_exceeded",
+        "message": "API key quota exceeded.",
+        "type": "rate_limit_error",
+    }
+    assert "private" not in json.dumps(socket.sent[-1])
+
+
+@pytest.mark.asyncio
+async def test_steering_policy_refresh_auth_failure_uses_canonical_public_error(monkeypatch):
+    from app.core.exceptions import ProxyAuthError
+
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    socket = ScriptedSocket([(create(), lambda _: True), (steer, saw("response.created", "r1"))])
+    upstream = ScriptedUpstream([[response("response.created", "r1")]])
+
+    def configure(service, account):
+        del account
+        calls = 0
+
+        async def refresh(key):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return key
+            raise ProxyAuthError("private auth detail", code="private-code", param="private-param")
+
+        monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", refresh)
+
+    await run_socket(monkeypatch, socket, upstream, configure=configure)
+
+    assert socket.sent[-1]["error"] == {
+        "code": "invalid_api_key",
+        "message": "Invalid API key.",
+        "type": "authentication_error",
+    }
+    assert "private" not in json.dumps(socket.sent[-1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("restricted_key", "expected_error"),
+    [
+        (
+            replace(_api_key(), allowed_models=["gpt-5.5"]),
+            {
+                "code": "model_not_allowed",
+                "message": "This API key does not have access to the requested model.",
+                "type": "permission_error",
+            },
+        ),
+        (
+            replace(_api_key(), allowed_reasoning_efforts=["low"]),
+            {
+                "code": "reasoning_effort_not_allowed",
+                "message": "This API key does not have access to the requested reasoning effort.",
+                "type": "permission_error",
+            },
+        ),
+    ],
+)
+async def test_steering_policy_rejection_uses_canonical_public_error(monkeypatch, restricted_key, expected_error):
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    socket = ScriptedSocket([(create(), lambda _: True), (steer, saw("response.created", "r1"))])
+    upstream = ScriptedUpstream([[response("response.created", "r1")]])
+
+    def configure(service, account):
+        del account
+        calls = 0
+
+        async def refresh(key):
+            nonlocal calls
+            calls += 1
+            return key if calls == 1 else restricted_key
+
+        monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", refresh)
+
+    await run_socket(monkeypatch, socket, upstream, configure=configure)
+
+    assert socket.sent[-1]["type"] == "response.steer.failed"
+    assert socket.sent[-1]["error"] == expected_error
 
 
 @pytest.mark.asyncio

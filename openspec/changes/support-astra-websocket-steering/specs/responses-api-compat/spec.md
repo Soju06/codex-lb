@@ -125,6 +125,16 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 - **WHEN** upstream sends response.steer.failed with a malformed or structured error.param
 - **THEN** the forwarded client payload omits the non-public parameter value
 
+#### Scenario: Public steering policy failures retain their classification
+- **WHEN** steering policy refresh, model or reasoning authorization, or usage reservation rejects a request with a known authentication, permission, or quota failure
+- **THEN** response.steer.failed SHALL retain the failure's canonical public code and type
+- **AND** the failure SHALL use a canonical public message without forwarding exception-provided message, code, or parameter values
+
+#### Scenario: Unknown caught steering errors remain private
+- **WHEN** steering catches an application or payload-validation error without a recognized public mapping
+- **THEN** response.steer.failed SHALL contain the generic invalid_input failure
+- **AND** the failure SHALL NOT expose raw exception message, code, or parameter values
+
 #### Scenario: Final rejected steering retains failed release ownership
 - **GIVEN** the final queued steer is rejected before its successor is created
 - **WHEN** releasing its reservation fails

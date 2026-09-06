@@ -15,6 +15,13 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
+from app.core.exceptions import (
+    AppError,
+    ProxyAuthError,
+    ProxyModelNotAllowed,
+    ProxyRateLimitError,
+    ProxyReasoningEffortNotAllowed,
+)
 from app.core.openai.requests import ResponsesRequest, validate_passthrough_depth
 from app.core.types import JsonValue
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
@@ -47,6 +54,44 @@ logger = logging.getLogger("app.modules.proxy.service")
 
 def steering_error(code: str, message: str) -> ProxyResponseError:
     return ProxyResponseError(400, openai_error(code, message, error_type="invalid_request_error"))
+
+
+def public_steering_app_error(exc: AppError) -> ProxyResponseError | None:
+    """Return the canonical public steering error for an allowlisted class."""
+
+    if type(exc) is ProxyAuthError:
+        return ProxyResponseError(
+            ProxyAuthError.status_code,
+            openai_error(ProxyAuthError.code, "Invalid API key.", error_type=ProxyAuthError.error_type),
+        )
+    if type(exc) is ProxyRateLimitError:
+        return ProxyResponseError(
+            ProxyRateLimitError.status_code,
+            openai_error(
+                ProxyRateLimitError.code,
+                "API key quota exceeded.",
+                error_type=ProxyRateLimitError.error_type,
+            ),
+        )
+    if type(exc) is ProxyReasoningEffortNotAllowed:
+        return ProxyResponseError(
+            ProxyReasoningEffortNotAllowed.status_code,
+            openai_error(
+                ProxyReasoningEffortNotAllowed.code,
+                "This API key does not have access to the requested reasoning effort.",
+                error_type=ProxyReasoningEffortNotAllowed.error_type,
+            ),
+        )
+    if type(exc) is ProxyModelNotAllowed:
+        return ProxyResponseError(
+            ProxyModelNotAllowed.status_code,
+            openai_error(
+                ProxyModelNotAllowed.code,
+                "This API key does not have access to the requested model.",
+                error_type=ProxyModelNotAllowed.error_type,
+            ),
+        )
+    return None
 
 
 def validate_steering_input(payload: Mapping[str, JsonValue]) -> tuple[str, list[JsonValue]]:

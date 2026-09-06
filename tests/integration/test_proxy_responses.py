@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 from collections.abc import AsyncIterator, Mapping
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import cast
 
@@ -15,13 +17,16 @@ import app.core.clients.proxy as proxy_client_module
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
+from app.core.auth.refresh import RefreshError, TokenRefreshResult
 from app.core.config.settings import Settings
+from app.core.crypto import TokenEncryptor
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.time import utcnow
-from app.db.models import Account, DashboardSettings, RequestLog, StickySessionKind
+from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog, StickySessionKind
 from app.db.session import SessionLocal
+from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -614,6 +619,72 @@ async def test_backend_responses_preserves_non_message_developer_directive(async
         developer_directive,
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("access_accepted", [True, False], ids=["access-accepted", "access-rejected"])
+async def test_responses_preflight_retains_unexpired_access_after_refresh_failure(
+    async_client, monkeypatch, path, access_accepted
+):
+    auth_manager_module._clear_refresh_singleflight_state()
+    raw_account_id = "acc_preflight_refresh_invalidated"
+    auth_json = _make_auth_json(raw_account_id, "preflight-refresh@example.com")
+    access_token = _encode_jwt({"exp": int(time.time()) + 3600})
+    auth_json["tokens"]["accessToken"] = access_token
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        account = (await session.execute(select(Account))).scalars().one()
+        account.last_refresh = utcnow() - timedelta(days=9)
+        before = (account.access_token_encrypted, account.refresh_token_encrypted, account.last_refresh)
+        await session.commit()
+
+    refresh_calls = 0
+    dispatched_tokens: list[str] = []
+
+    async def reject_refresh(_token: str, **_kwargs: object) -> TokenRefreshResult:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        raise RefreshError("refresh_token_invalidated", "Refresh token was revoked", True)
+
+    async def accept_access(payload, headers, access_token, account_id, **kwargs):
+        del payload, headers, kwargs
+        assert account_id == raw_account_id
+        dispatched_tokens.append(access_token)
+        if not access_accepted:
+            raise proxy_module.ProxyResponseError(
+                401, {"error": {"code": "invalid_api_key", "message": "Access token rejected"}}
+            )
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_retained_access",'
+            '"object":"response","status":"completed","output":[]}}\n\n'
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", reject_refresh)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", accept_access)
+
+    response = await async_client.post(
+        path,
+        json={"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True},
+    )
+
+    assert response.status_code == 200
+    assert refresh_calls == 1
+    event = _extract_first_event(response.text.splitlines())
+    assert event["type"] == ("response.completed" if access_accepted else "response.failed")
+    assert dispatched_tokens == [access_token]
+    async with SessionLocal() as session:
+        account = (await session.execute(select(Account))).scalars().one()
+        assert account.status == AccountStatus.REAUTH_REQUIRED
+        assert account.deactivation_reason is not None
+        assert "re-login required" in account.deactivation_reason
+        assert (account.access_token_encrypted, account.refresh_token_encrypted, account.last_refresh) == before
+        assert TokenEncryptor().decrypt(account.access_token_encrypted) == access_token
 
 
 @pytest.mark.asyncio

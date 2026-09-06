@@ -3901,6 +3901,16 @@ def _http_bridge_should_rollover_after_context_overflow(
     return True
 
 
+def _http_bridge_error_code(exc: ProxyResponseError) -> object:
+    payload = exc.payload
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return None
+    return error.get("code")
+
+
 def _http_bridge_should_attempt_local_bootstrap_rebind(
     exc: ProxyResponseError,
     *,
@@ -3913,6 +3923,13 @@ def _http_bridge_should_attempt_local_bootstrap_rebind(
         return False
     if previous_response_id is not None:
         return False
+    if owner_pre_dispatch and _http_bridge_error_code(exc) == "bridge_drain_active":
+        # Explicit draining-owner rejection before dispatch: the old owner never
+        # accepted this request upstream, so a bootstrap rebind is safe even
+        # under a hard turn-state anchor.
+        return True
+    if _sticky_key_from_turn_state_header(headers) is not None:
+        return False
     payload = exc.payload
     if not isinstance(payload, dict):
         return False
@@ -3920,13 +3937,6 @@ def _http_bridge_should_attempt_local_bootstrap_rebind(
     if not isinstance(error, dict):
         return False
     code = error.get("code")
-    if _sticky_key_from_turn_state_header(headers) is not None and not (
-        code == "bridge_drain_active" and owner_pre_dispatch
-    ):
-        # A hard turn-state anchor normally needs durable takeover. The safe
-        # bootstrap exception is explicit draining-owner rejection before
-        # dispatch, so the old owner did not accept this request upstream.
-        return False
     return code in {
         "bridge_drain_active",
         "bridge_owner_unreachable",

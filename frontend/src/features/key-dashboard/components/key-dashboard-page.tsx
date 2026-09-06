@@ -1,4 +1,5 @@
 import { Activity, Coins, Database, DollarSign, KeyRound, LogOut, RefreshCw } from "lucide-react";
+import { Tabs } from "radix-ui";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -14,6 +15,7 @@ import type { RequestLogColumnWidths } from "@/features/dashboard/request-log-co
 import type { DashboardStat } from "@/features/dashboard/utils";
 import { getKeyDashboardData } from "@/features/key-dashboard/api";
 import { KeyProfileCard } from "@/features/key-dashboard/components/key-profile-card";
+import { KeyInstallPanel } from "@/features/key-dashboard/components/key-install-panel";
 import {
   toDashboardRequestLog,
   type KeyDashboardProfile,
@@ -44,10 +46,9 @@ const SAFE_COLUMN_WIDTHS: RequestLogColumnWidths = {
 
 export function KeyDashboardPage() {
   const { t } = useTranslation();
-  const apiKeyRef = useRef("");
   const requestGenerationRef = useRef(0);
   const [draftKey, setDraftKey] = useState("");
-  const [initialRememberedKey] = useState(getRememberedApiKey);
+  const [initialRememberedKey, setInitialRememberedKey] = useState(getRememberedApiKey);
   const [rememberKey, setRememberKey] = useState(initialRememberedKey !== null);
   const [profile, setProfile] = useState<KeyDashboardProfile | null>(null);
   const [usage, setUsage] = useState<KeyUsage | null>(null);
@@ -56,6 +57,7 @@ export function KeyDashboardPage() {
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [connectedKey, setConnectedKey] = useState("");
 
   const connected = profile !== null && usage !== null && logs !== null;
   const requests = useMemo(
@@ -102,7 +104,8 @@ export function KeyDashboardPage() {
 
   const clearConnection = useCallback(() => {
     requestGenerationRef.current += 1;
-    apiKeyRef.current = "";
+    setConnectedKey("");
+    setInitialRememberedKey(null);
     forgetRememberedApiKey();
     setDraftKey("");
     setRememberKey(false);
@@ -126,7 +129,7 @@ export function KeyDashboardPage() {
     try {
       const data = await getKeyDashboardData(apiKey, nextLimit, nextOffset);
       if (generation !== requestGenerationRef.current) return;
-      apiKeyRef.current = apiKey;
+      setConnectedKey(apiKey);
       if (rememberAfterSuccess) rememberApiKey(apiKey);
       setProfile(data.profile);
       setUsage(data.usage);
@@ -149,6 +152,7 @@ export function KeyDashboardPage() {
   useEffect(() => {
     if (!initialRememberedKey) return;
     const restoreTimer = window.setTimeout(() => {
+      setInitialRememberedKey(null);
       void load(initialRememberedKey, DEFAULT_LIMIT, 0);
     }, 0);
     return () => window.clearTimeout(restoreTimer);
@@ -166,9 +170,14 @@ export function KeyDashboardPage() {
   };
 
   const handlePageChange = (nextLimit: number, nextOffset: number) => {
-    if (!apiKeyRef.current) return;
-    void load(apiKeyRef.current, nextLimit, nextOffset);
+    if (!connectedKey) return;
+    void load(connectedKey, nextLimit, nextOffset);
   };
+
+  const handleInstallUnauthorized = useCallback(() => {
+    clearConnection();
+    setError(t("keyDashboard.errors.invalidKey"));
+  }, [clearConnection, t]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -254,33 +263,51 @@ export function KeyDashboardPage() {
               <p className="mt-1 text-sm text-muted-foreground">{t("keyDashboard.description")}</p>
             </div>
             {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
-            <KeyProfileCard profile={profile} limits={usage.limits} />
-            <StatsGrid stats={stats} />
-            <section className="space-y-4" aria-labelledby="key-dashboard-recent-requests">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 id="key-dashboard-recent-requests" className="text-lg font-semibold">
-                    {t("keyDashboard.recentRequests")}
-                  </h2>
-                  <p className="text-sm text-muted-foreground">{t("keyDashboard.recentRequestsDescription")}</p>
-                </div>
-              </div>
-              {isLoading && !logs ? <SpinnerBlock /> : (
-                <RecentRequestsTable
-                  requests={requests}
-                  accounts={[]}
-                  total={logs.total}
-                  limit={limit}
-                  offset={offset}
-                  hasMore={logs.hasMore}
-                  visibleColumns={SAFE_COLUMNS}
-                  columnWidths={SAFE_COLUMN_WIDTHS}
-                  allowSensitiveDetails={false}
-                  onLimitChange={(nextLimit) => handlePageChange(nextLimit, 0)}
-                  onOffsetChange={(nextOffset) => handlePageChange(limit, nextOffset)}
-                />
-              )}
-            </section>
+            <Tabs.Root defaultValue="overview" className="space-y-6">
+              <Tabs.List aria-label={t("keyDashboard.title")} className="flex gap-1 border-b">
+                {(["overview", "install"] as const).map((tab) => (
+                  <Tabs.Trigger
+                    key={tab}
+                    value={tab}
+                    className="border-b-2 border-transparent px-5 py-3 text-sm font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:border-primary data-[state=active]:text-foreground"
+                  >
+                    {t(`keyDashboard.tabs.${tab}`)}
+                  </Tabs.Trigger>
+                ))}
+              </Tabs.List>
+              <Tabs.Content value="overview" className="space-y-8 outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <KeyProfileCard profile={profile} limits={usage.limits} />
+                <StatsGrid stats={stats} />
+                <section className="space-y-4" aria-labelledby="key-dashboard-recent-requests">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h2 id="key-dashboard-recent-requests" className="text-lg font-semibold">
+                        {t("keyDashboard.recentRequests")}
+                      </h2>
+                      <p className="text-sm text-muted-foreground">{t("keyDashboard.recentRequestsDescription")}</p>
+                    </div>
+                  </div>
+                  {isLoading && !logs ? <SpinnerBlock /> : (
+                    <RecentRequestsTable
+                      requests={requests}
+                      accounts={[]}
+                      total={logs.total}
+                      limit={limit}
+                      offset={offset}
+                      hasMore={logs.hasMore}
+                      visibleColumns={SAFE_COLUMNS}
+                      columnWidths={SAFE_COLUMN_WIDTHS}
+                      allowSensitiveDetails={false}
+                      onLimitChange={(nextLimit) => handlePageChange(nextLimit, 0)}
+                      onOffsetChange={(nextOffset) => handlePageChange(limit, nextOffset)}
+                    />
+                  )}
+                </section>
+              </Tabs.Content>
+              <Tabs.Content value="install" className="outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <KeyInstallPanel apiKey={connectedKey} onUnauthorized={handleInstallUnauthorized} />
+              </Tabs.Content>
+            </Tabs.Root>
           </div>
         )}
       </main>

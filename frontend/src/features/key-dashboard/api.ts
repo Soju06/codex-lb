@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 import { get } from "@/lib/api-client";
 import {
   KeyDashboardProfileSchema,
@@ -7,6 +9,21 @@ import {
   type KeyDashboardRequestLogsResponse,
   type KeyUsage,
 } from "@/features/key-dashboard/schemas";
+
+export type InstallPlatform = "macos" | "linux" | "windows";
+
+export function installScriptPath(platform: InstallPlatform): string {
+  return `/api/key-dashboard/install-script?platform=${platform}`;
+}
+
+export function getInstallScript(apiKey: string, platform: InstallPlatform, signal: AbortSignal): Promise<string> {
+  const options = keyRequestOptions(apiKey);
+  return get(installScriptPath(platform), z.string(), {
+    ...options,
+    headers: { ...options.headers, Accept: "text/plain" },
+    signal,
+  });
+}
 
 function keyRequestOptions(apiKey: string) {
   return {

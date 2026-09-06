@@ -1,10 +1,11 @@
 import { HttpResponse, http } from "msw";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
 import { KEY_DASHBOARD_API_KEY_STORAGE_KEY } from "@/features/key-dashboard/storage";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
@@ -80,6 +81,13 @@ describe("API key dashboard integration", () => {
   beforeEach(() => {
     window.history.pushState({}, "", "/key-dashboard");
     window.localStorage.removeItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY);
+    useDateDisplayFormatStore.setState({ dateDisplayFormat: "iso8601" });
+  });
+
+  afterEach(() => {
+    useDateDisplayFormatStore.setState({ dateDisplayFormat: "default" });
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("bypasses administrator auth and loads only key-scoped safe data", async () => {
@@ -134,6 +142,12 @@ describe("API key dashboard integration", () => {
     expect(screen.getByText("12.5K")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Production client" })).toBeInTheDocument();
     expect(screen.getByText("sk-clb-key-dash…")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("08:00:00  01/08/2026", { exact: true, normalizer: (value) => value })).toBeInTheDocument();
+    expect(screen.getByText("gpt-5.1, gpt-5.2")).toBeInTheDocument();
+    expect(screen.queryByText("Effective policies")).not.toBeInTheDocument();
+    expect(screen.queryByText("Traffic class")).not.toBeInTheDocument();
+    expect(screen.queryByText("Transport policy")).not.toBeInTheDocument();
     expect(screen.getByText("Usage limits")).toBeInTheDocument();
     expect(screen.getByText("37.5K remaining")).toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "Account" })).not.toBeInTheDocument();
@@ -163,6 +177,181 @@ describe("API key dashboard integration", () => {
     expect(await screen.findByRole("heading", { name: "View your API key usage" })).toBeInTheDocument();
     expect(screen.getByLabelText("API key")).toHaveValue("");
     expect(window.localStorage.getItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY)).toBeNull();
+  });
+
+  function mockDashboard() {
+    server.use(
+      http.get("/api/key-dashboard/profile", () => HttpResponse.json(safeProfile)),
+      http.get("/v1/usage", () => HttpResponse.json(usagePayload)),
+      http.get("/api/key-dashboard/request-logs", () => HttpResponse.json({ requests: [], total: 0, hasMore: false })),
+    );
+  }
+
+  async function connect(user: ReturnType<typeof userEvent.setup>, key = TEST_KEY) {
+    await user.type(await screen.findByLabelText("API key"), key);
+    await user.click(screen.getByRole("button", { name: "Open dashboard" }));
+    await screen.findByRole("tab", { name: "Install" });
+  }
+
+  it.each([null, "gpt-5.6-sol"])("renders unrestricted or enforced models and missing lifecycle dates (%s)", async (model) => {
+    mockDashboard();
+    server.use(http.get("/api/key-dashboard/profile", () => HttpResponse.json({
+      ...safeProfile, allowedModels: null, enforcedModel: model, expiresAt: null, lastUsedAt: null,
+    })));
+    const user = userEvent.setup();
+    renderWithProviders(<App />);
+    await connect(user);
+    expect(screen.getByText(model ?? "All models")).toBeInTheDocument();
+    expect(screen.getByText("Never")).toBeInTheDocument();
+    expect(screen.getByText("Not used yet")).toBeInTheDocument();
+    screen.getByRole("tab", { name: "Overview" }).focus();
+    await user.keyboard("{ArrowRight}");
+    expect(screen.getByRole("tab", { name: "Install" })).toHaveFocus();
+  });
+
+  it("supports keyboard platform selection and shows setup guidance outside the preview", async () => {
+    mockDashboard();
+    server.use(http.get("/api/key-dashboard/install-script", ({ request }) => {
+      const platform = new URL(request.url).searchParams.get("platform");
+      return HttpResponse.text(`# ${platform}\n${TEST_KEY}\n`);
+    }));
+    const user = userEvent.setup();
+    renderWithProviders(<App />);
+    await connect(user);
+    await user.click(screen.getByRole("tab", { name: "Install" }));
+    await screen.findByRole("button", { name: "Copy command" });
+
+    const group = screen.getByRole("group", { name: "Operating system" });
+    const macos = within(group).getByRole("radio", { name: "macOS" });
+    const linux = within(group).getByRole("radio", { name: "Linux" });
+    const windows = within(group).getByRole("radio", { name: "Windows" });
+    macos.focus();
+    expect(macos).toBeChecked();
+    await user.keyboard("{ArrowRight}");
+    expect(linux).toHaveFocus();
+    expect(linux).toBeChecked();
+    expect(await screen.findByText("codex-lb-linux.sh", { exact: true })).toBeInTheDocument();
+    await user.keyboard("{ArrowRight}");
+    expect(windows).toHaveFocus();
+    expect(windows).toBeChecked();
+    expect(await screen.findByText("codex-lb-windows.ps1", { exact: true })).toBeInTheDocument();
+    await user.tab();
+    expect(screen.getByRole("button", { name: "Copy command" })).toHaveFocus();
+    const guidance = screen.getByRole("complementary", { name: "Before you run" });
+    expect(within(guidance).getByText(/Install the Codex client first/)).toBeVisible();
+    expect(within(guidance).getByText(/Backs up and replaces/)).toBeVisible();
+    expect(within(guidance).getByText(/commands may remain in shell history/)).toBeVisible();
+    const preview = screen.getByText("Preview script", { selector: "summary" });
+    expect(preview.closest("details")).not.toHaveAttribute("open");
+    await user.click(preview);
+    expect(preview.closest("details")).toHaveAttribute("open");
+    expect(document.body.textContent).not.toContain(TEST_KEY);
+  });
+
+  it("exports the logged-in key for every platform while masking previews and omitting cookies", async () => {
+    mockDashboard();
+    const requests: string[] = [];
+    server.use(http.get("/api/key-dashboard/install-script", ({ request }) => {
+      expect(request.headers.get("Authorization")).toBe(`Bearer ${TEST_KEY}`);
+      expect(request.credentials).toBe("omit");
+      expect(request.cache).toBe("no-store");
+      expect(request.url).not.toContain(TEST_KEY);
+      const platform = new URL(request.url).searchParams.get("platform");
+      requests.push(platform!);
+      return HttpResponse.text(`# ${platform}\n${TEST_KEY}\n`);
+    }));
+    const user = userEvent.setup();
+    const clipboard = vi.spyOn(navigator.clipboard, "writeText");
+    vi.stubGlobal("isSecureContext", true);
+    const createObjectURL = vi.fn<(blob: Blob) => string>(() => "blob:installer");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL = createObjectURL;
+      static revokeObjectURL = revokeObjectURL;
+    });
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    renderWithProviders(<App />);
+    await connect(user);
+    expect(requests).toHaveLength(0);
+    await user.click(screen.getByRole("tab", { name: "Install" }));
+    expect(screen.queryByRole("heading", { name: "Recent requests" })).not.toBeInTheDocument();
+    for (const [platform, label] of [["macos", "macOS"], ["linux", "Linux"], ["windows", "Windows"]]) {
+      await user.click(screen.getByRole("radio", { name: label }));
+      await user.click(await screen.findByRole("button", { name: "Copy script" }));
+      expect(screen.getByText(`codex-lb-${platform}.${platform === "windows" ? "ps1" : "sh"}`, { exact: true })).toBeInTheDocument();
+      expect(screen.getByText(platform === "windows" ? "PowerShell" : "Bash", { selector: "span:not([aria-hidden])", exact: true })).toBeInTheDocument();
+      expect(clipboard).toHaveBeenLastCalledWith(`# ${platform}\n${TEST_KEY}\n`);
+      expect(document.body.textContent).not.toContain(TEST_KEY);
+      await user.click(screen.getByRole("button", { name: "Copy command" }));
+      const command = clipboard.mock.calls.at(-1)![0];
+      expect(command).toContain(`Authorization: Bearer ${TEST_KEY}`);
+      expect(command).toContain(`platform=${platform}`);
+      expect(command).toContain(platform === "windows" ? "curl.exe" : "curl -fsS");
+      await user.click(screen.getByRole("button", { name: "Download script" }));
+      expect(anchorClick.mock.instances.at(-1)).toHaveAttribute("download", `codex-lb-${platform}.${platform === "windows" ? "ps1" : "sh"}`);
+      const blob = createObjectURL.mock.calls.at(-1)![0] as Blob;
+      const content = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.readAsText(blob);
+      });
+      expect(content).toBe(`# ${platform}\n${TEST_KEY}\n`);
+    }
+    expect(requests).toEqual(["macos", "linux", "windows"]);
+    expect(window.localStorage.getItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY)).toBeNull();
+    await user.click(screen.getByRole("tab", { name: "Overview" }));
+    expect(await screen.findByRole("heading", { name: "Production client" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy script" })).not.toBeInTheDocument();
+  });
+
+  it("handles installer failures and invalid credentials without administrator authentication", async () => {
+    mockDashboard();
+    let status = 500;
+    const adminAuth = vi.fn();
+    server.use(
+      http.get("/api/dashboard-auth/session", adminAuth),
+      http.get("/api/key-dashboard/install-script", () => HttpResponse.json({ error: { message: "failed" } }, { status })),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<App />);
+    await connect(user);
+    await user.click(screen.getByRole("tab", { name: "Install" }));
+    expect(await screen.findByText("Could not load the setup script. Please try again.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy script" })).not.toBeInTheDocument();
+    status = 401;
+    await user.click(screen.getAllByRole("button", { name: "Refresh" }).at(-1)!);
+    expect(await screen.findByRole("button", { name: "Open dashboard" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Install" })).not.toBeInTheDocument();
+    expect(adminAuth).not.toHaveBeenCalled();
+  });
+
+  it("discards stale platform responses and exports only the new key after reconnecting", async () => {
+    mockDashboard();
+    let release: () => void = () => {};
+    const delayed = new Promise<void>((resolve) => { release = resolve; });
+    server.use(http.get("/api/key-dashboard/install-script", async ({ request }) => {
+      const platform = new URL(request.url).searchParams.get("platform");
+      const key = request.headers.get("Authorization")!.slice(7);
+      if (platform === "macos" && key === TEST_KEY) await delayed;
+      return HttpResponse.text(`# ${platform}\n${key}\n`);
+    }));
+    const user = userEvent.setup();
+    const clipboard = vi.spyOn(navigator.clipboard, "writeText");
+    vi.stubGlobal("isSecureContext", true);
+    renderWithProviders(<App />);
+    await connect(user);
+    await user.click(screen.getByRole("tab", { name: "Install" }));
+    await user.click(screen.getByRole("radio", { name: "Linux" }));
+    await user.click(await screen.findByRole("button", { name: "Copy script" }));
+    expect(clipboard).toHaveBeenLastCalledWith(`# linux\n${TEST_KEY}\n`);
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+    release();
+    await connect(user, "sk-clb-new-key");
+    expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("tab", { name: "Install" }));
+    await user.click(await screen.findByRole("button", { name: "Copy script" }));
+    expect(clipboard).toHaveBeenLastCalledWith("# macos\nsk-clb-new-key\n");
+    expect(document.body.textContent).not.toContain(TEST_KEY);
   });
 
   it("remembers a valid key only after opt-in and restores it on the next mount", async () => {

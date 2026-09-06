@@ -1,3 +1,4 @@
+import { format } from "date-fns";
 import { CalendarClock, Gauge, KeyRound, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -33,56 +34,27 @@ export function KeyProfileCard({ profile, limits }: KeyProfileCardProps) {
   const { t } = useTranslation();
   const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const allModels = t("keyDashboard.profile.allModels");
-  const allEfforts = t("keyDashboard.profile.allReasoningEfforts");
-  const inherited = t("keyDashboard.profile.inherited");
 
   const details = [
     {
       label: t("keyDashboard.profile.createdAt"),
-      value: formatDateTimeInline(profile.createdAt, dateDisplayFormat),
+      value: format(new Date(profile.createdAt), "HH:mm:ss  dd/MM/yyyy"),
     },
     {
       label: t("keyDashboard.profile.expiresAt"),
       value: profile.expiresAt
-        ? formatDateTimeInline(profile.expiresAt, dateDisplayFormat)
+        ? format(new Date(profile.expiresAt), "HH:mm:ss  dd/MM/yyyy")
         : t("keyDashboard.profile.never"),
     },
     {
       label: t("keyDashboard.profile.lastUsedAt"),
       value: profile.lastUsedAt
-        ? formatDateTimeInline(profile.lastUsedAt, dateDisplayFormat)
+        ? format(new Date(profile.lastUsedAt), "HH:mm:ss  dd/MM/yyyy")
         : t("keyDashboard.profile.notUsedYet"),
     },
   ];
 
-  const policies = [
-    {
-      label: t("keyDashboard.profile.models"),
-      value: profile.enforcedModel
-        ? t("keyDashboard.profile.enforcedValue", { value: profile.enforcedModel })
-        : policyList(profile.allowedModels, allModels),
-    },
-    {
-      label: t("keyDashboard.profile.reasoning"),
-      value: profile.enforcedReasoningEffort
-        ? t("keyDashboard.profile.enforcedValue", { value: profile.enforcedReasoningEffort })
-        : policyList(profile.allowedReasoningEfforts, allEfforts),
-    },
-    {
-      label: t("keyDashboard.profile.serviceTier"),
-      value: profile.enforcedServiceTier ?? inherited,
-    },
-    {
-      label: t("keyDashboard.profile.trafficClass"),
-      value: formatSlug(profile.trafficClass),
-    },
-    {
-      label: t("keyDashboard.profile.transportPolicy"),
-      value: profile.transportPolicyOverride
-        ? formatSlug(profile.transportPolicyOverride)
-        : inherited,
-    },
-  ];
+  const models = profile.enforcedModel ?? policyList(profile.allowedModels, allModels);
 
   return (
     <section className="overflow-hidden rounded-xl border bg-card" aria-labelledby="key-profile-heading">
@@ -109,19 +81,19 @@ export function KeyProfileCard({ profile, limits }: KeyProfileCardProps) {
         </Badge>
       </div>
 
-      <div className="grid gap-6 p-5 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.4fr)]">
+      <div className="grid gap-6 p-5 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <div className="space-y-3">
           <div className="flex items-center gap-2 text-sm font-medium">
             <CalendarClock className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
             {t("keyDashboard.profile.lifecycle")}
           </div>
-          <dl className="grid gap-3 sm:grid-cols-3 lg:grid-cols-1">
+          <dl className="grid gap-3 sm:grid-cols-3">
             {details.map((detail) => (
               <div key={detail.label} className="rounded-lg bg-muted/35 px-3 py-2.5">
                 <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
                   {detail.label}
                 </dt>
-                <dd className="mt-1 text-sm">{detail.value}</dd>
+                <dd className="mt-1 whitespace-pre-wrap text-sm tabular-nums">{detail.value}</dd>
               </div>
             ))}
           </dl>
@@ -130,18 +102,9 @@ export function KeyProfileCard({ profile, limits }: KeyProfileCardProps) {
         <div className="space-y-3">
           <div className="flex items-center gap-2 text-sm font-medium">
             <ShieldCheck className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-            {t("keyDashboard.profile.policies")}
+            {t("keyDashboard.profile.models")}
           </div>
-          <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {policies.map((policy) => (
-              <div key={policy.label} className="min-w-0 rounded-lg border px-3 py-2.5">
-                <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                  {policy.label}
-                </dt>
-                <dd className="mt-1 truncate text-sm" title={policy.value}>{policy.value}</dd>
-              </div>
-            ))}
-          </dl>
+          <p className="rounded-lg border px-3 py-3 text-sm break-words">{models}</p>
         </div>
       </div>
 

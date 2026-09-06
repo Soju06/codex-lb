@@ -231,7 +231,11 @@ async def test_key_dashboard_endpoints_reject_inactive_key(async_client, db_setu
         await session.execute(update(ApiKey).where(ApiKey.id == created.id).values(is_active=False))
         await session.commit()
 
-    for path in ("/api/key-dashboard/profile", "/api/key-dashboard/request-logs"):
+    for path in (
+        "/api/key-dashboard/profile",
+        "/api/key-dashboard/request-logs",
+        "/api/key-dashboard/install-script?platform=linux",
+    ):
         response = await async_client.get(
             path,
             headers={"Authorization": f"Bearer {created.key}"},
@@ -245,18 +249,71 @@ async def test_key_dashboard_endpoints_reject_expired_key(async_client, db_setup
     created = await _create_api_key("expired-dashboard-key")
     async with SessionLocal() as session:
         await session.execute(
-            update(ApiKey)
-            .where(ApiKey.id == created.id)
-            .values(expires_at=utcnow() - timedelta(seconds=1))
+            update(ApiKey).where(ApiKey.id == created.id).values(expires_at=utcnow() - timedelta(seconds=1))
         )
         await session.commit()
 
-    for path in ("/api/key-dashboard/profile", "/api/key-dashboard/request-logs"):
+    for path in (
+        "/api/key-dashboard/profile",
+        "/api/key-dashboard/request-logs",
+        "/api/key-dashboard/install-script?platform=linux",
+    ):
         response = await async_client.get(
             path,
             headers={"Authorization": f"Bearer {created.key}"},
         )
         assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["macos", "linux", "windows"])
+async def test_key_installer_requires_own_key_and_is_not_cacheable(async_client, db_setup, platform):
+    del db_setup
+    own = await _create_api_key("installer-own")
+    other = await _create_api_key("installer-other")
+    path = f"/api/key-dashboard/install-script?platform={platform}"
+    missing = await async_client.get(path)
+    invalid = await async_client.get(path, headers={"Authorization": "Bearer invalid"})
+    response = await async_client.get(
+        "https://installer.example.test" + path + f"&apiKeyId={other.id}",
+        headers={"Authorization": f"Bearer {own.key}"},
+    )
+    assert missing.status_code == invalid.status_code == 401
+    assert own.key not in missing.text + invalid.text
+    assert response.status_code == 200
+    assert "text/plain" in response.headers["content-type"]
+    assert response.headers["cache-control"] == "private, no-store"
+    assert "Authorization" in response.headers["vary"].split(", ")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-disposition"].endswith('.ps1"' if platform == "windows" else '.sh"')
+    assert own.key in response.text
+    assert other.key not in response.text
+    assert own.id not in response.text
+    assert "https://installer.example.test/backend-api/codex" in response.text
+    assert "auth.json" in response.text
+    assert "model = " not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enforced", [None, "gpt-5.6-terra"])
+async def test_key_installer_uses_key_model_policy(async_client, db_setup, enforced):
+    del db_setup
+    async with SessionLocal() as session:
+        key = await ApiKeysService(ApiKeysRepository(session)).create_key(
+            ApiKeyCreateData(
+                name="model-installer",
+                allowed_models=["gpt-5.6-sol", "gpt-5.6-terra"],
+                enforced_model=enforced,
+                limits=[],
+            )
+        )
+    headers = {"Authorization": f"Bearer {key.key}"}
+    response = await async_client.get("/api/key-dashboard/install-script?platform=linux", headers=headers)
+    assert response.status_code == 200
+    assert f'model = "{enforced or "gpt-5.6-sol"}"' in response.text
+    unsupported = await async_client.get("/api/key-dashboard/install-script?platform=android", headers=headers)
+    assert unsupported.status_code == 422
+    assert key.key not in unsupported.text
 
 
 @pytest.mark.asyncio

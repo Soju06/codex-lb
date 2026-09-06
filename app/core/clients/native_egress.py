@@ -1255,7 +1255,7 @@ def _transport_error_from_event(event: Mapping[str, object]) -> NativeEgressTran
     )
 
 
-def _websocket_error_from_event(event: Mapping[str, object]) -> NativeEgressTransportError:
+def _websocket_error_from_event(event: Mapping[str, object]) -> NativeEgressError:
     message = event.get("message")
     failure_phase = event.get("failure_phase")
     retryable_same_contract = event.get("retryable_same_contract")
@@ -1272,6 +1272,8 @@ def _websocket_error_from_event(event: Mapping[str, object]) -> NativeEgressTran
             body = base64.b64decode(encoded_body, validate=True)
         except ValueError as exc:
             raise NativeEgressProtocolError("native websocket error body is not base64") from exc
+    if failure_phase == "protocol":
+        return NativeEgressProtocolError(message if isinstance(message, str) else "native websocket protocol failed")
     return NativeEgressTransportError(
         message if isinstance(message, str) else "native websocket failed",
         failure_phase=failure_phase if isinstance(failure_phase, str) else "websocket",

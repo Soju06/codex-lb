@@ -21,6 +21,7 @@ from app.core.clients.native_egress import (
     NativeWebSocketRequest,
     NativeWebSocketRoutingMetadata,
     SubprocessNativeEgressClient,
+    _websocket_error_from_event,
     close_discovered_native_egress_client,
     discover_native_egress_client,
 )
@@ -67,6 +68,22 @@ def _write_helper(path: Path, source: str) -> None:
         )
     path.write_text(source, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def test_native_websocket_protocol_event_preserves_protocol_error_type() -> None:
+    error = _websocket_error_from_event(
+        {
+            "message": "native websocket protocol failed",
+            "failure_phase": "protocol",
+            "retryable_same_contract": False,
+            "is_tls_verification_failure": False,
+            "status": None,
+            "headers": [],
+            "body": None,
+        }
+    )
+
+    assert isinstance(error, NativeEgressProtocolError)
 
 
 def _echo_helper_source() -> str:

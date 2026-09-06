@@ -640,7 +640,10 @@ def _is_account_neutral_transport_drop(
     abnormal CLOSED), so it counts as frame-less here.
     """
 
-    return not close_frame_received and close_code in (None, 1006)
+    # aiohttp may report EOF as CLOSED with a synthesized normal code even
+    # though no close frame was received. Explicit frame provenance remains
+    # authoritative for that compatibility shape.
+    return not close_frame_received and close_code in (None, 1000, 1006)
 
 
 def _should_infer_upstream_status_from_proxy_error(exc: ProxyResponseError, upstream_error_code: str | None) -> bool:

@@ -1133,8 +1133,9 @@ network failure or upstream WebSocket liveness timeout, is a clean close
 (`close_code = 1000`) before any `response.*` event, carries the classified
 per-socket `upstream_keepalive_timeout` transport error, or is a terminal HTTP
 bridge close/error for which the adapter positively reports that no
-upstream-authored close frame was observed (`close_code` is absent or the
-adapter-synthesized RFC 6455 code `1006`). Clean pre-response closes,
+upstream-authored close frame was observed (`close_code` is absent, the
+adapter-synthesized RFC 6455 code `1006`, or an adapter-synthesized normal
+closure code on EOF). Clean pre-response closes,
 keepalive timeouts, process-wide network failures, and liveness timeouts MUST
 remain account-neutral and use their classified error and bounded retry or
 retry-circuit handling. A frame-less terminal HTTP bridge ending MUST remain

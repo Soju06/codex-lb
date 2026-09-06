@@ -576,15 +576,17 @@ class CodexUpstreamWebSocket:
                 else "upstream_unavailable"
             )
             await _rotate_after_websocket_network_failure(error_code)
+            protocol_error = isinstance(exception, aiohttp.WebSocketError)
             return UpstreamWebSocketMessage(
                 kind="error",
+                close_code=exception.code if protocol_error else None,
                 error=(
                     codex_transport_error_message("websocket receive", self._endpoint_id, exception)
                     if exception is not None
                     else "Upstream websocket error"
                 ),
                 error_code=_relay_receive_error_code(error_code),
-                transport_ended=True,
+                transport_ended=not protocol_error,
             )
         if msg.type == aiohttp.WSMsgType.TEXT:
             text = msg.data if isinstance(msg.data, str) else str(msg.data)

@@ -181,6 +181,36 @@ sys.stdin.read()
 
 
 @pytest.mark.asyncio
+async def test_subprocess_native_egress_treats_missing_capability_as_unavailable(tmp_path: Path) -> None:
+    helper = tmp_path / "native-helper"
+    helper.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+
+json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "server_hello",
+    "protocol_version": 1,
+    "capabilities": [
+        "failure_provenance_v1", "http", "http2_profile_v1",
+        "websocket", "websocket_send_ack",
+    ],
+}), flush=True)
+sys.stdin.read()
+""",
+        encoding="utf-8",
+    )
+    helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
+    client = SubprocessNativeEgressClient(helper)
+
+    with pytest.raises(NativeEgressUnavailable, match="websocket_close_frame_provenance_v1"):
+        await client.request(NativeEgressRequest(method="GET", url="https://example.test", headers={}))
+
+    assert client._process is None
+
+
+@pytest.mark.asyncio
 async def test_subprocess_native_egress_demultiplexes_interleaved_requests(tmp_path: Path) -> None:
     helper = tmp_path / "native-helper"
     _write_helper(

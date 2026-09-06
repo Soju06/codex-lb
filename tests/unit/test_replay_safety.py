@@ -715,6 +715,95 @@ def test_full_resend_suffix_accepts_only_self_contained_tool_loops(
     )
 
 
+def test_full_resend_tool_manifest_accepts_goal_followup_after_all_results() -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "Inspect the workspace"}]
+    suffix: list[JsonValue] = [
+        {"type": "function_call", "call_id": "call_inspect", "name": "inspect", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_inspect", "output": "Inspection complete"},
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": '<codex_internal_context source="goal">Continue the goal.</codex_internal_context>',
+                }
+            ],
+        },
+    ]
+
+    assert responses_input_suffix_matches_pending_tool_calls(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        pending_tool_calls={"call_inspect": "function_call"},
+    )
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "missing-call",
+        "missing-output",
+        "wrong-call-type",
+        "duplicate-output",
+        "omitted-parallel-call",
+        "leading-user",
+        "interleaved-user",
+        "later-call",
+        "later-developer",
+        "later-assistant",
+        "developer-interleave",
+        "opaque-compaction",
+        "malformed-type",
+    ],
+)
+def test_goal_followup_keeps_exact_tool_manifest_fences(changed: str) -> None:
+    stored: list[JsonValue] = [{"role": "user", "content": "Inspect"}]
+    call: dict[str, JsonValue] = {"type": "custom_tool_call", "call_id": "call_1", "name": "shell", "input": "pwd"}
+    output: dict[str, JsonValue] = {"type": "custom_tool_call_output", "call_id": "call_1", "output": "/workspace"}
+    followup: dict[str, JsonValue] = {"role": "user", "content": [{"type": "input_text", "text": "Continue"}]}
+    developer: dict[str, JsonValue] = {
+        "type": "message",
+        "role": "developer",
+        "content": [{"type": "input_text", "text": "Follow the current task"}],
+        "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+    }
+    suffix: list[JsonValue] = [call, output, followup]
+    manifest = {"call_1": "custom_tool_call"}
+    if changed == "missing-call":
+        suffix.remove(call)
+    elif changed == "missing-output":
+        suffix.remove(output)
+    elif changed == "wrong-call-type":
+        manifest["call_1"] = "function_call"
+    elif changed == "duplicate-output":
+        suffix.insert(2, output)
+    elif changed == "omitted-parallel-call":
+        manifest["call_2"] = "custom_tool_call"
+    elif changed == "leading-user":
+        suffix.insert(0, followup)
+    elif changed == "interleaved-user":
+        suffix.insert(1, followup)
+    elif changed == "later-call":
+        suffix.append({**call, "call_id": "call_2"})
+    elif changed == "later-developer":
+        suffix.append(developer)
+    elif changed == "later-assistant":
+        suffix.append({"role": "assistant", "content": "Earlier output must precede the new instruction"})
+    elif changed == "developer-interleave":
+        suffix.insert(1, developer)
+    elif changed == "opaque-compaction":
+        suffix.append({"type": "compaction", "encrypted_content": "opaque_owner_checkpoint"})
+    elif changed == "malformed-type":
+        followup["type"] = []
+
+    assert not responses_input_suffix_matches_pending_tool_calls(
+        [*stored, *suffix],
+        stored_count=len(stored),
+        pending_tool_calls=manifest,
+    )
+
+
 def test_full_resend_tool_loop_manifest_tolerates_fresh_developer_interleave_after_historical_one() -> None:
     stored_input: list[JsonValue] = [
         {"role": "user", "content": "first question"},

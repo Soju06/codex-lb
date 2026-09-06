@@ -8986,6 +8986,107 @@ async def test_backend_responses_http_bridge_real_selector_recovers_full_resend_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("owner_status", [AccountStatus.PAUSED, AccountStatus.QUOTA_EXCEEDED])
+@pytest.mark.parametrize("owned_file", [False, True], ids=["account-neutral", "file-pinned"])
+async def test_http_bridge_goal_followup_after_complete_tool_batch_leaves_unavailable_owner(
+    async_client, app_instance, monkeypatch, path, owner_status, owned_file
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_id = await _import_account(async_client, "acc_goal_tool_owner", "goal-tool-owner@example.com")
+    owner = await _get_account(owner_id)
+    owner_upstream = _ClosingInterruptedCustomToolUpstreamWebSocket()
+    replacement_upstream = _FakeBridgeUpstreamWebSocket("resp_goal_replacement")
+    connected = []
+
+    async def ensure_fresh(self, account, *, force=False, timeout_seconds):
+        return account
+
+    async def connect(headers, access_token, account_id_header, *, base_url=None, session=None):
+        connected.append(account_id_header)
+        return owner_upstream if account_id_header == owner.chatgpt_account_id else replacement_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    session_id = "goal-tool-followup-session"
+    history = [{"role": "user", "content": [{"type": "input_text", "text": "Inspect the workspace"}]}]
+    body = {"model": "gpt-5.1", "instructions": "Continue the diagnostic", "input": history, "stream": True}
+    first = await _collect_sse_events(async_client, path, json_body=body, headers={"session_id": session_id})
+    call = next(event["item"] for event in first if event["type"] == "response.output_item.done")
+    service = get_proxy_service_for_app(app_instance)
+    lookup = await service._durable_bridge.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value=session_id,
+        api_key_id=None,
+        turn_state=None,
+        session_header=session_id,
+        previous_response_id=None,
+    )
+    assert lookup is not None
+    assert lookup.latest_pending_tool_calls == {call["call_id"]: "custom_tool_call"}
+
+    replacement_id = await _import_account(
+        async_client, "acc_goal_tool_replacement", "goal-tool-replacement@example.com"
+    )
+    replacement = await _get_account(replacement_id)
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == owner_id).values(status=owner_status))
+        await session.commit()
+    full_resend = [
+        *history,
+        call,
+        {"type": "custom_tool_call_output", "call_id": call["call_id"], "output": "/workspace"},
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": '<codex_internal_context source="goal">Continue the goal.</codex_internal_context>',
+                }
+            ],
+        },
+    ]
+    if owned_file:
+        await service._pin_file_account("file_goal_owner", owner_id)
+        fresh_content = full_resend[-1]["content"]
+        assert isinstance(fresh_content, list)
+        fresh_content.append({"type": "input_file", "file_id": "file_goal_owner"})
+        rejected = await async_client.post(
+            path, json={**body, "input": full_resend}, headers={"session_id": session_id}
+        )
+        assert rejected.status_code in (502, 503)
+        assert connected == [owner.chatgpt_account_id]
+        assert not replacement_upstream.sent_text
+        return
+    second = await _collect_sse_events(
+        async_client,
+        path,
+        json_body={**body, "input": full_resend},
+        headers={"session_id": session_id},
+    )
+    assert second[-1]["response"]["id"] == "resp_goal_replacement_1"
+    assert connected == [owner.chatgpt_account_id, replacement.chatgpt_account_id]
+    assert len(owner_upstream.sent_text) == 1
+    assert len(replacement_upstream.sent_text) == 1
+    replay = json.loads(replacement_upstream.sent_text[0])
+    assert "previous_response_id" not in replay
+    assert replay["input"] == [{k: v for k, v in item.items() if k != "id"} for item in full_resend]
+    third = await _collect_sse_events(
+        async_client,
+        path,
+        json_body={
+            **body,
+            "input": [{"role": "user", "content": "Continue on the replacement"}],
+            "previous_response_id": second[-1]["response"]["id"],
+        },
+        headers={"session_id": session_id},
+    )
+    assert third[-1]["response"]["id"] == "resp_goal_replacement_2"
+    assert connected == [owner.chatgpt_account_id, replacement.chatgpt_account_id]
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_http_bridge_declines_cross_account_anchor_and_settles(
     async_client, app_instance, monkeypatch
 ):

@@ -232,21 +232,30 @@ class _HTTPBridgeSessionRegistryMixin:
         self: _HTTPBridgeServiceProtocol,
         session: _HTTPBridgeSession,
         turn_state: str,
+        *,
+        synthesized: bool = False,
     ) -> bool:
         if _requires_durable_recovery_alias_serialization(session):
             async with session.recovery_alias_lock:
-                return await self._register_http_bridge_turn_state_impl(session, turn_state)
-        return await self._register_http_bridge_turn_state_impl(session, turn_state)
+                return await self._register_http_bridge_turn_state_impl(
+                    session,
+                    turn_state,
+                    synthesized=synthesized,
+                )
+        return await self._register_http_bridge_turn_state_impl(session, turn_state, synthesized=synthesized)
 
     async def _register_http_bridge_turn_state_impl(
         self: _HTTPBridgeServiceProtocol,
         session: _HTTPBridgeSession,
         turn_state: str,
+        *,
+        synthesized: bool = False,
     ) -> bool:
         registered, _receipt = await self._register_http_bridge_turn_state_core(
             session,
             turn_state,
             reversible=False,
+            synthesized=synthesized,
         )
         return registered
 
@@ -261,6 +270,7 @@ class _HTTPBridgeSessionRegistryMixin:
             session,
             turn_state,
             reversible=True,
+            synthesized=False,
         )
 
     async def _register_http_bridge_turn_state_core(
@@ -269,6 +279,7 @@ class _HTTPBridgeSessionRegistryMixin:
         turn_state: str,
         *,
         reversible: bool,
+        synthesized: bool,
     ) -> tuple[bool, DurableBridgeAliasRegistrationReceipt | None]:
         defer_durable_publication = False
         deferred_live_alias_owner: _HTTPBridgeSession | None = None
@@ -303,6 +314,7 @@ class _HTTPBridgeSessionRegistryMixin:
                     deferred_live_alias_owner = live_alias_owner
                 else:
                     live_alias_owner.downstream_turn_state_aliases.discard(turn_state)
+                    live_alias_owner.synthesized_downstream_turn_state_aliases.discard(turn_state)
                     live_alias_owner.turn_state_alias_registration_generations.pop(turn_state, None)
                     if live_alias_owner.downstream_turn_state == turn_state:
                         live_alias_owner.downstream_turn_state = None
@@ -316,6 +328,8 @@ class _HTTPBridgeSessionRegistryMixin:
             registration_generation = _track_alias_registration(session, turn_state, turn_state=True)
             if not defer_durable_publication:
                 session.downstream_turn_state_aliases.add(turn_state)
+                if synthesized:
+                    session.synthesized_downstream_turn_state_aliases.add(turn_state)
                 if session.downstream_turn_state is None:
                     session.downstream_turn_state = turn_state
                 if live_alias_owner is not None:
@@ -346,6 +360,7 @@ class _HTTPBridgeSessionRegistryMixin:
             ):
                 if session.turn_state_alias_registration_generations.get(turn_state) == registration_generation:
                     session.turn_state_alias_registration_generations.pop(turn_state, None)
+                    session.synthesized_downstream_turn_state_aliases.discard(turn_state)
                 return False, receipt
             current_live_owner = _http_bridge_live_turn_state_alias_owner(self, session, turn_state)
             if (
@@ -357,10 +372,13 @@ class _HTTPBridgeSessionRegistryMixin:
                 return False, receipt
             if current_live_owner is not None:
                 current_live_owner.downstream_turn_state_aliases.discard(turn_state)
+                current_live_owner.synthesized_downstream_turn_state_aliases.discard(turn_state)
                 current_live_owner.turn_state_alias_registration_generations.pop(turn_state, None)
                 if current_live_owner.downstream_turn_state == turn_state:
                     current_live_owner.downstream_turn_state = None
             session.downstream_turn_state_aliases.add(turn_state)
+            if synthesized:
+                session.synthesized_downstream_turn_state_aliases.add(turn_state)
             if session.downstream_turn_state is None:
                 session.downstream_turn_state = turn_state
             alias_key = _http_bridge_turn_state_alias_key(turn_state, session.key.api_key_id)
@@ -592,6 +610,7 @@ class _HTTPBridgeSessionRegistryMixin:
             if self._http_bridge_turn_state_index.get(alias_key) == session.key:
                 self._http_bridge_turn_state_index.pop(alias_key, None)
         session.downstream_turn_state_aliases.clear()
+        session.synthesized_downstream_turn_state_aliases.clear()
         session.turn_state_alias_registration_generations.clear()
 
     def _unregister_http_bridge_previous_response_ids_locked(

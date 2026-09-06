@@ -850,6 +850,47 @@ def _http_bridge_key_is_synthesized_turn_state(key: "_HTTPBridgeSessionKey") -> 
     return key.affinity_kind == "turn_state_header" and key.synthesized_turn_state
 
 
+def _http_bridge_session_knows_synthesized_turn_state(
+    session: "_HTTPBridgeSession",
+    turn_state: str,
+) -> bool:
+    return turn_state in session.synthesized_downstream_turn_state_aliases or (
+        session.downstream_turn_state == turn_state and _http_bridge_key_is_synthesized_turn_state(session.key)
+    )
+
+
+def _http_bridge_local_turn_state_alias_is_synthesized_locked(
+    service: Any,
+    turn_state: str,
+    api_key_id: str | None,
+) -> bool:
+    alias_key = _http_bridge_turn_state_alias_key(turn_state, api_key_id)
+    session_key = service._http_bridge_turn_state_index.get(alias_key)
+    if session_key is None:
+        return False
+    session = service._http_bridge_sessions.get(session_key)
+    if _http_bridge_alias_target_is_stale(session):
+        return False
+    return _http_bridge_session_knows_synthesized_turn_state(session, turn_state)
+
+
+def _http_bridge_canonical_inflight_key_locked(
+    service: Any,
+    key: "_HTTPBridgeSessionKey",
+) -> "_HTTPBridgeSessionKey":
+    future = service._http_bridge_inflight_sessions.get(key)
+    if future is None:
+        return key
+    return next(
+        (
+            candidate_key
+            for candidate_key, candidate_future in service._http_bridge_inflight_sessions.items()
+            if candidate_future is future and candidate_key == key
+        ),
+        key,
+    )
+
+
 def _abort_http_bridge_inflight_creation_locked(
     service: Any,
     key: "_HTTPBridgeSessionKey",
@@ -941,32 +982,36 @@ async def _evict_http_bridge_retained_capacity_waiter_after_error(
     future: Any,
     *,
     timeout: float,
+    request_deadline: float | None = None,
 ) -> None:
     error = _http_bridge_startup_wait_timeout_error(
         "http_bridge_capacity",
         code="capacity_exhausted_active_sessions",
     )
-    if _http_bridge_inflight_owner_running(future) and not (
-        await _wait_for_http_bridge_retained_owner(future, timeout=timeout)
-    ):
+    timeout = _http_bridge_owner_observation_timeout_seconds(service, timeout, request_deadline)
+    retained_owner_finished = False
+    if timeout > 0:
+        retained_owner_finished = await _wait_for_http_bridge_retained_owner(future, timeout=timeout)
+    if _http_bridge_inflight_owner_running(future) and not retained_owner_finished:
         raise error
     await service._evict_http_bridge_inflight_waiter(future, error)
 
 
 def _http_bridge_owner_observation_timeout_seconds(
-    wait_timeout_seconds: float, request_deadline: float | None
+    service: object, wait_timeout_seconds: float, request_deadline: float | None
 ) -> float:
     if request_deadline is None:
         return max(0.0, wait_timeout_seconds)
-    return max(0.0, min(wait_timeout_seconds, request_deadline - _service_time().monotonic()))
+    return max(0.0, min(wait_timeout_seconds, request_deadline - clock_for(service).monotonic()))
 
 
 async def _wait_for_http_bridge_aborted_owner_within_budget(
+    service: object,
     future: Any,
     wait_timeout_seconds: float,
     request_deadline: float | None,
 ) -> bool:
-    timeout_seconds = _http_bridge_owner_observation_timeout_seconds(wait_timeout_seconds, request_deadline)
+    timeout_seconds = _http_bridge_owner_observation_timeout_seconds(service, wait_timeout_seconds, request_deadline)
     return timeout_seconds > 0 and await _wait_for_http_bridge_aborted_owner(future, timeout=timeout_seconds)
 
 
@@ -988,11 +1033,14 @@ def _http_bridge_turn_state_key_from(
     source_key: _HTTPBridgeSessionKey,
     turn_state: str,
     api_key_id: str | None,
+    *,
+    synthesized: bool = False,
 ) -> _HTTPBridgeSessionKey:
     return _http_bridge_turn_state_session_key(
         turn_state,
         api_key_id,
-        synthesized=_http_bridge_key_is_synthesized_turn_state(source_key) and source_key.affinity_key == turn_state,
+        synthesized=synthesized
+        or (_http_bridge_key_is_synthesized_turn_state(source_key) and source_key.affinity_key == turn_state),
     )
 
 
@@ -3158,6 +3206,7 @@ async def _persist_http_bridge_turn_state_alias(
             async with service._http_bridge_lock:
                 if session.turn_state_alias_registration_generations.get(turn_state) == registration_generation:
                     session.turn_state_alias_registration_generations.pop(turn_state, None)
+                    session.synthesized_downstream_turn_state_aliases.discard(turn_state)
         return None, None
     if registered == DurableBridgeAliasRegistration.REGISTERED:
         return registered, receipt
@@ -3167,6 +3216,7 @@ async def _persist_http_bridge_turn_state_alias(
         if session.turn_state_alias_registration_generations.get(turn_state) != registration_generation:
             return None, receipt
         session.turn_state_alias_registration_generations.pop(turn_state, None)
+        session.synthesized_downstream_turn_state_aliases.discard(turn_state)
         if local_alias_was_published:
             session.downstream_turn_state_aliases.discard(turn_state)
             if session.downstream_turn_state == turn_state:
@@ -4154,6 +4204,9 @@ for _helper_name in (
     "_http_bridge_reconnect_turn_state",
     "_http_bridge_turn_state_alias_key",
     "_http_bridge_previous_response_alias_key",
+    "_http_bridge_session_knows_synthesized_turn_state",
+    "_http_bridge_local_turn_state_alias_is_synthesized_locked",
+    "_http_bridge_canonical_inflight_key_locked",
     "_http_bridge_session_allows_api_key",
     "_http_bridge_session_account_active",
     "_http_bridge_session_reusable_for_request",

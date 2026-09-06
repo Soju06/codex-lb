@@ -185,6 +185,10 @@ def assign_websocket_created_request_state(
             return explicit
     continuation = continuation_for_created(payload, control)
     if continuation is None:
+        if isinstance(parent_id, str) and parent_id in control.rejected_steering_parent_ids:
+            if response_id is not None:
+                remember_suppressed_steering_response(control, response_id)
+            return None
         return _assign_websocket_response_id(pending_requests, response_id)
     request_state = continuation.request_state
     if request_state not in pending_requests:
@@ -540,6 +544,9 @@ async def process_websocket_steering_event(
             continuation.submissions.remove(submission)
             continuation.queued_input_bytes -= submission.wire_bytes
             if not continuation.submissions:
+                # Keep correlation after the active reservation is released:
+                # delayed successors must never fall through to unrelated FIFO.
+                control.rejected_steering_parent_ids.add(parent_id)
                 control.steering_continuations.pop(parent_id, None)
                 if continuation.explicit_request_prepared:
                     continuation.request_state.steering_parent_response_id = None

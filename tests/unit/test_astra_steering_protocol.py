@@ -1165,3 +1165,100 @@ async def test_explicit_continuation_retries_after_presend_size_rejection(monkey
     assert [(entry[0], entry[3]) for entry in settled] == [("res_0", "r1"), ("res_3", "r2")]
     assert [call.args[0].reservation_id for call in released.await_args_list if call.args[0]] == ["res_1", "res_2"]
     assert all(state.response_create_admission is None and not state.response_create_gate_acquired for state in states)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", [False, True], ids=["rejected-placeholder", "explicit-replacement"])
+async def test_final_steer_failure_keeps_late_successor_off_unrelated_create(monkeypatch, replacement):
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    call = {"type": "function_call", "call_id": "tool", "name": "slow", "arguments": "{}"}
+    result = {"type": "function_call_output", "call_id": "tool", "output": "saved"}
+    failed = {
+        "type": "response.steer.failed",
+        "steer": {"id": "s1", "previous_response_id": "r1"},
+        "error": {"code": "successor_creation_failed", "message": "Rejected"},
+    }
+    scripts = [(create(), lambda _: True), (steer, saw("response.created", "r1"))]
+    events = [
+        [response("response.created", "r1")],
+        [
+            {"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}},
+            response("response.completed", "r1", output=[call] if replacement else []),
+        ],
+    ]
+    if replacement:
+        scripts.append((create(parent="r1", input_items=[result]), saw("response.completed", "r1")))
+        events.append(
+            [
+                failed,
+                response("response.created", "r-explicit", parent="r1"),
+                response("response.completed", "r-explicit", parent="r1"),
+            ]
+        )
+    else:
+        events[-1].append(failed)
+    scripts.append(
+        (
+            create(input_items="Unrelated"),
+            saw("response.completed", "r-explicit") if replacement else saw("response.steer.failed"),
+        )
+    )
+    events.append(
+        [
+            response("response.created", "r-late", parent="r1"),
+            response("response.completed", "r-late", parent="r1"),
+            response("response.created", "r-unrelated"),
+            response("response.completed", "r-unrelated"),
+        ]
+    )
+    socket = ScriptedSocket(scripts)
+    socket.finish_when = lambda event: saw("response.completed", "r-unrelated")([event])
+    upstream = ScriptedUpstream(events)
+    _, reservations, settled, released, _ = await run_socket(monkeypatch, socket, upstream)
+    assert not any(event.get("response", {}).get("id") == "r-late" for event in socket.sent)
+    assert saw("response.completed", "r-unrelated")(socket.sent)
+    expected = [("res_0", "r1")]
+    if replacement:
+        expected.append(("res_2", "r-explicit"))
+    expected.append(("res_3" if replacement else "res_2", "r-unrelated"))
+    assert [(entry[0], entry[3]) for entry in settled] == expected
+    assert len(reservations) == (4 if replacement else 3)
+    assert [call.args[0].reservation_id for call in released.await_args_list if call.args[0]] == ["res_1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_kind", ["explicit", "steering"])
+async def test_rejected_steering_parent_allows_owned_retry(monkeypatch, retry_kind):
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    retry = create(parent="r1") if retry_kind == "explicit" else {**steer, "input": "Retry"}
+    socket = ScriptedSocket(
+        [
+            (create(), lambda _: True),
+            (steer, saw("response.created", "r1")),
+            (retry, saw("response.steer.failed")),
+        ]
+    )
+    socket.finish_when = lambda event: saw("response.completed", "r-retry")([event])
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [
+                {"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}},
+                response("response.completed", "r1"),
+                {
+                    "type": "response.steer.failed",
+                    "steer": {"id": "s1", "previous_response_id": "r1"},
+                    "error": {"code": "successor_creation_failed", "message": "Rejected"},
+                },
+            ],
+            [
+                response("response.created", "r-retry", parent="r1"),
+                response("response.completed", "r-retry", parent="r1"),
+            ],
+        ]
+    )
+    _, reservations, settled, released, _ = await run_socket(monkeypatch, socket, upstream)
+    assert len(upstream.sent) == len(reservations) == 3
+    assert saw("response.completed", "r-retry")(socket.sent)
+    assert [(entry[0], entry[3]) for entry in settled] == [("res_0", "r1"), ("res_2", "r-retry")]
+    assert [call.args[0].reservation_id for call in released.await_args_list if call.args[0]] == ["res_1"]

@@ -136,3 +136,10 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 - **WHEN** final payload validation rejects the unsent replacement
 - **THEN** the proxy SHALL remove only that replacement's control-map ownership and release its reservation and admission
 - **AND** a corrected continuation SHALL be admitted on the same socket
+
+#### Scenario: Final rejected steering retains late successor correlation
+- **GIVEN** the final queued steer fails and its continuation is removed
+- **WHEN** a late response.created names that steering parent while unrelated creates are pending
+- **THEN** the proxy SHALL suppress that late lifecycle without assigning or settling an unrelated request
+- **AND** the parent correlation SHALL survive the failed reservation release and remain valid for the upstream connection lifetime
+- **AND** an explicit create or newly admitted steering continuation for the same parent SHALL retain priority over suppression

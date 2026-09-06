@@ -21,3 +21,4 @@
 - [x] 3.8 Retain failed replaced-placeholder releases for bounded socket cleanup; prove transient recovery, accounting, unrelated progress, cancellation and owned teardown with deterministic WebSocket fault injection
 - [x] 3.9 Retain final-steer release failures for tracked teardown retry, including cancellation and persistent failure
 - [x] 3.10 Clear rejected unsent explicit replacements and prove a corrected continuation succeeds
+- [x] 3.11 Retain rejected parent correlation through late created events, while preserving explicit and steering retry ownership; prove full WebSocket event sequences

@@ -1547,6 +1547,17 @@ async def test_routed_websocket_error_message_defers_ordinary_code_to_relay(with
 
 
 @pytest.mark.asyncio
+async def test_routed_websocket_protocol_error_remains_account_attributable() -> None:
+    websocket = CodexUpstreamWebSocket(_FakeCodexErrorWebSocket(aiohttp.WebSocketError(1002, "invalid frame")))
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.close_code == 1002
+    assert message.transport_ended is False
+
+
+@pytest.mark.asyncio
 async def test_connect_responses_websocket_uses_all_proxy_fallback(monkeypatch):
     fake_connection = _FakeConnection()
     seen: dict[str, object] = {}

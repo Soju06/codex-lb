@@ -1305,6 +1305,7 @@ class _HTTPBridgeSessionKey:
     affinity_key: str
     api_key_id: str | None
     strength: Literal["hard", "soft"] | None = None
+    synthesized_turn_state: bool = field(default=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         strength = self.strength

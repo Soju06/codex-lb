@@ -179,7 +179,6 @@ from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _codex_backend_identity,
     _extract_model_class,
-    _is_synthesized_turn_state,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
 )
@@ -848,7 +847,7 @@ def _http_bridge_inflight_owner_running(future: Any) -> bool:
 
 
 def _http_bridge_key_is_synthesized_turn_state(key: "_HTTPBridgeSessionKey") -> bool:
-    return key.affinity_kind == "turn_state_header" and _is_synthesized_turn_state(key.affinity_key)
+    return key.affinity_kind == "turn_state_header" and key.synthesized_turn_state
 
 
 def _abort_http_bridge_inflight_creation_locked(
@@ -867,8 +866,9 @@ def _abort_http_bridge_inflight_creation_locked(
     owner_running = isinstance(owner_task, asyncio.Task) and not owner_task.done()
     owner_finished = isinstance(owner_task, asyncio.Task) and owner_task.done()
     abort_was_signalled = hasattr(future, _HTTP_BRIDGE_INFLIGHT_ABORT_ERROR_ATTR)
+    future_was_pending = not future.done()
 
-    if not future.done():
+    if future_was_pending:
         setattr(future, _HTTP_BRIDGE_INFLIGHT_ABORT_ERROR_ATTR, exc)
         if isinstance(exc, asyncio.CancelledError):
             future.cancel()
@@ -878,7 +878,7 @@ def _abort_http_bridge_inflight_creation_locked(
 
     if caller_is_owner or owner_finished or not isinstance(owner_task, asyncio.Task):
         service._http_bridge_inflight_sessions.pop(key, None)
-    elif owner_running and not abort_was_signalled:
+    elif owner_running and future_was_pending and not abort_was_signalled:
         owner_task.cancel()
     return True
 
@@ -951,6 +951,49 @@ async def _evict_http_bridge_retained_capacity_waiter_after_error(
     ):
         raise error
     await service._evict_http_bridge_inflight_waiter(future, error)
+
+
+def _http_bridge_owner_observation_timeout_seconds(
+    wait_timeout_seconds: float, request_deadline: float | None
+) -> float:
+    if request_deadline is None:
+        return max(0.0, wait_timeout_seconds)
+    return max(0.0, min(wait_timeout_seconds, request_deadline - _service_time().monotonic()))
+
+
+async def _wait_for_http_bridge_aborted_owner_within_budget(
+    future: Any,
+    wait_timeout_seconds: float,
+    request_deadline: float | None,
+) -> bool:
+    timeout_seconds = _http_bridge_owner_observation_timeout_seconds(wait_timeout_seconds, request_deadline)
+    return timeout_seconds > 0 and await _wait_for_http_bridge_aborted_owner(future, timeout=timeout_seconds)
+
+
+def _http_bridge_turn_state_session_key(
+    turn_state: str,
+    api_key_id: str | None,
+    *,
+    synthesized: bool = False,
+) -> _HTTPBridgeSessionKey:
+    return _HTTPBridgeSessionKey(
+        "turn_state_header",
+        turn_state,
+        api_key_id,
+        synthesized_turn_state=synthesized,
+    )
+
+
+def _http_bridge_turn_state_key_from(
+    source_key: _HTTPBridgeSessionKey,
+    turn_state: str,
+    api_key_id: str | None,
+) -> _HTTPBridgeSessionKey:
+    return _http_bridge_turn_state_session_key(
+        turn_state,
+        api_key_id,
+        synthesized=_http_bridge_key_is_synthesized_turn_state(source_key) and source_key.affinity_key == turn_state,
+    )
 
 
 def _http_bridge_inflight_creation_can_register(future: Any) -> bool:
@@ -2605,6 +2648,7 @@ def _make_http_bridge_session_key(
     allow_forwarded_affinity_headers: bool = False,
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
+    synthesized_turn_state: str | None = None,
 ) -> _HTTPBridgeSessionKey:
     forwarded_key = (
         _forwarded_http_bridge_session_key(
@@ -2623,6 +2667,7 @@ def _make_http_bridge_session_key(
         affinity_key = turn_state_key
         affinity_kind = "turn_state_header"
         strength: Literal["hard", "soft"] = "hard"
+        key_synthesized_turn_state = turn_state_key == synthesized_turn_state
     elif (thread_key := _codex_backend_identity(headers).thread_selection_key) is not None:
         # prompt_cache_key is intentionally shared by current Codex root trees.
         # The thread key is canonical identity; once a bridge exists it is hard
@@ -2630,6 +2675,7 @@ def _make_http_bridge_session_key(
         affinity_key = thread_key
         affinity_kind = "thread_header"
         strength = "hard"
+        key_synthesized_turn_state = False
     else:
         session_key = _sticky_key_from_session_header(headers)
         if session_key is not None:
@@ -2645,6 +2691,7 @@ def _make_http_bridge_session_key(
             affinity_key = session_header_key.affinity_key
             affinity_kind = "session_header"
             strength = "hard"
+            key_synthesized_turn_state = False
         else:
             inferred_key = (
                 inferred_http_bridge_key(payload) if payload.conversation or explicit_prompt_cache_key is None else None
@@ -2654,11 +2701,13 @@ def _make_http_bridge_session_key(
                 "prompt_cache" if inferred_key else affinity.kind.value if affinity.kind is not None else "request"
             )
             strength = "soft"
+            key_synthesized_turn_state = False
     return _HTTPBridgeSessionKey(
         affinity_kind=affinity_kind,
         affinity_key=affinity_key,
         api_key_id=api_key.id if api_key is not None else None,
         strength=strength,
+        synthesized_turn_state=key_synthesized_turn_state,
     )
 
 

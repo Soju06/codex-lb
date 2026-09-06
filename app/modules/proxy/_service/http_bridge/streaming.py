@@ -895,6 +895,7 @@ class _HTTPBridgeStreamingMixin:
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         suppress_text_done_events: bool = False,
         downstream_turn_state: str | None = None,
+        downstream_turn_state_synthesized: bool | None = None,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
         forwarded_legacy_signature: bool = False,
@@ -908,6 +909,10 @@ class _HTTPBridgeStreamingMixin:
         capacity_startup_ready_event: asyncio.Event | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
+        if downstream_turn_state_synthesized is None:
+            downstream_turn_state_synthesized = (
+                downstream_turn_state is not None and _sticky_key_from_turn_state_header(headers) is None
+            )
         proxy_api_authorization = _header_value_case_insensitive(headers, "authorization")
         filtered = filter_inbound_headers(headers)
         return self._stream_http_bridge_or_retry(
@@ -920,6 +925,7 @@ class _HTTPBridgeStreamingMixin:
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
             downstream_turn_state=downstream_turn_state,
+            downstream_turn_state_synthesized=downstream_turn_state_synthesized,
             forwarded_request=forwarded_request,
             forwarded_original_request_unanchored=forwarded_original_request_unanchored,
             forwarded_legacy_signature=forwarded_legacy_signature,
@@ -946,6 +952,7 @@ class _HTTPBridgeStreamingMixin:
         api_key_reservation: ApiKeyUsageReservationData | None,
         suppress_text_done_events: bool,
         downstream_turn_state: str | None = None,
+        downstream_turn_state_synthesized: bool = False,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
         forwarded_legacy_signature: bool = False,
@@ -1068,6 +1075,7 @@ class _HTTPBridgeStreamingMixin:
                     queue_limit=runtime_config.queue_limit,
                     prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
                     downstream_turn_state=downstream_turn_state,
+                    downstream_turn_state_synthesized=downstream_turn_state_synthesized,
                     forwarded_request=forwarded_request,
                     forwarded_original_request_unanchored=forwarded_original_request_unanchored,
                     forwarded_legacy_signature=forwarded_legacy_signature,
@@ -1219,6 +1227,7 @@ class _HTTPBridgeStreamingMixin:
         queue_limit: int,
         prompt_cache_idle_ttl_seconds: float | None = None,
         downstream_turn_state: str | None = None,
+        downstream_turn_state_synthesized: bool = False,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
         forwarded_legacy_signature: bool = False,
@@ -1373,6 +1382,7 @@ class _HTTPBridgeStreamingMixin:
             allow_forwarded_affinity_headers=forwarded_request,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            synthesized_turn_state=downstream_turn_state if downstream_turn_state_synthesized else None,
         )
         durable_lookup_turn_state = (
             downstream_turn_state

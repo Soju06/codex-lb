@@ -34,10 +34,12 @@ admission-wait interval and the key is retry-safe, the timing-out request MUST
 retry admission. If the owner does not terminate in that interval, the proxy
 MUST return the existing structured local-overload HTTP 429 and leave the
 owner-held marker registered until that owner finalizes. The proxy MUST NOT use
-this retry path to replace generated turn-state in-flight creation; generated
-turn-state creator timeouts keep the existing structured local-overload HTTP
-429 behavior and the late owner MUST NOT return an unregistered bridge session
-to the caller.
+this retry path to replace generated turn-state in-flight creation. The proxy
+MUST classify generated turn-state from recorded provenance rather than key
+text; client-supplied values matching generated prefixes MUST remain explicit
+turn-state. Generated turn-state creator timeouts keep the existing structured
+local-overload HTTP 429 behavior and the late owner MUST NOT return an
+unregistered bridge session to the caller.
 
 If a request owns in-flight bridge session creation and is cancelled or fails
 after publishing the in-flight marker but before registering the created

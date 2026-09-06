@@ -116,6 +116,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_wait_for_registration,
     _http_bridge_startup_wait_timeout_error,
     _http_bridge_turn_state_alias_key,
+    _http_bridge_turn_state_key_from,
     _log_http_bridge_event,
     _log_http_bridge_startup_wait_timeout,
     _mark_http_bridge_inflight_creation_owner,
@@ -132,7 +133,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _reserve_http_bridge_unanchored_handoff,
     _settle_and_close_failed_http_bridge_creation,
     _turn_keys,
-    _wait_for_http_bridge_aborted_owner,
+    _wait_for_http_bridge_aborted_owner_within_budget,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _close_http_bridge_session as _helpers_close_http_bridge_session,
@@ -420,6 +421,7 @@ class _HTTPBridgeMixin(
         settings = _service_get_settings()
         request_scope_id = ensure_request_scope_id()
         api_key_id = api_key.id if api_key is not None else None
+        requested_key = key
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
         incoming_session_key, initial_session_key = _turn_keys(headers, api_key, key, session_header_fallback_key)
         original_request_unanchored = _http_bridge_request_needs_unanchored_handoff(
@@ -560,7 +562,7 @@ class _HTTPBridgeMixin(
                                 bind_account_neutral_recovery_owner(alias_session)
                                 continue
                             self._http_bridge_turn_state_index.pop(alias_index_key, None)
-                            key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                            key = _http_bridge_turn_state_key_from(requested_key, incoming_turn_state, api_key_id)
                         elif not _http_bridge_models_compatible(alias_session.request_model, request_model):
                             model_transition_rebind, model_transition_parent_key = True, alias_key
                             if is_http_bridge_account_neutral_replay(
@@ -578,7 +580,7 @@ class _HTTPBridgeMixin(
                                 key = recovery_fork_key
                                 continue
                             else:
-                                key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                                key = _http_bridge_turn_state_key_from(requested_key, incoming_turn_state, api_key_id)
                         elif not _http_bridge_compatible(
                             alias_session, request_model, request_service_tier, True
                         ) or not _http_bridge_session_matches_preferred_account(
@@ -662,14 +664,14 @@ class _HTTPBridgeMixin(
                                 kind=key.affinity_kind,
                                 key=key.affinity_key,
                             ):
-                                key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                                key = _http_bridge_turn_state_key_from(requested_key, incoming_turn_state, api_key_id)
                         elif (
                             fallback_key := _alias_fallback_key(incoming_session_key, initial_session_key, api_key_id)
                         ) is not None:
                             key = fallback_key
                             used_session_header_fallback = True
                         else:
-                            key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                            key = _http_bridge_turn_state_key_from(requested_key, incoming_turn_state, api_key_id)
                             missing_turn_state_alias = True
                 pruned_sessions = self._prune_http_bridge_sessions_locked()
                 if pruned_sessions:
@@ -1370,9 +1372,8 @@ class _HTTPBridgeMixin(
                         pending_count=_http_bridge_session_generation_count(self),
                         inflight_count=len(self._http_bridge_inflight_sessions),
                     )
-                    if await _wait_for_http_bridge_aborted_owner(
-                        capacity_wait_future,
-                        timeout=wait_timeout_seconds,
+                    if await _wait_for_http_bridge_aborted_owner_within_budget(
+                        capacity_wait_future, wait_timeout_seconds, request_deadline
                     ):
                         continue
                     raise timeout_error from exc
@@ -1409,9 +1410,8 @@ class _HTTPBridgeMixin(
                     )
                     if _http_bridge_key_is_synthesized_turn_state(key):
                         raise timeout_error from exc
-                    if await _wait_for_http_bridge_aborted_owner(
-                        inflight_future,
-                        timeout=wait_timeout_seconds,
+                    if await _wait_for_http_bridge_aborted_owner_within_budget(
+                        inflight_future, wait_timeout_seconds, request_deadline
                     ):
                         continue
                     raise timeout_error from exc

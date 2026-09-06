@@ -20,7 +20,7 @@ from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.time import utcnow
-from app.db.models import Account, DashboardSettings, RequestLog, StickySessionKind
+from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
@@ -661,6 +661,99 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
     assert event["response"]["id"] == "resp_stream_failover"
     assert captured_account_ids[0] == invalidated_account_id
     assert captured_account_ids[1] != invalidated_account_id
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_revoked_token_event_retires_account_and_fails_over(async_client, monkeypatch):
+    account_ids: list[str] = []
+    for suffix in ("a", "b"):
+        raw_account_id = f"acc_stream_token_revoked_{suffix}"
+        email = f"stream-token-revoked-{suffix}@example.com"
+        auth_json = _make_auth_json(raw_account_id, email)
+        response = await async_client.post(
+            "/api/accounts/import",
+            files={"auth_json": (f"auth-{suffix}.json", json.dumps(auth_json), "application/json")},
+        )
+        assert response.status_code == 200
+        account_ids.append(generate_unique_account_id(raw_account_id, email))
+
+    captured_account_ids: list[str | None] = []
+    captured_payloads: list[ResponsesRequest] = []
+    revoked_upstream_account_id: str | None = None
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, base_url, raise_for_status, kwargs
+        nonlocal revoked_upstream_account_id
+        if revoked_upstream_account_id is None:
+            revoked_upstream_account_id = account_id
+        captured_account_ids.append(account_id)
+        captured_payloads.append(payload)
+        if account_id == revoked_upstream_account_id:
+            yield (
+                'data: {"type":"response.failed","sequence_number":2,'
+                '"response":{"id":"resp_token_revoked","status":"failed",'
+                '"error":{"code":"token_revoked","type":"authentication_error",'
+                '"message":"Encountered invalidated oauth token for user, failing request"}}}\n\n'
+            )
+            return
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_token_revoked_failover",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [
+                {"type": "message", "role": "user", "content": "first question"},
+                {
+                    "type": "reasoning",
+                    "id": "rs_revoked_owner",
+                    "encrypted_content": "opaque-state",
+                    "summary": [],
+                },
+                {
+                    "type": "message",
+                    "id": "msg_revoked_owner",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                {"type": "message", "role": "user", "content": "continue"},
+            ],
+            "stream": True,
+            "prompt_cache_key": "stream-token-revoked-sticky",
+        },
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    assert event["response"]["id"] == "resp_token_revoked_failover"
+    assert captured_account_ids[0] == revoked_upstream_account_id
+    assert captured_account_ids[1] != revoked_upstream_account_id
+    initial_input = captured_payloads[0].input
+    replay_input = captured_payloads[1].input
+    assert isinstance(initial_input, list)
+    assert isinstance(replay_input, list)
+    assert any(isinstance(item, dict) and item.get("type") == "reasoning" for item in initial_input)
+    assert all(not isinstance(item, dict) or item.get("type") != "reasoning" for item in replay_input)
+    assert all(not isinstance(item, dict) or "id" not in item for item in replay_input)
+
+    async with SessionLocal() as session:
+        accounts = {account.id: account for account in (await session.execute(select(Account))).scalars().all()}
+    revoked_account = next(
+        account for account in accounts.values() if account.chatgpt_account_id == revoked_upstream_account_id
+    )
+    assert revoked_account.id in account_ids
+    assert revoked_account.status == AccountStatus.REAUTH_REQUIRED
+    assert revoked_account.deactivation_reason == "Authentication token revoked - re-login required"
 
 
 @pytest.mark.asyncio

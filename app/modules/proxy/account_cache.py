@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import anyio
 from sqlalchemy import select
 
+from app.core.balancer import reauth_reason_blocks_routing
 from app.core.cache.invalidation import (
     NAMESPACE_ACCOUNT_ROUTING,
     NAMESPACE_ACCOUNT_SELECTION,
@@ -99,7 +100,8 @@ _ROUTING_UNAVAILABLE_STATUSES = frozenset(
 class RoutingAvailabilityCache:
     """Cluster-coherent view of which accounts are unavailable for routing.
 
-    The cache keeps a snapshot of committed account statuses (``{account_id: status}``)
+    The cache keeps a snapshot of committed account statuses and reasons
+    (``{account_id: (status, deactivation_reason)}``)
     seeded at poller start and rebuilt on every ``account_routing`` bump. An account is
     routing-unavailable when its committed status is PAUSED / DEACTIVATED, or the id
     is absent from the snapshot (deleted), or a local mark
@@ -113,7 +115,7 @@ class RoutingAvailabilityCache:
 
     def __init__(self, session_factory: Callable[[], AsyncSession] | None = None) -> None:
         self._session_factory = session_factory
-        self._snapshot: dict[str, AccountStatus] | None = None
+        self._snapshot: dict[str, tuple[AccountStatus, str | None]] | None = None
         self._local_marks: set[str] = set()
 
     @property
@@ -127,7 +129,7 @@ class RoutingAvailabilityCache:
     def clear_unavailable(self, account_id: str) -> None:
         self._local_marks.discard(account_id)
         if self._snapshot is not None:
-            self._snapshot[account_id] = AccountStatus.ACTIVE
+            self._snapshot[account_id] = (AccountStatus.ACTIVE, None)
         _request_account_routing_bump()
 
     def is_unavailable(self, account_id: str) -> bool:
@@ -136,8 +138,13 @@ class RoutingAvailabilityCache:
         snapshot = self._snapshot
         if snapshot is None:
             return False
-        status = snapshot.get(account_id)
-        return status is None or status in _ROUTING_UNAVAILABLE_STATUSES
+        entry = snapshot.get(account_id)
+        if entry is None:
+            return True
+        status, reason = entry
+        return status in _ROUTING_UNAVAILABLE_STATUSES or (
+            status == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(reason)
+        )
 
     async def refresh_from_db(self) -> None:
         """Rebuild the snapshot from committed account statuses.
@@ -161,8 +168,10 @@ class RoutingAvailabilityCache:
         factory = self._session_factory or SessionLocal
         session = factory()
         try:
-            result = await session.execute(select(Account.id, Account.status))
-            snapshot: dict[str, AccountStatus] = {account_id: status for account_id, status in result.all()}
+            result = await session.execute(select(Account.id, Account.status, Account.deactivation_reason))
+            snapshot: dict[str, tuple[AccountStatus, str | None]] = {
+                account_id: (status, reason) for account_id, status, reason in result.all()
+            }
         finally:
             await close_session(session)
         self._snapshot = snapshot
@@ -171,7 +180,8 @@ class RoutingAvailabilityCache:
             for account_id in self._local_marks
             if account_id not in marks_before_refresh
             or (status := snapshot.get(account_id)) is None
-            or status in _ROUTING_UNAVAILABLE_STATUSES
+            or status[0] in _ROUTING_UNAVAILABLE_STATUSES
+            or (status[0] == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(status[1]))
         }
 
     def reset(self) -> None:

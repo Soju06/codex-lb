@@ -1767,6 +1767,40 @@ def test_handle_permanent_failure_sets_reauth_required_for_token_invalidated():
     assert state.deactivation_reason == "Authentication token invalidated - re-login required"
 
 
+def test_handle_permanent_failure_sets_reauth_required_for_token_revoked():
+    state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    handle_permanent_failure(state, "token_revoked")
+    assert state.status == AccountStatus.REAUTH_REQUIRED
+    assert state.deactivation_reason == "Authentication token revoked - re-login required"
+
+
+def test_select_account_skips_reauth_account_with_revoked_access_token():
+    revoked = AccountState(
+        "revoked",
+        AccountStatus.REAUTH_REQUIRED,
+        deactivation_reason="Authentication token revoked - re-login required",
+    )
+    healthy = AccountState("healthy", AccountStatus.ACTIVE)
+
+    result = select_account([revoked, healthy])
+
+    assert result.account is not None
+    assert result.account.account_id == "healthy"
+
+
+def test_select_account_keeps_reauth_account_with_only_revoked_refresh_token():
+    refresh_revoked = AccountState(
+        "refresh-revoked",
+        AccountStatus.REAUTH_REQUIRED,
+        deactivation_reason="Refresh token was revoked - re-login required",
+    )
+
+    result = select_account([refresh_revoked])
+
+    assert result.account is not None
+    assert result.account.account_id == "refresh-revoked"
+
+
 def test_handle_permanent_failure_sets_reason_for_account_deactivated():
     state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
     handle_permanent_failure(state, "account_deactivated")

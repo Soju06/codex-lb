@@ -12,7 +12,7 @@ from typing import Any, AsyncGenerator, AsyncIterator, Mapping, cast
 import aiohttp
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
-from app.core.balancer import failover_decision
+from app.core.balancer import PERMANENT_FAILURE_CODES, failover_decision
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.proxy import (
     ProxyResponseError,
@@ -87,7 +87,10 @@ from app.modules.proxy.helpers import (
     is_upstream_model_capacity_error,
 )
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
-from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
+from app.modules.proxy.replay_safety import (
+    project_responses_input_for_account_neutral_fresh_replay,
+    responses_payload_is_account_neutral_fresh_replay,
+)
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
 
 _REQUEST_TRANSPORT_HTTP = "http"
@@ -775,6 +778,58 @@ class _StreamingRetryMixin:
             affinity = replace(affinity, reallocate_sticky=True)
             logger.info(
                 "cross_transport_verified_fresh_replay request_id=%s outcome=%s account_id=%s",
+                request_id,
+                outcome,
+                account_id,
+            )
+            return True
+
+        def _move_previsible_account_rejection_from_dispatch_owner(*, account_id: str, outcome: str) -> bool:
+            """Move a rejected first-turn body after upstream rejected this account.
+
+            A non-neutral body is pinned once dispatched because an ambiguous
+            transport failure may have created account-owned state.  A
+            pre-visible permanent account rejection is different: upstream
+            rejected the credential/account before it could execute the turn.
+            For an otherwise unanchored first turn, remove only the known
+            response-owned bookkeeping and require the resulting wire body to
+            pass the shared account-neutral replay gate before moving it.
+            """
+
+            nonlocal affinity, payload, payload_replay_required_account_id
+            if (
+                require_preferred_account
+                or preferred_account_id is not None
+                or file_preferred_account_id is not None
+                or turn_state_owner_account_id is not None
+                or routing_strategy == "single_account"
+                or payload.previous_response_id is not None
+                or payload_replay_required_account_id not in (None, account_id)
+            ):
+                return False
+
+            replay_payload = payload
+            replay_safety_payload = replay_payload.to_replay_safety_payload()
+            if not responses_payload_is_account_neutral_fresh_replay(replay_safety_payload):
+                input_items = replay_payload.input
+                if not isinstance(input_items, list) or not input_items:
+                    return False
+                projection = project_responses_input_for_account_neutral_fresh_replay(
+                    input_items,
+                    stored_count=len(input_items),
+                )
+                if projection is None:
+                    return False
+                replay_payload = replay_payload.model_copy(update={"input": projection.input_items})
+                if not responses_payload_is_account_neutral_fresh_replay(replay_payload.to_replay_safety_payload()):
+                    return False
+
+            payload = replay_payload
+            payload_replay_required_account_id = None
+            excluded_account_ids.add(account_id)
+            affinity = replace(affinity, reallocate_sticky=True)
+            logger.info(
+                "previsible_account_rejection_replay request_id=%s outcome=%s account_id=%s",
                 request_id,
                 outcome,
                 account_id,
@@ -2405,11 +2460,33 @@ class _StreamingRetryMixin:
                                     http_status=tex.status_code,
                                     phase="first_event",
                                 )
-                                if getattr(base_settings, "deterministic_failover_enabled", True):
-                                    action = failover_decision(
-                                        failure_class=classified["failure_class"],
-                                        downstream_visible=settlement.downstream_visible,
-                                        candidates_remaining=max_attempts - attempt - 1,
+                                deterministic_failover_enabled = getattr(
+                                    base_settings,
+                                    "deterministic_failover_enabled",
+                                    True,
+                                )
+                                permanent_account_rejection_replay = False
+                                if (
+                                    deterministic_failover_enabled
+                                    and code in PERMANENT_FAILURE_CODES
+                                    and attempt < max_attempts - 1
+                                ):
+                                    permanent_account_rejection_replay = _move_verified_fresh_replay_from_owner(
+                                        account_id=account.id,
+                                        outcome="owner_previsible_permanent_account_rejection",
+                                    ) or _move_previsible_account_rejection_from_dispatch_owner(
+                                        account_id=account.id,
+                                        outcome="owner_previsible_permanent_account_rejection",
+                                    )
+                                if deterministic_failover_enabled:
+                                    action = (
+                                        "failover_next"
+                                        if permanent_account_rejection_replay
+                                        else failover_decision(
+                                            failure_class=classified["failure_class"],
+                                            downstream_visible=settlement.downstream_visible,
+                                            candidates_remaining=max_attempts - attempt - 1,
+                                        )
                                     )
                                 else:
                                     action = "surface"
@@ -2583,10 +2660,32 @@ class _StreamingRetryMixin:
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None
                         excluded_account_ids.add(account.id)
-                    _move_verified_fresh_replay_from_owner(
+                    replay_moved = _move_verified_fresh_replay_from_owner(
                         account_id=account.id,
                         outcome="owner_previsible_retryable_failure",
                     )
+                    if exc.code in PERMANENT_FAILURE_CODES and not replay_moved:
+                        replay_moved = _move_previsible_account_rejection_from_dispatch_owner(
+                            account_id=account.id,
+                            outcome="owner_previsible_permanent_account_rejection",
+                        )
+                    if (
+                        exc.code in PERMANENT_FAILURE_CODES
+                        and not replay_moved
+                        and payload_replay_required_account_id == account.id
+                    ):
+                        # The account is now retired, but this body could not be
+                        # proven safe to move. Preserve the real authentication
+                        # failure instead of replacing it with the misleading
+                        # preferred-account-unavailable selector error.
+                        yield format_sse_event(
+                            response_failed_event(
+                                exc.code,
+                                str(exc.error.get("message") or "Upstream account is unavailable"),
+                                response_id=request_id,
+                            )
+                        )
+                        return
                     continue
                 except _TerminalStreamError:
                     if settlement.settlement_order_required:

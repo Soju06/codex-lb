@@ -4,6 +4,7 @@ import time
 from collections.abc import Collection
 
 from app.core.auth import token_expiry_epoch_ms
+from app.core.balancer import reauth_reason_blocks_routing
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
 
@@ -46,15 +47,30 @@ def reauth_access_token_is_expired(
     )
 
 
+def reauth_account_is_routing_blocked(
+    status: AccountStatus,
+    deactivation_reason: str | None,
+    access_token_expires_at: float | None,
+    *,
+    now: float | None = None,
+) -> bool:
+    """Return whether a re-auth account must be excluded from new routing."""
+    return status == AccountStatus.REAUTH_REQUIRED and (
+        reauth_reason_blocks_routing(deactivation_reason)
+        or reauth_access_token_is_expired(status, access_token_expires_at, now=now)
+    )
+
+
 def all_accounts_require_reauthentication(
     accounts: Collection[Account],
     encryptor: TokenEncryptor,
 ) -> bool:
-    """Return whether every candidate is reauthentication-blocked by known expiry."""
+    """Return whether every candidate requires reauthentication before routing."""
     now = time.time()
     return bool(accounts) and all(
-        reauth_access_token_is_expired(
+        reauth_account_is_routing_blocked(
             account.status,
+            account.deactivation_reason,
             account_access_token_expires_at(account, encryptor),
             now=now,
         )

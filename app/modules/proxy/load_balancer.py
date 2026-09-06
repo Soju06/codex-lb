@@ -34,6 +34,7 @@ from app.core.balancer import (
     handle_quota_exceeded,
     handle_rate_limit,
     plausible_rate_limit_reset_at,
+    reauth_reason_blocks_routing,
 )
 from app.core.balancer import (
     select_account as select_account,
@@ -1766,7 +1767,9 @@ class LoadBalancer:
                     state,
                     expected_refresh_token_encrypted=account.refresh_token_encrypted,
                 )
-            if downgraded and state.status == AccountStatus.DEACTIVATED:
+            if downgraded and (
+                state.status == AccountStatus.DEACTIVATED or reauth_reason_blocks_routing(state.deactivation_reason)
+            ):
                 mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
             return downgraded

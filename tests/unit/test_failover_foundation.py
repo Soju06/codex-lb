@@ -164,6 +164,15 @@ class TestClassifyUpstreamFailure:
         )
         assert result["failure_class"] == "non_retryable"
 
+    def test_revoked_token_is_non_retryable_auth(self) -> None:
+        result = classify_upstream_failure(
+            error_code="token_revoked",
+            error=UpstreamError(message="Encountered invalidated oauth token for user, failing request"),
+            http_status=None,
+            phase="first_event",
+        )
+        assert result["failure_class"] == "non_retryable"
+
     def test_preserves_error_payload(self) -> None:
         error: UpstreamError = {"message": "Try again", "resets_at": 1234567890}
         result = classify_upstream_failure(

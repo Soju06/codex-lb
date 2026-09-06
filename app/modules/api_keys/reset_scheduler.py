@@ -18,8 +18,7 @@ from app.modules.api_keys.repository import ApiKeysRepository
 logger = logging.getLogger(__name__)
 
 _API_KEY_LIMIT_RESET_INTERVAL_SECONDS = 3600
-_DAILY_LIMIT_ALIGNMENT_HOUR_UTC = 23
-_DAILY_LIMIT_ALIGNMENT_MINUTE_UTC = 50
+_DAILY_LIMIT_ALIGNMENT_LEAD = timedelta(minutes=10)
 _STALE_USAGE_RESERVATION_AGE = timedelta(hours=6)
 # Hard ceiling on reservation lifetime regardless of heartbeat activity. This
 # is the backstop for orphaned reservation heartbeats (issue #1594): a leaked
@@ -42,12 +41,7 @@ def _get_leader_election() -> _LeaderElectionLike:
 
 
 def seconds_until_daily_limit_alignment(now: datetime) -> float:
-    next_run = now.replace(
-        hour=_DAILY_LIMIT_ALIGNMENT_HOUR_UTC,
-        minute=_DAILY_LIMIT_ALIGNMENT_MINUTE_UTC,
-        second=0,
-        microsecond=0,
-    )
+    next_run = next_limit_reset(now, LimitWindow.DAILY) - _DAILY_LIMIT_ALIGNMENT_LEAD
     if next_run < now:
         next_run += timedelta(days=1)
     return (next_run - now).total_seconds()
@@ -139,7 +133,7 @@ class ApiKeyLimitResetScheduler:
                     aligned_count = await ApiKeysRepository(session).align_daily_limit_resets(reset_at=reset_at)
                     if aligned_count > 0:
                         logger.info(
-                            "Aligned daily API key limits to UTC midnight aligned_count=%s reset_at=%s",
+                            "Aligned daily API key limits to Asia/Ho_Chi_Minh midnight aligned_count=%s reset_at=%s",
                             aligned_count,
                             reset_at.isoformat(),
                         )

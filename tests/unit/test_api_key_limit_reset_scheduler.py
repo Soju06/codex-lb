@@ -21,13 +21,15 @@ def test_build_api_key_limit_reset_scheduler_uses_fixed_hourly_interval() -> Non
 @pytest.mark.parametrize(
     ("now", "expected_seconds"),
     [
-        (datetime(2026, 9, 4, 23, 49, 30), 30.0),
-        (datetime(2026, 9, 4, 23, 50, 0), 0.0),
-        (datetime(2026, 9, 4, 23, 50, 1), 86_399.0),
-        (datetime(2026, 9, 4, 8, 15, 0), 56_100.0),
+        (datetime(2026, 9, 4, 16, 49, 30), 30.0),
+        (datetime(2026, 9, 4, 16, 50, 0), 0.0),
+        (datetime(2026, 9, 4, 16, 50, 1), 86_399.0),
+        (datetime(2026, 9, 4, 17, 0, 0), 85_800.0),
+        (datetime(2026, 9, 4, 23, 50, 0), 61_200.0),
+        (datetime(2026, 9, 4, 8, 15, 0), 30_900.0),
     ],
 )
-def test_seconds_until_daily_limit_alignment_uses_2350_utc(
+def test_seconds_until_daily_limit_alignment_uses_2350_ho_chi_minh(
     now: datetime,
     expected_seconds: float,
 ) -> None:
@@ -82,7 +84,7 @@ async def test_reset_once_resets_expired_limits(monkeypatch: pytest.MonkeyPatch)
 async def test_align_daily_limits_once_is_leader_gated_and_targets_next_midnight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fixed_now = datetime(2026, 9, 4, 23, 50, 0)
+    fixed_now = datetime(2026, 9, 4, 16, 50, 0)
     repo = AsyncMock()
     repo.align_daily_limit_resets = AsyncMock(return_value=4)
 
@@ -112,4 +114,4 @@ async def test_align_daily_limits_once_is_leader_gated_and_targets_next_midnight
         await scheduler._align_daily_limits_once()
 
     assert gate_calls == 1
-    repo.align_daily_limit_resets.assert_awaited_once_with(reset_at=datetime(2026, 9, 5, 0, 0, 0))
+    repo.align_daily_limit_resets.assert_awaited_once_with(reset_at=datetime(2026, 9, 4, 17, 0, 0))

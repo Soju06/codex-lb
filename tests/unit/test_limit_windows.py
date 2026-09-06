@@ -38,17 +38,31 @@ def test_limit_window_delta_returns_expected_duration(
     "window, expected",
     [
         (LimitWindow.FIVE_HOURS, NOW + timedelta(hours=5)),
-        (LimitWindow.DAILY, datetime(2026, 5, 29, 0, 0, 0)),
+        (LimitWindow.DAILY, datetime(2026, 5, 28, 17, 0, 0)),
         (LimitWindow.WEEKLY, NOW + timedelta(days=7)),
         (LimitWindow.SEVEN_DAYS, NOW + timedelta(days=7)),
         (LimitWindow.MONTHLY, NOW + timedelta(days=30)),
     ],
 )
-def test_next_limit_reset_adds_window_delta_to_now(
+def test_next_limit_reset_uses_window_boundary(
     window: LimitWindow,
     expected: datetime,
 ) -> None:
     assert next_limit_reset(NOW, window) == expected
+
+
+@pytest.mark.parametrize(
+    ("now", "expected"),
+    [
+        (datetime(2026, 9, 6, 0, 0), datetime(2026, 9, 6, 17, 0)),
+        (datetime(2026, 9, 6, 16, 59, 59, 999999), datetime(2026, 9, 6, 17, 0)),
+        (datetime(2026, 9, 6, 17, 0), datetime(2026, 9, 7, 17, 0)),
+        (datetime(2026, 9, 6, 23, 59, 59), datetime(2026, 9, 7, 17, 0)),
+        (datetime(2026, 12, 31, 17, 0), datetime(2027, 1, 1, 17, 0)),
+    ],
+)
+def test_daily_reset_uses_next_ho_chi_minh_midnight(now: datetime, expected: datetime) -> None:
+    assert next_limit_reset(now, LimitWindow.DAILY) == expected
 
 
 def test_advance_limit_reset_returns_input_when_reset_is_already_in_future() -> None:
@@ -66,7 +80,7 @@ def test_advance_limit_reset_returns_input_when_reset_equals_now_strictly() -> N
 
     result = advance_limit_reset(reset_at, NOW, LimitWindow.DAILY)
 
-    assert result == datetime(2026, 5, 29, 0, 0, 0)
+    assert result == datetime(2026, 5, 28, 17, 0, 0)
 
 
 def test_advance_limit_reset_advances_by_a_single_delta_when_one_window_passed() -> None:
@@ -74,7 +88,7 @@ def test_advance_limit_reset_advances_by_a_single_delta_when_one_window_passed()
 
     result = advance_limit_reset(reset_at, NOW, LimitWindow.DAILY)
 
-    assert result == datetime(2026, 5, 29, 0, 0, 0)
+    assert result == datetime(2026, 5, 28, 17, 0, 0)
 
 
 def test_advance_limit_reset_advances_multiple_deltas_when_many_windows_passed() -> None:
@@ -85,7 +99,7 @@ def test_advance_limit_reset_advances_multiple_deltas_when_many_windows_passed()
 
     result = advance_limit_reset(reset_at, NOW, LimitWindow.DAILY)
 
-    assert result == datetime(2026, 5, 29, 0, 0, 0)
+    assert result == datetime(2026, 5, 28, 17, 0, 0)
     assert result > NOW
 
 

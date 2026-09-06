@@ -6,7 +6,7 @@ import contextlib
 import json
 import re
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
 
@@ -17,6 +17,7 @@ from sqlalchemy import select, update
 
 import app.core.clients.proxy as core_proxy_module
 import app.modules.api_keys.repository as api_keys_repository_module
+import app.modules.api_keys.service as api_keys_service_module
 import app.modules.proxy.api as proxy_api
 import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
@@ -3961,6 +3962,69 @@ async def test_update_key_reset_usage_requires_explicit_action(async_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("now", "expected_reset"),
+    [
+        (datetime(2026, 9, 6, 16, 59, 59), "2026-09-06T17:00:00Z"),
+        (datetime(2026, 9, 6, 17, 0), "2026-09-07T17:00:00Z"),
+        (datetime(2026, 9, 6, 23, 59, 59), "2026-09-07T17:00:00Z"),
+    ],
+)
+async def test_daily_limit_create_and_explicit_reset_use_ho_chi_minh_midnight(
+    async_client, monkeypatch, now, expected_reset
+):
+    monkeypatch.setattr(api_keys_service_module, "utcnow", lambda: now)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "local-midnight-reset",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 1000}],
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["limits"][0]["resetAt"] == expected_reset
+    key_id = created.json()["id"]
+
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        limits[0].current_value = 321
+        limits[0].reset_at = now + timedelta(days=3)
+        await session.commit()
+
+    reset = await async_client.patch(f"/api/api-keys/{key_id}", json={"resetUsage": True})
+    assert reset.status_code == 200
+    assert reset.json()["limits"][0]["resetAt"] == expected_reset
+    assert reset.json()["limits"][0]["currentValue"] == 0
+
+
+@pytest.mark.asyncio
+async def test_daily_limit_lazy_reset_uses_ho_chi_minh_midnight(async_client, monkeypatch):
+    now = datetime(2026, 9, 6, 17, 0, 1)
+    monkeypatch.setattr(api_keys_service_module, "utcnow", lambda: now)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "local-midnight-lazy-reset",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 1000}],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        limits[0].current_value = 1000
+        limits[0].reset_at = datetime(2026, 9, 6, 17, 0)
+        await session.commit()
+
+    usage = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {created.json()['key']}"})
+    assert usage.status_code == 200
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert limits[0].current_value == 0
+        assert limits[0].reset_at == datetime(2026, 9, 7, 17, 0)
+
+
+@pytest.mark.asyncio
 async def test_reset_expired_limits_background_fallback_advances_windows(async_client):
     created = await async_client.post(
         "/api/api-keys/",
@@ -3975,7 +4039,7 @@ async def test_reset_expired_limits_background_fallback_advances_windows(async_c
     assert created.status_code == 200
     key_id = created.json()["id"]
 
-    now = utcnow()
+    now = datetime(2026, 9, 6, 16, 30)
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
         limits = await repo.get_limits_by_key(key_id)
@@ -3999,12 +4063,7 @@ async def test_reset_expired_limits_background_fallback_advances_windows(async_c
         daily_limit = next(limit for limit in limits if limit.limit_window == LimitWindow.DAILY)
         weekly_limit = next(limit for limit in limits if limit.limit_window == LimitWindow.WEEKLY)
         assert daily_limit.current_value == 0
-        assert daily_limit.reset_at == (now + timedelta(days=1)).replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
+        assert daily_limit.reset_at == datetime(2026, 9, 6, 17, 0)
         assert weekly_limit.current_value == 0
         assert weekly_limit.reset_at == now + timedelta(days=7)
 
@@ -4024,7 +4083,7 @@ async def test_align_daily_limit_resets_preserves_usage_and_other_windows(async_
     assert created.status_code == 200
     key_id = created.json()["id"]
 
-    target_reset_at = utcnow().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    target_reset_at = datetime(2026, 9, 6, 17, 0)
     daily_reset_at = target_reset_at + timedelta(hours=8)
     weekly_reset_at = target_reset_at + timedelta(days=6, hours=12)
     async with SessionLocal() as session:
@@ -4070,7 +4129,7 @@ async def test_reset_expired_limits_background_fallback_processes_batches(async_
     assert created.status_code == 200
     key_id = created.json()["id"]
 
-    now = utcnow()
+    now = datetime(2026, 9, 6, 17, 30)
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
         limits = await repo.get_limits_by_key(key_id)
@@ -4095,12 +4154,7 @@ async def test_reset_expired_limits_background_fallback_processes_batches(async_
         limits = await repo.get_limits_by_key(key_id)
         by_window = {limit.limit_window: limit for limit in limits}
         assert by_window[LimitWindow.DAILY].current_value == 0
-        assert by_window[LimitWindow.DAILY].reset_at == (now + timedelta(days=1)).replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
+        assert by_window[LimitWindow.DAILY].reset_at == datetime(2026, 9, 7, 17, 0)
         assert by_window[LimitWindow.WEEKLY].current_value == 0
         assert by_window[LimitWindow.WEEKLY].reset_at == now + timedelta(days=7)
         assert by_window[LimitWindow.MONTHLY].current_value == 0

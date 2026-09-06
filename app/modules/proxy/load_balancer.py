@@ -2313,12 +2313,7 @@ def _state_from_account(
         secondary_reset = None
     ignore_zero_capacity_primary_runtime_reset = False
     status_seed = account.status
-    long_window_quota_available = (
-        effective_secondary_entry is not None
-        and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
-        and effective_secondary_entry.used_percent is not None
-        and float(effective_secondary_entry.used_percent) < 100.0
-    )
+    long_window_quota_available = _usage_entry_is_recent_available(effective_secondary_entry)
     # An account marked RATE_LIMITED by an actual 429 always carries a
     # blocked_at marker (stale window-derived RATE_LIMITED rows do not).
     # Evaluate the persisted cooldown against the ORIGINAL persisted
@@ -2423,9 +2418,7 @@ def _state_from_account(
         and effective_runtime_reset > time.time()
         and effective_blocked_at is None
         and effective_secondary_entry is not None
-        and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
-        and effective_secondary_entry.used_percent is not None
-        and float(effective_secondary_entry.used_percent) < 100.0
+        and long_window_quota_available
         and effective_secondary_entry.reset_at is not None
         and float(effective_secondary_entry.reset_at) > effective_runtime_reset
     ):

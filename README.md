@@ -122,6 +122,7 @@ for access guidance):
 
 - [Codex LB Status Bar](https://github.com/sm1ee/codex-lb-statusbar) — native macOS app: account status, quota details, account controls
 - [codex-lb SwiftBar](https://github.com/joschi655/codex-lb-swiftbar) — read-only SwiftBar/Bun monitor for pool status and quota headroom
+- [Codex LB Status](https://github.com/VictorStatko/codex-lb-status) — read-only Ubuntu tray monitor for pooled quota, account health, reset credits, and update state
 
 ## Development
 

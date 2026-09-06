@@ -386,3 +386,119 @@ test("login", async ({ page }) => {
     waitFor: 'input[type="password"]',
   });
 });
+
+test.describe("Japanese locale", () => {
+  test.use({ locale: "ja-JP" });
+
+  test("detects Japanese and respects saved preferences and URL overrides", async ({ page }) => {
+    await interceptApi(page);
+    await page.goto(`${BASE_URL}/settings`);
+    await expect(page.getByRole("heading", { name: "設定", exact: true })).toBeVisible();
+    await expect(page.locator("html")).toHaveAttribute("lang", "ja");
+    expect(await page.evaluate(() => localStorage.getItem("codex-lb-language"))).toBe("ja");
+
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "設定", exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "言語", exact: true }).click();
+    await page.getByRole("menuitem", { name: "English", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+    expect(await page.evaluate(() => localStorage.getItem("codex-lb-language"))).toBe("en");
+
+    await page.goto(`${BASE_URL}/settings?lang=ja-JP`);
+    await expect(page.getByRole("heading", { name: "設定", exact: true })).toBeVisible();
+    expect(await page.evaluate(() => localStorage.getItem("codex-lb-language"))).toBe("ja");
+
+    await page.goto(`${BASE_URL}/settings?lang=fr-FR`);
+    await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+    await expect(page.locator("html")).toHaveAttribute("lang", "en");
+  });
+
+  for (const width of [1440, 390]) {
+    test(`switches without reloading and renders at ${width}px`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await interceptApi(page);
+      await page.goto(`${BASE_URL}/dashboard`);
+      await expect(page.getByRole("heading", { name: "ダッシュボード", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "リクエストログ", exact: true })).toBeVisible();
+
+      let documentNavigations = 0;
+      page.on("framenavigated", (frame) => {
+        if (frame === page.mainFrame()) documentNavigations += 1;
+      });
+
+      if (width < 640) {
+        await page.getByRole("button", { name: "メニューを開く" }).click();
+        const menu = page.getByRole("dialog", { name: "Codex LB" });
+        await menu.getByRole("button", { name: "English", exact: true }).click();
+        await expect(menu.getByRole("link", { name: "Settings", exact: true })).toBeVisible();
+        await menu.getByRole("button", { name: "日本語", exact: true }).click();
+        await expect(menu.getByRole("link", { name: "設定", exact: true })).toBeVisible();
+        await page.screenshot({ path: testInfo.outputPath("japanese-mobile-menu.png") });
+        await menu.getByRole("button", { name: "閉じる", exact: true }).click();
+      } else {
+        await page.getByRole("button", { name: "言語", exact: true }).click();
+        await page.getByRole("menuitem", { name: "English", exact: true }).click();
+        await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+        await page.getByRole("button", { name: "Language", exact: true }).click();
+        await page.getByRole("menuitem", { name: "日本語", exact: true }).click();
+      }
+
+      await expect(page.getByRole("heading", { name: "ダッシュボード", exact: true })).toBeVisible();
+      await expect(page.locator("html")).toHaveAttribute("lang", "ja");
+      expect(await page.evaluate(() => localStorage.getItem("codex-lb-language"))).toBe("ja");
+      expect(documentNavigations).toBe(0);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      await page.screenshot({ path: testInfo.outputPath("japanese-dashboard.png") });
+
+      await page.goto(`${BASE_URL}/settings`);
+      await expect(page.getByRole("heading", { name: "設定", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "表示", exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      await page.screenshot({ path: testInfo.outputPath("japanese-settings.png"), fullPage: true });
+    });
+  }
+
+  test("renders Japanese form errors, inline markup, and expiry calendar", async ({ page }, testInfo) => {
+    await interceptApi(page);
+    // Vite's /api proxy also matches direct /apis navigations; enter via the app router.
+    await page.goto(`${BASE_URL}/settings`);
+    await page.getByRole("link", { name: "API", exact: true }).click();
+    await expect(page.getByText("合計トークン (週次, すべて)", { exact: true })).toBeVisible();
+    await expect(page.getByText("コスト（USD） (月次, すべて)", { exact: true })).toBeVisible();
+    await page.getByTestId("api-key-info").screenshot({ path: testInfo.outputPath("japanese-api-key-details.png") });
+    await page.getByRole("button", { name: "API キーを作成", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "API キーを作成", exact: true });
+    await dialog.getByRole("button", { name: "作成", exact: true }).click();
+    await expect(dialog.getByText("名前を入力してください", { exact: true })).toBeVisible();
+
+    await dialog.getByRole("button", { name: "有効期限なし", exact: true }).click();
+    await page.getByRole("button", { name: "日付を指定...", exact: true }).click();
+    await expect(page.getByLabel("日曜日", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "次の月へ", exact: true }).click();
+    const day = page.getByRole("button", { name: /年\d+月15日/ });
+    await expect(day).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("japanese-expiry-calendar.png") });
+    await day.click();
+    await expect(page.getByRole("button", { name: "次の月へ", exact: true })).toBeHidden();
+    await dialog.getByRole("button", { name: "閉じる", exact: true }).click();
+
+    await page.goto(`${BASE_URL}/settings`);
+    await page.getByRole("spinbutton", { name: "ダッシュボードのセッション有効期間" }).fill("1.5");
+    await expect(page.getByText("小数は指定できません。", { exact: false })).toBeVisible();
+    await expect(page.locator("code").filter({ hasText: "1.5" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "有効期間を保存", exact: true })).toBeDisabled();
+  });
+
+  test("localizes the unauthenticated login screen", async ({ page }) => {
+    await interceptApi(page, unauthenticatedSession);
+    await page.goto(`${BASE_URL}/dashboard`);
+    await expect(page.getByRole("heading", { name: "ログイン", exact: true })).toBeVisible();
+    await expect(page.getByLabel("パスワード", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "ログイン", exact: true })).toBeVisible();
+    await expect(page.locator("html")).toHaveAttribute("lang", "ja");
+  });
+});

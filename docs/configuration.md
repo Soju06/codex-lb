@@ -17,6 +17,19 @@ Settings are environment variables with the `CODEX_LB_` prefix, or a `.env.local
 | `CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS` | `127.0.0.1/32,::1/128` | CIDRs allowed to set `X-Forwarded-For` |
 | `CODEX_LB_OAUTH_CALLBACK_HOST` | auto-detected (`0.0.0.0` in containers) | Rarely — bind the OAuth login callback explicitly |
 
+## Dashboard language
+
+Use the language button in the dashboard header, or open the menu on mobile,
+to choose English, 简体中文, 한국어, or 日本語. The dashboard detects Japanese
+browser settings such as `ja-JP` on the first visit and remembers your selection
+in that browser. To open a Japanese view directly, append `?lang=ja` to a
+dashboard URL (or `&lang=ja` when it already has query parameters).
+
+Japanese applies to navigation, settings, dialogs, and the API-key expiry
+calendar. Date and time labels follow the selected language; explicit date/time
+preferences in **Settings → Appearance** still apply. Compact quantities keep
+`K/M/B` suffixes and USD amounts keep `$` across languages.
+
 ## Everything else
 
 The remaining settings (timeouts, connection pools, bulkheads, session bridge, leader election, observability, circuit breakers, ...) are advanced operational tunables with tested defaults. The full generated [settings reference](reference/settings.md) lists every variable with its type and default. Do not tune them unless the documentation for your specific scenario says so:
@@ -30,4 +43,4 @@ Runtime behavior such as the routing strategy, upstream stream transport, and pe
 
 ---
 
-*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [replica-operations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/replica-operations)*
+*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [replica-operations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/replica-operations) · [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture)*

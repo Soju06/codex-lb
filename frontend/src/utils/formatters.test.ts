@@ -71,14 +71,34 @@ describe("formatters", () => {
     expect(formatNumber("abc")).toBe("--");
   });
 
-  it("keeps compact K/M/B units stable across locales", async () => {
-    await i18n.changeLanguage("zh-CN");
+  it.each(["zh-CN", "ja"])("keeps compact K/M/B units stable in %s", async (language) => {
+    await i18n.changeLanguage(language);
     try {
       expect(formatCompactNumber(10_200)).toBe("10.2K");
       expect(formatCompactNumber(46_400)).toBe("46.4K");
       expect(formatCompactNumber(1_500_000)).toBe("1.5M");
       expect(formatCompactNumber(1_500_000_000)).toBe("1.5B");
       expect(formatCurrency(12)).toBe("$12.00");
+    } finally {
+      await i18n.changeLanguage("en");
+    }
+  });
+
+  it("formats Japanese dates and relative times while respecting explicit display preferences", async () => {
+    await i18n.changeLanguage("ja");
+    try {
+      const date = new Date(2026, 8, 6, 14, 30, 45);
+      const iso = date.toISOString();
+
+      expect(formatTimeLong(iso)).toEqual({ date: "2026/09/06", time: "午後02:30:45" });
+      expect(formatChartDateTime(iso)).toContain("9月6日");
+      expect(formatResetRelative((4 * 60 + 13) * 60_000)).toBe("4時間13分後");
+
+      useTimeFormatStore.setState({ timeFormat: "24h" });
+      expect(formatTimeLong(iso).time).toBe("14:30:45");
+
+      useDateDisplayFormatStore.setState({ dateDisplayFormat: "iso8601" });
+      expect(formatDateTimeInline(iso)).toBe("2026-09-06 14:30:45");
     } finally {
       await i18n.changeLanguage("en");
     }

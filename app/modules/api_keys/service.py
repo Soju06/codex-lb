@@ -164,6 +164,16 @@ class ApiKeysRepositoryProtocol(Protocol):
 
     async def get_usage_reservation(self, reservation_id: str) -> UsageReservationData | None: ...
 
+    async def get_usage_reservation_for_update(self, reservation_id: str) -> UsageReservationData | None: ...
+
+    async def set_usage_reservation_item_reserved_delta(
+        self,
+        reservation_id: str,
+        *,
+        limit_id: int,
+        reserved_delta: int,
+    ) -> bool: ...
+
     async def transition_usage_reservation_status(
         self,
         reservation_id: str,
@@ -995,6 +1005,121 @@ class ApiKeysService:
             has_applicable_limits=bool(reservation_items),
         )
 
+    async def extend_usage_reservation(
+        self,
+        reservation_id: str,
+        *,
+        request_service_tier: str | None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None,
+    ) -> bool:
+        return await self._adjust_usage_reservation_input_budget(
+            reservation_id,
+            request_service_tier=request_service_tier,
+            request_usage_budget=request_usage_budget,
+            direction=1,
+        )
+
+    async def reduce_usage_reservation(
+        self,
+        reservation_id: str,
+        *,
+        request_service_tier: str | None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None,
+    ) -> bool:
+        return await self._adjust_usage_reservation_input_budget(
+            reservation_id,
+            request_service_tier=request_service_tier,
+            request_usage_budget=request_usage_budget,
+            direction=-1,
+        )
+
+    async def _adjust_usage_reservation_input_budget(
+        self,
+        reservation_id: str,
+        *,
+        request_service_tier: str | None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None,
+        direction: int,
+    ) -> bool:
+        for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
+            try:
+                return await self._adjust_usage_reservation_input_budget_once(
+                    reservation_id,
+                    request_service_tier=request_service_tier,
+                    request_usage_budget=request_usage_budget,
+                    direction=direction,
+                )
+            except OperationalError as exc:
+                await self._repository.rollback()
+                if not _is_sqlite_database_locked(exc) or attempt == _SQLITE_BUSY_RETRY_ATTEMPTS - 1:
+                    raise
+                await asyncio.sleep(_SQLITE_BUSY_RETRY_BASE_SECONDS * (2**attempt))
+        raise RuntimeError("unreachable")
+
+    async def _adjust_usage_reservation_input_budget_once(
+        self,
+        reservation_id: str,
+        *,
+        request_service_tier: str | None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None,
+        direction: int,
+    ) -> bool:
+        if direction not in {-1, 1}:
+            raise ValueError("direction must be -1 or 1")
+        normalized_budget = _normalize_request_usage_budget(request_usage_budget)
+        input_tokens = normalized_budget.input_tokens or 0
+        async with sqlite_writer_section():
+            reservation = await self._repository.get_usage_reservation_for_update(reservation_id)
+            if reservation is None or reservation.status != "reserved":
+                await self._repository.rollback()
+                return False
+            try:
+                for item in reservation.items:
+                    input_delta = _reserve_additional_input_delta_for_limit_type(
+                        item.limit_type,
+                        request_model=reservation.model,
+                        request_service_tier=request_service_tier,
+                        input_tokens=input_tokens,
+                    )
+                    if input_delta <= 0:
+                        continue
+                    if direction > 0:
+                        result = await self._repository.try_reserve_usage(
+                            item.limit_id,
+                            delta=input_delta,
+                            expected_reset_at=item.expected_reset_at,
+                        )
+                        if not result.success:
+                            raise ApiKeyRateLimitExceededError(
+                                message=f"API key {item.limit_type.value} limit exceeded",
+                                reset_at=result.reset_at or item.expected_reset_at,
+                            )
+                    else:
+                        if input_delta > item.reserved_delta:
+                            raise RuntimeError("usage reservation input budget underflow")
+                        adjusted = await self._repository.adjust_reserved_usage(
+                            item.limit_id,
+                            delta=-input_delta,
+                            expected_reset_at=item.expected_reset_at,
+                        )
+                        if not adjusted:
+                            raise RuntimeError("failed to reduce API key usage reservation")
+                    updated = await self._repository.set_usage_reservation_item_reserved_delta(
+                        reservation_id,
+                        limit_id=item.limit_id,
+                        reserved_delta=item.reserved_delta + direction * input_delta,
+                    )
+                    if not updated:
+                        raise RuntimeError("API key usage reservation item disappeared")
+                touched = await self._repository.touch_usage_reservation(reservation_id)
+                if not touched:
+                    raise RuntimeError("API key usage reservation changed while adjusting")
+                await self._repository.commit()
+                return True
+            except Exception:
+                await self._repository.rollback()
+                raise
+
     async def finalize_usage_reservation(
         self,
         reservation_id: str,
@@ -1080,6 +1205,13 @@ class ApiKeysService:
                 new_status="settling",
             )
             if not claimed:
+                await self._repository.rollback()
+                return
+            # Extend/reduce may have committed a new reserved_delta after the
+            # unlocked read above. Reload items after claiming the status so
+            # settlement does not reconcile against a stale budget.
+            reservation = await self._repository.get_usage_reservation(reservation_id)
+            if reservation is None:
                 await self._repository.rollback()
                 return
 
@@ -1178,6 +1310,10 @@ class ApiKeysService:
                 new_status="released",
             )
             if not claimed:
+                await self._repository.rollback()
+                return
+            reservation = await self._repository.get_usage_reservation(reservation_id)
+            if reservation is None:
                 await self._repository.rollback()
                 return
 
@@ -1734,6 +1870,25 @@ def _reserve_budget_for_limit_type(
     if limit_type == LimitType.CREDITS:
         return 0
     return 1
+
+
+def _reserve_additional_input_delta_for_limit_type(
+    limit_type: LimitType,
+    *,
+    request_model: str | None,
+    request_service_tier: str | None,
+    input_tokens: int,
+) -> int:
+    if limit_type in {LimitType.TOTAL_TOKENS, LimitType.INPUT_TOKENS}:
+        return input_tokens
+    if limit_type == LimitType.COST_USD:
+        return _reserve_cost_budget_microdollars(
+            request_model,
+            request_service_tier,
+            input_tokens=input_tokens,
+            output_tokens=0,
+        )
+    return 0
 
 
 def _reserve_cost_budget_microdollars(

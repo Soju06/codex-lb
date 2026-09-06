@@ -9,10 +9,12 @@ from typing import Any, cast
 
 import aiohttp
 import pytest
+from websockets.asyncio.server import ServerConnection
 from websockets.asyncio.server import serve as websocket_serve
 
 from app.core.clients.codex import CodexClient
 from app.core.clients.native_egress import (
+    NativeWebSocketRequest,
     SubprocessNativeEgressClient,
     close_discovered_native_egress_client,
     discover_native_egress_client,
@@ -22,6 +24,7 @@ from app.core.clients.proxy_websocket import (
     _RESPONSES_WEBSOCKET_POLICY,
     _connect_upstream_websocket,
 )
+from app.core.clients.websocket_dispatch import websocket_send_context
 from app.core.openai.requests import ResponsesRequest
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
@@ -43,16 +46,23 @@ async def _copy_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
         writer.close()
 
 
-@pytest.mark.asyncio
-async def test_direct_sse_and_routed_http_websocket_share_native_helper(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.fixture
+def native_helper() -> Path:
     helper_value = os.environ.get("CODEX_LB_NATIVE_EGRESS_TEST_BINARY")
     if not helper_value:
         pytest.skip("set CODEX_LB_NATIVE_EGRESS_TEST_BINARY to run the native route wire probe")
     helper = Path(helper_value)
     if not helper.is_file():
         pytest.skip(f"native helper is unavailable: {helper}")
+    return helper
+
+
+@pytest.mark.asyncio
+async def test_direct_sse_and_routed_http_websocket_share_native_helper(
+    monkeypatch: pytest.MonkeyPatch,
+    native_helper: Path,
+) -> None:
+    helper = native_helper
     access_token = secrets.token_urlsafe(32)
 
     proxy_hits: list[str] = []
@@ -219,3 +229,65 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper(
             await close_discovered_native_egress_client()
             direct_server.close()
             await direct_server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_native_worker_records_dispatch_before_response_while_ipc_sender_is_held(
+    monkeypatch: pytest.MonkeyPatch, native_helper: Path
+) -> None:
+    received_frames: list[str | bytes] = []
+    dispatched: list[str] = []
+    release_sender = asyncio.Event()
+
+    async def upstream_handler(websocket: ServerConnection) -> None:
+        received_frames.append(await websocket.recv())
+        await websocket.send('{"type":"response.created","response":{"id":"resp_explicit"}}')
+        await websocket.send('{"type":"response.completed","response":{"id":"resp_explicit"}}')
+        await websocket.wait_closed()
+
+    client = SubprocessNativeEgressClient(native_helper)
+    async with websocket_serve(upstream_handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        websocket = await client.websocket(
+            NativeWebSocketRequest(
+                url=f"ws://127.0.0.1:{port}/codex/responses",
+                headers={},
+                connect_timeout_seconds=2,
+                max_message_bytes=4096,
+                ping_interval_seconds=None,
+            )
+        )
+        original_send = client._send_command
+
+        async def hold_sender_after_ipc_write(
+            process: asyncio.subprocess.Process, generation: int, command: dict[str, object]
+        ) -> None:
+            await original_send(process, generation, command)
+            if command["type"] == "websocket_send_text":
+                await release_sender.wait()
+
+        monkeypatch.setattr(client, "_send_command", hold_sender_after_ipc_write)
+
+        async def send() -> None:
+            with websocket_send_context(lambda: dispatched.append("explicit")):
+                await websocket.send_text('{"type":"response.create","previous_response_id":"resp_parent"}')
+
+        sender = asyncio.create_task(send())
+        try:
+            created = await asyncio.wait_for(websocket.receive(), timeout=5)
+            assert created.text is not None and json.loads(created.text)["type"] == "response.created"
+            assert dispatched == ["explicit"]
+            completed = await asyncio.wait_for(websocket.receive(), timeout=5)
+            assert completed.text is not None and json.loads(completed.text)["type"] == "response.completed"
+            assert received_frames == ['{"type":"response.create","previous_response_id":"resp_parent"}']
+            assert not sender.done()
+            release_sender.set()
+            await asyncio.wait_for(sender, timeout=2)
+            assert dispatched == ["explicit"]
+            assert websocket._pending == {}
+        finally:
+            release_sender.set()
+            sender.cancel()
+            await asyncio.gather(sender, return_exceptions=True)
+            await websocket.close()
+            await client.aclose()

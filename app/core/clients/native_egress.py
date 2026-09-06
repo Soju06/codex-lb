@@ -7,13 +7,15 @@ import json
 import logging
 import os
 import shutil
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Protocol, cast
 
 from multidict import CIMultiDict
+
+from app.core.clients.websocket_dispatch import current_websocket_send_callback
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +207,12 @@ class NativeEgressResponse:
         await self.aclose()
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingWebSocketCommand:
+    future: asyncio.Future[None]
+    on_dispatched: Callable[[], None] | None
+
+
 class NativeEgressWebSocket:
     """Bidirectional WebSocket multiplexed through one native helper stream."""
 
@@ -230,7 +238,7 @@ class NativeEgressWebSocket:
         self._messages: asyncio.Queue[NativeWebSocketMessage | BaseException] = asyncio.Queue(
             maxsize=_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT
         )
-        self._pending: dict[str, asyncio.Future[None]] = {}
+        self._pending: dict[str, _PendingWebSocketCommand] = {}
         self._command_sequence = 0
         self._completed = False
         self._closing = False
@@ -324,7 +332,10 @@ class NativeEgressWebSocket:
         self._command_sequence += 1
         command_id = f"{self._request_id}:{self._command_sequence}"
         future = asyncio.get_running_loop().create_future()
-        self._pending[command_id] = future
+        self._pending[command_id] = _PendingWebSocketCommand(
+            future=future,
+            on_dispatched=current_websocket_send_callback() if event_type == "websocket_send_text" else None,
+        )
         try:
             await self._client._send_command(
                 self._process,
@@ -361,9 +372,15 @@ class NativeEgressWebSocket:
                     command_id = item.get("command_id")
                     if not isinstance(command_id, str):
                         raise NativeEgressProtocolError("native websocket acknowledgement is missing command_id")
-                    future = self._pending.get(command_id)
-                    if future is not None and not future.done():
-                        future.set_result(None)
+                    pending = self._pending.get(command_id)
+                    if pending is not None and not pending.future.done():
+                        # The worker emits this after socket send and before
+                        # reading again. Notify here: subsequent frames can be
+                        # consumed before the sending coroutine resumes.
+                        if pending.on_dispatched is not None:
+                            pending.on_dispatched()
+                        pending.future.set_result(None)
+                        self._pending.pop(command_id, None)
                     continue
                 if event_type == "websocket_text":
                     text = item.get("text")
@@ -453,9 +470,10 @@ class NativeEgressWebSocket:
             self._messages.put_nowait(failure)
 
     def _fail_pending(self, failure: BaseException) -> None:
-        for future in tuple(self._pending.values()):
-            if not future.done():
-                future.set_exception(failure)
+        for pending in tuple(self._pending.values()):
+            if not pending.future.done():
+                pending.future.set_exception(failure)
+        self._pending.clear()
 
     def _finish(self) -> None:
         if self._completed:

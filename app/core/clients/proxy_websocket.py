@@ -49,6 +49,7 @@ from app.core.clients.proxy import (
     _normalize_non_native_upstream_fingerprint,
     filter_inbound_headers,
 )
+from app.core.clients.websocket_dispatch import WebSocketDispatchTransport
 from app.core.config.settings import get_settings
 from app.core.conversation_archive import archive_bytes, archive_text
 from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, openai_error
@@ -323,13 +324,21 @@ class WebsocketsUpstreamWebSocket:
         self._connection = connection
         self._uses_proxy = uses_proxy
         self._preserve_close_semantics = preserve_close_semantics
+        self._dispatch_transport: WebSocketDispatchTransport | None = None
+        if isinstance(connection, ClientConnection):
+            self._dispatch_transport = WebSocketDispatchTransport(connection.transport)
+            connection.transport = self._dispatch_transport.as_transport()
         connection_lost_waiter = getattr(connection, "connection_lost_waiter", None)
         if isinstance(connection_lost_waiter, asyncio.Future):
             connection_lost_waiter.add_done_callback(_consume_connection_lost_exception)
 
     async def send_text(self, text: str) -> None:
         try:
-            await self._connection.send(text)
+            if self._dispatch_transport is None:
+                await self._connection.send(text)
+            else:
+                with self._dispatch_transport.send_context():
+                    await self._connection.send(text)
         except Exception as exc:
             await _raise_websocket_send_error(exc, uses_proxy=self._uses_proxy)
 
@@ -487,12 +496,20 @@ class CodexUpstreamWebSocket:
         self._owns_codex_client = owns_codex_client
         self._endpoint_id = endpoint_id
         self._response_headers = _normalize_response_headers(response_headers)
+        self._dispatch_transport: WebSocketDispatchTransport | None = None
+        if isinstance(websocket, aiohttp.ClientWebSocketResponse):
+            self._dispatch_transport = WebSocketDispatchTransport(websocket._writer.transport)
+            websocket._writer.transport = self._dispatch_transport.as_transport()
 
     async def send_text(self, text: str) -> None:
         try:
-            result = self._websocket.send_str(text)
-            if asyncio.iscoroutine(result):
-                await result
+            if self._dispatch_transport is None:
+                result = self._websocket.send_str(text)
+                if asyncio.iscoroutine(result):
+                    await result
+            else:
+                with self._dispatch_transport.send_context():
+                    await self._websocket.send_str(text)
         except Exception as exc:
             classification_exc = _aiohttp_stored_liveness_exception(self._websocket) or exc
             await _raise_websocket_send_error(classification_exc, endpoint_id=self._endpoint_id, uses_proxy=True)

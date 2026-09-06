@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -13,12 +15,14 @@ from app.core.clients.native_egress import (
     NativeEgressRequest,
     NativeEgressTransportError,
     NativeEgressUnavailable,
+    NativeEgressWebSocket,
     NativeWebSocketMessage,
     NativeWebSocketRequest,
     SubprocessNativeEgressClient,
     close_discovered_native_egress_client,
     discover_native_egress_client,
 )
+from app.core.clients.websocket_dispatch import websocket_send_context
 
 _HELPER_PROTOCOL_PREAMBLE = r"""
 import json
@@ -588,6 +592,258 @@ async def test_native_websocket_routes_frames_and_send_acknowledgements(tmp_path
     assert client._process is process
     assert process is not None and process.returncode is None
     await client.aclose()
+
+
+@dataclass(slots=True)
+class _NativeDispatchHarness:
+    websocket: NativeEgressWebSocket
+    commands: asyncio.Queue[dict[str, object]]
+    allow_ipc_return: asyncio.Event
+
+    def acknowledge(self, command: dict[str, object]) -> None:
+        self.websocket._events.put_nowait({"type": "websocket_sent", "command_id": command["command_id"]})
+
+    def receive_marker(self, text: str) -> None:
+        self.websocket._events.put_nowait({"type": "websocket_text", "text": text})
+
+
+@pytest.fixture
+async def native_dispatch_harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[_NativeDispatchHarness]:
+    helper = tmp_path / "native-helper"
+    _write_helper(helper, _websocket_helper_source())
+    client = SubprocessNativeEgressClient(helper)
+    websocket = await client.websocket(
+        NativeWebSocketRequest(
+            url="wss://example.test/codex/responses",
+            headers={"user-agent": "codex-cli", "sec-websocket-protocol": "openai"},
+            connect_timeout_seconds=2,
+            max_message_bytes=1024,
+        )
+    )
+    harness = _NativeDispatchHarness(websocket, asyncio.Queue(), asyncio.Event())
+    original_send = client._send_command
+
+    async def hold_command(process: asyncio.subprocess.Process, generation: int, command: dict[str, object]) -> None:
+        if command["type"] == "websocket_close":
+            await original_send(process, generation, command)
+            return
+        harness.commands.put_nowait(command)
+        await harness.allow_ipc_return.wait()
+
+    monkeypatch.setattr(client, "_send_command", hold_command)
+    try:
+        yield harness
+    finally:
+        harness.allow_ipc_return.set()
+        await websocket.close()
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_native_dispatch_ack_precedes_inbound_delivery_before_sender_resumes(
+    native_dispatch_harness: _NativeDispatchHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = native_dispatch_harness
+    dispatched: list[str] = []
+    dispatch_at_delivery: list[tuple[str, ...]] = []
+    original_queue_message = harness.websocket._queue_message
+
+    def queue_message(message: NativeWebSocketMessage) -> None:
+        dispatch_at_delivery.append(tuple(dispatched))
+        original_queue_message(message)
+
+    monkeypatch.setattr(harness.websocket, "_queue_message", queue_message)
+
+    async def send() -> None:
+        with websocket_send_context(lambda: dispatched.append("explicit")):
+            await harness.websocket.send_text("explicit")
+
+    sender = asyncio.create_task(send())
+    try:
+        command = await asyncio.wait_for(harness.commands.get(), timeout=2)
+        assert dispatched == []  # The IPC write is not the socket handoff.
+        harness.acknowledge(command)
+        harness.acknowledge(command)
+        harness.receive_marker("response.created")
+        message = await asyncio.wait_for(harness.websocket.receive(), timeout=2)
+        assert message.text == "response.created"
+        assert dispatched == ["explicit"]
+        assert dispatch_at_delivery == [("explicit",)]
+        assert not sender.done()
+        assert harness.websocket._pending == {}
+        harness.allow_ipc_return.set()
+        await asyncio.wait_for(sender, timeout=2)
+        assert harness.websocket._pending == {}
+    finally:
+        sender.cancel()
+        await asyncio.gather(sender, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_native_dispatch_matches_exact_command_when_sends_overlap(
+    native_dispatch_harness: _NativeDispatchHarness,
+) -> None:
+    harness = native_dispatch_harness
+    dispatched: list[str] = []
+
+    async def send(text: str) -> None:
+        with websocket_send_context(lambda: dispatched.append(text)):
+            await harness.websocket.send_text(text)
+
+    left = asyncio.create_task(send("left"))
+    right = asyncio.create_task(send("right"))
+    try:
+        commands = [await asyncio.wait_for(harness.commands.get(), timeout=2) for _ in range(2)]
+        left_command = next(command for command in commands if command["text"] == "left")
+        right_command = next(command for command in commands if command["text"] == "right")
+        harness.acknowledge({"command_id": "unknown-command"})
+        harness.acknowledge(right_command)
+        harness.receive_marker("right")
+        assert (await asyncio.wait_for(harness.websocket.receive(), timeout=2)).text == "right"
+        assert dispatched == ["right"]
+        harness.acknowledge(left_command)
+        harness.receive_marker("left")
+        assert (await asyncio.wait_for(harness.websocket.receive(), timeout=2)).text == "left"
+        assert dispatched == ["right", "left"]
+        harness.allow_ipc_return.set()
+        await asyncio.wait_for(asyncio.gather(left, right), timeout=2)
+    finally:
+        left.cancel()
+        right.cancel()
+        await asyncio.gather(left, right, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_native_dispatch_does_not_observe_binary_or_close(
+    native_dispatch_harness: _NativeDispatchHarness,
+) -> None:
+    harness = native_dispatch_harness
+    dispatched: list[str] = []
+
+    async def send() -> None:
+        with websocket_send_context(lambda: dispatched.append("unexpected")):
+            await harness.websocket.send_bytes(b"unrelated")
+            await harness.websocket.close()
+
+    sender = asyncio.create_task(send())
+    try:
+        command = await asyncio.wait_for(harness.commands.get(), timeout=2)
+        harness.acknowledge(command)
+        harness.allow_ipc_return.set()
+        await asyncio.wait_for(sender, timeout=2)
+        assert dispatched == []
+        assert harness.websocket._pending == {}
+    finally:
+        sender.cancel()
+        await asyncio.gather(sender, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ipc_returned", [False, True], ids=["ipc-wait", "ack-wait"])
+async def test_native_dispatch_cancelled_send_ignores_late_ack(
+    native_dispatch_harness: _NativeDispatchHarness, ipc_returned: bool
+) -> None:
+    harness = native_dispatch_harness
+    dispatched: list[str] = []
+    if ipc_returned:
+        harness.allow_ipc_return.set()
+
+    async def send(text: str) -> None:
+        with websocket_send_context(lambda: dispatched.append(text)):
+            await harness.websocket.send_text(text)
+
+    cancelled = asyncio.create_task(send("cancelled"))
+    replacement: asyncio.Task[None] | None = None
+    try:
+        old_command = await asyncio.wait_for(harness.commands.get(), timeout=2)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        assert harness.websocket._pending == {}
+        replacement = asyncio.create_task(send("replacement"))
+        new_command = await asyncio.wait_for(harness.commands.get(), timeout=2)
+        harness.acknowledge(old_command)
+        harness.receive_marker("after-old-ack")
+        assert (await asyncio.wait_for(harness.websocket.receive(), timeout=2)).text == "after-old-ack"
+        assert dispatched == []
+        harness.acknowledge(new_command)
+        harness.allow_ipc_return.set()
+        await asyncio.wait_for(replacement, timeout=2)
+        assert dispatched == ["replacement"]
+        assert harness.websocket._pending == {}
+    finally:
+        cancelled.cancel()
+        if replacement is not None:
+            replacement.cancel()
+            await asyncio.gather(replacement, return_exceptions=True)
+        await asyncio.gather(cancelled, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_native_dispatch_send_failure_ignores_late_ack(
+    native_dispatch_harness: _NativeDispatchHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = native_dispatch_harness
+    dispatched: list[str] = []
+    original_send = harness.websocket._client._send_command
+
+    async def fail_command(process: asyncio.subprocess.Process, generation: int, command: dict[str, object]) -> None:
+        if command["type"] == "websocket_close":
+            await original_send(process, generation, command)
+            return
+        harness.commands.put_nowait(command)
+        raise NativeEgressTransportError("IPC write failed", failure_phase="websocket_send")
+
+    monkeypatch.setattr(harness.websocket._client, "_send_command", fail_command)
+    with websocket_send_context(lambda: dispatched.append("failed")):
+        with pytest.raises(NativeEgressTransportError, match="IPC write failed"):
+            await harness.websocket.send_text("failed")
+    command = await asyncio.wait_for(harness.commands.get(), timeout=2)
+    assert harness.websocket._pending == {}
+    harness.acknowledge(command)
+    harness.receive_marker("after-failure")
+    assert (await asyncio.wait_for(harness.websocket.receive(), timeout=2)).text == "after-failure"
+    assert dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_native_dispatch_worker_error_fails_pending_send_without_notification(
+    native_dispatch_harness: _NativeDispatchHarness,
+) -> None:
+    harness = native_dispatch_harness
+    dispatched: list[str] = []
+
+    async def send() -> None:
+        with websocket_send_context(lambda: dispatched.append("failed")):
+            await harness.websocket.send_text("failed")
+
+    sender = asyncio.create_task(send())
+    try:
+        command = await asyncio.wait_for(harness.commands.get(), timeout=2)
+        harness.websocket._events.put_nowait(
+            {
+                "type": "websocket_error",
+                "command_id": command["command_id"],
+                "message": "socket write failed",
+                "failure_phase": "websocket_send",
+            }
+        )
+        harness.acknowledge(command)
+        with pytest.raises(NativeEgressTransportError, match="socket write failed"):
+            await asyncio.wait_for(harness.websocket.receive(), timeout=2)
+        assert harness.websocket._pending == {}
+        assert not sender.done()
+        harness.allow_ipc_return.set()
+        with pytest.raises(NativeEgressTransportError, match="socket write failed"):
+            await asyncio.wait_for(sender, timeout=2)
+        assert dispatched == []
+        assert harness.websocket._pending == {}
+    finally:
+        sender.cancel()
+        await asyncio.gather(sender, return_exceptions=True)
 
 
 @pytest.mark.asyncio

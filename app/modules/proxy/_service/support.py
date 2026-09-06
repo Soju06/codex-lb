@@ -830,6 +830,7 @@ class _StreamSettlement:
     error_message: str | None = None
     error: UpstreamError | None = None
     account_health_error: bool = False
+    settlement_order_required: bool = False
     record_success: bool = True
     downstream_visible: bool = False
     downstream_text_visible: bool = False

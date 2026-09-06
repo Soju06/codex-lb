@@ -10,7 +10,7 @@ After the quota debounce expires, a fresh applicable long-window sample at 100% 
 
 The evidence gate MUST apply only to usage-based recovery of rate-limit and explicit quota-exhaustion states, not unrelated account-health penalties. Ordinary `rate_limit_exceeded` cooldown and persisted-deadline expiry during foreground selection MUST remain unchanged and MUST NOT require a new quota sample. Monthly usage unsupported by the account's plan MUST NOT block recovery based on an available post-block primary sample.
 
-When an applicable exhausted sample omits reset metadata, an elapsed fallback deadline MUST NOT reactivate the account. Credit overrides of an explicit quota block MUST use credit evidence recorded strictly after the block; cached pre-block credit availability MUST NOT clear the persisted quota status or block markers on any replica.
+When a fresh applicable exhausted sample omits reset metadata, an elapsed fallback deadline MUST NOT reactivate the account. An exhausted sample MUST be recent and, when a block marker exists, unambiguously post-block before replacing or removing that block's reset deadline. Credit overrides of an explicit quota block MUST use credit evidence recorded strictly after the block; cached pre-block credit availability MUST NOT clear the persisted quota status or block markers on any replica. Evidence recorded in the same integer Unix second as the persisted block MUST NOT count as post-block evidence. An expired long-window row MUST NOT veto recovery based on an available post-block primary sample or itself serve as fresh availability evidence.
 
 #### Scenario: Upstream 429 marks only the selected account
 
@@ -70,3 +70,24 @@ When an applicable exhausted sample omits reset metadata, an elapsed fallback de
 - **WHEN** another replica selects accounts after the rejection is persisted
 - **THEN** the rejected account remains quota-exceeded and retains its block marker
 - **AND** only credit evidence recorded after that block can override quota exhaustion
+
+#### Scenario: Fractional pre-block credits cannot clear a persisted quota block
+
+- **GIVEN** a credit snapshot was recorded before a rejection within the same Unix second
+- **WHEN** the rejection is persisted with integer-second precision and either replica evaluates recovery
+- **THEN** the snapshot does not qualify as post-block evidence
+- **AND** a new credit snapshot in a later second can recover the account
+
+#### Scenario: Expired exhaustion does not veto available primary evidence
+
+- **GIVEN** a marking replica has an elapsed local cooldown and a future persisted rate-limit deadline
+- **AND** a fresh post-block primary sample reports available quota while a stored exhausted long-window row has expired
+- **WHEN** the replica evaluates early recovery
+- **THEN** it ignores the expired long-window row and recovers from the primary evidence
+
+#### Scenario: Historical exhaustion cannot rewrite a newer quota deadline
+
+- **GIVEN** an explicit quota rejection has a persisted fallback deadline
+- **AND** the latest exhausted long-window row is stale or not unambiguously post-block
+- **WHEN** routing evaluates the account
+- **THEN** that row does not replace or remove the persisted fallback deadline

@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
@@ -274,12 +274,15 @@ async def test_peer_replica_honors_metadata_free_rate_limit_cooldown(db_setup):
 )
 @pytest.mark.parametrize("has_secondary", [False, True])
 async def test_peer_replica_requires_post_block_credits_to_recover_quota(
-    db_setup, credits_has, credits_unlimited, credits_balance, has_secondary
+    db_setup, monkeypatch, credits_has, credits_unlimited, credits_balance, has_secondary
 ):
+    blocked_time = float(int(time.time())) + 0.8
+    now = blocked_time
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
     limited = _make_account("quota_stale_credits")
     healthy = _make_account("quota_healthy")
     await _seed_accounts_with_usage((healthy, 20.0, 10.0))
-    stale_time = utcnow() - timedelta(seconds=5)
+    stale_time = datetime.fromtimestamp(blocked_time - 0.2, timezone.utc).replace(tzinfo=None)
     async with SessionLocal() as session:
         await AccountsRepository(session).upsert(limited)
         usage_repo = UsageRepository(session)
@@ -301,14 +304,15 @@ async def test_peer_replica_requires_post_block_credits_to_recover_quota(
     blocked = await _fetch_account(limited.id)
     assert blocked.blocked_at is not None
 
-    for _ in range(2):
-        selection = await LoadBalancer(_repo_factory).select_account(routing_strategy="fill_first")
+    for balancer in (marking_replica, LoadBalancer(_repo_factory)):
+        selection = await balancer.select_account(routing_strategy="fill_first")
         assert selection.account is not None
         assert selection.account.id == healthy.id
         row = await _fetch_account(limited.id)
         assert row.status == AccountStatus.QUOTA_EXCEEDED
         assert row.blocked_at == blocked.blocked_at
 
+    now = float(int(blocked_time) + 1)
     async with SessionLocal() as session:
         await UsageRepository(session).add_entry(
             account_id=limited.id,
@@ -316,7 +320,7 @@ async def test_peer_replica_requires_post_block_credits_to_recover_quota(
             window="secondary",
             reset_at=int(time.time()) + 7200,
             window_minutes=10080,
-            recorded_at=utcnow(),
+            recorded_at=datetime.fromtimestamp(now, timezone.utc).replace(tzinfo=None),
             credits_has=credits_has,
             credits_unlimited=credits_unlimited,
             credits_balance=credits_balance,
@@ -328,6 +332,47 @@ async def test_peer_replica_requires_post_block_credits_to_recover_quota(
     recovered = await _fetch_account(limited.id)
     assert recovered.status == AccountStatus.ACTIVE
     assert recovered.blocked_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_reset_metadata", [False, True])
+async def test_stale_quota_exhaustion_preserves_original_deadline_across_replicas(
+    db_setup, monkeypatch, has_reset_metadata
+):
+    blocked_time = float(int(time.time())) + 0.8
+    now = blocked_time
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    account = _make_account("quota_historical_reset")
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        await UsageRepository(session).add_entry(
+            account_id=account.id,
+            window="secondary",
+            used_percent=100.0,
+            reset_at=int(now + 86400) if has_reset_metadata else None,
+            window_minutes=10080,
+            recorded_at=datetime.fromtimestamp(now - 0.2, timezone.utc).replace(tzinfo=None),
+        )
+    marker = LoadBalancer(_repo_factory)
+    await marker.mark_quota_exceeded(account, {"message": "Quota exceeded", "resets_in_seconds": 7200})
+    row = await _fetch_account(account.id)
+    deadline = row.reset_at
+    assert deadline is not None
+
+    for balancer in (marker, LoadBalancer(_repo_factory)):
+        selection = await balancer.select_account(account_ids={account.id})
+        assert selection.account is None
+        row = await _fetch_account(account.id)
+        assert row.status == AccountStatus.QUOTA_EXCEEDED
+        assert row.reset_at == deadline
+
+    now = float(deadline + 1)
+    selection = await LoadBalancer(_repo_factory).select_account(account_ids={account.id})
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    row = await _fetch_account(account.id)
+    assert row.status == AccountStatus.ACTIVE
+    assert row.reset_at is None
 
 
 @pytest.mark.asyncio

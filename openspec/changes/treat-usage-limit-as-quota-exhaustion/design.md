@@ -21,6 +21,7 @@ The state builder's early-recovery gate previously accepted any fresh primary sa
 
 ## Decisions
 
+- Keep the existing integer-second block storage. Require evidence from a later second so fractional pre-block snapshots cannot appear newer after persistence. Reject historical exhausted snapshots before passing them to quota-state transitions; the state builder owns sample timestamps and the pure quota helper does not. Expired long-window rows are neither an exhaustion veto nor fresh recovery evidence.
 - Keep `usage_limit_reached` and `rate_limit_exceeded` classified as `rate_limit`, preserving existing deadlines and dashboard semantics.
 - Both error codes share the persisted `RATE_LIMITED` state; the evidence gate governs early usage-based recovery, not deadline expiry. It does not change unrelated health penalties. Unsupported monthly rows are ignored before evaluating long-window exhaustion, including raw rows supplied by background recovery.
 - Require available usage in the sample used for early recovery. An exhausted long window cannot be hidden by an available primary sample. Preserve the existing newer-long-window recovery path after the primary reset expires.

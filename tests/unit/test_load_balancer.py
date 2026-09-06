@@ -2962,6 +2962,57 @@ def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_blo
     assert state.status == AccountStatus.ACTIVE
 
 
+@pytest.mark.parametrize("long_reset_offset", [None, 3600, 0, -1])
+@pytest.mark.parametrize("primary_available", [True, False])
+def test_rate_limit_recovery_ignores_expired_long_window_veto(monkeypatch, long_reset_offset, primary_available):
+    now = 1_700_000_000.0
+    blocked_at = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+    account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=int(now + 7200), blocked_at=blocked_at)
+    state = _state_from_account(
+        account=account,
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=10.0 if primary_available else 100.0,
+            reset_at=int(now + 3600),
+            recorded_at=_epoch_to_naive_utc(now - 1),
+        ),
+        secondary_entry=_make_test_usage(
+            used_percent=100.0,
+            reset_at=None if long_reset_offset is None else int(now + long_reset_offset),
+            recorded_at=_epoch_to_naive_utc(now - 10),
+        ),
+        runtime=RuntimeState(cooldown_until=now - 1, blocked_at=float(blocked_at)),
+    )
+    can_recover = primary_available and long_reset_offset is not None and long_reset_offset <= 0
+    assert state.status == (AccountStatus.ACTIVE if can_recover else AccountStatus.RATE_LIMITED)
+    assert state.reset_at == (None if can_recover else account.reset_at)
+
+
+@pytest.mark.parametrize("sample_offset", [-310.0, -300.0, -299.4, -250.0, -1.0])
+@pytest.mark.parametrize("long_has_reset", [False, True])
+def test_quota_deadline_replacement_requires_fresh_post_block_exhaustion(monkeypatch, sample_offset, long_has_reset):
+    now = 1_700_000_000.0
+    blocked_at = int(now - 300)
+    fallback = int(now - 1)
+    long_reset = int(now + 7200) if long_has_reset else None
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+    account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=fallback, blocked_at=blocked_at)
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=_make_test_usage(
+            used_percent=100.0, reset_at=long_reset, recorded_at=_epoch_to_naive_utc(now + sample_offset)
+        ),
+        runtime=RuntimeState(),
+    )
+    assert state.status == AccountStatus.QUOTA_EXCEEDED
+    assert state.reset_at == (long_reset if sample_offset == -1.0 else fallback)
+    assert state.blocked_at == blocked_at
+
+
 def test_state_from_account_stale_runtime_block_does_not_recover_free_plan_peer_marked_block(monkeypatch):
     # Regression (codex P2): leftover runtime cooldown state from an EARLIER
     # 429 must not count as having observed the CURRENT 429. Here the
@@ -3259,6 +3310,7 @@ def test_state_from_account_keeps_quota_exceeded_after_cooldown_when_secondary_u
     secondary_reset = int(now + 5 * 24 * 3600)
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
     account = _make_test_account(
         status=AccountStatus.QUOTA_EXCEEDED,
@@ -3728,7 +3780,7 @@ def test_state_from_account_does_not_apply_rate_limit_repair_to_quota_exceeded(m
     )
 
     assert state.status == AccountStatus.QUOTA_EXCEEDED
-    assert state.reset_at == exhausted_secondary.reset_at
+    assert state.reset_at == implausible_reset
     assert select_account([state], now=now).account is None
 
 

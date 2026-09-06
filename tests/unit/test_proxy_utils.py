@@ -39491,6 +39491,160 @@ async def test_stream_selection_budget_exhaustion_emits_timeout_event(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_stream_pinned_permanent_initial_refresh_preserves_auth_error(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner = _make_account("acc_stream_pinned_permanent_initial")
+    selections: list[set[str]] = []
+    mark_permanent_failure = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=owner.id))
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        selections.append(excluded)
+        if owner.id in excluded:
+            return AccountSelection(
+                account=None,
+                error_message="Preferred account is unavailable",
+                error_code="preferred_account_unavailable",
+            )
+        return AccountSelection(account=owner, error_message=None)
+
+    async def fail_refresh(*_args: object, **_kwargs: object) -> Account:
+        raise proxy_service.RefreshError(
+            "token_revoked",
+            "Encountered invalidated oauth token for user, failing request",
+            True,
+        )
+
+    async def fail_if_dispatched(*_args: object, **_kwargs: object):
+        raise AssertionError("hard-owned request must not dispatch after permanent refresh failure")
+        yield ""
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", fail_refresh)
+    monkeypatch.setattr(service, "_stream_once", fail_if_dispatched)
+    monkeypatch.setattr(service._load_balancer, "mark_permanent_failure", mark_permanent_failure)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "continue",
+            "input": [],
+            "previous_response_id": "resp_revoked_owner",
+            "stream": True,
+        }
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-revoked-owner"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    failed = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert failed["response"]["error"] == {
+        "code": "token_revoked",
+        "message": "Encountered invalidated oauth token for user, failing request",
+        "type": "authentication_error",
+    }
+    assert selections == [set(), {owner.id}]
+    mark_permanent_failure.assert_awaited_once_with(owner, "token_revoked")
+
+
+@pytest.mark.asyncio
+async def test_stream_single_account_permanent_forced_refresh_preserves_auth_error(monkeypatch):
+    settings = _make_proxy_settings()
+    settings.routing_strategy = "single_account"
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner = _make_account("acc_stream_single_permanent_forced")
+    selections: list[set[str]] = []
+    stream_accounts: list[str] = []
+    mark_permanent_failure = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        selections.append(excluded)
+        if owner.id in excluded:
+            return AccountSelection(account=None, error_message="No active accounts", error_code="no_accounts")
+        return AccountSelection(account=owner, error_message=None)
+
+    async def ensure_fresh(account: Account, *, force: bool = False, **_kwargs: object) -> Account:
+        if force:
+            raise proxy_service.RefreshError(
+                "token_revoked",
+                "Forced refresh token was revoked",
+                True,
+            )
+        return account
+
+    async def reject_stale_token(account: Account, *_args: object, **_kwargs: object):
+        stream_accounts.append(account.id)
+        raise proxy_module.ProxyResponseError(
+            401,
+            proxy_module.openai_error(
+                "invalid_api_key",
+                "stale access token",
+                error_type="authentication_error",
+            ),
+        )
+        yield ""
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(service, "_stream_once", reject_stale_token)
+    monkeypatch.setattr(service._load_balancer, "mark_permanent_failure", mark_permanent_failure)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "continue", "input": [], "stream": True}
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-revoked-single"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    failed = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert failed["response"]["error"] == {
+        "code": "token_revoked",
+        "message": "Forced refresh token was revoked",
+        "type": "authentication_error",
+    }
+    assert stream_accounts == [owner.id]
+    assert selections == [set(), {owner.id}]
+    mark_permanent_failure.assert_awaited_once_with(owner, "token_revoked")
+
+
+@pytest.mark.asyncio
 async def test_stream_refresh_timeout_before_visible_output_fails_over_with_conversation_id(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()

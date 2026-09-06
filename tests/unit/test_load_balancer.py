@@ -1782,6 +1782,9 @@ def test_select_account_skips_reauth_account_with_revoked_access_token():
     )
     healthy = AccountState("healthy", AccountStatus.ACTIVE)
 
+    no_fallback = select_account([revoked])
+    assert no_fallback.account is None
+
     result = select_account([revoked, healthy])
 
     assert result.account is not None

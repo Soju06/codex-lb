@@ -20,6 +20,6 @@
 - [x] 3.1 Run focused unit and Responses integration coverage.
 - [x] 3.2 Run changed-file Ruff, formatting, type checks, architecture checks,
   and strict OpenSpec validation.
-- [ ] 3.3 Open the linked upstream PR and verify required GitHub checks.
-- [ ] 3.4 Deploy atomically with the existing data volume and verify live
+- [x] 3.3 Open the linked upstream PR and verify required GitHub checks.
+- [x] 3.4 Deploy atomically with the existing data volume and verify live
   routing no longer selects known revoked access tokens.

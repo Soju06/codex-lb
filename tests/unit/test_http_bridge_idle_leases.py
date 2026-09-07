@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -1224,6 +1225,7 @@ async def test_detached_retire_sweep_is_bounded_by_pending_lock_wait(
     await asyncio.sleep(0)
     assert session.pending_lock.locked()
 
+    started = time.perf_counter()
     with caplog.at_level("WARNING", logger="app.modules.proxy.service"):
         await asyncio.wait_for(
             http_bridge_helpers._release_http_bridge_unanchored_handoffs_for_request(
@@ -1231,6 +1233,10 @@ async def test_detached_retire_sweep_is_bounded_by_pending_lock_wait(
             ),
             timeout=1,
         )
+    elapsed = time.perf_counter() - started
+    # Returned at the configured bound (0.05s) plus scheduling margin, not
+    # merely "eventually": a regression to a longer or unbounded wait fails here.
+    assert 0.04 <= elapsed < 0.5, elapsed
 
     close_bounded.assert_not_awaited()
     assert not session.upstream_close_attempted

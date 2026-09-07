@@ -33,11 +33,11 @@ describe("Usage caps", () => {
       return HttpResponse.json(body);
     }));
     const { invalidate } = setup();
-    await user.type(screen.getByRole("spinbutton", { name: "5h cap (% used)" }), "80");
+    await user.type(screen.getByRole("spinbutton", { name: "5h cap (% usable)" }), "80");
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(bodies).toEqual([{ usageCap5HPercent: 80, usageCapWeeklyPercent: 50 }]));
     await waitFor(() => expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled());
-    await user.clear(screen.getByRole("spinbutton", { name: "Weekly cap (% used)" }));
+    await user.clear(screen.getByRole("spinbutton", { name: "Weekly cap (% usable)" }));
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(bodies[1]).toEqual({ usageCap5HPercent: 80, usageCapWeeklyPercent: null }));
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
@@ -47,7 +47,7 @@ describe("Usage caps", () => {
   it("rejects zero and over-100 caps", async () => {
     const user = userEvent.setup();
     setup();
-    const input = screen.getByRole("spinbutton", { name: "5h cap (% used)" });
+    const input = screen.getByRole("spinbutton", { name: "5h cap (% usable)" });
     for (const value of ["0", "101"]) {
       await user.clear(input);
       await user.type(input, value);
@@ -58,14 +58,14 @@ describe("Usage caps", () => {
 
   it("disables controls for read-only users", () => {
     setup(true);
-    expect(screen.getByRole("spinbutton", { name: "Weekly cap (% used)" })).toBeDisabled();
+    expect(screen.getByRole("spinbutton", { name: "Weekly cap (% usable)" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
   });
 
   it("does not enable a nonexistent 5h window", () => {
     setup(false, true);
-    expect(screen.getByRole("spinbutton", { name: "5h cap (% used)" })).toBeDisabled();
-    expect(screen.getByRole("spinbutton", { name: "Weekly cap (% used)" })).toBeEnabled();
+    expect(screen.getByRole("spinbutton", { name: "5h cap (% usable)" })).toBeDisabled();
+    expect(screen.getByRole("spinbutton", { name: "Weekly cap (% usable)" })).toBeEnabled();
   });
 
   it("presents disable as an outlined full-width action", () => {
@@ -86,7 +86,8 @@ describe("Usage caps", () => {
     if (surface === "dashboard-list") render(<AccountList accounts={[account]} />);
     expect(screen.getByRole("img", { name: "Cap: 80% used (20% remaining)" })).toHaveStyle({ width: "20%" });
     expect(screen.getByRole("img", { name: "Cap: 50% used (50% remaining)" })).toHaveStyle({ width: "50%" });
-    expect(screen.getByText("46% (26%)")).toBeInTheDocument();
-    expect(screen.getByText("70% (20%)")).toBeInTheDocument();
+    const accountPageValues = surface === "detail" || surface === "account-list";
+    expect(screen.getByText(accountPageValues ? "46% (26% usable)" : "46% (26%)")).toBeInTheDocument();
+    expect(screen.getByText(accountPageValues ? "70% (20% usable)" : "70% (20%)")).toBeInTheDocument();
   });
 });

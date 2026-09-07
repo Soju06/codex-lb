@@ -19,14 +19,14 @@ export function UsageCapMarker({ cap }: { cap?: number | null }) {
   );
 }
 
-export function UsageCapValue({ percent, cap }: { percent: number | null; cap?: number | null }) {
+export function UsageCapValue({ percent, cap, labelUsable = false }: { percent: number | null; cap?: number | null; labelUsable?: boolean }) {
   const { t } = useTranslation();
   const reserved = cap == null ? 0 : 100 - cap;
   const usable = percent == null || cap == null ? null : Math.max(0, percent - reserved);
   const remainingLabel = formatPercentNullable(percent, 1);
   if (usable == null) return remainingLabel;
   return t("accounts.usageCaps.usableRemaining", {
-    defaultValue: "{{remaining}} ({{usable}})",
+    defaultValue: labelUsable ? "{{remaining}} ({{usable}} usable)" : "{{remaining}} ({{usable}})",
     remaining: remainingLabel,
     usable: formatPercentNullable(usable, 1),
   });

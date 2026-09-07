@@ -226,7 +226,7 @@ function MiniQuotaRow({
       <div className="flex items-center justify-between text-[11px]">
         <span className="text-muted-foreground">{label}</span>
         <span className="tabular-nums font-medium">
-          <UsageCapValue percent={percent} cap={cap} />
+          <UsageCapValue percent={percent} cap={cap} labelUsable />
         </span>
       </div>
       <MiniQuotaBar

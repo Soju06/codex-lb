@@ -70,7 +70,7 @@ function QuotaRow({
                   : "text-red-600 dark:text-red-400",
           )}
         >
-          <UsageCapValue percent={percent} cap={cap} />
+          <UsageCapValue percent={percent} cap={cap} labelUsable />
         </span>
       </div>
       <div className={cn("relative h-1.5 w-full overflow-hidden rounded-full", quotaBarTrack(clamped))}>

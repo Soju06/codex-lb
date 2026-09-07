@@ -746,7 +746,7 @@ an owner, or fall back to an ordinary account.
 
 ### Requirement: Independent per-account usage caps
 
-Each account SHALL support independent nullable 5h and weekly consumed-percentage caps. Caps SHALL default to disabled and SHALL accept only finite numbers greater than zero and at most 100, or null to disable. The dashboard API SHALL persist both values atomically, require dashboard write access, and return them in account summaries.
+Each account SHALL support independent nullable 5h and weekly usable-quota percentages, interpreted as the consumed-usage threshold at which admission stops. Caps SHALL default to disabled and SHALL accept only finite numbers greater than zero and at most 100, or null to disable. The dashboard API SHALL persist both values atomically, require dashboard write access, and return them in account summaries.
 
 #### Scenario: Save and disable caps
 - **WHEN** an operator saves 80 for 5h and 50 for weekly

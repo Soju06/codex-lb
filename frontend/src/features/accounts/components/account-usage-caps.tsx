@@ -46,7 +46,7 @@ export function AccountUsageCaps({ account, disabled }: { account: AccountSummar
           {windows.map((window) => (
             <div key={window.label} className="space-y-2 rounded-md border bg-muted/20 p-3">
               <label className="grid gap-2.5 text-xs font-medium">
-                <span className="block">{t("accounts.usageCaps.label", { defaultValue: "{{window}} cap (% used)", window: window.label })}</span>
+                <span className="block">{t("accounts.usageCaps.label", { defaultValue: "{{window}} cap (% usable)", window: window.label })}</span>
                 <Input
                   type="number"
                   min={0}

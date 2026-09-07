@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import socket
+from contextlib import asynccontextmanager
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -427,6 +428,73 @@ async def test_codex_control_request_uses_codex_client_when_route_is_resolved(ro
     assert client.calls[0]["url"] == "https://chatgpt.test/codex/sessions"
     assert client.calls[0]["route"] is route
     assert trace.endpoint_id == "ep_1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_agent", ["Codex Desktop/0.153.4", "OpenAI/Python 2.24.0"])
+@pytest.mark.parametrize("header_name", ["content-type", "Content-Type", "cOnTeNt-TyPe"])
+@pytest.mark.parametrize("media_type", ["application/json", "application/sdp"])
+@pytest.mark.parametrize("transport", ["direct", "routed"])
+async def test_codex_control_request_preserves_single_media_type(
+    route: ResolvedUpstreamRoute, user_agent: str, header_name: str, media_type: str, transport: str
+) -> None:
+    client = _CodexClient()
+    payload = b"opaque request bytes"
+
+    class DirectResponse:
+        status = 200
+        headers = {"content-type": "application/json"}
+
+        async def read(self) -> bytes:
+            return b'{"ok":true}'
+
+    class DirectSession:
+        @asynccontextmanager
+        async def request(self, method: str, url: str, **kwargs: Any):
+            client.calls.append({"method": method, "url": url, **kwargs})
+            yield DirectResponse()
+
+    await codex_control_request(
+        "alpha/search" if media_type == "application/json" else "realtime/calls",
+        method="POST",
+        payload=payload,
+        query_params={},
+        headers={"user-agent": user_agent, header_name: media_type, "x-request-id": "media-type-test"},
+        access_token="access",
+        account_id="chatgpt_account",
+        base_url="https://chatgpt.test",
+        route=route if transport == "routed" else None,
+        session=cast(Any, DirectSession()),
+        codex_client=cast(Any, client),
+    )
+
+    headers = client.calls[0]["headers"]
+    assert [value for name, value in headers.items() if name.lower() == "content-type"] == [media_type]
+    assert client.calls[0]["data"] == payload
+    if user_agent.startswith("Codex Desktop"):
+        assert list(headers).index(header_name) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [None, b"{}"])
+async def test_codex_control_request_default_media_type_depends_on_body(
+    route: ResolvedUpstreamRoute, payload: bytes | None
+) -> None:
+    client = _CodexClient()
+    await codex_control_request(
+        "alpha/search",
+        method="POST" if payload is not None else "GET",
+        payload=payload,
+        query_params={},
+        headers={"user-agent": "Codex Desktop/0.153.4"},
+        access_token="access",
+        account_id=None,
+        route=route,
+        codex_client=cast(Any, client),
+    )
+
+    media_types = [value for name, value in client.calls[0]["headers"].items() if name.lower() == "content-type"]
+    assert media_types == ([] if payload is None else ["application/json"])
 
 
 @pytest.mark.asyncio

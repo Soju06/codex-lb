@@ -21,6 +21,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
 from app.core.clients import proxy as core_proxy
+from app.core.clients.codex import CodexClient, CodexRequestResult
 from app.core.clients.proxy import ProxyResponseError
 from app.core.upstream_proxy import (
     ResolvedProxyEndpoint,
@@ -846,6 +847,56 @@ async def test_codex_alpha_search_forwards_request_and_response(async_client, mo
     ]
     assert isinstance(calls[0]["timeout_seconds"], float)
     assert calls[0]["timeout_seconds"] > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", _CODEX_SEARCH_PATHS)
+async def test_native_codex_alpha_search_sends_one_content_type_to_transport(async_client, monkeypatch, path):
+    await _import_account(async_client, "acc_native_search", "native-search@example.com")
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="search-pool",
+        endpoint=ResolvedProxyEndpoint(id="search-endpoint", scheme="https", host="proxy.test", port=443),
+    )
+    payload = b'{ "query": "test search" }'
+    requests = []
+
+    async def resolve_route(*_args, **_kwargs):
+        return route
+
+    async def send_control(_client, method, url, **kwargs):
+        requests.append((method, url, kwargs))
+        content_types = [(name, value) for name, value in kwargs["headers"].items() if name.lower() == "content-type"]
+        if content_types != [("content-type", "application/json")]:
+            raise ProxyResponseError(400, {"error": {"code": "upstream_error", "message": "Unsupported content type"}})
+        return CodexRequestResult(
+            response=SimpleNamespace(
+                status_code=200, content=b'{"results":[]}', headers={"content-type": "application/json"}
+            ),
+            route=route,
+            fallback_used=False,
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_upstream_route_for_account", resolve_route)
+    monkeypatch.setattr(CodexClient, "request_with_route_metadata", send_control)
+
+    response = await async_client.post(
+        path,
+        content=payload,
+        headers={
+            "user-agent": "Codex Desktop/0.153.4 (Mac OS 26.6.2; arm64)",
+            "content-type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"results": []}
+    assert len(requests) == 1
+    method, url, kwargs = requests[0]
+    assert method == "POST"
+    assert url.endswith("/backend-api/codex/alpha/search")
+    assert kwargs["data"] == payload
+    assert kwargs["route"] is route
 
 
 @pytest.mark.asyncio

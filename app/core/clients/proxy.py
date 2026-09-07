@@ -5420,9 +5420,13 @@ async def codex_control_request(
     upstream_headers = _build_upstream_headers(headers, access_token, account_id, accept=headers.get("accept", "*/*"))
     content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), None)
     if content_type:
-        upstream_headers["Content-Type"] = content_type
+        _replace_header_preserving_position(
+            upstream_headers, "content-type", content_type, fallback_name="Content-Type"
+        )
     elif payload is None:
-        upstream_headers.pop("Content-Type", None)
+        for name in list(upstream_headers):
+            if name.lower() == "content-type":
+                del upstream_headers[name]
     total_timeout = (
         max(0.001, timeout_seconds)
         if timeout_seconds is not None

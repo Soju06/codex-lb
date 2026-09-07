@@ -57,6 +57,11 @@ change. The existing doubled-prefix rewrite also handles
 authentication is enabled. Upstream failures remain subject to the existing
 control-request policy. See the standalone search requirement in [spec.md](spec.md).
 
+Codex Desktop native control requests preserve exactly one case-insensitive
+`Content-Type` header. The inbound media type and opaque body bytes are retained;
+this prevents duplicate `content-type`/`Content-Type` fields from being appended
+by the native transport and rejected upstream as `Unsupported content type`.
+
 ## Fast Mode and Service Tiers
 
 codex-lb accepts the OpenAI/Codex `service_tier` field on Responses and Chat

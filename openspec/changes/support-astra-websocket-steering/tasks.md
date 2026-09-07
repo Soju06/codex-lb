@@ -32,3 +32,4 @@
 - [x] 3.19 Bound historical steering correlation with admission stop and rotation after drain; prove required-tool-input progress, pending accounting, fresh-connection history and account-health neutrality
 - [x] 3.20 Retire after timeout or local pre-send cleanup empties the queue, even without upstream events or keepalives; prove the next create uses a fresh connection
 - [x] 3.21 Preserve canonical public auth, policy and quota classifications for steering while keeping unknown exception details private; prove refresh, policy and reservation paths with focused regressions
+- [x] 3.22 Verify integration with the main-branch Clock/Scheduler and accepted-capacity replay changes, including virtual-time retirement after local cleanup with keepalives disabled

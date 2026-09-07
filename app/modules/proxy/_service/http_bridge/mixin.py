@@ -35,6 +35,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clock import clock_for, scheduler_for
 from app.core.errors import openai_error
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
@@ -46,7 +47,6 @@ from app.core.metrics.prometheus import (
 )
 from app.core.utils.locks import fast_lock
 from app.core.utils.request_id import ensure_request_scope_id
-from app.core.utils.shared_future import wait_on_shared_future
 from app.db.models import (
     StickySessionKind,
 )
@@ -139,7 +139,6 @@ from app.modules.proxy._service.http_bridge.quarantine import (
 )
 from app.modules.proxy._service.http_bridge.request_submit import _HTTPBridgeRequestSubmitMixin
 from app.modules.proxy._service.http_bridge.service_stubs import (
-    _await_cancelled_task,
     _call_with_supported_optional_kwargs,
     _estimated_lease_tokens_from_request_usage_budget,
     _prefer_earlier_reset_window,
@@ -147,11 +146,9 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _raise_proxy_unavailable,
     _record_continuity_fail_closed,
     _record_same_account_takeover,
-    _remaining_budget_seconds,
     _routing_strategy,
     _service_get_settings,
     _service_get_settings_cache,
-    _service_time,
     _upstream_turn_state_from_socket,
     _websocket_connect_deadline,
     _websocket_safe_headers_with_turn_state,
@@ -759,7 +756,7 @@ class _HTTPBridgeMixin(
                         existing.api_key = api_key
                         existing.request_model = request_model
                         existing.request_service_tier = request_service_tier
-                        existing.last_used_at = _service_time().monotonic()
+                        existing.last_used_at = clock_for(self).monotonic()
                         await _refresh_reused_http_bridge_session_with_handoff(
                             self,
                             existing,
@@ -1194,7 +1191,7 @@ class _HTTPBridgeMixin(
                                 if inflight_future is None:
                                     previous_session.request_model = request_model
                                     previous_session.request_service_tier = request_service_tier
-                                    previous_session.last_used_at = _service_time().monotonic()
+                                    previous_session.last_used_at = clock_for(self).monotonic()
                                     await self._refresh_durable_http_bridge_session(previous_session)
                                     _log_http_bridge_event(
                                         "reuse",
@@ -1340,7 +1337,7 @@ class _HTTPBridgeMixin(
                             setattr(
                                 inflight_future,
                                 _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
-                                _service_time().monotonic(),
+                                clock_for(self).monotonic(),
                             )
                             self._http_bridge_inflight_sessions[key] = inflight_future
                             owns_creation = True
@@ -1371,13 +1368,7 @@ class _HTTPBridgeMixin(
             if capacity_wait_future is not None:
                 wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
                 try:
-                    # Not wait_for(shield(...)): shield attaches per-waiter
-                    # callbacks to the shared registry future, which livelocks
-                    # the event loop under mass timeout (see shared_future.py).
-                    await wait_on_shared_future(
-                        capacity_wait_future,
-                        timeout=wait_timeout_seconds,
-                    )
+                    await self._await_http_bridge_registry_wait(capacity_wait_future, timeout=wait_timeout_seconds)
                 except asyncio.CancelledError:
                     if capacity_wait_future.cancelled():
                         continue
@@ -1405,13 +1396,7 @@ class _HTTPBridgeMixin(
             if inflight_future is not None and not owns_creation:
                 wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
                 try:
-                    # Not wait_for(shield(...)): shield attaches per-waiter
-                    # callbacks to the shared registry future, which livelocks
-                    # the event loop under mass timeout (see shared_future.py).
-                    session = await wait_on_shared_future(
-                        inflight_future,
-                        timeout=wait_timeout_seconds,
-                    )
+                    session = await self._await_http_bridge_registry_wait(inflight_future, timeout=wait_timeout_seconds)
                 except asyncio.CancelledError:
                     if inflight_future.cancelled():
                         continue
@@ -1480,7 +1465,7 @@ class _HTTPBridgeMixin(
                         session.api_key = api_key
                         session.request_model = request_model
                         session.request_service_tier = request_service_tier
-                        session.last_used_at = _service_time().monotonic()
+                        session.last_used_at = clock_for(self).monotonic()
                         return session
                 if force_goal_restart_account_reselection or (
                     not session.closed and session.account.status in ROUTABLE_STATUSES
@@ -1638,7 +1623,7 @@ class _HTTPBridgeMixin(
         return True
 
     def _prune_http_bridge_sessions_locked(self) -> list["_HTTPBridgeSession"]:
-        now = _service_time().monotonic()
+        now = clock_for(self).monotonic()
         stale_keys: list[_HTTPBridgeSessionKey] = []
         for key, session in self._http_bridge_sessions.items():
             if _http_bridge_session_has_admission_waiter(session):
@@ -1702,7 +1687,9 @@ class _HTTPBridgeMixin(
             service_tier=request_service_tier,
             reasoning_effort=None,
             api_key_reservation=None,
-            started_at=_service_time().monotonic(),
+            started_at=clock_for(self).monotonic(),
+            thread_affinity_last_touch_at=clock_for(self).monotonic(),
+            api_key_reservation_last_touch_at=clock_for(self).monotonic(),
             transport=_REQUEST_TRANSPORT_HTTP,
         )
         deadline = (
@@ -1711,6 +1698,7 @@ class _HTTPBridgeMixin(
             else _websocket_connect_deadline(
                 request_state,
                 _http_bridge_request_budget_seconds(_service_get_settings()),
+                now=clock_for(self).monotonic(),
             )
         )
         settings = await _service_get_settings_cache().get()
@@ -1791,7 +1779,7 @@ class _HTTPBridgeMixin(
             try:
                 account = await self._ensure_fresh_with_budget(
                     account,
-                    timeout_seconds=_remaining_budget_seconds(deadline),
+                    timeout_seconds=self._remaining_budget_seconds(deadline),
                 )
                 connect_headers = _websocket_safe_headers_with_turn_state(
                     headers, _sticky_key_from_turn_state_header(headers)
@@ -1801,7 +1789,7 @@ class _HTTPBridgeMixin(
                     account,
                     connect_headers,
                     optional_kwargs={"request_state": request_state},
-                    timeout_seconds=_remaining_budget_seconds(deadline),
+                    timeout_seconds=self._remaining_budget_seconds(deadline),
                 )
                 _record_same_account_takeover(
                     preferred_account_id=preferred_account_id,
@@ -1820,7 +1808,7 @@ class _HTTPBridgeMixin(
                 ):
                     selected_account_lease = None
                     continue
-                if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
+                if exc.status_code != 401 or self._remaining_budget_seconds(deadline) <= 0:
                     await self._load_balancer.release_account_lease(selected_account_lease)
                     selected_account_lease = None
                     raise
@@ -1828,7 +1816,7 @@ class _HTTPBridgeMixin(
                     account = await self._ensure_fresh_with_budget(
                         account,
                         force=True,
-                        timeout_seconds=_remaining_budget_seconds(deadline),
+                        timeout_seconds=self._remaining_budget_seconds(deadline),
                     )
                     connect_headers = _websocket_safe_headers_with_turn_state(
                         headers, _sticky_key_from_turn_state_header(headers)
@@ -1836,7 +1824,7 @@ class _HTTPBridgeMixin(
                     upstream = await self._open_upstream_websocket_with_budget(
                         account,
                         connect_headers,
-                        timeout_seconds=_remaining_budget_seconds(deadline),
+                        timeout_seconds=self._remaining_budget_seconds(deadline),
                         request_state=request_state,
                     )
                     _record_same_account_takeover(
@@ -1885,7 +1873,7 @@ class _HTTPBridgeMixin(
             except RefreshError as exc:
                 if exc.is_permanent:
                     await self._load_balancer.mark_permanent_failure(account, exc.code)
-                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                if selected_is_preferred and self._remaining_budget_seconds(deadline) > 0:
                     if retry_same_account_once and not exc.is_permanent:
                         retry_same_account_once = False
                         await self._load_balancer.release_account_lease(selected_account_lease)
@@ -1924,7 +1912,7 @@ class _HTTPBridgeMixin(
                 selected_account_lease = None
                 _raise_proxy_unavailable(exc.message or "Temporary upstream refresh failure")
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                if selected_is_preferred and self._remaining_budget_seconds(deadline) > 0:
                     if retry_same_account_once:
                         retry_same_account_once = False
                         await self._load_balancer.release_account_lease(selected_account_lease)
@@ -1970,7 +1958,7 @@ class _HTTPBridgeMixin(
             response_create_gate=asyncio.Semaphore(1),
             queued_request_count=0,
             lifecycle_lock=fast_lock(),
-            last_used_at=_service_time().monotonic(),
+            last_used_at=clock_for(self).monotonic(),
             idle_ttl_seconds=idle_ttl_seconds,
             codex_session=(affinity.kind == StickySessionKind.CODEX_SESSION or key.affinity_kind == "thread_header"),
             access_token_expires_at=_token_expiry(account, self._encryptor),
@@ -1981,7 +1969,7 @@ class _HTTPBridgeMixin(
             catalog_omission_quota_admission=selection.catalog_omission_quota_admission,
         )
         _copy_websocket_route_metadata_to_session(session, request_state)
-        session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
+        session.upstream_reader = self._spawn_http_bridge_upstream_reader(session)
         return session
 
     async def _reconnect_http_bridge_session(
@@ -2016,11 +2004,7 @@ class _HTTPBridgeMixin(
         if old_reader is not None:
             if old_reader is not asyncio.current_task():
                 try:
-                    cancelled = await _await_cancelled_task(
-                        old_reader,
-                        label="http bridge upstream reader",
-                        cleanup_tasks=self._background_cleanup_tasks,
-                    )
+                    cancelled = await self._cancel_http_bridge_previous_reader(old_reader)
                 except BaseException:
                     session.closed = True
                     _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
@@ -2038,6 +2022,7 @@ class _HTTPBridgeMixin(
         deadline = _websocket_connect_deadline(
             request_state,
             _http_bridge_request_budget_seconds(_service_get_settings()),
+            now=clock_for(self).monotonic(),
         )
         try:
             settings = await _service_get_settings_cache().get()
@@ -2125,7 +2110,7 @@ class _HTTPBridgeMixin(
                 return await self._open_upstream_websocket_with_budget(
                     selected_account,
                     selected_headers,
-                    timeout_seconds=_remaining_budget_seconds(deadline),
+                    timeout_seconds=self._remaining_budget_seconds(deadline),
                     request_state=request_state,
                 )
             except Exception:
@@ -2193,7 +2178,7 @@ class _HTTPBridgeMixin(
                     reuse_current_account_lease
                     and not hard_close_account_bound
                     and required_preferred_account_id is None
-                    and _remaining_budget_seconds(deadline) > 0
+                    and self._remaining_budget_seconds(deadline) > 0
                 ):
                     preferred_candidate_id = None
                     continue
@@ -2214,8 +2199,10 @@ class _HTTPBridgeMixin(
                         kind="http_bridge",
                         request_stage="reattach",
                         model=session.request_model,
-                        max_sleep_seconds=_remaining_budget_seconds(deadline),
+                        max_sleep_seconds=self._remaining_budget_seconds(deadline),
                         request_state=request_state,
+                        scheduler=scheduler_for(self),
+                        clock=clock_for(self),
                     )
                 except BaseException:
                     complete_failed_handoff()
@@ -2275,7 +2262,7 @@ class _HTTPBridgeMixin(
                 account = await self._ensure_fresh_with_budget(
                     account,
                     force=force_refresh,
-                    timeout_seconds=_remaining_budget_seconds(deadline),
+                    timeout_seconds=self._remaining_budget_seconds(deadline),
                 )
                 if force_refresh and request_state.force_refresh_account_id == account.id:
                     request_state.force_refresh_account_id = None
@@ -2288,7 +2275,7 @@ class _HTTPBridgeMixin(
                 record_selected_account_takeover(account.id)
                 break
             except ProxyResponseError as exc:
-                if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
+                if exc.status_code != 401 or self._remaining_budget_seconds(deadline) <= 0:
                     await release_selected_account_lease()
                     complete_failed_handoff()
                     raise _http_bridge_reconnect_connect_failure(exc, required_preferred_account_id) from exc
@@ -2296,7 +2283,7 @@ class _HTTPBridgeMixin(
                     account = await self._ensure_fresh_with_budget(
                         account,
                         force=True,
-                        timeout_seconds=_remaining_budget_seconds(deadline),
+                        timeout_seconds=self._remaining_budget_seconds(deadline),
                     )
                     connect_headers = _websocket_safe_headers_with_turn_state(
                         session.headers,
@@ -2326,7 +2313,7 @@ class _HTTPBridgeMixin(
             except RefreshError as exc:
                 if exc.is_permanent:
                     await self._load_balancer.mark_permanent_failure(account, exc.code)
-                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                if selected_is_preferred and self._remaining_budget_seconds(deadline) > 0:
                     if retry_same_account_once and not exc.is_permanent:
                         retry_same_account_once = False
                         await release_selected_account_lease()
@@ -2337,7 +2324,7 @@ class _HTTPBridgeMixin(
                 complete_failed_handoff()
                 raise _http_bridge_reconnect_connect_failure(exc, required_preferred_account_id)
             except (aiohttp.ClientError, asyncio.TimeoutError) as transport_exc:
-                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                if selected_is_preferred and self._remaining_budget_seconds(deadline) > 0:
                     if retry_same_account_once:
                         retry_same_account_once = False
                         await release_selected_account_lease()
@@ -2359,20 +2346,30 @@ class _HTTPBridgeMixin(
 
         async def abort_selected_handoff() -> None:
             session.closed = True
+            # ``shield(coroutine)`` would ``ensure_future`` an unowned task; the
+            # scheduler spawns it so a simulation owns the outliving cleanup.
+            scheduler = scheduler_for(self)
             try:
-                await asyncio.shield(upstream.close())
+                await asyncio.shield(scheduler.create_task(upstream.close(), name="http-bridge-handoff-abort-close"))
             except BaseException:
                 logger.debug("Failed to close HTTP bridge replacement websocket", exc_info=True)
             selected_lease = selected_account_lease
             old_lease = session.account_lease
             try:
-                await asyncio.shield(release_selected_account_lease())
+                await asyncio.shield(
+                    scheduler.create_task(release_selected_account_lease(), name="http-bridge-handoff-abort-lease")
+                )
             except BaseException:
                 logger.debug("Failed to release HTTP bridge replacement lease", exc_info=True)
             if old_lease is not None and old_lease is not selected_lease:
                 session.account_lease = None
                 try:
-                    await asyncio.shield(self._load_balancer.release_account_lease(old_lease))
+                    await asyncio.shield(
+                        scheduler.create_task(
+                            self._load_balancer.release_account_lease(old_lease),
+                            name="http-bridge-handoff-abort-old-lease",
+                        )
+                    )
                 except BaseException:
                     logger.debug("Failed to release HTTP bridge old account lease", exc_info=True)
             complete_failed_handoff()
@@ -2424,7 +2421,7 @@ class _HTTPBridgeMixin(
             await abort_selected_handoff()
             raise
         if restart_reader:
-            session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
+            session.upstream_reader = self._spawn_http_bridge_upstream_reader(session)
         _log_http_bridge_event(
             "reconnect",
             session.key,

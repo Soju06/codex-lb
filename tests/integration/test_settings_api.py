@@ -758,11 +758,11 @@ async def test_upstream_proxy_endpoint_test_rejects_proxy_auth_response(async_cl
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scheme", ["http", "socks5", "socks5h"])
-async def test_upstream_proxy_endpoint_create_rejects_plaintext_credentials(async_client, scheme: str):
+async def test_upstream_proxy_endpoint_create_allows_plaintext_credentials_with_warning_flag(async_client, scheme: str):
     response = await async_client.post(
         "/api/settings/upstream-proxy/endpoints",
         json={
-            "name": "Unsafe proxy",
+            "name": "Plaintext proxy",
             "scheme": scheme,
             "host": "proxy.internal",
             "port": 8080,
@@ -771,8 +771,33 @@ async def test_upstream_proxy_endpoint_create_rejects_plaintext_credentials(asyn
         },
     )
 
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "plaintext_proxy_credentials_forbidden"
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["plaintextCredentials"] is True
+    assert "secret" not in str(payload)
+
+    listing = await async_client.get("/api/settings/upstream-proxy")
+    assert listing.status_code == 200
+    flags = {endpoint["id"]: endpoint["plaintextCredentials"] for endpoint in listing.json()["endpoints"]}
+    assert flags[payload["id"]] is True
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_https_credentials_are_not_flagged(async_client):
+    response = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={
+            "name": "TLS proxy",
+            "scheme": "https",
+            "host": "proxy.internal",
+            "port": 8443,
+            "username": "user",
+            "password": "secret",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plaintextCredentials"] is False
 
 
 @pytest.mark.asyncio

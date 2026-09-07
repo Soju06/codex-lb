@@ -1453,6 +1453,7 @@
   "upstreamProxy.endpoints.connectionFailed": "连接失败",
   "upstreamProxy.endpoints.connectionOk": "连接正常",
   "upstreamProxy.endpoints.empty": "无项目",
+  "upstreamProxy.endpoints.plaintextCredentials": "凭据通过 {{scheme}} 以未加密方式发送到此代理。建议改用 https:// 代理或不带凭据的 IP 白名单。",
   "upstreamProxy.endpoints.title": "Endpoint",
   "upstreamProxy.memberDialog.alreadyPresent": "Endpoint 已在 {{pool}} 中。",
   "upstreamProxy.memberDialog.description": "将 endpoint 添加到 proxy pool。",

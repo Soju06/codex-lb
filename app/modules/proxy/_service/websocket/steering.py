@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import replace
@@ -13,6 +12,7 @@ import anyio
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocket
+from app.core.clock import clock_for, scheduler_for
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.exceptions import (
@@ -367,13 +367,15 @@ def required_steering_input_is_present(required: list[JsonValue], input_items: J
 
 
 async def release_steering_request(proxy: _WebSocketServiceProtocol, request_state: _WebSocketRequestState) -> None:
+    scheduler = scheduler_for(proxy)
+
     async def release() -> None:
         try:
-            await _release_websocket_response_create_gate(request_state, asyncio.Semaphore(0))
+            await _release_websocket_response_create_gate(request_state, asyncio.Semaphore(0), scheduler=scheduler)
         finally:
             await proxy._release_websocket_request_state_reservation(request_state)
 
-    cancellation = await _await_cleanup_deferring_cancellation(release())
+    cancellation = await _await_cleanup_deferring_cancellation(release(), scheduler=scheduler)
     if cancellation is not None:
         raise cancellation
 
@@ -433,7 +435,7 @@ async def submit_websocket_steering(
         raise steering_error("invalid_input", "Steering files must belong to the active response account.")
     selected_account, error_code, error_message = await proxy._revalidate_open_websocket_account(
         account,
-        request_state=replace(parent, started_at=time.monotonic()),
+        request_state=replace(parent, started_at=clock_for(proxy).monotonic()),
         api_key=refreshed_key,
     )
     if selected_account is None or selected_account.id != account.id:

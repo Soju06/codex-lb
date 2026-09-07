@@ -53619,10 +53619,11 @@ def test_prepare_visible_output_replay_arms_prelude_suppression_for_accepted_sta
 
 
 def test_prepare_visible_output_replay_preserves_staged_identity_across_bounded_extra_replay():
-    """A created-only replay whose replacement socket closes cleanly before
-    ``response.created`` gets one bounded extra replay. The identity captured
-    by the first replay must survive that second prepare, otherwise the extra
-    attempt's ``response.created`` would leak a second lifecycle."""
+    """The bridge no longer grants an accepted lifecycle the bounded clean-close
+    extra replay (``_websocket_request_can_replay_before_visible_output`` gates
+    it on ``replay_downstream_response_id``), but the prepare step stays
+    identity-stable regardless: a captured identity must survive a second
+    prepare so no path can leak a second ``response.created``."""
     request_state = _accepted_lifecycle_request_state(
         response_id=None,
         awaiting_response_created=True,
@@ -54261,3 +54262,37 @@ async def test_process_upstream_websocket_text_defers_accepted_replay_health_unt
     assert calls == ["settle", f"health:{failing_account.id}:server_is_overloaded"]
     assert request_state.deferred_keyed_stream_health == []
     assert request_state.api_key_reservation is None
+
+
+@pytest.mark.parametrize(
+    ("replay_downstream_response_id", "expected"),
+    [
+        pytest.param(None, True, id="precreated_replay_keeps_bounded_clean_close_retry"),
+        pytest.param("resp_accepted_visible", False, id="accepted_lifecycle_replay_is_sent_exactly_once"),
+    ],
+)
+def test_replay_before_visible_output_clean_close_retry_is_refused_after_an_accepted_lifecycle_replay(
+    replay_downstream_response_id: str | None,
+    expected: bool,
+):
+    """#2127 P3: after an accepted replay (``replay_count == 1``, event count
+    reset) a clean close of the replacement socket qualified for the bounded
+    clean-close extra retry, a third send the spec forbids. The affordance
+    stays with pre-created requests."""
+    request_state = _accepted_lifecycle_request_state(
+        response_id=None,
+        awaiting_response_created=True,
+        response_event_count=0,
+        replay_count=1,
+        clean_close_replay_count=0,
+        replay_downstream_response_id=replay_downstream_response_id,
+    )
+
+    assert proxy_service._websocket_request_can_replay_before_visible_output(request_state) is False
+    assert (
+        proxy_service._websocket_request_can_replay_before_visible_output(
+            request_state,
+            allow_clean_close_retry=True,
+        )
+        is expected
+    )

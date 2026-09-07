@@ -46848,3 +46848,48 @@ async def test_forward_http_bridge_request_to_owner_passes_owner_scheduler_and_c
     assert chunks == []
     assert captured["scheduler"] is scheduler
     assert captured["clock"] is clock
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_refuses_a_third_send_after_an_accepted_replay_clean_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2127 P3: the accepted replay was re-sent once and its replacement socket
+    closed cleanly before ``response.created``. The bounded clean-close retry
+    must not turn that into a third send; the request fails closed under the
+    visible id instead."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _accepted_bridge_request_state(
+        request_id="req-accepted-clean-close-third-send",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        replay_count=1,
+        replay_downstream_response_id="resp-accepted-visible",
+        suppress_next_created_downstream=True,
+        response_create_gate_acquired=True,
+        account_response_create_lease=cast(Any, object()),
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-accepted-clean-close", None),
+        key_value="bridge-accepted-clean-close",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    await session.response_create_gate.acquire()
+    session.last_upstream_close_code = 1000
+    session.last_upstream_close_generation = 3
+    send_text = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(service, "_release_request_state_account_response_create_lease", AsyncMock())
+
+    assert await service._retry_http_bridge_precreated_request(session) is False
+
+    reconnect.assert_not_awaited()
+    send_text.assert_not_awaited()
+    assert request_state.replay_count == 1
+    assert request_state.clean_close_replay_count == 0
+    assert request_state.replay_downstream_response_id == "resp-accepted-visible"

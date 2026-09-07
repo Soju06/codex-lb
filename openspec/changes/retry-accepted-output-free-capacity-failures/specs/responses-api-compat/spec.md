@@ -4,11 +4,11 @@
 
 ### Requirement: Accepted output-free capacity failures are replayed within a single response lifecycle
 
-When a native Codex HTTP bridge or direct WebSocket `response.create` has been accepted upstream — `response.created` and optionally `response.in_progress` were forwarded downstream and no output item, text or tool delta, reasoning prelude, or tool call has been observed — and the turn then fails output-free, the proxy MUST re-send the request once and the client MUST observe a single response lifecycle: exactly one `response.created`, no duplicated `response.in_progress`, and every later frame (including `response.completed` or a second terminal failure) carrying the response id the client already read.
+When a native Codex HTTP bridge or direct WebSocket `response.create` has been accepted upstream — `response.created` and optionally `response.in_progress` were forwarded downstream and no output item, text or tool delta, reasoning prelude, or tool call has been observed — and the turn then fails output-free, the proxy MUST re-send the request exactly once and the client MUST observe a single response lifecycle: exactly one `response.created`, no duplicated `response.in_progress`, and every later frame (including `response.completed` or a second terminal failure) carrying the response id the client already read. The bounded clean-close retry that pre-created requests receive MUST NOT extend an accepted lifecycle to a third send.
 
 An output-free failure is either a terminal `error` / `response.failed` whose normalized code is `server_is_overloaded`, `overloaded_error`, or `model_at_capacity`, or whose message names the selected-model capacity, or a transport close that is not account-neutral. The terminal MUST NOT name another response and MUST NOT report output items or billed output or reasoning tokens. Quota and rate-limit codes after acceptance MUST keep their stronger classification and MUST NOT be replayed. Anchored continuations without a retry-safe fresh payload, requests sharing the socket with another pending request, and requests whose replay budget is consumed MUST NOT be replayed.
 
-The replay MUST capture the client-visible response id and arm prelude suppression before the request's upstream response id is cleared. On the HTTP bridge the replay MUST re-claim the session response-create gate without waiting; when another request holds the gate the upstream terminal MUST be forwarded unchanged. The replay MUST re-acquire shared work admission before sending, and when the request body is account-neutral the failing account MUST be excluded from the replacement selection on both surfaces. On the HTTP bridge only a terminal transport message (close or error) MAY replay an accepted turn.
+The replay MUST capture the client-visible response id and arm prelude suppression before the request's upstream response id is cleared. On the HTTP bridge the replay MUST re-claim the session response-create gate without waiting; when another request holds the gate the upstream terminal MUST be forwarded unchanged. The replay MUST re-acquire shared work admission before sending, and when the request body is account-neutral the failing account MUST be excluded from the replacement selection on both surfaces. A replay that swaps a retry-safe fresh body in for an anchored one MUST re-derive its owner requirement from the fresh body (an account-neutral body releases the anchor owner's pin; an account-bound body keeps it), and the failing account MUST NOT be excluded while the replay is still required to reconnect to it. The classified capacity code an accepted terminal is replayed under MUST be a transparent replay code (`model_at_capacity` is reported as `server_is_overloaded`). When the request is API-key-backed, the failing account's health write MUST wait for the request's reservation settlement, as for pre-created replays. On the HTTP bridge only a terminal transport message (close or error) MAY replay an accepted turn.
 
 #### Scenario: Bridge terminal capacity error after acceptance is retried on another account
 
@@ -62,9 +62,28 @@ The replay MUST capture the client-visible response id and arm prelude suppressi
 
 #### Scenario: A second capacity failure surfaces one terminal under the visible id
 
-- **WHEN** the replayed request also fails output-free
+- **WHEN** the replayed request also fails output-free, including a clean upstream close before the replay's `response.created`
 - **THEN** the proxy MUST NOT attempt a third send
 - **AND** the client observes one terminal failure with no second `response.created` or `response.in_progress`
+
+#### Scenario: An anchored accepted follow-up is replayed with its fresh body on another account
+
+- **GIVEN** a direct WebSocket follow-up turn whose `previous_response_id` the proxy injected and whose full resend is retained as a retry-safe, account-neutral fresh body
+- **AND** upstream accepted the turn (`response.created` and `response.in_progress` forwarded) on the anchor's owner
+- **WHEN** upstream then emits an output-free capacity `error` with code `server_is_overloaded` or `model_at_capacity`, or closes the transport abruptly
+- **THEN** the proxy re-sends the fresh body without `previous_response_id` on another account, excluding the owner
+- **AND** the client observes exactly one `response.created` and a `response.completed` carrying that id
+
+#### Scenario: An account-bound accepted replay reconnects to its owner
+
+- **WHEN** an accepted replay's body still requires one account (bound replay owner, uploaded file, anchored owner, or turn-state owner)
+- **THEN** the proxy MUST NOT exclude that account and MUST reconnect to it
+
+#### Scenario: Accepted replay health writes wait for API-key settlement
+
+- **GIVEN** an API-key-backed accepted request that fails output-free and is replayed
+- **WHEN** the replay reaches its terminal
+- **THEN** the failing account's health write is applied only after the request's reservation settlement commits
 
 #### Scenario: Another pending request or a busy create gate forwards the original error
 

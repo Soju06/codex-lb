@@ -1683,11 +1683,17 @@ def _websocket_request_can_replay_before_visible_output(
         return False
     if request_state.transport == _REQUEST_TRANSPORT_WEBSOCKET and request_state.response_create_sent_at is None:
         return False
+    # The bounded clean-close retry is a pre-created affordance. An accepted
+    # lifecycle (``replay_downstream_response_id`` captured) is re-sent exactly
+    # once; a clean close of the replacement socket before its
+    # ``response.created`` surfaces one terminal under the visible id instead
+    # of a third send (openspec: retry-accepted-output-free-capacity-failures).
     if request_state.replay_count >= 1 and not (
         allow_clean_close_retry
         and request_state.replay_count == 1
         and request_state.response_event_count == 0
         and request_state.clean_close_replay_count == 0
+        and request_state.replay_downstream_response_id is None
     ):
         return False
     # A sequenced downstream frame normally pins the request to its socket: a

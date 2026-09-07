@@ -8,16 +8,21 @@ routing without becoming permanently invisible behind healthier accounts.
 
 ## Reauthentication warning state
 
-`reauth_required` means refresh-token exchange needs operator repair; it does not
-prove that the stored access token is unusable. Such accounts remain eligible
+`reauth_required` alone means refresh-token exchange needs operator repair; it does not
+prove that the stored access token is unusable. Refresh-only warning accounts remain eligible
 for ordinary requests and retain sticky, bridge, file, response, and realtime
 ownership while the access token remains unexpired. Proactive refresh is skipped.
 At known access-token expiry, selection and bridge reuse reject the account
 locally: movable soft affinity may fail over, while hard account-owned continuity
 remains fail-closed. Before expiry, an upstream rejection plus permanent forced-
-refresh failure excludes the account only from that request's remaining movable
-retries. Paused, deactivated, deleted, and security-ineligible accounts retain
-their hard exclusions.
+refresh failure, or a second 401 after refresh, persists the stronger
+`account_auth_invalidated` reason for the rejected credential generation. That
+reason excludes later independent requests and bridge reuse across replicas
+until credential repair; it is not limited to the current request's retries.
+Paused, deactivated, deleted, and security-ineligible accounts retain their hard
+exclusions. New operator routing assignments still omit warning accounts until
+repair, independently of their eligibility for ordinary requests and existing
+ownership.
 
 ## Replica-local soft health
 
@@ -107,3 +112,10 @@ failures preserve it; repaired credentials clear it through reauthentication.
 Status writes compare both credential ciphertexts so stale failures cannot disable
 a repaired account. For example, after A rejects access and refresh, a subsequent
 independent request can select B even when A's JWT expiry is unknown.
+
+Local unavailable marks are fenced against repair clears and snapshot refreshes
+observed during the guarded write. A newer cache observation wins over the stale
+mark. The successful write still queues a routing invalidation, even if its mark
+is suppressed, so a snapshot read before the write cannot hide the committed
+rejection beyond the normal bus convergence bound. A missed guarded write adds
+no speculative mark and clears no newer routing state.

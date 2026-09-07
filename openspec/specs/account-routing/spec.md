@@ -230,12 +230,15 @@ When upstream rejects a request because of the request payload itself, the proxy
 ### Requirement: Stale in-memory account sessions must not stay routable
 
 The service MUST remove accounts from routing when they are paused, deleted,
-marked `reauth_required`, or otherwise made unavailable by a permanent
-credential/session failure. This applies even when a long-lived in-memory HTTP
+deactivated, or marked `reauth_required` with known expired access credentials
+or proven `account_auth_invalidated` access rejection. A refresh-only
+`reauth_required` warning MUST NOT by itself remove an account whose access
+token is not known expired from routing. This applies even when a long-lived in-memory HTTP
 bridge session still holds an older `ACTIVE` account object. When the account
 is successfully imported, re-authenticated, or reactivated, the service MUST
 clear the in-memory unavailable marker. The routing-unavailable state MUST be
-derived from persisted account status and MUST converge on every replica
+derived from persisted account status and authentication-failure reason, with
+known access-token expiry checked during selection and reuse, and MUST converge on every replica
 within the cache-invalidation bus bound (marks and clears both propagate);
 bridge-session reuse checks MUST NOT add per-request database reads; sessions
 pinned to a deleted account MUST NOT be reused on any replica. A local
@@ -424,19 +427,29 @@ derived quota window MUST report below `100%` usage before recovery.
 - **WHEN** selection reconstructs the account from recent available usage in every applicable window
 - **THEN** normal compare-and-set recovery may restore the account to `active`
 
-### Requirement: Re-authentication-required accounts are not selectable
+### Requirement: Re-authentication-required routing distinguishes usable access credentials
 
-When an account credential/session is invalidated but the upstream account is not known to be disabled, the system MUST mark the account `reauth_required`. The selector MUST remove `reauth_required` accounts from every routing strategy and hard-affinity fallback until the account is re-authenticated. Operator pickers that configure single-account routing or account-scoped routing MUST only offer accounts that are not hard-blocked by paused, reauth-required, or deactivated status.
+When account refresh credentials need repair but the upstream account is not known to be disabled, the system MUST mark the account `reauth_required`. The selector MUST retain refresh-only warning accounts whose access tokens are not known expired as candidates, subject to normal routing constraints. The selector MUST exclude `reauth_required` accounts with known expired access credentials or proven `account_auth_invalidated` access rejection from every routing strategy and hard-affinity fallback until credential repair. Hard account-owned continuity MUST remain fail-closed when its owner is excluded.
+
+Operator pickers that configure new single-account or account-scoped assignments MUST continue to omit paused, `reauth_required`, and deactivated accounts. This operator-assignment restriction MUST NOT remove refresh-only warning accounts from ordinary routing or existing ownership. Reauthentication-required accounts MUST NOT be paused into a resumable state.
 
 #### Scenario: Token invalidated account leaves the pool
 
 - **GIVEN** account A is `reauth_required`
+- **AND** its access credentials are known expired or carry the proven `account_auth_invalidated` reason
 - **AND** account B is active
 - **WHEN** a proxy request selects an account
 - **THEN** account B is selected
 - **AND** account A is not considered an eligible candidate
 
-#### Scenario: Hard-blocked account cannot be newly selected for scoped routing
+#### Scenario: Refresh-only warning remains an ordinary routing candidate
+
+- **GIVEN** account A is `reauth_required` only because its refresh token needs repair
+- **AND** its access token is not known expired and has no proven access-rejection reason
+- **WHEN** a proxy request selects an account or reuses existing ownership
+- **THEN** account A remains eligible subject to normal routing constraints
+
+#### Scenario: Account requiring operator repair cannot be newly selected for scoped routing
 
 - **GIVEN** account A is paused, reauth-required, or deactivated
 - **WHEN** an operator opens a scoped account-routing picker
@@ -776,3 +789,16 @@ The status update MUST be conditioned on the rejected access-token and refresh-t
 - **GIVEN** A was excluded for proven access-authentication failure
 - **WHEN** repaired credentials are imported and routing snapshots refresh
 - **THEN** A can be selected and reused again
+
+#### Scenario: Repair invalidation wins over a completed rejection write
+
+- **GIVEN** a guarded rejection write succeeds for account A
+- **WHEN** credential repair is reflected in the local routing cache before the request publishes its unavailable mark
+- **THEN** the stale rejection MUST NOT replace the repaired routing state
+- **AND** a routing invalidation MUST still reconcile the final committed state
+
+#### Scenario: A snapshot read before rejection cannot swallow its invalidation
+
+- **GIVEN** a routing snapshot refresh observes A as active while its rejection write is pending
+- **WHEN** the rejection write subsequently commits
+- **THEN** the post-write invalidation MUST make the committed rejection visible within the cache-invalidation bus bound

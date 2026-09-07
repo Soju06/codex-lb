@@ -64,6 +64,7 @@ from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
+from app.modules.proxy import account_cache
 from app.modules.proxy._load_balancer.model_eligibility import (
     _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES,
     CatalogOmissionQuotaAdmission,
@@ -135,7 +136,6 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     UnboundSelectionRequest,
     run_unbound_selection_path,
 )
-from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.account_eligibility import (
     account_access_token_expires_at,
     all_accounts_require_reauthentication,
@@ -296,7 +296,7 @@ class LoadBalancer:
         self._runtime_lock = asyncio.Lock()
         self._account_locks: dict[str, asyncio.Lock] = {}
         self._account_locks_registry_lock = asyncio.Lock()
-        self._selection_inputs_cache = get_account_selection_cache()
+        self._selection_inputs_cache = account_cache.get_account_selection_cache()
 
     async def release_account_lease(self, lease: AccountLease | None) -> None:
         if lease is None:
@@ -1746,8 +1746,8 @@ class LoadBalancer:
     async def mark_permanent_failure(self, account: Account, error_code: str) -> bool:
         """Downgrade *account* to its permanent-failure status.
 
-        Returns whether the permanent downgrade applied (or was already in
-        effect). When the guarded status write MISSES because a peer replica
+        Returns whether the downgrade applied or was already in effect.
+        When the guarded status write MISSES because a peer replica
         concurrently re-authed/imported and rotated ``refresh_token_encrypted``
         (the DB row was repaired and left ACTIVE), the account keeps its
         repaired state. DEACTIVATED and proven access-authentication failure
@@ -1759,12 +1759,11 @@ class LoadBalancer:
             state = self._state_for(account)
             handle_permanent_failure(state, error_code)
             self._sync_runtime_state(account, state)
+            routing_generation = account_cache.get_routing_availability_cache().generation
             async with self._repo_factory() as repos:
-                # AuthManager already CAS-persists refresh-only failures and
-                # may update this object. This guarded fallback covers other
-                # failures and singleflight joiners without overwriting a peer's
-                # repaired credentials. Proven access rejection additionally
-                # guards the access token, even when status already matches.
+                # AuthManager CAS-persists refresh-only failures and may update this object. This fallback also
+                # covers other failures and singleflight joiners without overwriting repaired credentials.
+                # Proven access rejection additionally guards the access token even when status already matches.
                 downgraded = await self._persist_state_if_current(
                     repos.accounts,
                     account,
@@ -1774,7 +1773,7 @@ class LoadBalancer:
             if downgraded and (
                 state.status == AccountStatus.DEACTIVATED or reauth_reason_blocks_routing(state.deactivation_reason)
             ):
-                mark_account_routing_unavailable(account.id)
+                account_cache.mark_account_routing_unavailable(account.id, generation=routing_generation)
             self._selection_inputs_cache.invalidate()
             return downgraded
 

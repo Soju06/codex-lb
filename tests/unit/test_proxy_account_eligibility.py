@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -124,9 +125,11 @@ def test_http_bridge_rejects_expired_reauth_session() -> None:
     assert not _http_bridge_session_account_active(cast(Any, session))
 
 
-@pytest.mark.parametrize("expires_at", [None, 1_900_000_000.0])
+@pytest.mark.parametrize("expiry_known", [False, True])
 @pytest.mark.parametrize("rejected", [False, True])
-def test_reauth_access_rejection_controls_selection_and_bridge(expires_at, rejected) -> None:
+def test_reauth_access_rejection_controls_selection_and_bridge(expiry_known: bool, rejected: bool) -> None:
+    now = time.time()
+    expires_at = now + 3600 if expiry_known else None
     reason = PERMANENT_FAILURE_CODES["account_auth_invalidated" if rejected else "invalid_grant"]
     state = AccountState(
         "reauth-owner",
@@ -134,7 +137,7 @@ def test_reauth_access_rejection_controls_selection_and_bridge(expires_at, rejec
         access_token_expires_at=expires_at,
         deactivation_reason=reason,
     )
-    result = select_account([state], now=1_700_000_000.0)
+    result = select_account([state], now=now)
     assert (result.account is None) == rejected
     session = SimpleNamespace(
         account=Account(id=state.account_id, status=state.status, deactivation_reason=reason),

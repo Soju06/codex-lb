@@ -608,6 +608,41 @@ async def test_local_mark_during_inflight_refresh_survives(db_setup, poller_slot
     assert cache.is_unavailable(account_id) is False
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refresh_before_write", [False, True])
+async def test_guarded_routing_mark_respects_refresh_and_reconciles_committed_status(
+    db_setup, poller_slot, monkeypatch, refresh_before_write: bool
+) -> None:
+    account_id = "acct-guarded-mark-refresh"
+    await _insert_account(account_id)
+    cache = RoutingAvailabilityCache(SessionLocal)
+    poller = CacheInvalidationPoller(SessionLocal)
+    set_cache_invalidation_poller(poller)
+    monkeypatch.setattr("app.modules.proxy.account_cache._routing_availability_cache", cache)
+    poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, cache.refresh_from_db)
+    await poller.prime()
+    await cache.refresh_from_db()
+    generation = cache.generation
+
+    if refresh_before_write:
+        await cache.refresh_from_db()
+        await _set_account_status(account_id, AccountStatus.DEACTIVATED)
+    else:
+        await _set_account_status(account_id, AccountStatus.DEACTIVATED)
+        await _set_account_status(account_id, AccountStatus.ACTIVE)
+        await cache.refresh_from_db()
+
+    mark_account_routing_unavailable(account_id, generation=generation)
+
+    # Never overwrite a refresh observed during the write with stale evidence.
+    assert not cache.is_unavailable(account_id)
+    # Even a pre-write refresh must not swallow the subsequent committed change.
+    await poller._poll_once()
+    assert cache.is_unavailable(account_id) is refresh_before_write
+    stale_session = _fake_bridge_session(_make_account(account_id, AccountStatus.ACTIVE))
+    assert _http_bridge_session_account_active(stale_session) is not refresh_before_write
+
+
 class _BrokenSession:
     def in_transaction(self) -> bool:
         return False

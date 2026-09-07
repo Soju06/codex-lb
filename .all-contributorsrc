@@ -1414,6 +1414,17 @@
         "bug",
         "test"
       ]
+    },
+    {
+      "login": "glyzinie",
+      "name": "Wis",
+      "avatar_url": "https://avatars.githubusercontent.com/u/149991443?v=4",
+      "profile": "https://github.com/glyzinie",
+      "contributions": [
+        "code",
+        "translation",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

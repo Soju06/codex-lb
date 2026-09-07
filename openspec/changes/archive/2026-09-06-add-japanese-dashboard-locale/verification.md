@@ -12,9 +12,10 @@ build, including Japanese browser settings and narrow mobile viewports.
 | Correctness | Detection, selection, persistence, translation integrity, date preferences, calendar interaction, and API-key period labels verified. |
 | Coherence | Existing i18next resources, detector, storage key, formatters, and installed calendar locale reused; no new dependencies or settings. |
 
-No critical issues or change-specific warnings remain. The three delta
-requirements match the main frontend-architecture specification. Stable context
-and the existing Configuration page document the delivered behavior.
+The initial local checks passed, but CI later exposed a stale integration-test
+expectation and missing contributor attribution; see the follow-up below. The
+three delta requirements match the main frontend-architecture specification.
+Stable context and the existing Configuration page document the delivered behavior.
 
 ## Requirement evidence
 
@@ -70,3 +71,25 @@ browser assertions against horizontal overflow at 1440 px and 390 px.
 The mobile language menu, login screen, form errors, inline markup, Japanese
 calendar weekdays/navigation, and API-key period labels were also checked in
 the browser. Account names and identifiers in screenshots come from fixtures.
+
+## CI follow-up: 2026-09-07
+
+PR #2118 reported one failure among 1,249 frontend tests: the settings API-key
+list integration test still expected `Tokens: 125K/1M weekly`, while the
+translated English period label renders `Tokens: 125K/1M Weekly`. The assertion
+now matches that label. Runtime behavior is unchanged.
+
+The contributor check also required `glyzinie` in `.all-contributorsrc`. Added
+the GitHub profile with code, translation, and test contributions, and regenerated
+the README contributor list using all-contributors-cli. Regeneration also renders
+two contributors already present in the registry but absent from the old table.
+
+Validation after these fixes:
+
+- Full frontend suite: 152 files, 1,249 tests passed.
+- Frontend lint and TypeScript checking: passed.
+- Repository contributor checker with the current PR event and live GitHub
+  contributor data: passed, covering 111 contributors.
+- Simplicity budgets and `git diff --check`: passed.
+
+These are local results; GitHub checks must run again after the fix is pushed.

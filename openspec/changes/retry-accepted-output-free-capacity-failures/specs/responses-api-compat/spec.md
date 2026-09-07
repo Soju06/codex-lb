@@ -2,13 +2,15 @@
 
 ## ADDED Requirements
 
-### Requirement: Accepted output-free capacity failures are replayed within a single response lifecycle
+### Requirement: HTTP bridge accepted output-free capacity failures are replayed within a single response lifecycle
 
-When a native Codex HTTP bridge or direct WebSocket `response.create` has been accepted upstream — `response.created` and optionally `response.in_progress` were forwarded downstream and no output item, text or tool delta, reasoning prelude, or tool call has been observed — and the turn then fails output-free, the proxy MUST re-send the request exactly once and the client MUST observe a single response lifecycle: exactly one `response.created`, no duplicated `response.in_progress`, and every later frame (including `response.completed` or a second terminal failure) carrying the response id the client already read. The bounded clean-close retry that pre-created requests receive MUST NOT extend an accepted lifecycle to a third send.
+When a native Codex HTTP bridge `response.create` has been accepted upstream — `response.created` and optionally `response.in_progress` were forwarded downstream and no output item, text or tool delta, reasoning prelude, or tool call has been observed — and the turn then fails output-free, the proxy MUST re-send the request exactly once and the client MUST observe a single response lifecycle: exactly one `response.created`, no duplicated `response.in_progress`, and every later frame (including `response.completed` or a second terminal failure) carrying the response id the client already read. The bounded clean-close retry that pre-created requests receive MUST NOT extend an accepted lifecycle to a third send.
 
-An output-free failure is either a terminal `error` / `response.failed` whose normalized code is `server_is_overloaded`, `overloaded_error`, or `model_at_capacity`, or whose message names the selected-model capacity, or a transport close that is not account-neutral. The terminal MUST NOT name another response and MUST NOT report output items or billed output or reasoning tokens. Quota and rate-limit codes after acceptance MUST keep their stronger classification and MUST NOT be replayed. Anchored continuations without a retry-safe fresh payload, requests sharing the socket with another pending request, and requests whose replay budget is consumed MUST NOT be replayed. The other-pending check MUST be evaluated under the pending lock at the moment the replay is decided, after every await the terminal handling performs, never from a snapshot taken before such an await. The requirement "Direct WebSocket replay never mixes numeric response sequences" is unchanged: a direct WebSocket request whose forwarded prelude carried a finite integer `sequence_number` MUST NOT be replayed, and its capacity terminal or transport close keeps the existing fail-closed handling.
+An output-free failure is either a terminal `error` / `response.failed` whose normalized code is `server_is_overloaded`, `overloaded_error`, or `model_at_capacity`, or whose message names the selected-model capacity, or a transport close that is not account-neutral. The terminal MUST NOT name another response and MUST NOT report output items or billed output or reasoning tokens. Quota and rate-limit codes after acceptance MUST keep their stronger classification and MUST NOT be replayed. Anchored continuations without a retry-safe fresh payload, requests sharing the socket with another pending request, and requests whose replay budget is consumed MUST NOT be replayed.
 
-The replay MUST capture the client-visible response id and arm prelude suppression before the request's upstream response id is cleared. On the HTTP bridge the replay MUST re-claim the session response-create gate without waiting; when another request holds the gate the upstream terminal MUST be forwarded unchanged. The replay MUST re-acquire shared work admission before sending, and when the request body is account-neutral the failing account MUST be excluded from the replacement selection on the HTTP bridge and on a direct WebSocket whose affinity cannot resolve to a hard sticky owner. A replay that swaps a retry-safe fresh body in for an anchored one MUST re-derive its owner requirement from the fresh body (an account-neutral body releases the anchor owner's pin; an account-bound body keeps it), and the failing account MUST NOT be excluded while the replay is still required to reconnect to it. On the direct WebSocket surface the failing account MUST NOT be excluded either when the request's affinity may resolve to a hard `CODEX_SESSION` owner the request state does not carry -- a `CODEX_SESSION` affinity (bare session header or turn state) or any affinity that consults a raw legacy compatibility row (`legacy_selection_key`) -- because a resolved hard row narrows selection to its owner and excluding that owner fails every re-selection with `hard_affinity_saturated`; such a replay reconnects through selection without an exclusion, exactly as the created-only transport-close replay did before this change. When the fresh body cannot release that pin -- the client supplied the anchor, or the fresh body names an account-scoped upload -- a capacity terminal MUST re-send the anchored body to the account that accepted it and MUST NOT fail the turn closed as `previous_response_owner_unavailable`. The classified capacity code an accepted terminal is replayed under MUST be a transparent replay code (`model_at_capacity` is reported as `server_is_overloaded`). When the request is API-key-backed, the failing account's health write MUST wait for the request's reservation settlement, as for pre-created replays. On the HTTP bridge only a terminal transport message (close or error) MAY replay an accepted turn.
+The replay MUST capture the client-visible response id and arm prelude suppression before the request's upstream response id is cleared. The replay MUST re-claim the session response-create gate without waiting; when another request holds the gate the upstream terminal MUST be forwarded unchanged. The replay MUST re-acquire shared work admission before sending, and when the request body is account-neutral the failing account MUST be excluded from the replacement selection. A replay that swaps a retry-safe fresh body in for an anchored one MUST re-derive its owner requirement from the fresh body (an account-neutral body releases the anchor owner's pin; an account-bound body keeps it), and the failing account MUST NOT be excluded while the replay is still required to reconnect to it. When the fresh body cannot release that pin -- the client supplied the anchor, or the fresh body names an account-scoped upload -- the anchored body MUST be re-sent to the account that accepted it. The classified capacity code an accepted terminal is replayed under MUST be a transparent replay code (`model_at_capacity` is reported as `server_is_overloaded`). When the request is API-key-backed, the failing account's health write MUST wait for the request's reservation settlement, as for pre-created replays. Only a terminal transport message (close or error) MAY replay an accepted turn.
+
+This requirement applies to the HTTP bridge only. The direct WebSocket surface is governed by the requirement "Direct WebSocket accepted turns keep the pre-existing fail-closed handling" below.
 
 #### Scenario: Bridge terminal capacity error after acceptance is retried on another account
 
@@ -32,23 +34,6 @@ The replay MUST capture the client-visible response id and arm prelude suppressi
 - **GIVEN** an unanchored native Codex bridge request whose `response.created` and `response.in_progress` were forwarded
 - **WHEN** the upstream websocket closes with a non-account-neutral close before any output
 - **THEN** the request is re-sent once on another account within the same single response lifecycle
-
-#### Scenario: WebSocket accepted capacity failures are retried within one lifecycle
-
-- **GIVEN** a direct `/backend-api/codex/responses` WebSocket request whose `response.created` and `response.in_progress` were forwarded
-- **AND** the connection carries no Codex session affinity that may resolve to a hard sticky owner (no `CODEX_SESSION` kind and no raw legacy compatibility lookup)
-- **WHEN** upstream then emits an output-free capacity `error` or closes the transport abruptly
-- **THEN** the proxy reconnects excluding the failing account and re-sends the request once
-- **AND** the client observes exactly one `response.created` and one `response.in_progress` and a `response.completed` carrying that id
-
-#### Scenario: A sequenced direct WebSocket prelude keeps the existing fail-closed contract
-
-- **GIVEN** a direct `/backend-api/codex/responses` WebSocket request whose forwarded `response.created` (0) and `response.in_progress` (1) carried finite integer `sequence_number` values
-- **WHEN** upstream then emits an output-free capacity `error`
-- **THEN** the proxy MUST NOT reconnect or re-send the request and MUST finalize and surface that terminal unchanged
-- **WHEN** upstream instead closes the transport abruptly before any output
-- **THEN** the proxy MUST record the request as `stream_incomplete` without emitting a synthetic terminal under the visible id and MUST close the downstream WebSocket with code 1011
-- **AND** in both cases no replacement account is connected
 
 #### Scenario: Output before the capacity failure disables the replay
 
@@ -76,57 +61,10 @@ The replay MUST capture the client-visible response id and arm prelude suppressi
 - **THEN** the proxy MUST NOT attempt a third send
 - **AND** the client observes one terminal failure with no second `response.created` or `response.in_progress`
 
-#### Scenario: An anchored accepted follow-up is replayed with its fresh body on another account
-
-- **GIVEN** a direct WebSocket follow-up turn whose `previous_response_id` the proxy injected and whose full resend is retained as a retry-safe, account-neutral fresh body
-- **AND** the connection carries no Codex session affinity that may resolve to a hard sticky owner
-- **AND** upstream accepted the turn (`response.created` and `response.in_progress` forwarded) on the anchor's owner
-- **WHEN** upstream then emits an output-free capacity `error` with code `server_is_overloaded` or `model_at_capacity`, or closes the transport abruptly
-- **THEN** the proxy re-sends the fresh body without `previous_response_id` on another account, excluding the owner
-- **AND** the client observes exactly one `response.created` and a `response.completed` carrying that id
-
 #### Scenario: An account-bound accepted replay reconnects to its owner
 
-- **WHEN** an accepted replay's body still requires one account (bound replay owner, uploaded file, anchored owner, or turn-state owner)
+- **WHEN** an accepted replay's body still requires one account (bound replay owner, uploaded file, or an anchor the proxy is not entitled to release)
 - **THEN** the proxy MUST NOT exclude that account and MUST reconnect to it
-
-#### Scenario: A Codex-session accepted replay keeps its hard sticky owner eligible
-
-- **GIVEN** a direct WebSocket connection whose `session_id` (or thread) header selects a `CODEX_SESSION` affinity, so selection consults the raw legacy compatibility row for that key
-- **AND** that raw row names one account as the hard owner while the request state carries no owner pin (unanchored, account-neutral turn)
-- **AND** upstream accepted the turn on that owner (`response.created` and `response.in_progress` forwarded) and then emitted an output-free capacity `error` or closed the transport abruptly
-- **WHEN** the proxy replays the turn
-- **THEN** the proxy MUST NOT exclude the owner or request a sticky reallocation, and MUST reconnect through selection so the hard row resolves to the owner again
-- **AND** the client observes exactly one `response.created` and a `response.completed` carrying that id, never a connect failure after `hard_affinity_saturated`
-- **AND** the owner still receives the capacity health penalty (deferred behind API-key settlement when the request is keyed)
-- **AND** a request whose affinity cannot resolve to a hard owner (no `CODEX_SESSION` kind, no raw legacy lookup) is still excluded and moved
-
-#### Scenario: A transport close of a client-anchored accepted turn reconnects to its owner
-
-- **GIVEN** a direct WebSocket accepted turn (`response.created` and `response.in_progress` forwarded) whose `previous_response_id` the client supplied and whose full resend is retained as a retry-safe fresh body
-- **WHEN** upstream closes the transport abruptly before any output
-- **THEN** the proxy re-sends the fresh body once to the account that accepted it, keeping the owner pin the client's anchor established and without excluding that account
-- **AND** the client observes exactly one `response.created` and a `response.completed` carrying that id
-
-#### Scenario: A turn-state session re-sends an accepted replay to its owner
-
-- **GIVEN** a direct WebSocket connection whose `x-codex-turn-state` resolves to an owner account (the native Codex flow: the handshake token of the previous connection is echoed and the proxy injects the completed id as `previous_response_id`, retaining the full resend as a retry-safe fresh body)
-- **AND** upstream accepted the follow-up on that owner and then emitted an output-free capacity `error` or closed the transport abruptly
-- **WHEN** the proxy replays the turn with the fresh body
-- **THEN** the turn-state owner pin survives the fresh-body install (it is a session pin, not a body pin) and the proxy MUST NOT exclude the owner
-- **AND** the proxy reconnects to the owner on a fresh socket and re-sends the fresh body once
-- **AND** the client observes exactly one `response.created` and a `response.completed` carrying that id, never `previous_response_owner_unavailable`
-- **AND** a pre-created owner replay in the same session (capacity code before `response.created`) is likewise re-sent to the owner instead of excluding it
-
-#### Scenario: A capacity terminal of an anchored accepted turn that cannot leave its owner is re-sent to that owner
-
-- **GIVEN** a direct WebSocket accepted turn (`response.created` and `response.in_progress` forwarded) that carries `previous_response_id` and retains a retry-safe fresh body
-- **AND** the fresh body cannot release the anchor owner's pin: the client supplied the anchor, or the fresh body names an account-scoped uploaded file
-- **WHEN** upstream emits an output-free capacity `error`
-- **THEN** the proxy re-sends the anchored body once to the account that accepted it, without excluding it
-- **AND** the client observes exactly one `response.created` and a `response.completed` carrying that id
-- **AND** the proxy MUST NOT rewrite the terminal into `previous_response_owner_unavailable`
-- **AND** for an API-key-backed request the owner's health write waits for the reservation settlement
 
 #### Scenario: Accepted replay health writes wait for API-key settlement
 
@@ -138,14 +76,6 @@ The replay MUST capture the client-visible response id and arm prelude suppressi
 
 - **WHEN** another request is pending on the same upstream socket, or another `response.create` holds the bridge session response-create gate
 - **THEN** the proxy MUST forward the upstream terminal unchanged and MUST NOT modify the accepted request's identity
-
-#### Scenario: A younger turn admitted while the accepted terminal is handled forwards the original error
-
-- **GIVEN** a direct WebSocket accepted request (`response.created` and `response.in_progress` forwarded) that released the session response-create gate at `response.created`
-- **AND** the sender admits and sends a younger `response.create` on the same upstream socket while the reader awaits the accepted request's thread-affinity refresh for its output-free capacity terminal
-- **WHEN** the reader decides whether to replay the accepted request
-- **THEN** the other-pending guard MUST observe the younger request
-- **AND** the proxy MUST forward the upstream terminal unchanged, MUST NOT modify the accepted request's identity, and MUST NOT retire the shared socket under the younger request
 
 #### Scenario: A transport close while another response shares the bridge socket replays nothing
 
@@ -159,6 +89,66 @@ The replay MUST capture the client-visible response id and arm prelude suppressi
 
 - **WHEN** the bridge upstream socket yields a protocol-invalid binary frame while an accepted request is pending
 - **THEN** the proxy MUST NOT replay the accepted request
+
+### Requirement: Direct WebSocket accepted turns keep the pre-existing fail-closed handling
+
+The accepted output-free replay is not shipped for the direct `/backend-api/codex/responses` WebSocket surface (follow-up tracked under issue #2126). For a direct WebSocket request that upstream accepted -- `response.created` and optionally `response.in_progress` forwarded, no output -- the proxy MUST keep the handling that existed before this change: an output-free capacity terminal MUST be finalized and forwarded to the client unchanged (no replay staged, no reconnect, no account excluded, no rewrite into `previous_response_owner_unavailable`), and an abrupt upstream close after a forwarded `response.in_progress` MUST fail the request closed as `stream_incomplete`. The created-only transport-close replay of this surface is unchanged: `response.created` alone (one counted lifecycle event) still qualifies for one replay within the single lifecycle, a forwarded `response.in_progress` (two counted events) MUST NOT widen it, and that replay MUST reconnect through selection without excluding the account or requesting a sticky reallocation, so a session whose sticky row resolves to a hard owner reconnects to that owner. The requirement "Direct WebSocket replay never mixes numeric response sequences" is unchanged.
+
+The shared fixes this change made to code both surfaces reach MUST stay in effect on the direct WebSocket surface: a replay that swaps the retained fresh body in re-derives its owner requirement from that body (a proxy-injected anchor's body pin is released, an account-bound body or a client-supplied anchor keeps its owner, and a turn-state owner survives as a session pin); the pre-created owner-switch replay of a turn-state session MUST NOT exclude the owner the reconnect hard-requires; websocket idle keepalives MUST carry the client-visible response id of a replayed request; and the relay records model output so no predicate can mistake a forwarded output item for a lifecycle prelude.
+
+#### Scenario: A direct WebSocket accepted capacity failure is forwarded unchanged
+
+- **GIVEN** a direct WebSocket request whose `response.created` and `response.in_progress` were forwarded, with or without a Codex session affinity, an anchor the proxy or the client supplied, an account-bound fresh body, or a turn-state owner
+- **WHEN** upstream then emits an output-free capacity `error` or `response.failed` (`server_is_overloaded`, `overloaded_error`, or `model_at_capacity`)
+- **THEN** the proxy MUST NOT reconnect or re-send the request and MUST finalize and surface that terminal unchanged on the single connect
+- **AND** the request's identity, body, anchor, and owner pins are untouched and no account is excluded
+- **AND** the terminal MUST NOT be rewritten into `previous_response_owner_unavailable`
+
+#### Scenario: A direct WebSocket accepted abrupt close fails closed
+
+- **GIVEN** a direct WebSocket request whose `response.created` and `response.in_progress` were forwarded
+- **WHEN** upstream closes the transport abruptly before any output
+- **THEN** the proxy MUST NOT reconnect or re-send the request and MUST record it as `stream_incomplete`
+- **AND** an unsequenced prelude surfaces the failure under the visible id while a sequenced prelude keeps the existing 1011 downstream close
+- **AND** no replacement account is connected
+
+#### Scenario: A younger turn admitted while the accepted terminal is handled still reads the original error
+
+- **GIVEN** a direct WebSocket accepted request that released the session response-create gate at `response.created`
+- **AND** the sender admits and sends a younger `response.create` on the same upstream socket while the reader awaits the accepted request's thread-affinity refresh for its output-free capacity terminal
+- **WHEN** the reader handles that terminal
+- **THEN** the proxy MUST forward the upstream terminal unchanged, MUST NOT modify the accepted request's identity, and MUST NOT retire the shared socket under the younger request
+
+#### Scenario: A sequenced direct WebSocket prelude keeps the existing fail-closed contract
+
+- **GIVEN** a direct WebSocket request whose forwarded `response.created` (0) and `response.in_progress` (1) carried finite integer `sequence_number` values
+- **WHEN** upstream then emits an output-free capacity `error`
+- **THEN** the proxy MUST NOT reconnect or re-send the request and MUST finalize and surface that terminal unchanged
+- **WHEN** upstream instead closes the transport abruptly before any output
+- **THEN** the proxy MUST record the request as `stream_incomplete` without emitting a synthetic terminal under the visible id and MUST close the downstream WebSocket with code 1011
+- **AND** in both cases no replacement account is connected
+
+#### Scenario: A created-only transport close reconnects through selection without excluding the account
+
+- **GIVEN** a direct WebSocket request whose `response.created` alone was forwarded (no `response.in_progress`, no output)
+- **AND** the connection carries no affinity, a prompt-cache affinity, or a bare Codex session whose raw legacy compatibility row names a hard `CODEX_SESSION` owner
+- **WHEN** the upstream websocket closes abruptly
+- **THEN** the proxy replays the request once within the single lifecycle (exactly one `response.created`, the `response.completed` carrying that id)
+- **AND** the replacement selection runs with no excluded account, no owner requirement, and no sticky reallocation, so the hard row resolves to its owner again and the connect never fails with `hard_affinity_saturated`
+
+#### Scenario: A created-only transport close of an anchored turn reconciles the owner pin without excluding
+
+- **GIVEN** a direct WebSocket anchored turn whose `response.created` alone was forwarded and whose full resend is retained as a retry-safe fresh body
+- **WHEN** the upstream websocket closes abruptly
+- **THEN** the fresh body replaces the anchored one and a proxy-injected anchor's body pin is released, an account-bound fresh body keeps its required owner, a client-supplied anchor keeps both pins, and a turn-state owner survives as the preferred account
+- **AND** in every shape the account that accepted the turn is not excluded
+
+#### Scenario: A pre-created owner replay in a turn-state session stays on its owner
+
+- **GIVEN** a direct WebSocket connection whose `x-codex-turn-state` resolves to an owner account and whose anchored follow-up (proxy-injected `previous_response_id`, retry-safe fresh body retained) hits a transparent capacity code before `response.created`
+- **WHEN** the pre-created owner-switch replay swaps the fresh body in
+- **THEN** the turn-state owner pin survives the install and the proxy MUST NOT exclude the owner the reconnect hard-requires
+- **AND** the fresh body is re-sent to that owner on a fresh socket instead of failing the turn closed as `previous_response_owner_unavailable`
 
 ## MODIFIED Requirements
 

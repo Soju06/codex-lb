@@ -336,6 +336,7 @@ from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_HTTP,
     _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _accepted_lifecycle_replay_enabled,
     _account_capacity_wait_payload,
     _clear_websocket_precreated_replay_fallback,
     _clear_websocket_request_error_overrides,
@@ -1267,13 +1268,17 @@ async def _process_upstream_websocket_transport_end(
         if (
             replay_request_state is not None
             and replay_request_state.replay_downstream_response_id is not None
+            and _accepted_lifecycle_replay_enabled(replay_request_state)
             and _websocket_accepted_replay_may_exclude_account(replay_request_state)
         ):
             # An accepted turn was lost on this account; move the
             # account-neutral replay to another one like the bridge does. A
             # replay still pinned to this owner (bound replay owner, file,
             # turn state) or whose Codex session may resolve to a hard sticky
-            # owner reconnects here instead of excluding itself.
+            # owner reconnects here instead of excluding itself. Gated off
+            # while the accepted replay is shipped for the HTTP bridge only
+            # (#2126 follow-up): the direct websocket created-only replay
+            # reconnects through selection unexcluded, as before.
             replay_request_state.excluded_account_ids.add(account.id)
             replay_request_state.affinity_policy = replace(replay_request_state.affinity_policy, reallocate_sticky=True)
     if replay_request_state is not None:
@@ -5752,9 +5757,19 @@ class _WebSocketMixin:
                 surface="websocket",
             )
 
+        # Only an accepted lifecycle can take the accepted-replay branches
+        # below, and only where that replay is shipped (HTTP bridge;
+        # ``_accepted_lifecycle_replay_enabled`` is false for every direct
+        # websocket state while the surface is de-scoped, #2126 follow-up).
+        accepted_lifecycle_replay_candidate = (
+            request_state.response_id is not None
+            and not request_state.awaiting_response_created
+            and _accepted_lifecycle_replay_enabled(request_state)
+        )
         if (
             event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
             and not has_other_pending_requests
+            and accepted_lifecycle_replay_candidate
         ):
             # ``has_other_pending_requests`` was snapshotted under the lock when
             # the terminal popped this request, but the thread-affinity refresh
@@ -5768,6 +5783,8 @@ class _WebSocketMixin:
             # consume it; the accepted path sets the reconnect latch without
             # awaiting after this point, and the sender re-checks that latch at
             # its send boundary, so a turn admitted later is transferred instead.
+            # A pre-created request still holds the gate, so its snapshot is
+            # authoritative and it keeps the decision path it always had.
             async with pending_lock:
                 has_other_pending_requests = _websocket_owner_switch_has_other_pending_requests(
                     request_state,
@@ -5831,11 +5848,7 @@ class _WebSocketMixin:
         # anchor is handled where the replay is staged, so an anchored turn the
         # owner-switch prep cannot move is re-sent to its owner instead of
         # being failed closed as ``previous_response_owner_unavailable``.
-        accepted_lifecycle_replay = (
-            retry_error_code is not None
-            and request_state.response_id is not None
-            and not request_state.awaiting_response_created
-        )
+        accepted_lifecycle_replay = retry_error_code is not None and accepted_lifecycle_replay_candidate
         retry_safe_owner_replay = bool(
             not accepted_lifecycle_replay
             and retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES

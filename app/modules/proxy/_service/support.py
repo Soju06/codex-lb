@@ -1674,6 +1674,25 @@ def _record_response_event(
     request_state.response_event_count += 1
 
 
+def _accepted_lifecycle_replay_enabled(request_state: _WebSocketRequestState) -> bool:
+    """Return whether the accepted output-free replay is shipped for this request's surface.
+
+    The single-lifecycle replay of an accepted turn (``response.created``
+    [+ ``response.in_progress``], no output; openspec change
+    ``retry-accepted-output-free-capacity-failures``) is shipped for the HTTP
+    bridge only. The direct websocket surface is de-scoped (issue #2126
+    follow-up): its accepted turns keep the behaviour they had before the
+    change -- an output-free capacity terminal is forwarded unchanged and the
+    transport-close replay stays created-only -- while the shared fixes that
+    also cover pre-created and created-only replays stay in place. The bridge
+    builds its request state with ``_REQUEST_TRANSPORT_HTTP``; the direct
+    websocket relay builds its state with ``_REQUEST_TRANSPORT_WEBSOCKET``.
+    Every accepted-replay entry point consults this predicate so the websocket
+    surface can be re-enabled in one place.
+    """
+    return request_state.transport == _REQUEST_TRANSPORT_HTTP
+
+
 def _websocket_request_can_replay_before_visible_output(
     request_state: _WebSocketRequestState,
     *,
@@ -1721,7 +1740,18 @@ def _websocket_request_can_replay_before_visible_output(
     precreated_pending = request_state.response_id is None and request_state.awaiting_response_created
     if precreated_pending and request_state.previous_response_id is not None and not has_retry_safe_fresh_payload:
         return False
-    accepted_lifecycle_only_pending = _websocket_request_is_accepted_lifecycle_only(request_state) and (
+    if _accepted_lifecycle_replay_enabled(request_state):
+        lifecycle_only_pending = _websocket_request_is_accepted_lifecycle_only(request_state)
+    else:
+        # Direct websocket surface (accepted replay de-scoped): the created-only
+        # rule, unchanged -- ``response.created`` alone qualifies, a forwarded
+        # ``response.in_progress`` (two counted events) fails closed.
+        lifecycle_only_pending = (
+            request_state.response_id is not None
+            and not request_state.awaiting_response_created
+            and request_state.response_event_count <= 1
+        )
+    accepted_lifecycle_only_pending = lifecycle_only_pending and (
         request_state.previous_response_id is None or has_retry_safe_fresh_payload
     )
     if precreated_pending and request_state.response_event_count > 0:

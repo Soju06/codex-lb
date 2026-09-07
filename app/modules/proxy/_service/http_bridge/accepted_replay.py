@@ -15,6 +15,14 @@ body keeps the anchored body on its owner) -- while the client keeps reading
 the single lifecycle it already observed. Quota and rate-limit terminals after
 acceptance deliberately stay fail-closed; see the openspec change
 ``retry-accepted-output-free-capacity-failures``.
+
+Surface scope: the replay is shipped for the HTTP bridge only. The direct
+websocket surface is de-scoped (``_accepted_lifecycle_replay_enabled`` in
+``support.py`` is false for its request states; follow-up tracked under issue
+#2126): its accepted turns keep the pre-change behaviour -- the capacity
+terminal is forwarded unchanged and the transport-close replay stays
+created-only -- so the ``_websocket_*`` helpers below are reached only through
+the shared classifier for bridge states until that follow-up.
 """
 
 from __future__ import annotations

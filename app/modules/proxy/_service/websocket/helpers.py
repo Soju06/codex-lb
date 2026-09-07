@@ -291,6 +291,7 @@ from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _accepted_lifecycle_replay_enabled,
     _clear_websocket_request_error_overrides,
     _DeferredKeyedStreamHealthPenalty,
     _event_type_from_payload,
@@ -961,7 +962,12 @@ def _websocket_precreated_retry_error_code(
         return None
     if request_state.response_id is not None and not request_state.awaiting_response_created:
         # An accepted response is only replayable under the output-free
-        # capacity rule; every pre-created classifier below refuses it.
+        # capacity rule, and only where that replay is shipped (the HTTP
+        # bridge; a direct websocket terminal is forwarded unchanged, see
+        # ``_accepted_lifecycle_replay_enabled``). Every pre-created
+        # classifier below refuses an accepted state.
+        if not _accepted_lifecycle_replay_enabled(request_state):
+            return None
         return _websocket_accepted_capacity_retry_error_code(
             request_state,
             event_type=event_type,

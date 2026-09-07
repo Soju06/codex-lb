@@ -13296,15 +13296,47 @@ def _receive_until_terminal(websocket, *, limit: int = 12) -> tuple[list[dict[st
 
 
 class _TwoAccountWebSocketFailover:
-    """Hands out ``acct_ws_accepted_a``/``first_upstream`` on the first connect
-    and ``acct_ws_accepted_b``/``recovered_upstream`` on the second, recording
-    what the proxy knew about the first account at retry time."""
+    """Two selectable accounts for the direct websocket surface.
+
+    ``acct_ws_accepted_a`` serves ``first_upstream`` and ``acct_ws_accepted_b``
+    serves ``recovered_upstream``. The fake connect honors what the real
+    selection honors -- ``excluded_account_ids`` and a hard owner requirement
+    (bound replay owner, anchored or file-pinned or turn-state preferred
+    account) -- and refuses the connect with the same
+    ``previous_response_owner_unavailable`` failure ``_connect_proxy_websocket``
+    emits when no account satisfies both. A replay that never excludes the
+    failing account lands on that account again (whose upstream is spent), and
+    a replay that excludes the account it still requires has no candidate;
+    neither is silently handed the recovery upstream any more."""
+
+    FIRST_ACCOUNT_ID = "acct_ws_accepted_a"
+    SECOND_ACCOUNT_ID = "acct_ws_accepted_b"
 
     def __init__(self, first_upstream: _FakeUpstreamWebSocket, recovered_upstream: _FakeUpstreamWebSocket) -> None:
-        self.upstreams = [("acct_ws_accepted_a", first_upstream), ("acct_ws_accepted_b", recovered_upstream)]
+        self.upstreams_by_account: dict[str, deque[_FakeUpstreamWebSocket]] = {
+            self.FIRST_ACCOUNT_ID: deque([first_upstream]),
+            self.SECOND_ACCOUNT_ID: deque([recovered_upstream]),
+        }
         self.connect_accounts: list[str] = []
         self.excluded_at_connect: list[set[str]] = []
+        self.required_at_connect: list[str | None] = []
+        self.refused_connects: list[dict[str, Any]] = []
         self.stream_errors: list[tuple[str, str]] = []
+        self.turn_events: list[list[dict[str, Any]]] = []
+
+    @staticmethod
+    def _required_account_id(request_state: Any) -> str | None:
+        """Mirror the ``require_preferred_account`` owner of ``_connect_proxy_websocket``."""
+        if request_state.replay_required_account_id is not None:
+            return request_state.replay_required_account_id
+        preferred_account_id = request_state.preferred_account_id
+        if preferred_account_id is not None and (
+            request_state.previous_response_id is not None
+            or request_state.file_required_preferred_account
+            or request_state.affinity_policy.codex_session_source == "turn_state"
+        ):
+            return preferred_account_id
+        return None
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         failover = self
@@ -13320,13 +13352,56 @@ class _TwoAccountWebSocketFailover:
         async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
             return None
 
-        async def fake_connect_proxy_websocket(self, headers, *, request_state, **kwargs):
-            del self, headers, kwargs
-            assert failover.upstreams, "unexpected extra upstream connect"
-            account_id, upstream = failover.upstreams.pop(0)
-            failover.connect_accounts.append(account_id)
-            failover.excluded_at_connect.append(set(getattr(request_state, "excluded_account_ids", set())))
-            return SimpleNamespace(id=account_id), upstream
+        async def fake_connect_proxy_websocket(
+            self,
+            headers,
+            *,
+            request_state,
+            websocket,
+            client_send_lock,
+            api_key,
+            **kwargs,
+        ):
+            del headers, kwargs
+            excluded_account_ids = set(request_state.excluded_account_ids)
+            required_account_id = failover._required_account_id(request_state)
+            failover.excluded_at_connect.append(excluded_account_ids)
+            failover.required_at_connect.append(required_account_id)
+            candidates = [
+                account_id
+                for account_id in failover.upstreams_by_account
+                if account_id not in excluded_account_ids
+                and (required_account_id is None or account_id == required_account_id)
+            ]
+            selected_account_id = candidates[0] if candidates else None
+            if selected_account_id is None or not failover.upstreams_by_account[selected_account_id]:
+                failover.refused_connects.append(
+                    {
+                        "excluded": excluded_account_ids,
+                        "required": required_account_id,
+                        "selected": selected_account_id,
+                        "reason": "no_candidate" if selected_account_id is None else "account_upstream_spent",
+                    }
+                )
+                message = "Previous response owner account is unavailable; retry later."
+                await self._emit_websocket_connect_failure(
+                    websocket,
+                    client_send_lock=client_send_lock,
+                    account_id=required_account_id,
+                    api_key=api_key,
+                    request_state=request_state,
+                    status_code=502,
+                    payload=proxy_module.openai_error(
+                        "previous_response_owner_unavailable",
+                        message,
+                        error_type="server_error",
+                    ),
+                    error_code="previous_response_owner_unavailable",
+                    error_message=message,
+                )
+                return None, None
+            failover.connect_accounts.append(selected_account_id)
+            return SimpleNamespace(id=selected_account_id), failover.upstreams_by_account[selected_account_id].popleft()
 
         async def spy_handle_stream_error(self, account, error, code, http_status=None):
             failover.stream_errors.append((account.id, code))
@@ -13342,31 +13417,57 @@ class _TwoAccountWebSocketFailover:
         monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", spy_handle_stream_error)
         monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
 
-    def run(self, app_instance) -> tuple[list[dict[str, Any]], WebSocketDisconnect | None]:
+    @staticmethod
+    def response_create(input_items: list[dict[str, Any]]) -> dict[str, Any]:
+        return {"type": "response.create", "model": "gpt-5.4", "input": input_items, "stream": True}
+
+    HISTORICAL_INPUT: dict[str, Any] = {"role": "user", "content": [{"type": "input_text", "text": "hello"}]}
+    FOLLOW_UP_INPUT: dict[str, Any] = {"role": "user", "content": [{"type": "input_text", "text": "continue"}]}
+
+    def run(
+        self,
+        app_instance,
+        *,
+        requests: list[dict[str, Any]] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[list[dict[str, Any]], WebSocketDisconnect | None]:
+        """Send each ``response.create`` in turn on one client socket and return
+        the last turn's frames; every turn's frames are kept in ``turn_events``."""
+        payloads = requests if requests is not None else [self.response_create([self.HISTORICAL_INPUT])]
+        connect_kwargs: dict[str, Any] = {"headers": headers} if headers is not None else {}
+        result: tuple[list[dict[str, Any]], WebSocketDisconnect | None] = ([], None)
         with TestClient(app_instance) as client:
-            with client.websocket_connect("/backend-api/codex/responses") as websocket:
-                websocket.send_text(
-                    json.dumps(
-                        {
-                            "type": "response.create",
-                            "model": "gpt-5.4",
-                            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
-                            "stream": True,
-                        }
-                    )
-                )
-                return _receive_until_terminal(websocket)
+            with client.websocket_connect("/backend-api/codex/responses", **connect_kwargs) as websocket:
+                for payload in payloads:
+                    websocket.send_text(json.dumps(payload))
+                    result = _receive_until_terminal(websocket)
+                    self.turn_events.append(result[0])
+                    if result[1] is not None:
+                        break
+                return result
+
+    def run_anchored_follow_up(self, app_instance) -> tuple[list[dict[str, Any]], WebSocketDisconnect | None]:
+        """First turn completes, then a follow-up that repeats the history: the
+        proxy injects the completed id as ``previous_response_id`` (Lite
+        continuity) and retains the full resend as the retry-safe fresh body."""
+        return self.run(
+            app_instance,
+            requests=[
+                self.response_create([self.HISTORICAL_INPUT]),
+                self.response_create([self.HISTORICAL_INPUT, self.FOLLOW_UP_INPUT]),
+            ],
+            headers={"Authorization": "Bearer external-token", "session_id": "sid-ws-accepted-anchored"},
+        )
 
     def assert_retried_on_another_account(self) -> None:
-        assert self.connect_accounts == ["acct_ws_accepted_a", "acct_ws_accepted_b"], self.connect_accounts
-        # The failing account must be out of the running for the replacement
-        # connect: either excluded on the request state or penalized in the
-        # load balancer through the stream-error path.
-        penalized = {account_id for account_id, _code in self.stream_errors}
-        assert "acct_ws_accepted_a" in (self.excluded_at_connect[-1] | penalized), (
-            self.excluded_at_connect,
-            self.stream_errors,
-        )
+        assert not self.refused_connects, self.refused_connects
+        assert self.connect_accounts == [self.FIRST_ACCOUNT_ID, self.SECOND_ACCOUNT_ID], self.connect_accounts
+        # The replacement connect must be steered by the request state itself
+        # (spec: the failing account MUST be excluded from the replacement
+        # selection), with no owner pin left behind for the exclusion to
+        # contradict. A load-balancer penalty alone does not count.
+        assert self.excluded_at_connect[-1] == {self.FIRST_ACCOUNT_ID}, self.excluded_at_connect
+        assert self.required_at_connect[-1] is None, self.required_at_connect
 
 
 def _assert_ws_single_response_lifecycle_completed(

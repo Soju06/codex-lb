@@ -990,6 +990,34 @@ _SECURITY_WORK_RETRY_MESSAGE = (
 )
 
 
+def _relinquish_http_bridge_capacity_wait_ownership(
+    session: "_HTTPBridgeSession",
+    request_state: _WebSocketRequestState,
+    claimed_terminal_request_states: list[_WebSocketRequestState],
+) -> None:
+    """Pop a capacity-wait request from pending ownership and record the settlement claim.
+
+    The selected-model capacity branch reserves its request *in* pending
+    ownership while it waits (a younger submit must not take its queue slot),
+    so the terminal pop that normally records the ``"claimed"`` marker never
+    ran for it. Once the branch gives that ownership up -- the replay was
+    refused or failed, or the request never had a consumer -- this bookkeeping
+    continuation is the request's sole settlement owner exactly like a popped
+    terminal, and an abort between here and ``_finalize_terminal_settlement``
+    must reach the shielded abort settlement (issue #1594) instead of leaking
+    the API-key reservation, its heartbeat, and the re-claimed create gate. The
+    caller holds ``session.pending_lock``.
+    """
+    if request_state not in session.pending_requests:
+        return
+    session.pending_requests.remove(request_state)
+    if _http_bridge_request_counts_against_queue(request_state):
+        session.queued_request_count = max(0, session.queued_request_count - 1)
+    request_state.terminal_settlement_phase = "claimed"
+    if request_state not in claimed_terminal_request_states:
+        claimed_terminal_request_states.append(request_state)
+
+
 async def _wait_before_http_bridge_model_capacity_retry(
     request_state: _WebSocketRequestState | None,
     *,
@@ -3470,10 +3498,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if suppress_capacity_keepalives_until_retry_finishes:
                         status_request_state.account_capacity_wait_suppress_keepalive = False
                 async with session.pending_lock:
-                    if status_request_state in session.pending_requests:
-                        session.pending_requests.remove(status_request_state)
-                        if _http_bridge_request_counts_against_queue(status_request_state):
-                            session.queued_request_count = max(0, session.queued_request_count - 1)
+                    _relinquish_http_bridge_capacity_wait_ownership(
+                        session, status_request_state, claimed_terminal_request_states
+                    )
                 if retry_after_wait or not status_request_state.propagate_http_errors:
                     status_request_state.error_http_status_override = 502
                     (
@@ -3485,10 +3512,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                     ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
             else:
                 async with session.pending_lock:
-                    if status_request_state in session.pending_requests:
-                        session.pending_requests.remove(status_request_state)
-                        if _http_bridge_request_counts_against_queue(status_request_state):
-                            session.queued_request_count = max(0, session.queued_request_count - 1)
+                    _relinquish_http_bridge_capacity_wait_ownership(
+                        session, status_request_state, claimed_terminal_request_states
+                    )
         elif owner_pinned_quota_error is not None and not is_previous_response_not_found_event:
             await self._handle_or_defer_precreated_stream_health(
                 status_request_state,

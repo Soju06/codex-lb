@@ -203,7 +203,11 @@ duplicate lifecycle prelude MUST be suppressed so the client observes exactly on
   upstream reader is sleeping
 - **AND** the proxy MUST release account-level and shared response-create capacity during the wait
 - **AND** the proxy MUST reacquire both capacity leases before sending the replay
-- **AND** the proxy MUST skip the replay if that queued request detaches before the wait completes.
+- **AND** the proxy MUST skip the replay if that queued request detaches before the wait completes
+- **AND** when the wait branch gives that pending ownership up without a successful replay (the replay was refused or
+  failed, or the session gate could not be re-claimed) it MUST record the request's terminal settlement claim, so an
+  abort before finalization still settles the API-key reservation through the shielded abort settlement instead of
+  orphaning the reservation, its heartbeat, and the re-claimed session gate.
 
 #### Scenario: Accepted requests re-claim the session gate before waiting
 

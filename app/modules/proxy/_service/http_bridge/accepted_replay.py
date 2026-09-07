@@ -257,14 +257,17 @@ async def _stage_websocket_request_state_for_replay(
     one is supplied. Returns ``False`` without touching the state when the gate
     is held by another request. Pre-created requests pass through unchanged.
 
-    ``terminal_settlement_phase`` is deliberately left alone. The bridge
-    terminal bookkeeping that stages a replay recorded a ``"claimed"`` marker
-    when it popped the request, and that marker is what lets the shielded
-    abort settlement (issue #1594) release the API-key reservation when the
-    replay fails and the continuation is cancelled or raises before it
-    finalizes; a replay that succeeds keeps the request in pending ownership,
-    where the abort helper skips it, and the bookkeeping clears the marker on
-    its normal exit.
+    ``terminal_settlement_phase`` is deliberately left alone: the settlement
+    claim belongs to the bridge terminal bookkeeping, not to staging. The
+    transparent-code branch recorded a ``"claimed"`` marker when it popped the
+    request; the capacity-message wait branch keeps the request in pending
+    ownership while it waits and records the marker itself when it gives that
+    ownership up (``_relinquish_http_bridge_capacity_wait_ownership``). Either
+    way the marker is what lets the shielded abort settlement (issue #1594)
+    release the API-key reservation when the replay fails and the continuation
+    is cancelled or raises before it finalizes; a replay that succeeds keeps
+    the request in pending ownership, where the abort helper skips it, and the
+    bookkeeping clears the marker on its normal exit.
     """
     accepted = request_state.response_id is not None and not request_state.awaiting_response_created
     if accepted:

@@ -5986,6 +5986,59 @@ async def test_http_bridge_accepted_replay_failure_keeps_settlement_claim_for_ab
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("gate_busy", [False, True], ids=["replay_failed", "gate_busy"])
+async def test_http_bridge_accepted_capacity_wait_branch_claims_settlement_when_it_leaves_pending(
+    monkeypatch: pytest.MonkeyPatch,
+    gate_busy: bool,
+) -> None:
+    """#2127 round 4 P3-B: the selected-model capacity wait branch reserves the
+    accepted request *in* pending ownership, so the terminal pop never recorded
+    a settlement claim for it. When the branch then gives that ownership up --
+    the staged replay failed, or a busy create gate refused the staging -- an
+    abort between the pending removal and ``_finalize_terminal_settlement``
+    used to find ``claimed_terminal_request_states`` empty and leak the keyed
+    request's reservation, its heartbeat, and the re-claimed create gate. The
+    wait branch must record the claim when it relinquishes pending ownership so
+    the shielded abort settlement (#1594) releases the reservation."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _install_accepted_replay_harness(service, monkeypatch, retry_result=False)
+    release_reservation = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_pending_count",
+        AsyncMock(side_effect=RuntimeError("terminal bookkeeping aborted")),
+    )
+    reservation = SimpleNamespace(reservation_id="res-accepted-capacity-wait-abort", status="reserved")
+    request_state = _accepted_bridge_request_state(api_key_reservation=cast(Any, reservation))
+    session = _make_bridge_session(
+        key_value="bridge-accepted-capacity-wait-abort",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    if gate_busy:
+        await session.response_create_gate.acquire()
+
+    with pytest.raises(RuntimeError, match="terminal bookkeeping aborted"):
+        await service._process_http_bridge_upstream_text(
+            session,
+            _capacity_error_text(code="model_at_capacity", message=_CAPACITY_MESSAGE),
+        )
+
+    assert request_state not in session.pending_requests
+    assert session.queued_request_count == 0
+    release_reservation.assert_awaited_once_with(request_state)
+    assert request_state.api_key_reservation is None
+    assert request_state.terminal_settlement_phase is None
+    assert request_state.event_queue is not None
+    # The abort settlement unblocks the downstream waiter with end-of-stream.
+    queued: list[str | None] = []
+    while not request_state.event_queue.empty():
+        queued.append(request_state.event_queue.get_nowait())
+    assert queued and queued[-1] is None
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_accepted_capacity_replay_keeps_the_response_identity_the_client_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

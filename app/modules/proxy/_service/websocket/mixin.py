@@ -1848,7 +1848,9 @@ class _WebSocketMixin:
                                 steering_continuation = None
                                 parent_id = payload.get("previous_response_id")
                                 if upstream_control is not None and isinstance(parent_id, str):
-                                    steering_continuation = upstream_control.steering_continuations.get(parent_id)
+                                    steering_continuation = upstream_control.steering_continuations.get(
+                                        parent_id.strip()
+                                    )
                                 if (
                                     upstream_control is not None
                                     and upstream_control.retire_after_drain

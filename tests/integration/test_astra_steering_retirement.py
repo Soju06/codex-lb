@@ -496,8 +496,9 @@ async def test_history_retirement_rotates_after_last_pending_local_cleanup(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parent_id", ["r-tool", " r-tool ", "\tr-tool\n", "\u2003r-tool\u2003"])
 async def test_history_retirement_rejects_new_work_but_finishes_required_tool_input_before_rotation(
-    app_instance: FastAPI, monkeypatch: pytest.MonkeyPatch
+    app_instance: FastAPI, monkeypatch: pytest.MonkeyPatch, parent_id: str
 ) -> None:
     monkeypatch.setattr(steering, "_MAX_STEERING_HISTORY_IDS", 2)
     audit = _RetirementAudit()
@@ -529,7 +530,7 @@ async def test_history_retirement_rejects_new_work_but_finishes_required_tool_in
                 ),
             ),
             (
-                create(parent="r-tool", input_items=[result]),
+                create(parent=parent_id, input_items=[result]),
                 lambda events: any(event["type"] == "error" and event.get("status") == 503 for event in events),
             ),
             (create(input_items="Fresh generation"), lambda _: upstream.closed.is_set()),

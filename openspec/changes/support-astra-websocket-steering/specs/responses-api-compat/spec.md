@@ -18,6 +18,14 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 - **WHEN** upstream reports response.steer.pending with required tool input
 - **THEN** the proxy preserves that notification and allows the matching explicit anchored response.create to continue on the same connection without replaying the steer
 
+#### Scenario: Explicit tool continuation normalizes its parent before ownership lookup
+- **GIVEN** an accepted steer awaiting required tool input and a response.create whose previous_response_id has surrounding whitespace
+- **AND** reservation operations succeed
+- **WHEN** the proxy identifies the explicit continuation
+- **THEN** it SHALL apply the existing ResponsesRequest parent-ID normalization before ownership lookup and replace the matching steering placeholder
+- **AND** it SHALL release the placeholder reservation before dispatching the explicit continuation and settle the explicit response exactly once on its terminal event
+- **AND** a connection retiring after drain SHALL allow that owned continuation to finish before rotating
+
 #### Scenario: Required tool input arrives before pending notification
 - **GIVEN** steering has been accepted and the original response has completed with a tool call
 - **WHEN** the client sends the matching anchored tool result before response.steer.pending arrives

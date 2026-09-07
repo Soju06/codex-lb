@@ -33,6 +33,7 @@ from app.core.clients.native_egress import (
     NativeEgressUnavailable,
     NativeWebSocketMessage,
     NativeWebSocketRequest,
+    _websocket_error_from_event,
 )
 from app.core.clients.proxy import ProxyResponseError, is_confirmed_pre_dispatch_transport_error
 from app.core.clients.proxy_websocket import (
@@ -362,6 +363,32 @@ async def test_native_direct_adapter_keeps_protocol_error_distinct_from_transpor
     assert message.kind == "error"
     assert message.error_code is None
     assert message.transport_ended is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["transport", "protocol"])
+async def test_native_error_event_retains_reset_vs_protocol_provenance(phase: str) -> None:
+    class NativeConnection(_FakeNativeWebSocket):
+        async def receive(self) -> NativeWebSocketMessage:
+            raise _websocket_error_from_event(
+                {
+                    "message": "native websocket failed",
+                    "failure_phase": phase,
+                    "retryable_same_contract": False,
+                    "is_tls_verification_failure": False,
+                    "status": None,
+                    "headers": [],
+                    "body": None,
+                }
+            )
+
+    message = await NativeUpstreamWebSocket(cast(Any, NativeConnection())).receive()
+
+    assert message.kind == "error"
+    assert message.error_code is None
+    assert message.close_code is None
+    assert message.close_frame_received is False
+    assert message.transport_ended is (phase == "transport")
 
 
 @pytest.mark.asyncio

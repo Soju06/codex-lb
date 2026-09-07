@@ -14,7 +14,7 @@ use tokio_tungstenite::Connector;
 use tokio_tungstenite::client_async_tls_with_config;
 use tokio_tungstenite::proxy::connect_via_proxy;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::error::TlsError;
+use tokio_tungstenite::tungstenite::error::{ProtocolError, TlsError};
 use tokio_tungstenite::tungstenite::handshake::client::Response as WebSocketResponse;
 use tokio_tungstenite::tungstenite::http::HeaderName as WebSocketHeaderName;
 use tokio_tungstenite::tungstenite::http::HeaderValue as WebSocketHeaderValue;
@@ -455,6 +455,18 @@ pub(crate) async fn emit_websocket_error(
     command_id: Option<String>,
     failure: &NativeWebSocketFailure,
 ) -> Result<(), std::io::Error> {
+    emit(
+        output,
+        &websocket_error_event(request_id, command_id, failure),
+    )
+    .await
+}
+
+fn websocket_error_event(
+    request_id: &str,
+    command_id: Option<String>,
+    failure: &NativeWebSocketFailure,
+) -> NativeEvent {
     let (message, phase, retryable, tls_verification, status, headers, body) = match failure {
         NativeWebSocketFailure::Timeout => (
             "native websocket connection timed out",
@@ -510,7 +522,10 @@ pub(crate) async fn emit_websocket_error(
                 None,
             )
         }
-        NativeWebSocketFailure::WebSocket(WebSocketError::Io(_)) => (
+        NativeWebSocketFailure::WebSocket(WebSocketError::Io(_))
+        | NativeWebSocketFailure::WebSocket(WebSocketError::Protocol(
+            ProtocolError::ResetWithoutClosingHandshake,
+        )) => (
             "native websocket transport failed",
             "transport",
             false,
@@ -538,21 +553,17 @@ pub(crate) async fn emit_websocket_error(
             None,
         ),
     };
-    emit(
-        output,
-        &NativeEvent::WebsocketError {
-            request_id: request_id.to_owned(),
-            command_id,
-            message: message.to_owned(),
-            failure_phase: phase.to_owned(),
-            retryable_same_contract: retryable,
-            is_tls_verification_failure: tls_verification,
-            status,
-            headers,
-            body,
-        },
-    )
-    .await
+    NativeEvent::WebsocketError {
+        request_id: request_id.to_owned(),
+        command_id,
+        message: message.to_owned(),
+        failure_phase: phase.to_owned(),
+        retryable_same_contract: retryable,
+        is_tls_verification_failure: tls_verification,
+        status,
+        headers,
+        body,
+    }
 }
 
 fn websocket_tls_verification_failure(failure: &NativeWebSocketFailure) -> bool {
@@ -565,5 +576,34 @@ fn websocket_tls_verification_failure(failure: &NativeWebSocketFailure) -> bool 
             error_chain_has_invalid_certificate(error)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_without_closing_handshake_is_transport_not_protocol() {
+        let cases = [
+            (ProtocolError::ResetWithoutClosingHandshake, "transport"),
+            (ProtocolError::SendAfterClosing, "protocol"),
+        ];
+        for (error, expected_phase) in cases {
+            let failure = NativeWebSocketFailure::WebSocket(WebSocketError::Protocol(error));
+            let event = websocket_error_event("request", None, &failure);
+            let NativeEvent::WebsocketError {
+                failure_phase,
+                retryable_same_contract,
+                status,
+                ..
+            } = event
+            else {
+                panic!("expected websocket error event");
+            };
+            assert_eq!(failure_phase, expected_phase);
+            assert!(!retryable_same_contract);
+            assert_eq!(status, None);
+        }
     }
 }

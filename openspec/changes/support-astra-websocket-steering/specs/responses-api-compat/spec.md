@@ -60,6 +60,12 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 - **WHEN** a steering request is invalid, unknown, or upstream reports response.steer.failed
 - **THEN** the failure is returned without assigning its lifecycle to an unrelated queued create or charging usage twice
 
+#### Scenario: Steering parent normalization preserves failure correlation
+- **GIVEN** a valid steering request whose previous_response_id has surrounding whitespace
+- **WHEN** the proxy admits the steering request for the normalized owned response ID
+- **THEN** it SHALL forward that same normalized ID upstream while preserving the submitted input representation
+- **AND** an echoed rejection SHALL release the matching successor reservation before the connection closes
+
 #### Scenario: A late successor does not consume unrelated admission
 - **GIVEN** a known steering continuation no longer has a pending request state after expiry or during explicit replacement
 - **WHEN** its late response.created event names the original parent

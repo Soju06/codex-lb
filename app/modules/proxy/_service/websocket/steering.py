@@ -394,7 +394,7 @@ async def submit_websocket_steering(
     prohibit_fast_mode: bool,
 ) -> None:
     parent_id, input_items = validate_steering_input(payload)
-    wire_text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    wire_text = json.dumps({**payload, "previous_response_id": parent_id}, ensure_ascii=True, separators=(",", ":"))
     wire_bytes = len(wire_text.encode("utf-8"))
     max_input_bytes = get_settings().upstream_response_create_max_bytes
     if wire_bytes > max_input_bytes:

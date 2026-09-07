@@ -174,6 +174,15 @@ async def _stage_websocket_request_state_for_replay(
     admission for re-acquisition, and re-claims the session create gate when
     one is supplied. Returns ``False`` without touching the state when the gate
     is held by another request. Pre-created requests pass through unchanged.
+
+    ``terminal_settlement_phase`` is deliberately left alone. The bridge
+    terminal bookkeeping that stages a replay recorded a ``"claimed"`` marker
+    when it popped the request, and that marker is what lets the shielded
+    abort settlement (issue #1594) release the API-key reservation when the
+    replay fails and the continuation is cancelled or raises before it
+    finalizes; a replay that succeeds keeps the request in pending ownership,
+    where the abort helper skips it, and the bookkeeping clears the marker on
+    its normal exit.
     """
     accepted = request_state.response_id is not None and not request_state.awaiting_response_created
     if accepted:
@@ -185,9 +194,6 @@ async def _stage_websocket_request_state_for_replay(
         request_state.suppress_next_created_downstream = True
         request_state.suppress_next_in_progress_downstream = request_state.response_event_count >= 2
         request_state.response_create_admission_reacquire_required = True
-        # The caller keeps the request in pending ownership, so no terminal
-        # bookkeeping continuation owns its settlement any more.
-        request_state.terminal_settlement_phase = None
         logger.info(
             "Accepted output-free replay staged request_id=%s surface=%s trigger=%s visible_response_id=%s events=%d",
             request_state.request_log_id or request_state.request_id,

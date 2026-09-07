@@ -5542,6 +5542,8 @@ def _assert_staged_for_single_lifecycle_replay(
     assert request_state.response_create_gate is session.response_create_gate
     assert session.response_create_gate.locked() is True
     assert request_state.response_create_admission_reacquire_required is True
+    # The terminal bookkeeping clears its settlement claim on its normal exit;
+    # staging itself must not (see the abort-settlement test below).
     assert request_state.terminal_settlement_phase is None
 
 
@@ -5686,6 +5688,45 @@ async def test_http_bridge_accepted_capacity_replay_failure_releases_gate_and_ke
     assert isinstance(terminal, dict)
     assert terminal["type"] == "response.failed"
     assert cast(dict[str, Any], terminal["response"])["id"] == "resp-accepted-visible"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_accepted_replay_failure_keeps_settlement_claim_for_abort_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #1594 parity: the terminal pop marked the request "claimed" before
+    staging re-appended it to pending. When the staged replay fails, the request
+    leaves pending ownership again, so the claim must survive staging; an abort
+    on any of the awaits before ``_finalize_terminal_settlement`` then settles
+    the API-key reservation through the shielded abort path instead of leaking
+    the reservation and its heartbeat."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _install_accepted_replay_harness(service, monkeypatch, retry_result=False)
+    release_reservation = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_pending_count",
+        AsyncMock(side_effect=RuntimeError("terminal bookkeeping aborted")),
+    )
+    reservation = SimpleNamespace(reservation_id="res-accepted-replay-failed", status="reserved")
+    request_state = _accepted_bridge_request_state(api_key_reservation=cast(Any, reservation))
+    session = _make_bridge_session(
+        key_value="bridge-accepted-replay-failed-abort",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    with pytest.raises(RuntimeError, match="terminal bookkeeping aborted"):
+        await service._process_http_bridge_upstream_text(
+            session,
+            _capacity_error_text(code="server_is_overloaded", message=_OVERLOADED_MESSAGE),
+        )
+
+    assert request_state not in session.pending_requests
+    release_reservation.assert_awaited_once_with(request_state)
+    assert request_state.api_key_reservation is None
+    assert request_state.terminal_settlement_phase is None
 
 
 @pytest.mark.asyncio
@@ -5914,6 +5955,28 @@ async def test_stage_websocket_request_state_for_replay_is_a_no_op_reset_for_pre
     assert request_state.awaiting_response_created is True
     assert request_state.response_id is None
     assert gate.locked() is True
+
+
+@pytest.mark.asyncio
+async def test_stage_websocket_request_state_for_replay_keeps_the_terminal_settlement_claim() -> None:
+    """The bridge terminal bookkeeping owns the "claimed" marker it recorded
+    when it popped the request; staging a replay must leave it in place so a
+    failed replay followed by an abort still settles the reservation (#1594)."""
+    request_state = _accepted_bridge_request_state(terminal_settlement_phase="claimed")
+
+    assert (
+        await http_bridge_accepted_replay_module._stage_websocket_request_state_for_replay(
+            request_state,
+            create_gate=asyncio.Semaphore(1),
+            surface="http_bridge",
+            trigger="capacity_error",
+        )
+        is True
+    )
+
+    assert request_state.terminal_settlement_phase == "claimed"
+    assert request_state.replay_downstream_response_id == "resp-accepted-visible"
+    assert request_state.awaiting_response_created is True
 
 
 @pytest.mark.asyncio

@@ -24,7 +24,7 @@ from app.core.config.settings import get_settings as get_app_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError, DashboardSettingsConflictError
-from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_proxy_endpoint
+from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_proxy_endpoint, sends_plaintext_credentials
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_proxy_service_for_app, get_settings_context
@@ -269,13 +269,6 @@ async def create_upstream_proxy_endpoint(
     _write_access=Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> UpstreamProxyEndpointResponse:
-    if payload.scheme in {"http", "socks5", "socks5h"} and (
-        payload.username is not None or payload.password is not None
-    ):
-        raise DashboardBadRequestError(
-            "Plaintext proxies cannot carry credentials",
-            code="plaintext_proxy_credentials_forbidden",
-        )
     if payload.username is not None and ":" in payload.username:
         # Mirrors the resolver: a Basic user-id cannot encode a colon.
         raise DashboardBadRequestError('Proxy usernames cannot contain ":"', code="invalid_proxy_username")
@@ -552,6 +545,9 @@ def _proxy_endpoint_response(row: ProxyEndpoint) -> UpstreamProxyEndpointRespons
         port=row.port,
         username=row.username,
         is_active=row.is_active,
+        plaintext_credentials=sends_plaintext_credentials(
+            row.scheme, has_credentials=row.username is not None or row.password_encrypted is not None
+        ),
     )
 
 

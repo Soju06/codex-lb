@@ -856,6 +856,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 # The caller's dump describes the un-deduped input; it must not
                 # become the forwarded frame or the budget base.
                 upstream_payload_base = None
+                if apply_astra_subscription_schema:
+                    # Removing a replayed call can make updates adjacent.
+                    validate_astra_request(payload, api_key, prepare_continuation=False)
         protected_agent_control_output_occurrences = (
             _historical_agent_control_output_occurrences(cast(list[JsonValue], payload.input))
             if isinstance(payload.input, list)

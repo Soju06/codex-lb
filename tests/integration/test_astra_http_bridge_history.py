@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
 from app.core.openai.requests import ResponsesRequest
-from app.db.models import HttpBridgeSessionRecord
+from app.db.models import ApiKeyUsageReservation, HttpBridgeSessionRecord
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy._service.http_bridge import streaming as bridge_streaming
@@ -27,6 +27,121 @@ from tests.integration.test_http_responses_bridge import (
 from tests.integration.test_openai_compat_features import _completed_event
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.parametrize(
+    ("path", "stream"),
+    [("/v1/responses", False), ("/v1/responses", True), ("/backend-api/codex/responses", True)],
+    ids=["v1-collect", "v1-stream", "backend-stream"],
+)
+@pytest.mark.parametrize("keep_separator", [False, True], ids=["adjacent", "separated"])
+async def test_http_bridge_validates_updates_after_replay_deduplication(
+    async_client, monkeypatch, app_instance, path: str, stream: bool, keep_separator: bool
+) -> None:
+    account_id = await _import_account(async_client, "astra-dedupe", "astra-dedupe@example.com")
+    account = await _get_account(account_id)
+    settings = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert settings.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "astra-dedupe",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 1000000}],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()
+    _install_bridge_settings(monkeypatch, enabled=True)
+    upstream = _FakeBridgeUpstreamWebSocket()
+    service = get_proxy_service_for_app(app_instance)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    connect = AsyncMock(return_value=upstream)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+
+    async def fail_http_fallback(*args, **kwargs):
+        raise AssertionError("Bridge continuation unexpectedly fell back to HTTP upstream")
+        yield ""
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_http_fallback)
+    registered = anyio.Event()
+    original_register = service._register_http_bridge_previous_response_id
+
+    async def register_response(session, response_id, **kwargs):
+        result = await original_register(session, response_id, **kwargs)
+        assert result
+        registered.set()
+        return result
+
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_response)
+    headers = {"Authorization": "Bearer " + key["key"], "thread-id": "astra-dedupe-thread"}
+    with anyio.fail_after(5):
+        initial = await async_client.post(
+            path,
+            json={"model": "gpt-6-astra", "instructions": "", "input": [{"role": "user", "content": "Start"}]},
+            headers=headers,
+        )
+        assert initial.status_code == 200, initial.text
+        await registered.wait()
+    assert len(upstream.sent_text) == 1
+    anchor = "resp_bridge_1"
+    call = {
+        "type": "function_call",
+        "name": "exec_command",
+        "arguments": json.dumps({"cmd": "touch marker"}),
+        "call_id": "call_replayed",
+    }
+    update = {"type": "configuration_update", "reasoning": {"effort": "low"}}
+    items = [call, update, dict(call)]
+    if keep_separator:
+        items.append({"role": "assistant", "content": "Kept separator"})
+    items.extend([dict(update), {"role": "user", "content": "Continue"}])
+    with anyio.fail_after(5):
+        response = await async_client.post(
+            path,
+            json={
+                "model": "gpt-6-astra",
+                "instructions": "",
+                "reasoning": {"effort": "low"},
+                "previous_response_id": anchor,
+                "input": items,
+                "stream": stream,
+            },
+            headers=headers,
+        )
+    if keep_separator:
+        assert response.status_code == 200, response.text
+        if stream:
+            events = [
+                json.loads(line[6:])
+                for line in response.text.splitlines()
+                if line.startswith("data: ") and line != "data: [DONE]"
+            ]
+            assert sum(event.get("type") == "response.completed" for event in events) == 1
+            assert not any(event.get("type") == "response.failed" for event in events)
+        else:
+            assert response.json()["status"] == "completed"
+        assert len(upstream.sent_text) == 2
+        forwarded = json.loads(upstream.sent_text[1])["input"]
+        updates = [index for index, item in enumerate(forwarded) if item.get("type") == "configuration_update"]
+        assert len(updates) == 2
+        assert updates[1] > updates[0] + 1
+        assert any("Kept separator" in json.dumps(item.get("content")) for item in forwarded)
+        assert not any(item.get("type") == "function_call" for item in forwarded)
+    else:
+        assert response.status_code == 400, response.text
+        assert response.json()["error"]["type"] == "invalid_request_error"
+        assert response.json()["error"]["param"] == "input.2"
+        assert len(upstream.sent_text) == 1
+        connect.assert_awaited_once()
+        await service.drain_persistence_tasks(timeout_seconds=5)
+        async with SessionLocal() as db:
+            statuses = list((await db.execute(select(ApiKeyUsageReservation.status))).scalars())
+        assert sorted(statuses) == ["finalized", "released"]
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["collect", "stream"])

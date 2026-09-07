@@ -99,6 +99,56 @@ async def _reservation_statuses(app):
         return list((await session.execute(select(ApiKeyUsageReservation.status))).scalars())
 
 
+@pytest.mark.parametrize("path", _PATHS)
+@pytest.mark.parametrize("keep_separator", [False, True], ids=["adjacent", "separated"])
+def test_websocket_validates_updates_after_replay_deduplication(
+    app_instance, source_and_subscription_owner, monkeypatch, path, keep_separator
+):
+    client, key, _ = source_and_subscription_owner
+    upstream = _SequencedUpstreamWebSocket([], deferred_message_batches=[_websocket_response_batch("resp_deduped")])
+    connect = AsyncMock(return_value=upstream)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    call = {
+        "type": "function_call",
+        "name": "exec_command",
+        "arguments": json.dumps({"cmd": "touch marker"}),
+        "call_id": "call_replayed",
+    }
+    update = {"type": "configuration_update", "reasoning": {"effort": "low"}}
+    separator = {"role": "assistant", "content": "Kept separator"}
+    items = [call, update, dict(call)]
+    if keep_separator:
+        items.append(separator)
+    items.extend([dict(update), {"role": "user", "content": "Continue"}])
+    payload = _continuation({"input": items})
+    headers = {"Authorization": "Bearer " + key["key"]}
+
+    with client.websocket_connect(path, headers=headers) as ws:
+        ws.send_json(payload)
+        event = ws.receive_json()
+        if keep_separator:
+            assert event["type"] == "response.created", event
+            assert ws.receive_json()["type"] == "response.completed"
+        else:
+            assert event["type"] == "error", event
+            assert event["status"] == 400
+
+    if keep_separator:
+        assert len(upstream.sent_text) == 1
+        forwarded = json.loads(upstream.sent_text[0])["input"]
+        updates = [index for index, item in enumerate(forwarded) if item.get("type") == "configuration_update"]
+        assert len(updates) == 2
+        assert updates[1] > updates[0] + 1
+        assert any("Kept separator" in json.dumps(item.get("content")) for item in forwarded)
+        assert not any(item.get("type") == "function_call" for item in forwarded)
+    else:
+        assert event["error"]["type"] == "invalid_request_error"
+        assert event["error"]["param"] == "input.2"
+        assert upstream.sent_text == []
+        connect.assert_not_awaited()
+        assert client.portal.call(_reservation_statuses, app_instance) == ["released"]
+
+
 def _continuation(extra):
     return {
         "type": "response.create",

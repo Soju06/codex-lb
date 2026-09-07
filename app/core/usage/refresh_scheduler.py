@@ -222,6 +222,7 @@ class UsageRefreshScheduler:
                 refresh_started_at = usage_updater_module.utcnow()
                 usage_written = await updater.refresh_accounts([selected_account], before_primary)
                 if usage_written:
+                    get_account_selection_cache().invalidate()
                     async with get_background_session() as session:
                         usage_repo = UsageRepository(session)
                         accounts_repo = AccountsRepository(session)

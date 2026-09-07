@@ -1286,6 +1286,18 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
         start=AsyncMock(),
         stop=AsyncMock(),
     )
+    routing_availability_cache = SimpleNamespace(
+        refresh_from_db=AsyncMock(),
+        refresh_usage_caps_from_db=AsyncMock(),
+    )
+
+    class _AccountsRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def seed_hard_sticky_outage_grace_on_startup(self) -> int:
+            return 0
+
     wait_for_reachable = AsyncMock()
     validate_advertise = AsyncMock()
 
@@ -1306,12 +1318,17 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
     monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
     monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
     monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
+    monkeypatch.setattr(main, "AccountsRepository", _AccountsRepository)
     monkeypatch.setattr(main, "_wait_for_bridge_advertise_endpoint", wait_for_reachable)
     monkeypatch.setattr(main, "_validate_bridge_advertise_endpoint_for_multi_replica", validate_advertise)
     monkeypatch.setattr(main, "mark_process_dead", Mock())
     monkeypatch.setattr(
         "app.core.cache.invalidation.CacheInvalidationPoller",
         lambda session_factory: cache_poller,
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy.account_cache.get_routing_availability_cache",
+        lambda: routing_availability_cache,
     )
 
     async with main.lifespan(main.app):

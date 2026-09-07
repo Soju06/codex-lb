@@ -296,7 +296,7 @@ class LoadBalancer:
         self._runtime_lock = asyncio.Lock()
         self._account_locks: dict[str, asyncio.Lock] = {}
         self._account_locks_registry_lock = asyncio.Lock()
-        self._selection_inputs_cache = get_account_selection_cache()
+        self._selection_inputs_cache = get_account_selection_cache(clock=clock)
 
     async def release_account_lease(self, lease: AccountLease | None) -> None:
         if lease is None:

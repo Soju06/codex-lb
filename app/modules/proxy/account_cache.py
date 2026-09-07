@@ -12,7 +12,7 @@ from app.core.cache.invalidation import (
     NAMESPACE_ACCOUNT_SELECTION,
     get_cache_invalidation_poller,
 )
-from app.core.clock import clock_for
+from app.core.clock import REAL_CLOCK, Clock
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal, close_session
 from app.modules.proxy.usage_caps import reached_usage_cap_resets
@@ -34,7 +34,7 @@ class _CachedSelectionInputs:
 
 
 class AccountSelectionCache:
-    def __init__(self, ttl_seconds: int | None = None) -> None:
+    def __init__(self, ttl_seconds: int | None = None, *, clock: Clock = REAL_CLOCK) -> None:
         if ttl_seconds is None:
             import sys
 
@@ -42,6 +42,7 @@ class AccountSelectionCache:
         if ttl_seconds < 0:
             raise ValueError("ttl_seconds must be non-negative")
         self._ttl_seconds = ttl_seconds
+        self._clock = clock
         self._cache: dict[_CacheKey, _CachedSelectionInputs] = {}
         self._lock = anyio.Lock()
         self._generation: int = 0
@@ -56,7 +57,7 @@ class AccountSelectionCache:
         entry = self._cache.get(key)
         if entry is None:
             return None
-        if clock_for(self).monotonic() >= entry.expires_at:
+        if self._clock.monotonic() >= entry.expires_at:
             return None
         return entry.data
 
@@ -72,7 +73,7 @@ class AccountSelectionCache:
                 return
             self._cache[key] = _CachedSelectionInputs(
                 data=data,
-                expires_at=clock_for(self).monotonic() + self._ttl_seconds,
+                expires_at=self._clock.monotonic() + self._ttl_seconds,
             )
 
     def invalidate(self, *, propagate: bool = True) -> None:
@@ -113,8 +114,9 @@ class RoutingAvailabilityCache:
     to the historical process-local set semantics.
     """
 
-    def __init__(self, session_factory: Callable[[], AsyncSession] | None = None) -> None:
+    def __init__(self, session_factory: Callable[[], AsyncSession] | None = None, *, clock: Clock = REAL_CLOCK) -> None:
         self._session_factory = session_factory
+        self._clock = clock
         self._snapshot: dict[str, AccountStatus] | None = None
         self._local_marks: set[str] = set()
         self._usage_caps: dict[str, tuple[int | None, ...]] = {}
@@ -179,7 +181,7 @@ class RoutingAvailabilityCache:
         }
 
     def is_usage_capped(self, account_id: str) -> bool:
-        now = clock_for(self).time()
+        now = self._clock.time()
         return any(reset is None or reset > now for reset in self._usage_caps.get(account_id, ()))
 
     async def refresh_usage_caps_from_db(self) -> None:
@@ -204,7 +206,7 @@ class RoutingAvailabilityCache:
                         account,
                         primary.get(account.id),
                         secondary.get(account.id),
-                        now=clock_for(self).time(),
+                        now=self._clock.time(),
                     )
                     for account in accounts
                 }
@@ -223,11 +225,16 @@ _account_selection_cache = AccountSelectionCache()
 _routing_availability_cache = RoutingAvailabilityCache()
 
 
-def get_account_selection_cache() -> AccountSelectionCache:
+def get_account_selection_cache(*, clock: Clock | None = None) -> AccountSelectionCache:
+    if clock is not None:
+        _account_selection_cache._clock = clock
+        _routing_availability_cache._clock = clock
     return _account_selection_cache
 
 
-def get_routing_availability_cache() -> RoutingAvailabilityCache:
+def get_routing_availability_cache(*, clock: Clock | None = None) -> RoutingAvailabilityCache:
+    if clock is not None:
+        _routing_availability_cache._clock = clock
     return _routing_availability_cache
 
 

@@ -74,9 +74,9 @@ def overload_backoff_active(runtime: RuntimeState | None, now: float) -> bool:
     return runtime is not None and runtime.overload_backoff_until is not None and now < runtime.overload_backoff_until
 
 
-def record_overload_rejection_locked(runtime: RuntimeState, now: float, *, count: int = 1) -> float | None:
-    """Record ``count`` overload rejections observed at ``now``; return the new
-    backoff deadline when they trip the window, else ``None``.
+def record_overload_rejection_locked(runtime: RuntimeState, now: float) -> float | None:
+    """Record one overload rejection observed at ``now``; return the new
+    backoff deadline when it trips the window, else ``None``.
 
     Caller holds the balancer's per-account lock.
     """
@@ -87,7 +87,7 @@ def record_overload_rejection_locked(runtime: RuntimeState, now: float, *, count
         runtime.overload_backoff_level = 0
     window_start = now - OVERLOAD_WINDOW_SECONDS
     recent = [at for at in (runtime.overload_rejections or ()) if at > window_start]
-    recent.extend([now] * max(1, count))
+    recent.append(now)
     if len(recent) < OVERLOAD_TRIP_COUNT:
         runtime.overload_rejections = recent
         return None
@@ -103,17 +103,11 @@ def record_overload_rejection_locked(runtime: RuntimeState, now: float, *, count
     return deadline
 
 
-async def record_upstream_overload(
-    balancer: Any,
-    account: Account,
-    *,
-    count: int = 1,
-    redact_account_id: bool = False,
-) -> None:
-    """Record ``count`` upstream overload rejections for ``account``.
+async def record_upstream_overload(balancer: Any, account: Account, *, redact_account_id: bool = False) -> None:
+    """Record one upstream overload rejection for ``account`` at the balancer clock.
 
-    ``count`` > 1 carries same-account retry aggregation: N rejections that
-    the retry loop absorbed before failing over are N admission refusals.
+    Observations are taken where account health is written (the
+    ``_handle_stream_error`` funnel), so they inherit its settlement ordering.
     No-op when ``balancer`` does not expose the runtime map (test doubles).
     """
     runtime_map = getattr(balancer, "_runtime", None)
@@ -123,7 +117,7 @@ async def record_upstream_overload(
     async with lock:
         now = float(balancer._clock.time())
         runtime = runtime_map.setdefault(account.id, RuntimeState())
-        deadline = record_overload_rejection_locked(runtime, now, count=count)
+        deadline = record_overload_rejection_locked(runtime, now)
     if deadline is not None:
         logger.warning(
             "Account overload backoff engaged account_id=%s level=%d backoff_seconds=%.0f "

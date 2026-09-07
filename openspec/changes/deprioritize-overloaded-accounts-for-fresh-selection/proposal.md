@@ -40,7 +40,13 @@ feeding the rejected accounts at their normal capacity weight.
   sticky owner, continuity owner, or hard-affinity owner is never touched.
 - HTTP-status failures whose body carries an overload code keep that code
   through the same-account retry loop (they used to collapse to
-  `server_error`), and each absorbed retry counts toward the window. Sticky, continuity-owner, and
+  `server_error`), so the post-exhaustion health write counts as a rejection.
+  Observations are taken exactly where account health is written, so they
+  inherit the existing settlement-before-health ordering; a same-account
+  retry that then succeeds writes no health and is therefore not counted
+  (known limit, shared with `error_count`).
+- Recovery-probe reservation uses the same pool the selection ran over, so an
+  older due probe skipped by the overload pass cannot invalidate the match. Sticky, continuity-owner, and
   hard-affinity selection are untouched, so warm sessions on the account keep
   flowing and hard-pinned sessions are never denied because of this signal.
 - Engaging the backoff is logged with the level and duration.
@@ -71,7 +77,7 @@ None.
   pick where the sticky path chooses a new account; `load_balancer.py`
   forwards the runtime map (one line).
 - `app/modules/proxy/_service/streaming/retry.py`: overload codes survive
-  HTTP-status retry aggregation; absorbed retries feed the window.
+  HTTP-status retry aggregation.
 - No change to `service.py`, settings, schema, or API.
   Thresholds are fixed constants, matching the existing drain/probe
   thresholds.

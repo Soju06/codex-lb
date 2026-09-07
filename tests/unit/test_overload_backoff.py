@@ -28,10 +28,7 @@ from app.modules.proxy._load_balancer.overload_backoff import (
     record_upstream_overload,
 )
 from app.modules.proxy._load_balancer.types import RuntimeState
-from app.modules.proxy._service.streaming.retry import (
-    _record_aggregated_overload_observations,
-    _transient_retry_error_code,
-)
+from app.modules.proxy._service.streaming.retry import _transient_retry_error_code
 from app.modules.proxy._service.support import _TransientStreamError
 from app.modules.proxy.load_balancer import LoadBalancer
 from tests.simulation.virtual_time import VirtualClock
@@ -188,26 +185,6 @@ def test_transient_retry_error_code_keeps_overload_codes_from_http_status_failur
     assert _transient_retry_error_code(RuntimeError("no payload at all")) == "server_error"
     framed = _TransientStreamError("stream_incomplete", {"message": "cut"})
     assert _transient_retry_error_code(framed) == "stream_incomplete"
-
-
-@pytest.mark.asyncio
-async def test_aggregated_retry_observations_feed_the_window_for_overload_codes_only() -> None:
-    clock = VirtualClock(epoch_value=2_000_000_000.0)
-    balancer = LoadBalancer(cast(Any, None), clock=clock)
-    account = _make_account("acc-retried")
-    proxy = SimpleNamespace(_load_balancer=balancer)
-
-    await _record_aggregated_overload_observations(proxy, account, "server_error", 2)
-    assert account.id not in balancer._runtime
-
-    await _record_aggregated_overload_observations(proxy, account, "server_is_overloaded", 0)
-    assert account.id not in balancer._runtime
-
-    # Two absorbed same-account retries plus the final health write = the trip count.
-    await _record_aggregated_overload_observations(proxy, account, "server_is_overloaded", OVERLOAD_TRIP_COUNT - 1)
-    assert balancer._runtime[account.id].overload_rejections == [clock.time()] * (OVERLOAD_TRIP_COUNT - 1)
-    await record_upstream_overload(balancer, account)
-    assert overload_backoff_active(balancer._runtime[account.id], clock.time())
 
 
 @pytest.mark.asyncio
@@ -368,3 +345,41 @@ async def test_fresh_sticky_binding_avoids_backed_off_account_but_established_ow
     alone = await _select_sticky(balancer, [_state("hot")], _sticky_repo(None))
     assert alone.account is not None
     assert alone.account.account_id == "hot"
+
+
+@pytest.mark.asyncio
+async def test_fresh_sticky_binding_reports_the_pool_it_selected_from() -> None:
+    """Probe reservation in the sticky run path reuses ``effective_states``; it
+    must name the overload-free pool only when that pool produced the pick."""
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(_mock_repo_factory, clock=clock)
+    balancer._runtime["hot"] = RuntimeState(overload_backoff_until=clock.time() + OVERLOAD_BACKOFF_BASE_SECONDS)
+    hot, clean = _state("hot"), _state("clean")
+    account_map = {state.account_id: cast(Account, AsyncMock()) for state in (hot, clean)}
+
+    async def _outcome(states: list[AccountState], existing: str | None):
+        return await balancer._select_with_stickiness(
+            states=states,
+            account_map=account_map,
+            sticky_key="key",
+            sticky_kind=StickySessionKind.PROMPT_CACHE,
+            reallocate_sticky=False,
+            sticky_max_age_seconds=600,
+            prefer_earlier_reset_accounts=False,
+            prefer_earlier_reset_window="secondary",
+            routing_strategy="usage_weighted",
+            sticky_repo=_sticky_repo(existing),
+        )
+
+    filtered = await _outcome([hot, clean], None)
+    assert filtered.selection.account is not None and filtered.selection.account.account_id == "clean"
+    assert filtered.effective_states is not None
+    assert [state.account_id for state in filtered.effective_states] == ["clean"]
+
+    unfiltered = await _outcome([hot], None)
+    assert unfiltered.selection.account is not None and unfiltered.selection.account.account_id == "hot"
+    assert unfiltered.effective_states is None
+
+    owned = await _outcome([hot, clean], "hot")
+    assert owned.selection.account is not None and owned.selection.account.account_id == "hot"
+    assert owned.effective_states is None

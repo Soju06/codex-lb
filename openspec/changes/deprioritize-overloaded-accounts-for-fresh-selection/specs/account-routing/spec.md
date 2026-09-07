@@ -4,9 +4,9 @@
 
 When upstream rejects a fresh admission for an account as overloaded
 (`server_is_overloaded` or `overloaded_error`), the proxy MUST record the
-rejection in a replica-local per-account window that is independent of the
-transient error count and MUST NOT be reset by later successes on that
-account. When at least three rejections land inside a 120-second window, the
+rejection, at the point where account health is written for it, in a
+replica-local per-account window that is independent of the transient error
+count and MUST NOT be reset by later successes on that account. When at least three rejections land inside a 120-second window, the
 proxy MUST deprioritize the account for fresh (unbound) selection for a
 bounded interval that grows exponentially with consecutive trips (60 seconds
 base, capped at 600 seconds, decaying to the base after 30 minutes without a
@@ -57,14 +57,24 @@ body returned to the client MUST remain unchanged.
 - **THEN** the new binding is made to account B
 - **AND** a request whose key already maps to account A keeps using account A
 
-#### Scenario: Same-account retries count as admission rejections
+#### Scenario: HTTP-status overload rejections keep their code
 
 - **GIVEN** upstream answers a fresh admission with an HTTP 5xx whose body
   carries `server_is_overloaded`
 - **WHEN** the same-account transient retries are exhausted and health is
   written after settlement
-- **THEN** the health write keeps the overload code and every absorbed retry
-  counts toward the account's overload window
+- **THEN** the health write carries `server_is_overloaded` rather than a
+  collapsed `server_error`, so the rejection counts toward the account's
+  overload window
+
+#### Scenario: Recovery-probe reservation follows the selected pool
+
+- **GIVEN** a fresh request whose selection ran over the overload-free
+  candidates
+- **WHEN** the selected account is a due recovery probe that needs a
+  reservation
+- **THEN** the reservation is taken from that same overload-free pool, so an
+  older due probe skipped by the overload pass cannot invalidate the selection
 
 #### Scenario: Pinned sessions are not denied by overload backoff
 

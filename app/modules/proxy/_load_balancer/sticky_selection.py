@@ -266,6 +266,10 @@ class _StickyMutation:
 class _StickySelectionOutcome:
     selection: SelectionResult
     mutation: _StickyMutation | None = None
+    # The candidate pool the selection actually ran over when a NEW account
+    # was chosen for the key (overload-free first pass); ``None`` means the
+    # caller's full pool. Probe reservation must use the same pool.
+    effective_states: list[AccountState] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -733,8 +737,12 @@ async def run_sticky_selection_path(
                     or reallocate_sticky
                 )
             )
+            # A fresh binding may have been chosen from the overload-free
+            # subset; reserve the recovery probe from that same pool so an
+            # older due probe the pass skipped cannot invalidate the match.
+            probe_states = sticky_outcome.effective_states or selection_states
             probing_result_requires_reservation = _probing_result_requires_recovery_reservation(
-                selection_states,
+                probe_states,
                 result.account,
                 routing_strategy=routing_strategy,
                 traffic_class=traffic_class,
@@ -748,7 +756,7 @@ async def run_sticky_selection_path(
                 # can temporarily consume the only due probing slot and
                 # make concurrent unbound traffic miss recovery.
                 probe_reservation = owner._reserve_due_probe_locked(
-                    selection_states,
+                    probe_states,
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
                     prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,
@@ -1208,6 +1216,7 @@ async def _select_with_stickiness(
         *,
         persist_account_id: str | None = None,
         refresh_skip_deadline: datetime | None = None,
+        effective_states: list[AccountState] | None = None,
     ) -> _StickySelectionOutcome:
         mutation = pending_mutation
         if persist_account_id is not None:
@@ -1215,7 +1224,7 @@ async def _select_with_stickiness(
                 account_id=persist_account_id,
                 refresh_skip_deadline=refresh_skip_deadline,
             )
-        return _StickySelectionOutcome(selection=selection, mutation=mutation)
+        return _StickySelectionOutcome(selection=selection, mutation=mutation, effective_states=effective_states)
 
     if sticky_existing_account_id is _STICKY_EXISTING_UNSET:
         existing = await sticky_repo.get_account_id(
@@ -1475,9 +1484,11 @@ async def _select_with_stickiness(
         fallback_candidates = filter_overload_backoff_candidates(states, overload_backoff_runtime, now=clock.time())
     chosen = _choose_from(fallback_candidates)
     if chosen.account is None and fallback_candidates is not states:
+        fallback_candidates = states
         chosen = _choose_from(states)
+    chosen_pool = fallback_candidates if fallback_candidates is not states else None
     if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
-        return finish_selection(chosen, persist_account_id=chosen.account.account_id)
+        return finish_selection(chosen, persist_account_id=chosen.account.account_id, effective_states=chosen_pool)
     if preserve_existing_mapping_on_fallback and chosen.account is not None and existing is not None:
         # Spillover is deliberately request-local. The alternate may create
         # its own hard response/file/bridge owner, but local cap pressure
@@ -1488,7 +1499,7 @@ async def _select_with_stickiness(
             chosen.account.account_id,
             sticky_kind.value,
         )
-    return finish_selection(chosen)
+    return finish_selection(chosen, effective_states=chosen_pool)
 
 
 def _sticky_refresh_write_skippable(

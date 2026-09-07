@@ -235,8 +235,10 @@ async def run_unbound_selection_path(
                     owner._runtime,
                     now=selection_now,
                 )
+                effective_states = overload_free_states
                 result = _select_from(overload_free_states)
                 if result.account is None and overload_free_states is not selection_states:
+                    effective_states = selection_states
                     result = _select_from(selection_states)
                 if (
                     result.account is None
@@ -255,8 +257,12 @@ async def run_unbound_selection_path(
                         _account_cap_error_message(lease_kind, caps),
                         error_code=selection_error_code,
                     )
+                # Probe reservation must see the pool the selection actually
+                # ran over: reserving from the wider pool could pick an older
+                # due probe the overload pass skipped and invalidate the
+                # selection on an identity mismatch.
                 probing_result_requires_reservation = _probing_result_requires_recovery_reservation(
-                    selection_states,
+                    effective_states,
                     result.account,
                     routing_strategy=routing_strategy,
                     traffic_class=traffic_class,
@@ -271,7 +277,7 @@ async def run_unbound_selection_path(
                     # both succeed; otherwise the failed request can
                     # consume minutes of recovery capacity.
                     probe_reservation = owner._reserve_due_probe_locked(
-                        selection_states,
+                        effective_states,
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
                         prefer_earlier_reset_window=prefer_earlier_reset_window,
                         routing_strategy=routing_strategy,

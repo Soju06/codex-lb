@@ -41,7 +41,7 @@ from app.core.utils.shared_future import _await_task_deferring_cancellation
 from app.core.utils.sse import format_sse_event
 from app.db.models import Account, StickySessionKind
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
-from app.modules.proxy._load_balancer.overload_backoff import UPSTREAM_OVERLOAD_CODES, record_upstream_overload
+from app.modules.proxy._load_balancer.overload_backoff import UPSTREAM_OVERLOAD_CODES
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_shape,
     _record_continuity_fail_closed,
@@ -301,13 +301,6 @@ def _transient_retry_error_code(tex: BaseException) -> str:
     return "server_error"
 
 
-async def _record_aggregated_overload_observations(proxy: Any, account: Account, code: str, extra: int) -> None:
-    """Same-account retries absorbed ``extra`` further rejections before
-    failing over; each was an admission refusal for the overload window."""
-    if extra > 0 and code in UPSTREAM_OVERLOAD_CODES:
-        await record_upstream_overload(proxy._load_balancer, account, count=extra)
-
-
 class _StreamingRetryMixin:
     async def _stream_with_retry(
         self,
@@ -558,7 +551,6 @@ class _StreamingRetryMixin:
                         )
                         if retry_count > 1:
                             await proxy._load_balancer.record_errors(account, retry_count - 1)
-                            await _record_aggregated_overload_observations(proxy, account, error_code, retry_count - 1)
                     except Exception:
                         logger.warning(
                             "Failed to flush deferred keyed stream health account_id=%s request_id=%s",
@@ -678,9 +670,6 @@ class _StreamingRetryMixin:
             )
             if transient_retry_count > 1:
                 await proxy._load_balancer.record_errors(failed_account, transient_retry_count - 1)
-                await _record_aggregated_overload_observations(
-                    proxy, failed_account, failed_code, transient_retry_count - 1
-                )
             return classified
 
         async def _drain_pending_post_refresh_penalty_on_terminal(

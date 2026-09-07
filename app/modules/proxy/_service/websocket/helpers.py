@@ -71,6 +71,7 @@ from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
+    StickySessionKind,
 )
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -337,6 +338,7 @@ from app.modules.proxy._service.warmup import (
     _WarmupUsageSnapshot as _WarmupUsageSnapshot,
 )
 from app.modules.proxy.affinity import (
+    _AffinityPolicy,
     _sticky_key_from_session_header,  # noqa: F401
 )
 from app.modules.proxy.durable_bridge_coordinator import (
@@ -618,6 +620,47 @@ def _websocket_accepted_replay_can_switch_account(request_state: "_WebSocketRequ
     ):
         return False
     return _websocket_auth_request_can_switch_account(request_state)
+
+
+def _websocket_affinity_may_resolve_hard_owner(affinity_policy: _AffinityPolicy) -> bool:
+    """Return whether sticky selection may bind this request to one owner account.
+
+    A resolved hard ``CODEX_SESSION`` row narrows selection to its owner
+    (``hard_sticky`` in ``sticky_selection``): turn-state ownership, or the raw
+    compatibility row an old replica persisted for a bare session or thread
+    header, which every policy exposing ``legacy_selection_key`` consults and
+    which wins over the namespaced soft row. The owner is not a request-state
+    pin -- it is read from the database at selection time -- so the request
+    cannot tell whether its session resolves to a hard owner. Any policy that
+    may is treated as owner-bound: excluding that owner would leave every
+    re-selection at ``hard_affinity_saturated`` until the connect budget runs
+    out.
+    """
+    return (
+        affinity_policy.kind == StickySessionKind.CODEX_SESSION
+        or affinity_policy.legacy_selection_key is not None
+        or affinity_policy.legacy_continuity_source is not None
+    )
+
+
+def _websocket_accepted_replay_may_exclude_account(request_state: "_WebSocketRequestState") -> bool:
+    """Return whether an accepted replay may exclude the account that accepted it.
+
+    The exclusion is what moves an account-neutral accepted replay to another
+    account (bridge parity). It is refused when a request-state pin requires
+    the owner (``_websocket_accepted_replay_can_switch_account``) and when the
+    request's affinity may resolve to a hard owner the state does not carry
+    (``_websocket_affinity_may_resolve_hard_owner``). In both cases the replay
+    reconnects without an exclusion, as the created-only transport-close replay
+    did before accepted replays existed: sticky selection then re-resolves the
+    owner, or moves a soft row through the health penalty the failing account
+    receives. Only accepted lifecycles decide with this predicate; the
+    pre-created owner-switch branch keeps the pin-only predicate it already
+    used.
+    """
+    if _websocket_affinity_may_resolve_hard_owner(request_state.affinity_policy):
+        return False
+    return _websocket_accepted_replay_can_switch_account(request_state)
 
 
 async def _record_or_defer_websocket_accepted_replay_health(

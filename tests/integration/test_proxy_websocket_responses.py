@@ -13300,14 +13300,19 @@ class _TwoAccountWebSocketFailover:
 
     ``acct_ws_accepted_a`` serves ``first_upstream`` and ``acct_ws_accepted_b``
     serves ``recovered_upstream``. The fake connect honors what the real
-    selection honors -- ``excluded_account_ids`` and a hard owner requirement
+    selection honors -- ``excluded_account_ids``, a hard owner requirement
     (bound replay owner, anchored or file-pinned or turn-state preferred
-    account) -- and refuses the connect with the same
-    ``previous_response_owner_unavailable`` failure ``_connect_proxy_websocket``
-    emits when no account satisfies both. A replay that never excludes the
-    failing account lands on that account again (whose upstream is spent), and
-    a replay that excludes the account it still requires has no candidate;
-    neither is silently handed the recovery upstream any more."""
+    account), and a raw legacy ``CODEX_SESSION`` row resolved for the request's
+    ``legacy_selection_key`` (``hard_sticky_owner_by_legacy_key``, the
+    ``hard_sticky`` narrowing of real sticky selection) -- and refuses the
+    connect with the same ``previous_response_owner_unavailable`` failure
+    ``_connect_proxy_websocket`` emits when no account satisfies all of them. A
+    replay that never excludes the failing account lands on that account again
+    (whose upstream is spent), a replay that excludes the account it still
+    requires has no candidate, and a replay that excludes a hard sticky owner
+    is refused as ``hard_affinity_saturated`` (real selection re-selects into
+    the same exclusion until the connect budget is spent); none is silently
+    handed the recovery upstream any more."""
 
     FIRST_ACCOUNT_ID = "acct_ws_accepted_a"
     SECOND_ACCOUNT_ID = "acct_ws_accepted_b"
@@ -13321,6 +13326,11 @@ class _TwoAccountWebSocketFailover:
         self.excluded_at_connect: list[set[str]] = []
         self.required_at_connect: list[str | None] = []
         self.refused_connects: list[dict[str, Any]] = []
+        # Raw ``CODEX_SESSION`` rows an old replica persisted for a bare session
+        # header are hard ownership in real selection: the owner is the only
+        # candidate and no request-state pin records it. Keyed by the raw
+        # lookup key (``_AffinityPolicy.legacy_selection_key``).
+        self.hard_sticky_owner_by_legacy_key: dict[str, str] = {}
         self.stream_errors: list[tuple[str, str]] = []
         self.turn_events: list[list[dict[str, Any]]] = []
         self.request_logs: list[dict[str, Any]] = []
@@ -13338,6 +13348,13 @@ class _TwoAccountWebSocketFailover:
         ):
             return preferred_account_id
         return None
+
+    def _hard_sticky_owner_id(self, request_state: Any) -> str | None:
+        """Mirror ``hard_sticky``: the raw legacy row resolved for the request's lookup key."""
+        legacy_key = request_state.affinity_policy.legacy_selection_key
+        if legacy_key is None:
+            return None
+        return self.hard_sticky_owner_by_legacy_key.get(legacy_key)
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         failover = self
@@ -13366,6 +13383,7 @@ class _TwoAccountWebSocketFailover:
             del headers, kwargs
             excluded_account_ids = set(request_state.excluded_account_ids)
             required_account_id = failover._required_account_id(request_state)
+            hard_sticky_owner_id = failover._hard_sticky_owner_id(request_state)
             failover.excluded_at_connect.append(excluded_account_ids)
             failover.required_at_connect.append(required_account_id)
             candidates = [
@@ -13373,15 +13391,23 @@ class _TwoAccountWebSocketFailover:
                 for account_id in failover.upstreams_by_account
                 if account_id not in excluded_account_ids
                 and (required_account_id is None or account_id == required_account_id)
+                and (hard_sticky_owner_id is None or account_id == hard_sticky_owner_id)
             ]
             selected_account_id = candidates[0] if candidates else None
             if selected_account_id is None or not failover.upstreams_by_account[selected_account_id]:
+                if selected_account_id is not None:
+                    reason = "account_upstream_spent"
+                elif hard_sticky_owner_id is not None and hard_sticky_owner_id in excluded_account_ids:
+                    reason = "hard_affinity_saturated"
+                else:
+                    reason = "no_candidate"
                 failover.refused_connects.append(
                     {
                         "excluded": excluded_account_ids,
                         "required": required_account_id,
+                        "hard_sticky_owner": hard_sticky_owner_id,
                         "selected": selected_account_id,
-                        "reason": "no_candidate" if selected_account_id is None else "account_upstream_spent",
+                        "reason": reason,
                     }
                 )
                 message = "Previous response owner account is unavailable; retry later."
@@ -13448,18 +13474,47 @@ class _TwoAccountWebSocketFailover:
                         break
                 return result
 
-    def run_anchored_follow_up(self, app_instance) -> tuple[list[dict[str, Any]], WebSocketDisconnect | None]:
+    def run_anchored_follow_up(
+        self,
+        app_instance,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[list[dict[str, Any]], WebSocketDisconnect | None]:
         """First turn completes, then a follow-up that repeats the history: the
         proxy injects the completed id as ``previous_response_id`` (Lite
-        continuity) and retains the full resend as the retry-safe fresh body."""
+        continuity, per connection) and retains the full resend as the
+        retry-safe fresh body. Without a ``session_id`` header the connection
+        carries no Codex session affinity, so an account-neutral replay may
+        leave the owner; pass ``BARE_SESSION_HEADERS`` for a session whose raw
+        legacy row may be a hard owner."""
         return self.run(
             app_instance,
             requests=[
                 self.response_create([self.HISTORICAL_INPUT]),
                 self.response_create([self.HISTORICAL_INPUT, self.FOLLOW_UP_INPUT]),
             ],
-            headers={"Authorization": "Bearer external-token", "session_id": "sid-ws-accepted-anchored"},
+            headers=headers if headers is not None else {"Authorization": "Bearer external-token"},
         )
+
+    BARE_SESSION_ID = "sid-ws-legacy-hard-owner"
+    BARE_SESSION_HEADERS: dict[str, str] = {
+        "Authorization": "Bearer external-token",
+        "session_id": BARE_SESSION_ID,
+    }
+
+    def bind_bare_session_hard_owner(self, owner_recovered_upstream: _FakeUpstreamWebSocket) -> None:
+        """Make ``acct_ws_accepted_a`` the hard owner of the raw legacy row for
+        ``BARE_SESSION_ID`` and give it the socket the replay reconnects on."""
+        self.hard_sticky_owner_by_legacy_key[self.BARE_SESSION_ID] = self.FIRST_ACCOUNT_ID
+        self.upstreams_by_account[self.FIRST_ACCOUNT_ID].append(owner_recovered_upstream)
+
+    def assert_re_sent_to_bare_session_hard_owner(self) -> None:
+        assert not self.refused_connects, self.refused_connects
+        assert self.connect_accounts == [self.FIRST_ACCOUNT_ID, self.FIRST_ACCOUNT_ID], self.connect_accounts
+        # No request-state pin records the raw row's owner, so the reconnect is
+        # steered by leaving the owner eligible: nothing excluded, no requirement.
+        assert self.excluded_at_connect[-1] == set(), self.excluded_at_connect
+        assert self.required_at_connect[-1] is None, self.required_at_connect
 
     TURN_STATE_SESSION_HEADERS: dict[str, str] = {
         "Authorization": "Bearer external-token",
@@ -14226,6 +14281,118 @@ def test_backend_responses_websocket_reconnects_a_client_anchored_accepted_abrup
     # The owner receives the client's full resend with the anchor stripped
     # (the transport close leaves the anchor's fate unknown, so the
     # self-contained history is what goes upstream, as on ``main``).
+    assert len(owner_recovered_upstream.sent_text) == 1
+    replayed_payload = json.loads(owner_recovered_upstream.sent_text[0])
+    assert "previous_response_id" not in replayed_payload
+    assert replayed_payload["input"] == [failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]
+    assert other_account_upstream.sent_text == []
+
+
+_BARE_SESSION_ACCEPTED_TERMINALS = [
+    pytest.param(
+        _ws_event(
+            {
+                "type": "error",
+                "error": {
+                    "type": "service_unavailable_error",
+                    "code": "server_is_overloaded",
+                    "message": "Our servers are currently overloaded. Please try again later.",
+                },
+            }
+        ),
+        id="capacity_error",
+    ),
+    pytest.param(
+        _ws_event(
+            {
+                "type": "error",
+                "error": {
+                    "type": "service_unavailable_error",
+                    "code": "model_at_capacity",
+                    "message": "Selected model is at capacity. Please try a different model.",
+                },
+            }
+        ),
+        id="model_at_capacity",
+    ),
+    pytest.param(_FakeUpstreamMessage("close", close_code=1011), id="abrupt_close"),
+]
+
+
+@pytest.mark.parametrize("terminal", _BARE_SESSION_ACCEPTED_TERMINALS)
+def test_backend_responses_websocket_re_sends_a_bare_session_accepted_failure_to_its_hard_sticky_owner(
+    app_instance,
+    monkeypatch,
+    terminal,
+):
+    """#2127 round 7 P2: a native Codex connection carries ``session_id``; an
+    old replica may have persisted that raw value as a hard ``CODEX_SESSION``
+    row naming ``acct_ws_accepted_a``. The unanchored first turn is
+    account-neutral and carries no owner pin, so the accepted replay used to
+    exclude the owner and ask for a sticky reallocation -- and the hard row then
+    failed every re-selection with ``hard_affinity_saturated`` until the connect
+    budget ran out (``main`` reconnected the created-only replay to the owner).
+    The replay must leave the owner eligible and go back to it on a fresh
+    socket, still within the single lifecycle the client is reading."""
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[[*_accepted_output_free_prelude("resp_ws_bare_session_accepted_failed"), terminal]],
+    )
+    owner_recovered_upstream = _recovered_upstream("resp_ws_bare_session_owner_recovered")
+    other_account_upstream = _recovered_upstream("resp_ws_bare_session_other_account")
+    failover = _TwoAccountWebSocketFailover(first_upstream, other_account_upstream)
+    failover.bind_bare_session_hard_owner(owner_recovered_upstream)
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run(app_instance, headers=failover.BARE_SESSION_HEADERS)
+
+    created_id = _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    assert created_id == "resp_ws_bare_session_accepted_failed"
+    failover.assert_re_sent_to_bare_session_hard_owner()
+    assert len(first_upstream.sent_text) == 1
+    assert len(owner_recovered_upstream.sent_text) == 1
+    replayed_payload = json.loads(owner_recovered_upstream.sent_text[0])
+    assert replayed_payload["input"] == json.loads(first_upstream.sent_text[0])["input"]
+    assert other_account_upstream.sent_text == []
+    if terminal.kind == "text":
+        # The owner still takes the capacity penalty; only the exclusion is refused.
+        assert (failover.FIRST_ACCOUNT_ID, "server_is_overloaded") in failover.stream_errors
+
+
+@pytest.mark.parametrize("terminal", _BARE_SESSION_ACCEPTED_TERMINALS)
+def test_backend_responses_websocket_re_sends_an_anchored_accepted_failure_in_a_bare_session_to_its_hard_owner(
+    app_instance,
+    monkeypatch,
+    terminal,
+):
+    """Session-header twin of the anchored account-switch tests: the fresh body
+    still replaces the proxy-injected anchored body and releases the anchor
+    owner's body pin, but the bare session's raw row may be a hard owner, so the
+    replay reconnects to that owner unexcluded instead of moving the
+    continuation to the other account."""
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            _completed_first_turn_upstream_batch("resp_ws_bare_session_anchor_turn_1"),
+            [*_accepted_output_free_prelude("resp_ws_bare_session_anchored_accepted_failed"), terminal],
+        ],
+    )
+    owner_recovered_upstream = _recovered_upstream("resp_ws_bare_session_anchored_owner_recovered")
+    other_account_upstream = _recovered_upstream("resp_ws_bare_session_anchored_other_account")
+    failover = _TwoAccountWebSocketFailover(first_upstream, other_account_upstream)
+    failover.bind_bare_session_hard_owner(owner_recovered_upstream)
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run_anchored_follow_up(app_instance, headers=failover.BARE_SESSION_HEADERS)
+
+    created_id = _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    assert created_id == "resp_ws_bare_session_anchored_accepted_failed"
+    assert [event["type"] for event in failover.turn_events[0]] == ["response.created", "response.completed"]
+    failover.assert_re_sent_to_bare_session_hard_owner()
+    assert len(first_upstream.sent_text) == 2
+    anchored_payload = json.loads(first_upstream.sent_text[1])
+    assert anchored_payload["previous_response_id"] == "resp_ws_bare_session_anchor_turn_1"
+    assert anchored_payload["input"] == [failover.FOLLOW_UP_INPUT]
     assert len(owner_recovered_upstream.sent_text) == 1
     replayed_payload = json.loads(owner_recovered_upstream.sent_text[0])
     assert "previous_response_id" not in replayed_payload

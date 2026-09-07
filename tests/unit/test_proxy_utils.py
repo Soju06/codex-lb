@@ -54297,6 +54297,99 @@ def test_websocket_accepted_replay_can_switch_account_mirrors_the_connect_owner_
     assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is expected
 
 
+_BARE_SESSION_HEADER_AFFINITY = proxy_service._AffinityPolicy(
+    key="legacy-process",
+    kind=StickySessionKind.CODEX_SESSION,
+    codex_session_source="session_header",
+)
+
+
+@pytest.mark.parametrize(
+    ("affinity_policy", "expected"),
+    [
+        pytest.param(proxy_service._AffinityPolicy(), False, id="no_affinity"),
+        pytest.param(
+            proxy_service._AffinityPolicy(key="cache-key", kind=StickySessionKind.PROMPT_CACHE, max_age_seconds=300),
+            False,
+            id="prompt_cache_without_legacy_lookup",
+        ),
+        pytest.param(
+            proxy_service._AffinityPolicy(
+                key="thread-key",
+                kind=StickySessionKind.STICKY_THREAD,
+                reallocate_sticky=True,
+            ),
+            False,
+            id="sticky_thread",
+        ),
+        pytest.param(_BARE_SESSION_HEADER_AFFINITY, True, id="bare_session_header_consults_the_raw_row"),
+        pytest.param(
+            proxy_service._AffinityPolicy(
+                key="turn_0123456789abcdef0123456789abcdef",
+                kind=StickySessionKind.CODEX_SESSION,
+                codex_session_source="turn_state",
+            ),
+            True,
+            id="turn_state",
+        ),
+        pytest.param(
+            proxy_service._AffinityPolicy(
+                key="thread-selection-key",
+                kind=StickySessionKind.PROMPT_CACHE,
+                max_age_seconds=300,
+                codex_session_source="thread_header",
+                legacy_codex_session_key="legacy-process",
+                legacy_continuity_source="session_header",
+            ),
+            True,
+            id="thread_header_with_legacy_process_lookup",
+        ),
+    ],
+)
+def test_websocket_affinity_may_resolve_hard_owner_covers_every_hard_sticky_lookup(
+    affinity_policy: proxy_service._AffinityPolicy,
+    expected: bool,
+):
+    """#2127 round 7 P2: ``hard_sticky`` in sticky selection is a resolved
+    ``CODEX_SESSION`` row -- turn-state ownership, or the raw compatibility row
+    an old replica persisted for a bare session/thread header
+    (``legacy_selection_key``). The request state never carries that owner, so
+    every policy that consults such a row must count as potentially owner-bound."""
+    assert websocket_helpers_module._websocket_affinity_may_resolve_hard_owner(affinity_policy) is expected
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        pytest.param({}, True, id="unpinned_without_affinity"),
+        pytest.param({"affinity_policy": _BARE_SESSION_HEADER_AFFINITY}, False, id="bare_session_header"),
+        pytest.param({"replay_required_account_id": "acc_ws_bound_owner"}, False, id="bound_replay_owner"),
+        pytest.param(
+            {"affinity_policy": proxy_service._AffinityPolicy(key="cache-key", kind=StickySessionKind.PROMPT_CACHE)},
+            True,
+            id="prompt_cache_stays_movable",
+        ),
+    ],
+)
+def test_websocket_accepted_replay_may_exclude_account_refuses_pins_and_hard_capable_affinity(
+    overrides: dict[str, Any],
+    expected: bool,
+):
+    """The accepted-replay exclusion needs both: no request-state pin
+    (``_websocket_accepted_replay_can_switch_account``) and an affinity that
+    cannot resolve to a hard sticky owner. A bare session header passed the
+    pin-only predicate and excluded the raw row's owner, which then failed
+    every re-selection with ``hard_affinity_saturated``."""
+    request_state = _accepted_lifecycle_request_state(**overrides)
+
+    assert websocket_helpers_module._websocket_accepted_replay_may_exclude_account(request_state) is expected
+    # The pin-only predicate is unchanged: the pre-created owner-switch branch
+    # keeps deciding its exclusion with it.
+    assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is (
+        "replay_required_account_id" not in overrides
+    )
+
+
 class _ClosableUpstream:
     def __init__(self) -> None:
         self.close_calls = 0
@@ -54387,6 +54480,143 @@ async def test_transport_end_replay_of_an_account_bound_accepted_turn_stays_on_i
     assert request_state.request_text == _ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT
     assert request_state.excluded_account_ids == set()
     assert request_state.replay_required_account_id == account.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("affinity_policy", "expect_exclusion"),
+    [
+        pytest.param(_BARE_SESSION_HEADER_AFFINITY, False, id="bare_session_header_reconnects_to_owner"),
+        pytest.param(
+            proxy_service._AffinityPolicy(key="cache-key", kind=StickySessionKind.PROMPT_CACHE, max_age_seconds=300),
+            True,
+            id="prompt_cache_moves",
+        ),
+    ],
+)
+async def test_transport_end_replay_of_a_codex_session_accepted_turn_does_not_exclude_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    affinity_policy: proxy_service._AffinityPolicy,
+    expect_exclusion: bool,
+):
+    """#2127 round 7 P2 (transport close): an unanchored, account-neutral
+    accepted turn in a bare Codex session (``session_id`` header) carries no
+    pin on its state, yet sticky selection may resolve the raw compatibility
+    row (``{"legacy-process": owner}``) to a hard owner. Excluding that owner
+    left every re-selection at ``hard_affinity_saturated`` until the connect
+    budget ran out, where ``main`` reconnected the created-only replay to the
+    owner. The replay must keep the owner eligible; an affinity that cannot
+    resolve a hard owner still moves."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_legacy_hard_owner")
+    request_state = _accepted_lifecycle_request_state(response_create_sent_at=1.0, affinity_policy=affinity_policy)
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream = _ClosableUpstream()
+
+    replayed = await websocket_mixin._process_upstream_websocket_transport_end(
+        service,
+        cast(WebSocket, SimpleNamespace(send_text=AsyncMock())),
+        cast(UpstreamWebSocket, upstream),
+        message=SimpleNamespace(kind="close", text=None, data=None, close_code=1011, error=None, error_code=None),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    assert replayed is True
+    assert upstream_control.replay_request_state is request_state
+    assert pending_requests == deque()
+    assert upstream.close_calls == 1
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert request_state.replay_count == 1
+    assert request_state.replay_required_account_id is None
+    assert request_state.preferred_account_id is None
+    if expect_exclusion:
+        assert request_state.excluded_account_ids == {account.id}
+        assert request_state.affinity_policy.reallocate_sticky is True
+    else:
+        assert request_state.excluded_account_ids == set()
+        assert request_state.affinity_policy == affinity_policy
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [
+        ("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
+        ("model_at_capacity", "Selected model is at capacity. Please try a different model."),
+    ],
+)
+async def test_process_upstream_websocket_text_replays_a_codex_session_accepted_capacity_failure_on_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    error_message: str,
+):
+    """#2127 round 7 P2 (capacity path): the same bare-session accepted turn
+    fails output-free with a capacity terminal. The single-lifecycle replay is
+    still staged and the owner still takes the health penalty, but the owner is
+    not excluded and the sticky row is not reallocated: the session may resolve
+    to a hard owner, so the reconnect goes back through selection unexcluded as
+    the pre-created replay always did."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_legacy_hard_owner")
+    pending_request = _accepted_lifecycle_request_state(
+        request_id="ws_req_codex_session_accepted_capacity_replay",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_gate_acquired=True,
+        affinity_policy=_BARE_SESSION_HEADER_AFFINITY,
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(0),
+        )
+
+    await process({"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    await process({"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}})
+    assert pending_request.response_event_count == 2
+
+    await process(_accepted_capacity_error_payload(code=error_code, message=error_message))
+
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.replay_request_state is pending_request
+    assert pending_requests == deque()
+    assert pending_request.replay_downstream_response_id == "resp_x"
+    assert pending_request.suppress_next_created_downstream is True
+    assert pending_request.suppress_next_in_progress_downstream is True
+    assert pending_request.awaiting_response_created is True
+    assert pending_request.response_id is None
+    assert pending_request.replay_count == 1
+    assert pending_request.request_text == _accepted_lifecycle_request_state().request_text
+    assert pending_request.excluded_account_ids == set()
+    assert pending_request.affinity_policy == _BARE_SESSION_HEADER_AFFINITY
+    assert pending_request.affinity_policy.reallocate_sticky is False
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[0] is account
+    assert handle_stream_error.await_args.args[2] == "server_is_overloaded"
 
 
 @pytest.mark.asyncio

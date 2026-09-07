@@ -432,6 +432,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _trim_websocket_previous_response_input_items,
     _upstream_websocket_disconnect_message,
     _websocket_accepted_replay_can_switch_account,
+    _websocket_accepted_replay_may_exclude_account,
     _websocket_auth_failure_requires_reauth,
     _websocket_capability_metadata_values,
     _websocket_client_previous_response_full_resend_is_retry_safe,
@@ -1266,12 +1267,13 @@ async def _process_upstream_websocket_transport_end(
         if (
             replay_request_state is not None
             and replay_request_state.replay_downstream_response_id is not None
-            and _websocket_accepted_replay_can_switch_account(replay_request_state)
+            and _websocket_accepted_replay_may_exclude_account(replay_request_state)
         ):
             # An accepted turn was lost on this account; move the
             # account-neutral replay to another one like the bridge does. A
             # replay still pinned to this owner (bound replay owner, file,
-            # turn state) reconnects here instead of excluding itself.
+            # turn state) or whose Codex session may resolve to a hard sticky
+            # owner reconnects here instead of excluding itself.
             replay_request_state.excluded_account_ids.add(account.id)
             replay_request_state.affinity_policy = replace(replay_request_state.affinity_policy, reallocate_sticky=True)
     if replay_request_state is not None:
@@ -5986,10 +5988,11 @@ class _WebSocketMixin:
                     # the bridge's owner-bound anchored retry). The dispatch
                     # binding already requires that owner on the reconnect.
                     _prepare_websocket_request_state_for_account_switch(request_state)
-                if accepted_lifecycle_replay and _websocket_accepted_replay_can_switch_account(request_state):
+                if accepted_lifecycle_replay and _websocket_accepted_replay_may_exclude_account(request_state):
                     # The accepted turn failed on this account; move the
                     # account-neutral replay to another one like the bridge does.
-                    # A replay still pinned to its owner reconnects there instead.
+                    # A replay still pinned to its owner, or whose Codex session
+                    # may resolve to a hard sticky owner, reconnects there instead.
                     request_state.excluded_account_ids.add(account.id)
                     request_state.affinity_policy = replace(request_state.affinity_policy, reallocate_sticky=True)
                 upstream_control.suppress_downstream_event = True

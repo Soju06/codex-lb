@@ -220,6 +220,12 @@ class ConversationDetailsResult:
     model_stats: list[ConversationModelStatRow]
 
 
+@dataclass(frozen=True, slots=True)
+class RequestActivityDay:
+    date: str
+    requests: int
+
+
 class RequestLogsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -731,6 +737,50 @@ class RequestLogsRepository:
 
     async def aggregate_activity_between(self, since: datetime, until: datetime) -> RequestActivityAggregate:
         return await self._aggregate_activity(since, until)
+
+    async def aggregate_request_activity(self, since: datetime, until: datetime) -> list[RequestActivityDay]:
+        """Count non-warmup requests by UTC day over a bounded window.
+
+        The hourly reader supplies folded rows using the rollup bucket range
+        and returns only the raw complement.  Keeping the raw query restricted
+        to those windows is important here: this endpoint is polled by an
+        optional dashboard view and must not turn a six-month request into a
+        scan of all retained request logs.
+        """
+        rollup_rows, raw_windows = await read_hourly_window(
+            self._session,
+            since,
+            until,
+            filters=(RequestUsageHourlyRollup.request_kind.not_in(WARMUP_REQUEST_KINDS),),
+        )
+        counts: dict[int, int] = {}
+        for rollup in rollup_rows:
+            day_epoch = rollup.bucket_epoch // 86_400 * 86_400
+            counts[day_epoch] = counts.get(day_epoch, 0) + rollup.request_count
+
+        if raw_windows:
+            day_col = self._bucket_epoch_expr(86_400).label("day_epoch")
+            statement = (
+                select(day_col, func.count(RequestLog.id).label("request_count"))
+                .where(
+                    raw_windows_clause(raw_windows),
+                    self._exclude_warmup_clause(),
+                )
+                .group_by(day_col)
+                .order_by(day_col)
+            )
+            for row in (await self._session.execute(statement)).all():
+                day_epoch = int(row.day_epoch)
+                counts[day_epoch] = counts.get(day_epoch, 0) + int(row.request_count)
+
+        return [
+            RequestActivityDay(
+                date=datetime.fromtimestamp(day_epoch, tz=timezone.utc).date().isoformat(),
+                requests=count,
+            )
+            for day_epoch, count in sorted(counts.items())
+            if count > 0
+        ]
 
     async def _aggregate_activity(self, since: datetime, until: datetime | None) -> RequestActivityAggregate:
         rollup_rows, raw_windows = await read_hourly_window(

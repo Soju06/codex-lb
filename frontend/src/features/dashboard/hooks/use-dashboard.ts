@@ -1,6 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { getDashboardOverview, getDashboardProjections } from "@/features/dashboard/api";
+import {
+  getDashboardOverview,
+  getDashboardProjections,
+  getDashboardRequestActivity,
+} from "@/features/dashboard/api";
 import {
   DEFAULT_OVERVIEW_TIMEFRAME,
   type OverviewTimeframe,
@@ -23,6 +27,18 @@ export function useDashboardProjections(enabled = true) {
   return useQuery({
     queryKey: ["dashboard", "projections"],
     queryFn: getDashboardProjections,
+    enabled,
+    refetchInterval: refreshSeconds * 1_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+  });
+}
+
+export function useDashboardRequestActivity(enabled = false) {
+  const refreshSeconds = useDashboardPreferencesStore((state) => state.refreshSeconds);
+  return useQuery({
+    queryKey: ["dashboard", "request-activity"],
+    queryFn: getDashboardRequestActivity,
     enabled,
     refetchInterval: refreshSeconds * 1_000,
     refetchIntervalInBackground: false,

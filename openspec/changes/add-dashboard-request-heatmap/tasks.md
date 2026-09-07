@@ -1,0 +1,9 @@
+- [x] Add OpenSpec requirements and design for the local display mode and request activity endpoint.
+- [x] Add the dashboard display-mode preference with localStorage persistence and Appearance controls.
+- [x] Add the bounded daily request-count backend endpoint using hourly rollups plus raw tail data.
+- [x] Add frontend schemas, query hook, heatmap component, theme-aware styling, and tooltips.
+- [x] Update dashboard composition so the selected mode replaces only Weekly credits pace.
+- [x] Add frontend and backend regression tests, including no-full-scan query-path coverage.
+- [x] Run OpenSpec validation, focused tests, typecheck, and lint.
+- [x] Extend the heatmap window to six months and remove month and weekday axis labels.
+- [x] Remove the unused request activity description translation.

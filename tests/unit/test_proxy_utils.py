@@ -38482,7 +38482,8 @@ async def test_pop_replayable_created_generate_false_prewarm_accepts_initial_seq
 @pytest.mark.parametrize(
     ("generate_false_prewarm", "response_event_count", "sequence_number"),
     [
-        (False, 2, 0),
+        (False, 1, 0),
+        (False, 2, 1),
         (True, 2, 0),
         (True, 1, 1),
     ],
@@ -53413,6 +53414,7 @@ def test_websocket_precreated_retry_error_code_replays_accepted_output_free_capa
         {"deferred_reasoning_downstream_texts": ["data: {}\n\n"]},
         {"previous_response_id": "resp_anchor"},
         {"last_downstream_sequence_number": 0},
+        {"last_downstream_sequence_number": 1},
         {"request_text": None},
         {"response_create_sent_at": None},
     ],
@@ -53570,9 +53572,15 @@ def test_precreated_only_classifiers_refuse_accepted_states():
     ("overrides", "expected"),
     [
         ({}, True),
-        ({"last_downstream_sequence_number": 1}, True),
+        # A forwarded finite sequence_number keeps the request on its socket
+        # (openspec: "Direct WebSocket replay never mixes numeric response
+        # sequences"); the accepted lifecycle does not widen that, and only the
+        # created-only ``generate: false`` prewarm keeps its watermark-0 exception.
+        ({"last_downstream_sequence_number": 1}, False),
         ({"last_downstream_sequence_number": 0}, False),
-        ({"response_event_count": 1, "last_downstream_sequence_number": 0}, True),
+        ({"response_event_count": 1, "last_downstream_sequence_number": 0}, False),
+        ({"response_event_count": 1, "last_downstream_sequence_number": 0, "generate_false_prewarm": True}, True),
+        ({"response_event_count": 2, "last_downstream_sequence_number": 1, "generate_false_prewarm": True}, False),
         ({"upstream_model_output_seen": True}, False),
         ({"pending_function_call_ids": ["call_pending"]}, False),
         ({"deferred_reasoning_downstream_texts": ["data: {}\n\n"]}, False),
@@ -53593,7 +53601,7 @@ def test_websocket_request_can_replay_before_visible_output_accepts_lifecycle_on
     expected: bool,
 ):
     """created + in_progress (two counted lifecycle events) is still pre-visible;
-    a sequenced watermark qualifies only when it covers exactly that prelude."""
+    a sequenced watermark keeps refusing the replay exactly as on ``main``."""
     request_state = _accepted_lifecycle_request_state(**overrides)
 
     assert proxy_service._websocket_request_can_replay_before_visible_output(request_state) is expected
@@ -53643,23 +53651,32 @@ def test_prepare_visible_output_replay_preserves_staged_identity_across_bounded_
 
 
 @pytest.mark.asyncio
-async def test_pop_replayable_sequenced_lifecycle_prelude_replays_without_prewarm_marker():
-    """Sequenced created + in_progress (watermark 1) is replayable for ordinary
-    native requests, not only ``generate: false`` prewarms."""
+async def test_pop_replayable_refuses_sequenced_accepted_lifecycle_prelude():
+    """#2127 round 4 P2-B: created(0) + in_progress(1) forwarded with finite
+    ``sequence_number`` frames is exactly the shape the existing requirement
+    "Direct WebSocket replay never mixes numeric response sequences" fails
+    closed. The accepted-lifecycle replay must not widen it: the transport-end
+    path refuses the replay with the sequenced reason and leaves the request
+    untouched for the 1011 close, as on ``main``."""
     pending_request = _accepted_lifecycle_request_state(last_downstream_sequence_number=1)
     pending_requests = deque([pending_request])
+    replay_refusal_reasons: list[str] = []
 
     replayed_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
         pending_requests,
         pending_lock=anyio.Lock(),
+        replay_refusal_reasons=replay_refusal_reasons,
     )
 
-    assert replayed_request is pending_request
-    assert pending_requests == deque()
-    assert pending_request.replay_downstream_response_id == "resp_accepted_visible"
-    assert pending_request.suppress_next_created_downstream is True
-    assert pending_request.suppress_next_in_progress_downstream is True
-    assert pending_request.last_downstream_sequence_number == 1
+    assert replayed_request is None
+    assert pending_requests == deque([pending_request])
+    assert replay_refusal_reasons == ["sequenced_downstream_frame"]
+    assert pending_request.replay_count == 0
+    assert pending_request.response_id == "resp_accepted_visible"
+    assert pending_request.awaiting_response_created is False
+    assert pending_request.replay_downstream_response_id is None
+    assert pending_request.suppress_next_created_downstream is False
+    assert pending_request.suppress_next_in_progress_downstream is False
 
 
 @pytest.mark.asyncio
@@ -53759,6 +53776,56 @@ async def test_process_upstream_websocket_text_replays_accepted_capacity_error_w
     assert upstream_control.suppress_downstream_event is False
     assert json.loads(completed_text)["response"]["id"] == "resp_x"
     assert pending_requests == deque()
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_forwards_sequenced_accepted_capacity_error_without_replay(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#2127 round 4 P2-B: the direct websocket surface forwarded created(0)
+    and in_progress(1) with finite ``sequence_number`` frames. The existing
+    requirement "Direct WebSocket replay never mixes numeric response
+    sequences" (scenario "Sequenced retryable terminal event is not replayed")
+    applies to the accepted capacity terminal too: it is finalized and
+    surfaced unchanged, with no reconnect and no replay staged."""
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_sequenced_accepted_capacity")
+    pending_request = _accepted_lifecycle_request_state(
+        request_id="ws_req_sequenced_accepted_capacity",
+        last_downstream_sequence_number=1,
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream_text = json.dumps({**_accepted_capacity_error_payload(), "sequence_number": 2}, separators=(",", ":"))
+
+    downstream_text = await service._process_upstream_websocket_text(
+        upstream_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert downstream_text == upstream_text
+    finalize_request_state.assert_awaited_once()
+    handle_stream_error.assert_not_awaited()
+    assert upstream_control.reconnect_requested is False
+    assert upstream_control.suppress_downstream_event is False
+    assert upstream_control.replay_request_state is None
+    assert pending_requests == deque()
+    assert pending_request.replay_count == 0
+    assert pending_request.replay_downstream_response_id is None
+    assert pending_request.suppress_next_created_downstream is False
+    assert pending_request.suppress_next_in_progress_downstream is False
+    assert pending_request.excluded_account_ids == set()
 
 
 @pytest.mark.asyncio

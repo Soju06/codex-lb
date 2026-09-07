@@ -5455,9 +5455,9 @@ class _WebSocketMixin:
             else:
                 release_create_gate = False
             if request_state is not None:
-                replay_prelude_will_be_suppressed = (
+                replay_created_will_be_suppressed = (
                     event_type == "response.created" and request_state.suppress_next_created_downstream
-                ) or (event_type == "response.in_progress" and request_state.suppress_next_in_progress_downstream)
+                )
                 sequence_number = payload.get("sequence_number") if payload is not None else None
                 if (
                     request_state.replay_downstream_response_id is not None
@@ -5465,7 +5465,7 @@ class _WebSocketMixin:
                     and isinstance(sequence_number, int)
                     and not isinstance(sequence_number, bool)
                     and sequence_number <= request_state.last_downstream_sequence_number
-                    and not replay_prelude_will_be_suppressed
+                    and not replay_created_will_be_suppressed
                 ):
                     raise _WebSocketReplaySequenceRegression(
                         f"request_id={request_state.request_log_id or request_state.request_id} "

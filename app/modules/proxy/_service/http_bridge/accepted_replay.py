@@ -63,13 +63,23 @@ def _websocket_accepted_replay_candidate(
 
     Mirrors the fresh-replay rules of the pre-created path: a single pending
     request with its body retained, no replay consumed yet, a send boundary on
-    the direct websocket transport, and either no anchor or a retry-safe fresh
-    payload. The fresh payload replaces the anchored body only when the
-    owner-switch prep proves the move safe (proxy-injected anchor,
-    account-neutral body); otherwise the anchored body is re-sent to the owner
-    that accepted it, which the terminal proved produced nothing.
+    the direct websocket transport, no finite ``sequence_number`` forwarded
+    downstream, and either no anchor or a retry-safe fresh payload. The fresh
+    payload replaces the anchored body only when the owner-switch prep proves
+    the move safe (proxy-injected anchor, account-neutral body); otherwise the
+    anchored body is re-sent to the owner that accepted it, which the terminal
+    proved produced nothing.
+
+    The sequence guard is the direct websocket surface's existing contract
+    (openspec: "Direct WebSocket replay never mixes numeric response
+    sequences"): a fresh upstream generation restarts its counter, so once a
+    sequenced prelude frame reached the client the terminal is finalized and
+    surfaced unchanged instead of being replayed. The HTTP bridge never
+    records a downstream watermark, so its behaviour is unaffected.
     """
     if has_other_pending_requests:
+        return False
+    if request_state.last_downstream_sequence_number is not None:
         return False
     if not _websocket_request_is_accepted_lifecycle_only(request_state):
         return False

@@ -1696,16 +1696,20 @@ def _websocket_request_can_replay_before_visible_output(
         and request_state.replay_downstream_response_id is None
     ):
         return False
-    # A sequenced downstream frame normally pins the request to its socket: a
-    # fresh upstream generation restarts ``sequence_number`` from zero. The
-    # accepted lifecycle prelude is the one exception because its replay is
-    # suppressed downstream, so the client's counter keeps advancing; the
-    # websocket relay still fails closed if a replay frame does not advance.
-    sequenced_lifecycle_only = (
-        request_state.last_downstream_sequence_number is not None
-        and _websocket_request_is_accepted_lifecycle_only(request_state)
+    # A sequenced downstream frame pins the request to its socket: a fresh
+    # upstream generation restarts ``sequence_number`` from zero (openspec
+    # requirement "Direct WebSocket replay never mixes numeric response
+    # sequences"). The accepted-lifecycle replay does not widen this; the
+    # created-only ``generate: false`` prewarm keeps its watermark-0 exception.
+    sequenced_created_only_prewarm = (
+        request_state.generate_false_prewarm
+        and request_state.last_downstream_sequence_number == 0
+        and request_state.response_id is not None
+        and not request_state.awaiting_response_created
+        and request_state.response_event_count == 1
+        and not request_state.downstream_visible
     )
-    if request_state.last_downstream_sequence_number is not None and not sequenced_lifecycle_only:
+    if request_state.last_downstream_sequence_number is not None and not sequenced_created_only_prewarm:
         return False
     if request_state.downstream_visible:
         return False
@@ -1736,10 +1740,16 @@ def _websocket_request_is_accepted_lifecycle_only(request_state: _WebSocketReque
     websocket relay record in ``upstream_model_output_seen``, so "at most two
     counted events and no output marker" is equivalent to "lifecycle only"
     even when upstream skips ``response.in_progress``. A buffered reasoning
-    prelude, a pending tool call, or a downstream sequence watermark that does
-    not cover exactly that prelude (frames ``0 .. count - 1``) disqualify the
-    request. Such a turn has no client-observable or conversational side
-    effect, which is what makes its single-lifecycle replay safe.
+    prelude or a pending tool call disqualifies the request. Such a turn has
+    no client-observable or conversational side effect, which is what makes
+    its single-lifecycle replay safe.
+
+    This predicate describes the upstream lifecycle only. Downstream sequence
+    exposure (``last_downstream_sequence_number``) is judged by the callers:
+    ``_websocket_request_can_replay_before_visible_output`` and the accepted
+    capacity classifier both keep refusing a sequenced request, so the direct
+    websocket surface never replays after a finite ``sequence_number`` frame
+    was forwarded.
     """
     if request_state.response_id is None or request_state.awaiting_response_created:
         return False
@@ -1749,10 +1759,7 @@ def _websocket_request_is_accepted_lifecycle_only(request_state: _WebSocketReque
         return False
     if request_state.deferred_reasoning_downstream_texts:
         return False
-    if request_state.pending_function_call_ids or request_state.pending_tool_call_types:
-        return False
-    watermark = request_state.last_downstream_sequence_number
-    return watermark is None or watermark == request_state.response_event_count - 1
+    return not (request_state.pending_function_call_ids or request_state.pending_tool_call_types)
 
 
 def _record_websocket_route_metadata(

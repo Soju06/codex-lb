@@ -13323,6 +13323,7 @@ class _TwoAccountWebSocketFailover:
         self.refused_connects: list[dict[str, Any]] = []
         self.stream_errors: list[tuple[str, str]] = []
         self.turn_events: list[list[dict[str, Any]]] = []
+        self.request_logs: list[dict[str, Any]] = []
 
     @staticmethod
     def _required_account_id(request_state: Any) -> str | None:
@@ -13408,7 +13409,8 @@ class _TwoAccountWebSocketFailover:
             return await real_handle_stream_error(self, account, error, code, http_status)
 
         async def fake_write_request_log(self, **kwargs):
-            del self, kwargs
+            del self
+            failover.request_logs.append(kwargs)
 
         monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
         monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
@@ -13633,113 +13635,72 @@ def _sequenced_accepted_capacity_failure_upstream(response_id: str) -> _Sequence
     )
 
 
-def _sequenced_recovered_upstream(response_id: str, *, completed_sequence: int) -> _SequencedUpstreamWebSocket:
-    """A fresh upstream generation restarts its counter: created 0,
-    in_progress 1 (both suppressed downstream), then output 2 and completion."""
-    return _SequencedUpstreamWebSocket(
-        [],
-        deferred_message_batches=[
-            [
-                _sequenced_ws_event(
-                    {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}}, 0
-                ),
-                _sequenced_ws_event(
-                    {"type": "response.in_progress", "response": {"id": response_id, "status": "in_progress"}}, 1
-                ),
-                _sequenced_ws_event(
-                    {
-                        "type": "response.output_item.added",
-                        "response_id": response_id,
-                        "output_index": 0,
-                        "item": {
-                            "id": "msg_ws_seq_recovered",
-                            "type": "message",
-                            "role": "assistant",
-                            "status": "in_progress",
-                            "content": [],
-                        },
-                    },
-                    2,
-                ),
-                _sequenced_ws_event(
-                    {
-                        "type": "response.completed",
-                        "response": {
-                            "id": response_id,
-                            "status": "completed",
-                            "output": [
-                                {
-                                    "type": "message",
-                                    "role": "assistant",
-                                    "content": [{"type": "output_text", "text": "OK"}],
-                                }
-                            ],
-                        },
-                    },
-                    completed_sequence,
-                ),
-            ]
-        ],
-    )
-
-
-def test_backend_responses_websocket_accepted_capacity_replay_keeps_sequenced_frames_advancing(
+def test_backend_responses_websocket_sequenced_accepted_capacity_error_is_not_replayed(
     app_instance,
     monkeypatch,
 ):
-    """Native Codex frames carry ``sequence_number``. The replay's duplicate
-    prelude (created 0, in_progress 1) is suppressed, so the client's counter
-    keeps advancing under the single response id it already reads."""
+    """#2127 round 4 P2-B: native Codex frames carry ``sequence_number``. Once
+    created(0) and in_progress(1) reached the client, the existing requirement
+    "Direct WebSocket replay never mixes numeric response sequences" (scenario
+    "Sequenced retryable terminal event is not replayed") governs: the
+    accepted capacity terminal is finalized and surfaced unchanged on the
+    single connect, exactly as on ``main``; the accepted-lifecycle replay does
+    not widen that contract."""
     first_upstream = _sequenced_accepted_capacity_failure_upstream("resp_ws_seq_accepted_failed")
-    recovered_upstream = _sequenced_recovered_upstream("resp_ws_seq_accepted_recovered", completed_sequence=3)
+    recovered_upstream = _recovered_upstream("resp_ws_seq_accepted_unused")
     failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
     failover.install(monkeypatch)
 
     events, disconnect = failover.run(app_instance)
 
-    created_id = _assert_ws_single_response_lifecycle_completed(events, disconnect)
-    assert created_id == "resp_ws_seq_accepted_failed"
+    assert disconnect is None, f"unexpected disconnect code={disconnect.code}"
     assert [(event["type"], event["sequence_number"]) for event in events] == [
         ("response.created", 0),
         ("response.in_progress", 1),
-        ("response.output_item.added", 2),
-        ("response.completed", 3),
+        ("error", 2),
     ]
-    assert events[2]["response_id"] == created_id
-    failover.assert_retried_on_another_account()
-    assert len(recovered_upstream.sent_text) == 1
+    assert events[0]["response"]["id"] == "resp_ws_seq_accepted_failed"
+    assert events[-1]["error"]["code"] == "server_is_overloaded"
+    assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID]
+    assert failover.excluded_at_connect == [set()]
+    assert not failover.refused_connects
+    assert len(first_upstream.sent_text) == 1
+    assert recovered_upstream.sent_text == []
 
 
-def test_backend_responses_websocket_accepted_capacity_replay_fails_closed_on_non_advancing_sequence(
+def test_backend_responses_websocket_sequenced_accepted_abrupt_close_fails_closed_without_replay(
     app_instance,
     monkeypatch,
 ):
-    """Mutant: a replay frame that does not advance past the forwarded prelude
-    (completed with ``sequence_number`` 1 after the client saw 0 and 1) is
-    refused by the existing fail-closed sequence guard instead of reaching
-    the client with a stale counter."""
-    first_upstream = _sequenced_accepted_capacity_failure_upstream("resp_ws_seq_regressed_failed")
-    recovered_upstream = _SequencedUpstreamWebSocket(
+    """#2127 round 4 P2-B, transport-close twin: after a sequenced accepted
+    prelude the abrupt close keeps the existing contract (scenario "sequenced
+    direct websocket closes before completion"): the request is recorded as
+    ``stream_incomplete``, no synthetic terminal is emitted under the visible
+    id, no replacement account is connected, and the downstream socket closes
+    with 1011 so the client retries on a fresh transport."""
+    first_upstream = _SequencedUpstreamWebSocket(
         [],
         deferred_message_batches=[
             [
                 _sequenced_ws_event(
                     {
                         "type": "response.created",
-                        "response": {"id": "resp_ws_seq_regressed_recovered", "status": "in_progress"},
+                        "response": {"id": "resp_ws_seq_accepted_closed", "status": "in_progress"},
                     },
                     0,
                 ),
                 _sequenced_ws_event(
                     {
-                        "type": "response.completed",
-                        "response": {"id": "resp_ws_seq_regressed_recovered", "status": "completed", "output": []},
+                        "type": "response.in_progress",
+                        "response": {"id": "resp_ws_seq_accepted_closed", "status": "in_progress"},
                     },
                     1,
                 ),
+                _FakeUpstreamMessage("close", close_code=1011),
             ]
         ],
     )
+    recovered_upstream = _recovered_upstream("resp_ws_seq_close_unused")
     failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
     failover.install(monkeypatch)
 
@@ -13750,7 +13711,14 @@ def test_backend_responses_websocket_accepted_capacity_replay_fails_closed_on_no
         ("response.in_progress", 1),
     ]
     assert disconnect is not None and disconnect.code == 1011
-    assert failover.connect_accounts == ["acct_ws_accepted_a", "acct_ws_accepted_b"]
+    assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID]
+    assert not failover.refused_connects
+    assert len(first_upstream.sent_text) == 1
+    assert recovered_upstream.sent_text == []
+    assert len(failover.request_logs) == 1
+    assert failover.request_logs[0]["request_id"] == "resp_ws_seq_accepted_closed"
+    assert failover.request_logs[0]["status"] == "error"
+    assert failover.request_logs[0]["error_code"] == "stream_incomplete"
 
 
 def test_backend_responses_websocket_does_not_replay_accepted_capacity_error_after_output_item(

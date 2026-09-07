@@ -70,6 +70,7 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 
 #### Scenario: Steering parent normalization preserves failure correlation
 - **GIVEN** a valid steering request whose previous_response_id has surrounding whitespace
+- **AND** reservation operations succeed
 - **WHEN** the proxy admits the steering request for the normalized owned response ID
 - **THEN** it SHALL forward that same normalized ID upstream while preserving the submitted input representation
 - **AND** an echoed rejection SHALL release the matching successor reservation before the connection closes

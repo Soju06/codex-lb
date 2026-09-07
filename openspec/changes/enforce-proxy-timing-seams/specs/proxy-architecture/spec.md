@@ -2,21 +2,26 @@
 
 ### Requirement: Proxy turn-lifecycle timing seams are enforced
 
-The required repository architecture gate SHALL inspect every Python module under `app/modules/proxy/` and `app/core/utils/shared_future.py` and SHALL reject raw timing, task-spawn and clock sites that bypass the `Scheduler`/`Clock` seams in `app/core/clock.py`. The gate MUST classify each site under exactly one rule: `raw-sleep` (`asyncio.sleep`/`anyio.sleep` with a non-zero delay), `raw-timeout` (`asyncio.wait_for`, a timed `asyncio.wait`, `asyncio.timeout`/`timeout_at`, `anyio.fail_after`/`move_on_after`, and a timed `wait_on_shared_future` without `scheduler=`), `raw-task-spawn` (`asyncio.create_task`, `asyncio.ensure_future`, `asyncio.TaskGroup`, and `create_task` on a loop obtained from `asyncio.get_running_loop()`/`get_event_loop()`), `raw-clock-read` (`time.monotonic()`/`time()`/`perf_counter()`, `loop.time()`/`call_later`/`call_at`, the legacy `_service_time().<x>()` seam and direct `REAL_CLOCK.<x>()` calls, including the `time.time() if now is None else now` default idiom), and `missing-scheduler-kwarg` (a call to a function listed in the configuration that omits a required `scheduler`/`clock`/`scheduler_owner` keyword, matched by the callee's terminal name so facade, attribute and bare calls are covered). A direct `REAL_SCHEDULER.<x>()` call MUST be classified by member (`sleep` as `raw-sleep`, `create_task` as `raw-task-spawn`, otherwise `raw-timeout`). A literal `sleep(0)` yield point, an untimed `asyncio.wait`, `asyncio.shield`, `asyncio.gather`, `loop.create_future()`, `anyio.CancelScope(shield=True)`, `asyncio.to_thread`, `utcnow()` and `datetime.now()` MUST NOT be reported. Alias discovery MUST cover every import in the file, including nested ones, and the canonical `asyncio`/`anyio`/`time` names MUST always be recognised; a function parameter that shadows a recognised name MUST suppress the match; a `**kwargs` splat MUST satisfy a required-keyword rule.
+The required repository architecture gate SHALL inspect every Python module under `app/modules/proxy/` and `app/core/utils/shared_future.py` and SHALL reject raw timing, task-spawn and clock sites that bypass the `Scheduler`/`Clock` seams in `app/core/clock.py`. The gate MUST classify each site under exactly one rule: `raw-sleep` (`asyncio.sleep`/`anyio.sleep` with a non-zero delay, `anyio.sleep_forever`/`sleep_until`, and the blocking `time.sleep`), `raw-timeout` (`asyncio.wait_for`, a timed `asyncio.wait`, `asyncio.timeout`/`timeout_at`, `anyio.fail_after`/`move_on_after`/`fail_at`/`move_on_at`, and a timed `wait_on_shared_future` without `scheduler=`), `raw-task-spawn` (`asyncio.create_task`, `asyncio.ensure_future`, `asyncio.TaskGroup`, `anyio.create_task_group`, and `create_task` on a loop obtained from `asyncio.get_running_loop()`/`get_event_loop()`), `raw-clock-read` (`time.monotonic()`/`time()`/`perf_counter()`, `loop.time()`/`call_later`/`call_at`, the legacy `_service_time().<x>()` seam and direct `REAL_CLOCK.<x>()` calls, including the `time.time() if now is None else now` default idiom), and `missing-scheduler-kwarg` (a call to a function listed in the configuration that omits a required `scheduler`/`clock`/`scheduler_owner` keyword, matched by the callee's terminal name so facade, attribute and bare calls are covered). A direct `REAL_SCHEDULER.<x>()` call MUST be classified by member (`sleep` as `raw-sleep`, `create_task` as `raw-task-spawn`, otherwise `raw-timeout`). A literal `asyncio.sleep(0)` yield point, an untimed `asyncio.wait`, `asyncio.shield`, `asyncio.gather`, `loop.create_future()`, `anyio.CancelScope(shield=True)`, `asyncio.to_thread`, `utcnow()` and `datetime.now()` MUST NOT be reported. Alias discovery MUST cover every import in the file, including nested ones, and the canonical `asyncio`/`anyio`/`time` names MUST always be recognised; a function parameter that shadows a recognised name MUST suppress the match; a `**kwargs` splat MUST satisfy a required-keyword rule.
 
-The gate's complete configuration SHALL be defined exactly once in the marked `proxy-timing-seams` TOML block of this specification: `[scheduler_kwarg_required]` maps a function name to its required keyword or list of distinct keywords, and `[allowances.timing]` / `[allowances.clock]` give the accepted raw-site count per repository-relative module for the timing rules (`raw-sleep`, `raw-timeout`, `raw-task-spawn`, `missing-scheduler-kwarg`) and the clock rule respectively. A module not listed SHALL have an allowance of zero. Implementations SHALL restore or lower these allowances rather than increase, bypass, or remove them to make CI pass, and the committed allowances SHALL equal the counts the gate reports so headroom cannot accrue silently. A missing, duplicate, malformed, incomplete, or otherwise invalid definition, or an allowance for a module that is not scanned, SHALL fail the gate by name without preventing module parse failures from being reported. The gate SHALL be able to print the configuration block matching the current tree and to list every site with its rule.
+The gate's complete configuration SHALL be defined exactly once in the marked `proxy-timing-seams` TOML block of the stable specification file `openspec/specs/proxy-architecture/spec.md`, which is the file the checker reads: `[scheduler_kwarg_required]` maps a function name to its required keyword or list of distinct keywords, and `[allowances.timing]` / `[allowances.clock]` give the accepted raw-site counts per repository-relative module for the timing rules (`raw-sleep`, `raw-timeout`, `raw-task-spawn`, `missing-scheduler-kwarg`) and the clock rule respectively. A timing allowance SHALL be tracked per rule as an inline table (`{ raw-sleep = 1, raw-timeout = 2 }`) so that removing a raw site of one rule cannot offset adding a raw site of another; a plain integer MAY be accepted as a category total for compatibility, but `--report` SHALL emit per-rule counts and the committed block SHALL use them. The single-rule clock table is written as plain integers. A module or rule not listed SHALL have an allowance of zero. Implementations SHALL restore or lower these allowances rather than increase, bypass, or remove them to make CI pass, and the committed allowances SHALL equal the counts the gate reports so headroom cannot accrue silently. A missing, duplicate, malformed, incomplete, or otherwise invalid definition, a per-rule table naming a rule outside its category, or an allowance for a module that is not scanned, SHALL fail the gate by name without preventing module parse failures from being reported. The gate SHALL be able to print the configuration block matching the current tree and to list every site with its rule.
 
 #### Scenario: Raw timing site in an unlisted module
 
-- **WHEN** a module under `app/modules/proxy/` gains a raw `asyncio.sleep`, timed wait, task spawn, clock read or a seam call missing its required keyword and the module has no allowance for that category
-- **THEN** the gate reports every site of that category in the module with its rule id, spelling and suggested seam
-- **AND** reports the module's count against its allowance
+- **WHEN** a module under `app/modules/proxy/` gains a raw `asyncio.sleep`, timed wait, task spawn, clock read or a seam call missing its required keyword and the module has no allowance for that rule
+- **THEN** the gate reports every site of that rule in the module with its rule id, spelling and suggested seam
+- **AND** reports the module's count for that rule against its allowance
 - **AND** the architecture gate exits non-zero
 
 #### Scenario: Yield points and non-timing primitives stay raw
 
 - **WHEN** application code uses a literal `asyncio.sleep(0)`, an untimed `asyncio.wait`, `asyncio.shield`, `asyncio.gather`, `loop.create_future()`, `anyio.CancelScope(shield=True)`, `asyncio.to_thread`, `utcnow()` or `datetime.now()`
 - **THEN** the gate does not report the site
+
+#### Scenario: Trading one timing rule for another is rejected
+
+- **WHEN** a module's per-rule timing allowance accepts one `missing-scheduler-kwarg` site and the module instead contains one raw `asyncio.sleep` and no missing-keyword site, so its timing total is unchanged
+- **THEN** the gate reports the raw sleep under `raw-sleep` against an allowance of zero and exits non-zero
 
 #### Scenario: Injected seams pass
 
@@ -31,20 +36,20 @@ The gate's complete configuration SHALL be defined exactly once in the marked `p
 
 #### Scenario: Aliases and nested imports are resolved, parameter shadows are not
 
-- **WHEN** a raw primitive is reached through a module alias, an imported member alias, a loop bound from `asyncio.get_running_loop()` in the same scope, or an import nested inside a function
+- **WHEN** a raw primitive (including `time.sleep`, `anyio.sleep_forever`/`sleep_until`, `anyio.fail_at`/`move_on_at` or `anyio.create_task_group`) is reached through a module alias, an imported member alias, a loop bound from `asyncio.get_running_loop()` in the same scope, or an import nested inside a function
 - **THEN** the gate reports the site under its rule
 - **AND** a function parameter that shadows the recognised name suppresses the report
 
 #### Scenario: Definition is invalid or lists a missing module
 
-- **WHEN** the `proxy-timing-seams` block is missing, duplicated, malformed, has an unknown key or allowance table, a non-positive or non-integer allowance, a malformed keyword list, or lists a module that is not scanned
+- **WHEN** the `proxy-timing-seams` block is missing, duplicated, malformed, has an unknown key or allowance table, a non-positive or non-integer allowance, an empty per-rule table, a per-rule table naming an unknown rule or a non-positive count, a malformed keyword list, or lists a module that is not scanned
 - **THEN** the gate reports the definition failure by name and exits non-zero
 - **AND** module parse failures are still reported
 
 #### Scenario: Allowances are exact and reproducible
 
 - **WHEN** the repository test suite runs
-- **THEN** every listed allowance equals the count the gate reports for that module, no unlisted module has a raw site, and the block printed by `--report` parses to the committed configuration
+- **THEN** every listed timing allowance is a per-rule table equal to the per-rule counts the gate reports for that module, every listed clock allowance equals its count, no unlisted module has a raw site, and the block printed by `--report` parses to the committed configuration
 
 #### Scenario: All timing seam gates pass
 

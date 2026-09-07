@@ -11,14 +11,16 @@ allowance table. Unlisted modules have an allowance of zero.
 
 Rules (the id is printed verbatim and used as the test id):
 
-* ``raw-sleep``: ``asyncio.sleep``/``anyio.sleep`` with a non-zero delay.
-  A literal ``sleep(0)`` is a yield point, not a timer, and stays raw.
+* ``raw-sleep``: ``asyncio.sleep``/``anyio.sleep`` with a non-zero delay,
+  ``anyio.sleep_forever``/``sleep_until`` and the blocking ``time.sleep``.
+  A literal ``asyncio.sleep(0)`` is a yield point, not a timer, and stays raw.
 * ``raw-timeout``: ``asyncio.wait_for``, ``asyncio.wait(..., timeout=)``,
-  ``asyncio.timeout``/``timeout_at``, ``anyio.fail_after``/``move_on_after``
-  and a timed ``wait_on_shared_future`` without ``scheduler=``.
+  ``asyncio.timeout``/``timeout_at``, ``anyio.fail_after``/``move_on_after``/
+  ``fail_at``/``move_on_at`` and a timed ``wait_on_shared_future`` without
+  ``scheduler=``.
 * ``raw-task-spawn``: ``asyncio.create_task``, ``asyncio.ensure_future``,
-  ``asyncio.TaskGroup`` and ``<loop>.create_task`` on an event loop obtained
-  from ``asyncio.get_running_loop()``/``get_event_loop()``.
+  ``asyncio.TaskGroup``, ``anyio.create_task_group`` and ``<loop>.create_task``
+  on an event loop obtained from ``asyncio.get_running_loop()``/``get_event_loop()``.
 * ``raw-clock-read``: ``time.monotonic()``/``time()``/``perf_counter()``,
   ``<loop>.time()``/``call_later``/``call_at``, the legacy
   ``_service_time().<x>()`` seam and direct ``REAL_CLOCK.<x>()`` calls
@@ -47,9 +49,15 @@ recognised: a guard against silent rot must prefer a visible false positive
 function parameter that shadows a recognised name still suppresses the match.
 
 The only escape hatch is the marked TOML block in
-``openspec/specs/proxy-architecture/spec.md``; ``--report`` prints the block
-that matches the current tree and ``--explain`` lists every site with its
-rule so a reviewer can tell a missed injection from an accepted residual.
+``openspec/specs/proxy-architecture/spec.md``. ``[allowances.timing]`` holds
+one inline table of per-rule counts per module (``{ raw-sleep = 1, ... }``) so
+a module cannot trade one accepted residual for a new bypass of another kind
+while its total stays put; a plain integer is still accepted as a category
+total for compatibility, but ``--report`` always emits per-rule counts, so the
+committed block stays per-rule. ``[allowances.clock]`` has a single rule and is
+written as plain integers. ``--report`` prints the block that matches the
+current tree and ``--explain`` lists every site with its rule so a reviewer
+can tell a missed injection from an accepted residual.
 """
 
 from __future__ import annotations
@@ -77,8 +85,14 @@ RULE_RAW_TASK_SPAWN = "raw-task-spawn"
 RULE_RAW_CLOCK_READ = "raw-clock-read"
 RULE_MISSING_KWARG = "missing-scheduler-kwarg"
 
-TIMING_RULES = frozenset({RULE_RAW_SLEEP, RULE_RAW_TIMEOUT, RULE_RAW_TASK_SPAWN, RULE_MISSING_KWARG})
-CLOCK_RULES = frozenset({RULE_RAW_CLOCK_READ})
+# Rule order is the report/failure order within a category.
+TIMING_RULES = (RULE_RAW_SLEEP, RULE_RAW_TIMEOUT, RULE_RAW_TASK_SPAWN, RULE_MISSING_KWARG)
+CLOCK_RULES = (RULE_RAW_CLOCK_READ,)
+CATEGORY_RULES: dict[str, tuple[str, ...]] = {"timing": TIMING_RULES, "clock": CLOCK_RULES}
+_CATEGORY_COMMENTS = {
+    "timing": "per-rule counts of " + " + ".join(TIMING_RULES) + "; unlisted modules and rules = 0",
+    "clock": RULE_RAW_CLOCK_READ + "; unlisted modules = 0",
+}
 
 _SUGGESTIONS = {
     RULE_RAW_SLEEP: "use scheduler_for(owner).sleep(...); only a literal sleep(0) yield point stays raw",
@@ -91,6 +105,8 @@ _SUGGESTIONS = {
 _TRACKED_MODULES = ("asyncio", "anyio", "time")
 _TRACKED_NAMES = ("REAL_CLOCK", "REAL_SCHEDULER", "_service_time", "wait_on_shared_future")
 _LOOP_FACTORIES = frozenset({("asyncio", "get_running_loop"), ("asyncio", "get_event_loop")})
+_SLEEP_CALLS = frozenset({("asyncio", "sleep"), ("anyio", "sleep")})  # a literal 0 is a yield point
+_UNCONDITIONAL_SLEEP_CALLS = frozenset({("time", "sleep"), ("anyio", "sleep_forever"), ("anyio", "sleep_until")})
 _TIMEOUT_CALLS = frozenset(
     {
         ("asyncio", "wait_for"),
@@ -98,9 +114,18 @@ _TIMEOUT_CALLS = frozenset(
         ("asyncio", "timeout_at"),
         ("anyio", "fail_after"),
         ("anyio", "move_on_after"),
+        ("anyio", "fail_at"),
+        ("anyio", "move_on_at"),
     }
 )
-_SPAWN_CALLS = frozenset({("asyncio", "create_task"), ("asyncio", "ensure_future"), ("asyncio", "TaskGroup")})
+_SPAWN_CALLS = frozenset(
+    {
+        ("asyncio", "create_task"),
+        ("asyncio", "ensure_future"),
+        ("asyncio", "TaskGroup"),
+        ("anyio", "create_task_group"),
+    }
+)
 _CLOCK_MEMBERS = frozenset({"monotonic", "time", "perf_counter"})
 _LOOP_CLOCK_MEMBERS = frozenset({"time", "call_later", "call_at"})
 _LOOP = "<loop>"
@@ -118,17 +143,19 @@ class Site:
     suggestion: str
 
 
-@dataclass(frozen=True, slots=True)
-class Counts:
-    timing: int = 0
-    clock: int = 0
+# A module allowance is either a per-rule table (``{rule: count}``) or, for
+# compatibility, a plain integer compared against the category total.
+Allowance = int | dict[str, int]
 
 
 @dataclass(frozen=True, slots=True)
 class Config:
     scheduler_kwarg_required: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    timing_allowances: dict[str, int] = field(default_factory=dict)
-    clock_allowances: dict[str, int] = field(default_factory=dict)
+    timing_allowances: dict[str, Allowance] = field(default_factory=dict)
+    clock_allowances: dict[str, Allowance] = field(default_factory=dict)
+
+    def allowances(self, category: str) -> dict[str, Allowance]:
+        return self.timing_allowances if category == "timing" else self.clock_allowances
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,13 +340,15 @@ class _Scanner:
 
     def visit_call(self, call: ast.Call) -> None:
         resolved = self._resolve_module_call(call.func)
-        if resolved in (("asyncio", "sleep"), ("anyio", "sleep")):
+        if resolved in _SLEEP_CALLS:
             delay = call.args[0] if call.args else None
             if delay is None:
                 keyword = _keyword(call, "delay")
                 delay = keyword.value if keyword is not None else None
             if delay is None or not _is_zero_literal(delay):
                 self._record(call, RULE_RAW_SLEEP)
+        elif resolved in _UNCONDITIONAL_SLEEP_CALLS:
+            self._record(call, RULE_RAW_SLEEP)
         elif resolved in _TIMEOUT_CALLS:
             self._record(call, RULE_RAW_TIMEOUT)
         elif resolved == ("asyncio", "wait"):
@@ -401,17 +430,30 @@ def _required_keywords(path: Path, name: str, value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _allowances(path: Path, table_name: str, value: object) -> dict[str, int]:
+def _is_positive_int(value: object) -> bool:
+    return type(value) is int and value > 0
+
+
+def _allowance(path: Path, table_name: str, module_path: str, value: object) -> Allowance:
+    label = f"timing seam allowance allowances.{table_name}.{module_path!r}"
+    if isinstance(value, int) and _is_positive_int(value):
+        return value
+    if not isinstance(value, dict) or not value:
+        raise _config_failure(path, f"{label} must be a positive integer or a table of per-rule positive integers")
+    unknown_rules = sorted(set(value) - set(CATEGORY_RULES[table_name]))
+    if unknown_rules:
+        raise _config_failure(path, f"{label} has unknown rules: " + ", ".join(unknown_rules))
+    if not all(_is_positive_int(count) for count in value.values()):
+        raise _config_failure(path, f"{label} per-rule counts must be positive integers")
+    return {rule: value[rule] for rule in CATEGORY_RULES[table_name] if rule in value}
+
+
+def _allowances(path: Path, table_name: str, value: object) -> dict[str, Allowance]:
     if not isinstance(value, dict):
         raise _config_failure(path, f"timing seam allowances.{table_name} must be a table of module allowances")
-    allowances: dict[str, int] = {}
-    for module_path, allowance in value.items():
-        if type(allowance) is not int or allowance <= 0:
-            raise _config_failure(
-                path, f"timing seam allowance allowances.{table_name}.{module_path!r} must be a positive integer"
-            )
-        allowances[module_path] = allowance
-    return allowances
+    return {
+        module_path: _allowance(path, table_name, module_path, allowance) for module_path, allowance in value.items()
+    }
 
 
 def load_config(spec_path: Path | None = None) -> Config:
@@ -451,7 +493,7 @@ def load_config(spec_path: Path | None = None) -> Config:
     allowance_tables = values.get("allowances", {})
     if not isinstance(allowance_tables, dict):
         raise _config_failure(path, "timing seam allowances must be a table")
-    unknown_tables = sorted(set(allowance_tables) - {"timing", "clock"})
+    unknown_tables = sorted(set(allowance_tables) - set(CATEGORY_RULES))
     if unknown_tables:
         raise _config_failure(path, "timing seam allowances has unknown tables: " + ", ".join(unknown_tables))
     return Config(
@@ -467,14 +509,18 @@ def scanned_paths(proxy_dir: Path | None = None, shared_future_path: Path | None
     return [*sorted(proxy.rglob("*.py")), shared]
 
 
-def _counts(sites: Iterable[Site]) -> Counts:
-    timing = clock = 0
+def _counts(sites: Iterable[Site]) -> dict[str, int]:
+    """Return ``{rule: count}`` for the rules present in ``sites``."""
+
+    counts: dict[str, int] = {}
     for site in sites:
-        if site.rule in TIMING_RULES:
-            timing += 1
-        elif site.rule in CLOCK_RULES:
-            clock += 1
-    return Counts(timing=timing, clock=clock)
+        counts[site.rule] = counts.get(site.rule, 0) + 1
+    return counts
+
+
+def _category_counts(sites: Iterable[Site], category: str) -> dict[str, int]:
+    counts = _counts(sites)
+    return {rule: counts[rule] for rule in CATEGORY_RULES[category] if counts.get(rule)}
 
 
 def repository_report(paths: Sequence[Path], config: Config) -> dict[str, list[Site]]:
@@ -515,18 +561,24 @@ def collect_failures(spec_path: Path | None = None, paths: Sequence[Path] | None
             # Allowances cannot be evaluated without a valid definition; parse
             # failures above are the only independently evaluable findings.
             continue
-        counts = _counts(sites)
-        for category, rules, allowance in (
-            ("timing", TIMING_RULES, config.timing_allowances.get(relative, 0)),
-            ("clock", CLOCK_RULES, config.clock_allowances.get(relative, 0)),
-        ):
-            count = getattr(counts, category)
-            if count <= allowance:
+        for category, rules in CATEGORY_RULES.items():
+            counts = _category_counts(sites, category)
+            allowance = config.allowances(category).get(relative, {})
+            if isinstance(allowance, int):
+                # Compatibility form: one total for the whole category.
+                count = sum(counts.values())
+                if count > allowance:
+                    failures.extend(_format_site(site) for site in sites if site.rule in rules)
+                    failures.append(f"{relative} has {count} raw {category} sites; allowance is {allowance}")
                 continue
-            failures.extend(_format_site(site) for site in sites if site.rule in rules)
-            failures.append(f"{relative} has {count} raw {category} sites; allowance is {allowance}")
+            for rule in rules:
+                count = counts.get(rule, 0)
+                if count > allowance.get(rule, 0):
+                    failures.extend(_format_site(site) for site in sites if site.rule == rule)
+                    failures.append(f"{relative} has {count} {rule} sites; allowance is {allowance.get(rule, 0)}")
     if config is not None:
-        for table_name, table in (("timing", config.timing_allowances), ("clock", config.clock_allowances)):
+        for table_name in CATEGORY_RULES:
+            table = config.allowances(table_name)
             for module_path in sorted(set(table) - scanned_relative):
                 failures.append(
                     f"{_relative_path(spec_path)} timing seam allowances.{table_name} lists {module_path}, "
@@ -549,15 +601,18 @@ def render_report(report: dict[str, list[Site]], config: Config) -> str:
             _toml_string(keywords[0]) if len(keywords) == 1 else "[" + ", ".join(map(_toml_string, keywords)) + "]"
         )
         lines.append(f"{name} = {rendered}")
-    for category, comment in (
-        ("timing", "raw-sleep + raw-timeout + raw-task-spawn + missing-scheduler-kwarg; unlisted modules = 0"),
-        ("clock", "raw-clock-read; unlisted modules = 0"),
-    ):
-        lines.extend(("", f"[allowances.{category}]  # {comment}"))
+    for category, rules in CATEGORY_RULES.items():
+        lines.extend(("", f"[allowances.{category}]  # {_CATEGORY_COMMENTS[category]}"))
         for module_path in sorted(report):
-            count = getattr(_counts(report[module_path]), category)
-            if count:
-                lines.append(f"{_toml_string(module_path)} = {count}")
+            counts = _category_counts(report[module_path], category)
+            if not counts:
+                continue
+            if len(rules) == 1:
+                # A single-rule category is already per-rule; keep the plain integer.
+                rendered = str(counts[rules[0]])
+            else:
+                rendered = "{ " + ", ".join(f"{rule} = {count}" for rule, count in counts.items()) + " }"
+            lines.append(f"{_toml_string(module_path)} = {rendered}")
     return "\n".join(lines) + "\n"
 
 

@@ -18,7 +18,7 @@ _needs_scheduler = "scheduler"
 _needs_both = ["scheduler", "clock"]
 
 [allowances.timing]
-"app/modules/proxy/allowed.py" = 1
+"app/modules/proxy/allowed.py" = { raw-task-spawn = 1 }
 
 [allowances.clock]
 "app/modules/proxy/allowed.py" = 1
@@ -106,6 +106,17 @@ _RAW_CASES = [
         [(3, "raw-sleep")],
         id="raw-sleep-nested-import-alias-detected",
     ),
+    pytest.param("import time\ndef f():\n    time.sleep(0)\n", [(3, "raw-sleep")], id="raw-sleep-blocking-time-sleep"),
+    pytest.param(
+        "import anyio\nasync def f():\n    await anyio.sleep_forever()\n",
+        [(3, "raw-sleep")],
+        id="raw-sleep-anyio-sleep-forever",
+    ),
+    pytest.param(
+        "from anyio import sleep_until\nasync def f(deadline):\n    await sleep_until(deadline)\n",
+        [(3, "raw-sleep")],
+        id="raw-sleep-anyio-sleep-until",
+    ),
     pytest.param(
         "import asyncio\nasync def f(fut):\n    await asyncio.wait_for(fut, timeout=1)\n",
         [(3, "raw-timeout")],
@@ -137,6 +148,12 @@ _RAW_CASES = [
         id="raw-timeout-anyio-move-on-after-imported",
     ),
     pytest.param(
+        "import anyio\nasync def f(deadline):\n    with anyio.fail_at(deadline):\n        pass\n"
+        "    with anyio.move_on_at(deadline):\n        pass\n",
+        [(3, "raw-timeout"), (5, "raw-timeout")],
+        id="raw-timeout-anyio-absolute-deadlines",
+    ),
+    pytest.param(
         "from app.core.utils.shared_future import wait_on_shared_future\n"
         "async def f(shared, t):\n    return await wait_on_shared_future(shared, timeout=t)\n",
         [(3, "raw-timeout")],
@@ -166,6 +183,11 @@ _RAW_CASES = [
         "import asyncio\nasync def f():\n    async with asyncio.TaskGroup() as tg:\n        pass\n",
         [(3, "raw-task-spawn")],
         id="raw-task-spawn-task-group",
+    ),
+    pytest.param(
+        "import anyio\nasync def f():\n    async with anyio.create_task_group() as tg:\n        pass\n",
+        [(3, "raw-task-spawn")],
+        id="raw-task-spawn-anyio-task-group",
     ),
     pytest.param(
         "import time\ndef f():\n    return time.monotonic()\n", [(3, "raw-clock-read")], id="raw-clock-read-monotonic"
@@ -377,12 +399,14 @@ def test_main_reports_every_site_of_an_over_budget_module_in_stable_order(
     assert captured.out == ""
     prefix = "proxy timing seam check failed: app/modules/proxy/_service/lifecycle.py"
     assert captured.err.splitlines() == [
-        f"{prefix}:5: raw-task-spawn asyncio.create_task(...); use scheduler_for(owner).create_task(...)",
         f"{prefix}:6: raw-sleep asyncio.sleep(...); "
         "use scheduler_for(owner).sleep(...); only a literal sleep(0) yield point stays raw",
+        f"{prefix} has 1 raw-sleep sites; allowance is 0",
+        f"{prefix}:5: raw-task-spawn asyncio.create_task(...); use scheduler_for(owner).create_task(...)",
+        f"{prefix} has 1 raw-task-spawn sites; allowance is 0",
         f"{prefix}:8: missing-scheduler-kwarg _needs_scheduler(...) without scheduler=; "
         "pass the collaborator explicitly (REAL_SCHEDULER/REAL_CLOCK when no owner is in scope)",
-        f"{prefix} has 3 raw timing sites; allowance is 0",
+        f"{prefix} has 1 missing-scheduler-kwarg sites; allowance is 0",
         f"{prefix}:7: raw-clock-read time.monotonic(...); "
         "use clock_for(owner).monotonic()/time() or thread the caller's now=",
         f"{prefix}:9: raw-clock-read time.monotonic(...); "
@@ -407,10 +431,74 @@ def test_main_reports_allowance_for_missing_module_and_keeps_scanning(
     assert captured.err.splitlines() == [
         "proxy timing seam check failed: app/modules/proxy/fresh.py:4: raw-clock-read time.time(...); "
         "use clock_for(owner).monotonic()/time() or thread the caller's now=",
-        "proxy timing seam check failed: app/modules/proxy/fresh.py has 1 raw clock sites; allowance is 0",
+        "proxy timing seam check failed: app/modules/proxy/fresh.py has 1 raw-clock-read sites; allowance is 0",
         "proxy timing seam check failed: openspec/specs/proxy-architecture/spec.md timing seam allowances.clock "
         "lists app/modules/proxy/gone.py, which is not a scanned module",
     ]
+
+
+_SUBSTITUTED_LIFECYCLE = """
+import asyncio
+
+async def turn(delay):
+    await asyncio.sleep(delay)
+"""
+
+
+def test_main_rejects_trading_one_timing_rule_for_another_under_a_per_rule_allowance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A module that swaps its accepted ``missing-scheduler-kwarg`` site for a raw sleep keeps its total but fails."""
+
+    checker = _load_checker_module()
+    proxy_dir = _configure_fixture(checker, tmp_path, monkeypatch)
+    _write_module(proxy_dir / "_service" / "lifecycle.py", _SUBSTITUTED_LIFECYCLE)
+    _write_spec(
+        checker.PROXY_ARCHITECTURE_SPEC_PATH,
+        _SPEC_BLOCK.replace(
+            "[allowances.clock]\n",
+            '"app/modules/proxy/_service/lifecycle.py" = { missing-scheduler-kwarg = 1 }\n\n[allowances.clock]\n',
+        ),
+    )
+
+    assert checker.main([]) == 1
+
+    prefix = "proxy timing seam check failed: app/modules/proxy/_service/lifecycle.py"
+    assert capsys.readouterr().err.splitlines() == [
+        f"{prefix}:4: raw-sleep asyncio.sleep(...); "
+        "use scheduler_for(owner).sleep(...); only a literal sleep(0) yield point stays raw",
+        f"{prefix} has 1 raw-sleep sites; allowance is 0",
+    ]
+
+
+def test_main_accepts_a_plain_integer_as_a_category_total(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The compatibility form compares the category total, so the substitution above passes under it."""
+
+    checker = _load_checker_module()
+    proxy_dir = _configure_fixture(checker, tmp_path, monkeypatch)
+    _write_module(proxy_dir / "_service" / "lifecycle.py", _SUBSTITUTED_LIFECYCLE)
+    _write_spec(
+        checker.PROXY_ARCHITECTURE_SPEC_PATH,
+        _SPEC_BLOCK.replace(
+            "[allowances.clock]\n", '"app/modules/proxy/_service/lifecycle.py" = 1\n\n[allowances.clock]\n'
+        ),
+    )
+
+    assert checker.main([]) == 0
+    assert capsys.readouterr().err == ""
+
+    _write_module(proxy_dir / "_service" / "lifecycle.py", _SUBSTITUTED_LIFECYCLE + "    await asyncio.sleep(delay)\n")
+
+    assert checker.main([]) == 1
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        "proxy timing seam check failed: app/modules/proxy/_service/lifecycle.py has 2 raw timing sites; allowance is 1"
+    )
 
 
 @pytest.mark.parametrize(
@@ -451,16 +539,43 @@ def test_main_reports_allowance_for_missing_module_and_keeps_scanning(
                 '[allowances.clock]\n"app/modules/proxy/allowed.py" = 1',
                 '[allowances.clock]\n"app/modules/proxy/allowed.py" = 0',
             ),
-            "timing seam allowance allowances.clock.'app/modules/proxy/allowed.py' must be a positive integer",
+            "timing seam allowance allowances.clock.'app/modules/proxy/allowed.py' "
+            "must be a positive integer or a table of per-rule positive integers",
             id="non-positive-allowance",
         ),
         pytest.param(
             lambda text: text.replace(
-                '[allowances.timing]\n"app/modules/proxy/allowed.py" = 1',
-                '[allowances.timing]\n"app/modules/proxy/allowed.py" = "1"',
+                '"app/modules/proxy/allowed.py" = { raw-task-spawn = 1 }', '"app/modules/proxy/allowed.py" = "1"'
             ),
-            "timing seam allowance allowances.timing.'app/modules/proxy/allowed.py' must be a positive integer",
+            "timing seam allowance allowances.timing.'app/modules/proxy/allowed.py' "
+            "must be a positive integer or a table of per-rule positive integers",
             id="non-integer-allowance",
+        ),
+        pytest.param(
+            lambda text: text.replace(
+                '"app/modules/proxy/allowed.py" = { raw-task-spawn = 1 }', '"app/modules/proxy/allowed.py" = {}'
+            ),
+            "timing seam allowance allowances.timing.'app/modules/proxy/allowed.py' "
+            "must be a positive integer or a table of per-rule positive integers",
+            id="empty-per-rule-table",
+        ),
+        pytest.param(
+            lambda text: text.replace(
+                '"app/modules/proxy/allowed.py" = { raw-task-spawn = 1 }',
+                '"app/modules/proxy/allowed.py" = { raw-task-spawn = 1, raw-clock-read = 1, spawn = 1 }',
+            ),
+            "timing seam allowance allowances.timing.'app/modules/proxy/allowed.py' "
+            "has unknown rules: raw-clock-read, spawn",
+            id="per-rule-table-with-unknown-rule",
+        ),
+        pytest.param(
+            lambda text: text.replace(
+                '"app/modules/proxy/allowed.py" = { raw-task-spawn = 1 }',
+                '"app/modules/proxy/allowed.py" = { raw-task-spawn = 0 }',
+            ),
+            "timing seam allowance allowances.timing.'app/modules/proxy/allowed.py' "
+            "per-rule counts must be positive integers",
+            id="non-positive-per-rule-count",
         ),
         pytest.param(
             lambda text: text.replace('_needs_scheduler = "scheduler"', "_needs_scheduler = []"),
@@ -537,7 +652,7 @@ def test_report_and_explain_describe_the_scanned_tree(
     assert tomllib.loads(capsys.readouterr().out) == {
         "scheduler_kwarg_required": {"_needs_scheduler": "scheduler", "_needs_both": ["scheduler", "clock"]},
         "allowances": {
-            "timing": {"app/modules/proxy/allowed.py": 1},
+            "timing": {"app/modules/proxy/allowed.py": {"raw-task-spawn": 1}},
             "clock": {"app/modules/proxy/allowed.py": 1},
         },
     }
@@ -559,10 +674,17 @@ def test_repository_allowances_are_exact() -> None:
     checker = _load_checker_module()
     config = checker.load_config()
     report = checker.repository_report(checker.scanned_paths(), config)
-    counts = {module_path: checker._counts(sites) for module_path, sites in report.items()}
 
-    assert {path: counts[path].timing for path in counts if counts[path].timing} == config.timing_allowances
-    assert {path: counts[path].clock for path in counts if counts[path].clock} == config.clock_allowances
+    def counts(category: str) -> dict[str, dict[str, int]]:
+        per_module = {path: checker._category_counts(sites, category) for path, sites in report.items()}
+        return {path: rule_counts for path, rule_counts in per_module.items() if rule_counts}
+
+    # The committed timing table is per rule: the integer total form is a compatibility fallback only.
+    assert all(isinstance(allowance, dict) for allowance in config.timing_allowances.values())
+    assert counts("timing") == config.timing_allowances
+    assert {path: rule_counts["raw-clock-read"] for path, rule_counts in counts("clock").items()} == (
+        config.clock_allowances
+    )
 
 
 def test_repository_report_reproduces_committed_block() -> None:

@@ -19,8 +19,9 @@ gate in the required lint target, not a review checklist.
 - Own the gate's configuration in a second marked TOML block in
   `openspec/specs/proxy-architecture/spec.md`: `[scheduler_kwarg_required]`
   (function name -> keyword or list of keywords) and per-module
-  `[allowances.timing]` / `[allowances.clock]` counts. Unlisted modules have
-  an allowance of zero; there is no inline marker or label override.
+  `[allowances.timing]` (per-rule inline tables) / `[allowances.clock]`
+  counts. Unlisted modules and rules have an allowance of zero; there is no
+  inline marker or label override.
 - Seed the allowances from the harness tree (`--report`), and pin them exactly
   in `tests/unit/test_check_proxy_timing_seams.py` so removing a raw site must
   lower its number in the same diff while the script itself keeps the

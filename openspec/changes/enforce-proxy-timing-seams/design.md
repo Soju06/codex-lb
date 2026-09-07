@@ -66,9 +66,9 @@ keyword; the value is a string or a list so functions that take both
 `REAL_SCHEDULER`/`REAL_CLOCK` is allowed because it is visible and greppable.
 A `**kwargs` splat is taken as satisfying the requirement because the
 keywords cannot be inspected statically. The `api.py` route layer's nineteen
-calls to the deferring-cancellation helpers are carried as its timing
-allowance rather than exempted by rule, so the owner can make them explicit
-and lower the number later.
+calls to the deferring-cancellation helpers are carried as its
+`missing-scheduler-kwarg` allowance rather than exempted by rule, so the owner
+can make them explicit and lower the number later.
 
 Functions whose name is shared with an unrelated method (`stream_responses`
 exists on both the HTTP bridge owner client and `ProxyService`;
@@ -76,15 +76,36 @@ exists on both the HTTP bridge owner client and `ProxyService`;
 method) are deliberately not listed: terminal-name matching would flag the
 homonym.
 
+### Timing allowances are per rule
+
+A single per-module total for the four timing rules would let a module trade
+one accepted residual for a new bypass of another kind (drop one
+`missing-scheduler-kwarg` site, add one raw `asyncio.sleep`) without moving
+the number, and the exact-count pin would not notice either. `[allowances.timing]`
+therefore holds one inline table of per-rule counts per module
+(`{ raw-timeout = 2, raw-task-spawn = 3 }`); unlisted rules are zero, a table
+naming a rule outside the category is a definition failure, and
+`test_main_rejects_trading_one_timing_rule_for_another_under_a_per_rule_allowance`
+pins the substitution. A plain integer is still accepted as a category total
+so an older block keeps loading, but `--report` always renders per-rule counts
+and `test_repository_allowances_are_exact` asserts the committed table is
+per-rule, so the compatibility form cannot become the committed form.
+
 ### `raw-clock-read` is a separate allowance table
 
 Clock reads are the highest-volume, most-likely-to-rot rule and the one the
 owner may want to strike or defer independently; a separate table lets that
-happen in one edit without touching the timing rows. The rule counts the
+happen in one edit without touching the timing rows. It has a single rule, so
+its plain integers are already per-rule counts. The rule counts the
 `time.time() if now is None else now` and `REAL_CLOCK.x()` default idioms on
 purpose so a new hidden wall-clock default shows up as a raised number.
 
 ### Alias discovery is file-wide and canonical names are always recognised
+
+The primitive sets also cover the less common spellings a bypass could reach
+for: the blocking `time.sleep`, `anyio.sleep_forever`/`sleep_until`, the
+absolute-deadline `anyio.fail_at`/`move_on_at` and `anyio.create_task_group`.
+None occur in the scanned tree today, so they add coverage without allowances.
 
 `check_cancellation_safety.py` restricts alias discovery to module-level
 imports so an unrelated nested import cannot redefine an alias for the whole

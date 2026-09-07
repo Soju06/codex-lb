@@ -191,6 +191,17 @@ export const DashboardProjectionsSchema = z.object({
   weeklyCreditPace: WeeklyCreditPaceSchema.nullable().optional(),
 });
 
+const RequestActivityDaySchema = z.object({
+  date: z.iso.date(),
+  requests: z.number().int().nonnegative(),
+});
+
+export const DashboardRequestActivitySchema = z.object({
+  days: z.array(RequestActivityDaySchema),
+});
+
+export const RequestActivityResponseSchema = DashboardRequestActivitySchema;
+
 const RequestLogCostBreakdownSchema = z.object({
   inputUsd: z.number().nullable().optional().default(null),
   cachedInputUsd: z.number().nullable().optional().default(null),
@@ -297,6 +308,9 @@ export type DashboardMetricsComparison = z.infer<typeof DashboardMetricsComparis
 export type DashboardOverview = z.infer<typeof DashboardOverviewSchema>;
 export type DashboardProjections = z.infer<typeof DashboardProjectionsSchema>;
 export type DashboardOverviewTimeframe = z.infer<typeof DashboardOverviewTimeframeSchema>;
+export type RequestActivityDay = z.infer<typeof RequestActivityDaySchema>;
+export type RequestActivityResponse = z.infer<typeof RequestActivityResponseSchema>;
+export type DashboardRequestActivity = RequestActivityResponse;
 export type TrendPoint = z.infer<typeof TrendPointSchema>;
 export type MetricsTrends = z.infer<typeof MetricsTrendsSchema>;
 export type UsageWindow = z.infer<typeof UsageWindowSchema>;

@@ -16648,6 +16648,9 @@ async def test_backend_responses_http_bridge_retries_accepted_output_free_capaci
     terminal ``error``. The bridge must retry on another account while the
     client observes a single response lifecycle."""
     _install_bridge_settings(monkeypatch, enabled=True)
+    # The selected-model capacity message goes through the bounded capacity
+    # wait; keep it to milliseconds instead of the 30s production default.
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS", 0.01)
     first_account_id = await _import_account(
         async_client,
         "acc_http_bridge_accepted_capacity_a",

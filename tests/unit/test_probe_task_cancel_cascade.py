@@ -110,9 +110,13 @@ async def test_level_cancelled_keepalive_consumer_does_not_respin_pending_chunk_
     release = asyncio.Event()
     source_closed = asyncio.Event()
     cleanup_task: asyncio.Task[None] | None = None
+    chunk_task: asyncio.Task[object] | None = None
 
     async def deferring_source() -> AsyncIterator[str]:
-        nonlocal cleanup_task
+        nonlocal chunk_task, cleanup_task
+        # ``__anext__`` runs inside the injector's ``_next_chunk`` task, so the
+        # current task here is exactly the chunk task under test.
+        chunk_task = asyncio.current_task()
 
         async def cleanup() -> None:
             await release.wait()
@@ -128,11 +132,10 @@ async def test_level_cancelled_keepalive_consumer_does_not_respin_pending_chunk_
     response_task = await _run_level_cancelled_consumer(stream)
     await asyncio.sleep(0.05)
 
-    pending_tasks = [
-        t for t in asyncio.all_tasks() if t is not asyncio.current_task() and "_next_chunk" in repr(t.get_coro())
-    ]
-    assert pending_tasks, "keepalive injector should still own its pending chunk task"
-    assert [t.cancelling() for t in pending_tasks] == [1] * len(pending_tasks)
+    assert chunk_task is not None, "the injector must have started its chunk task"
+    assert chunk_task is not asyncio.current_task()
+    assert not chunk_task.done(), "the deferring source must keep the chunk task alive"
+    assert chunk_task.cancelling() == 1, chunk_task.cancelling()
     assert cleanup_task is not None
     assert cleanup_task.cancelling() == 0
     assert not response_task.done()
@@ -140,7 +143,7 @@ async def test_level_cancelled_keepalive_consumer_does_not_respin_pending_chunk_
 
     release.set()
     await asyncio.wait_for(response_task, timeout=1)
-    assert all(t.done() for t in pending_tasks)
+    assert chunk_task.done()
     # The chunk task settled first, then the injector's finalizer closed the
     # source exactly once (aclose on a finished generator is a no-op).
     assert source_closed.is_set()

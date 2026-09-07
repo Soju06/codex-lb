@@ -22,7 +22,7 @@ order.
 
 - `python scripts/check_proxy_timing_seams.py`: `proxy timing seam checks passed`.
 - `python scripts/check_proxy_architecture.py`, `python scripts/check_cancellation_safety.py`: passed.
-- `pytest tests/unit/test_check_proxy_timing_seams.py tests/unit/test_check_proxy_architecture.py tests/unit/test_check_cancellation_safety.py`: 98 passed.
+- `pytest tests/unit/test_check_proxy_timing_seams.py tests/unit/test_check_proxy_architecture.py tests/unit/test_check_cancellation_safety.py`: 108 passed.
 - `ruff check scripts tests/unit/test_check_proxy_timing_seams.py`, `ruff format --check`: clean.
 - `ty check scripts/check_proxy_timing_seams.py tests/unit/test_check_proxy_timing_seams.py`: passed.
 - `openspec validate enforce-proxy-timing-seams --strict`: passed.
@@ -32,22 +32,22 @@ order.
 Inserting `await asyncio.sleep(0.5)` after the `scheduler.sleep(chunk_seconds)`
 call in `app/modules/proxy/_service/http_bridge/streaming.py` produced:
 
-```
+```text
 proxy timing seam check failed: app/modules/proxy/_service/http_bridge/streaming.py:739: raw-sleep asyncio.sleep(...); use scheduler_for(owner).sleep(...); only a literal sleep(0) yield point stays raw
-proxy timing seam check failed: app/modules/proxy/_service/http_bridge/streaming.py has 1 raw timing sites; allowance is 0
+proxy timing seam check failed: app/modules/proxy/_service/http_bridge/streaming.py has 1 raw-sleep sites; allowance is 0
 ```
 
 The probe was reverted; the committed tree passes.
 
 ## Residual census (from `--explain` on the PR A tree)
 
-Timing (33): `api.py` 19 route-layer deferring-cancellation calls without
+Timing (32 = 19 `missing-scheduler-kwarg` + 6 `raw-timeout` + 6 `raw-task-spawn` + 1 `raw-sleep`): `api.py` 19 route-layer deferring-cancellation calls without
 `scheduler=`; `realtime_live.py` 5 (relay/close owners); `compact.py` 3;
 `http_bridge_event_batcher.py` 2 (lazy flusher); `http_bridge/mixin.py` 1
 (shutdown drain `wait_for`); `request_log.py` 1 (shutdown drain timed
 `wait`); `shared_future.py` 1 (`ensure_future` fallback).
 
-Clock (46): `api.py` 8 (payload epochs, images `perf_counter`); `compact.py`
+Clock (48): `api.py` 8 (payload epochs, images `perf_counter`); `compact.py`
 6; `load_balancer.py` 3 (`REAL_CLOCK` default idioms); `websocket/helpers.py`
 3 (stale previous-response TTL cache); 2 each in `codex_control.py`,
 `file_ops.py`, `transcribe.py` (`_service_time()` latency stamps),

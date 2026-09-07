@@ -38,12 +38,6 @@ from app.modules.proxy.api import _prepend_first_task
 
 pytestmark = pytest.mark.unit
 
-# The old cascade re-cancelled the probe once per loop iteration: thousands
-# of cancels in 50ms. The fixed path performs exactly one explicit teardown
-# cancel; allow a little slack for scheduler noise.
-_MAX_CANCELS = 3
-
-
 async def _run_level_cancelled_consumer(stream: AsyncIterator[str]) -> asyncio.Task[None]:
     """Consume ``stream`` inside a task group whose scope is then cancelled.
 
@@ -99,7 +93,7 @@ async def test_level_cancelled_response_does_not_respin_startup_probe_task():
 
     assert cleanup_task is not None
     assert not first_task.done(), "deferred cleanup must keep the probe alive"
-    assert first_task.cancelling() <= _MAX_CANCELS, first_task.cancelling()
+    assert first_task.cancelling() == 1, first_task.cancelling()
     assert cleanup_task.cancelling() == 0
     # Teardown still waits for the probe's deferred cleanup (ordering: the
     # probe drives the inner stream, so the body must not close it first).
@@ -137,7 +131,7 @@ async def test_level_cancelled_keepalive_consumer_does_not_respin_pending_chunk_
         t for t in asyncio.all_tasks() if t is not asyncio.current_task() and "_next_chunk" in repr(t.get_coro())
     ]
     assert pending_tasks, "keepalive injector should still own its pending chunk task"
-    assert all(t.cancelling() <= _MAX_CANCELS for t in pending_tasks), [t.cancelling() for t in pending_tasks]
+    assert [t.cancelling() for t in pending_tasks] == [1] * len(pending_tasks)
     assert cleanup_task is not None
     assert cleanup_task.cancelling() == 0
     assert not response_task.done()

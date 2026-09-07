@@ -206,6 +206,16 @@ Completed Astra parents retained for later steering SHALL discard historical inp
 ### Requirement: Steering correlation history retires with its connection
 The proxy SHALL stop starting new steering admissions when retained rejected-parent and suppressed-response IDs reach an internal per-connection history limit. It SHALL preserve existing correlation records and allow admitted work, including explicit required-tool-input continuations, to finish on that upstream connection. New unrelated creates received during this drain SHALL receive a retryable error without acquiring a reservation. An admission already in progress MAY finish on the same connection while it remains open. Once pending work drains, the proxy SHALL close the upstream connection and discard its correlation history before admitting work on a new connection. Planned retirement SHALL NOT penalize account health or fail existing requests. History beyond the limit SHALL be retained only for admitted work and admission already in progress when retirement began.
 
+When expiry removes a steering continuation's owned request from pending work, the proxy SHALL discard that continuation and its submissions and retain a parent-ID tombstone within the existing history limit. Cleanup SHALL preserve any newer replacement owner and SHALL leave reservation finalization to the existing expiry path.
+
+#### Scenario: Expired steering releases input while retaining late-response correlation
+- **GIVEN** accepted steers expire without creating their successors
+- **WHEN** the proxy expires their pending requests
+- **THEN** their continuation input SHALL no longer be retained by connection history
+- **AND** late steering notifications SHALL NOT recreate ownership, and late created/terminal events SHALL follow the existing tombstone suppression policy
+- **AND** a new steer for a still-owned completed parent MAY proceed before retirement begins
+- **AND** accumulated expiry tombstones SHALL trigger rotation after admitted work drains, preserving unrelated responses and exactly-once reservation cleanup
+
 #### Scenario: Repeated rejections exhaust retained history
 - **GIVEN** distinct rejected steering parents or suppressed responses with ID-less terminals have reached the history limit
 - **WHEN** the client submits another steer or an unrelated create while admitted work is pending

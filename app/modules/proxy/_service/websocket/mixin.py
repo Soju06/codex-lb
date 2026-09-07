@@ -469,6 +469,7 @@ from app.modules.proxy._service.websocket.steering import (
     release_completed_steering_payload,
     release_steering_request,
     required_steering_input_is_present,
+    retire_steering_history_if_full,
     steering_error,
     steering_failure_payload,
     submit_websocket_steering,
@@ -5378,6 +5379,7 @@ class _WebSocketMixin:
                         websocket=websocket,
                         client_send_lock=client_send_lock,
                         response_create_gate=response_create_gate,
+                        upstream_control=upstream_control,
                     )
                     continue
                 if message.kind == "text" and message.text is not None:
@@ -6565,6 +6567,7 @@ class _WebSocketMixin:
         websocket: WebSocket | None = None,
         client_send_lock: anyio.Lock | None = None,
         response_create_gate: asyncio.Semaphore | None = None,
+        upstream_control: _WebSocketUpstreamControl | None = None,
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -6577,6 +6580,15 @@ class _WebSocketMixin:
             ]
             for request_state in expired_requests:
                 pending_requests.remove(request_state)
+                parent_id = request_state.steering_parent_response_id
+                if upstream_control is not None and parent_id is not None:
+                    continuation = upstream_control.steering_continuations.get(parent_id)
+                    if continuation is not None and continuation.request_state is request_state:
+                        # Keep only bounded correlation for late successors.
+                        # Expiry remains the sole owner of request finalization.
+                        upstream_control.steering_continuations.pop(parent_id)
+                        upstream_control.rejected_steering_parent_ids.add(parent_id)
+                        retire_steering_history_if_full(upstream_control)
         if not expired_requests:
             return
         await proxy._fail_pending_websocket_requests(

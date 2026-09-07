@@ -194,9 +194,7 @@ class _RetirementAudit:
         assert not service._background_cleanup_tasks
         for control in self.controls:
             assert not control.retired_steering_requests
-            assert all(
-                continuation.request_state in expired_states for continuation in control.steering_continuations.values()
-            )
+            assert not control.steering_continuations
         assert self.heartbeats and all(task.done() for task in self.heartbeats)
         assert all(
             state.api_key_reservation is None
@@ -476,7 +474,8 @@ async def test_history_retirement_rotates_after_last_pending_local_cleanup(
 
     assert len(audit.controls) == 2
     assert upstream.pending_at_close == []
-    assert upstream.history_at_close == (frozenset({"r-rejected"}), frozenset({"r-suppressed"}), 1)
+    expected_rejected = {"r-rejected", "r-tool"} if cleanup_path == "request-timeout" else {"r-rejected"}
+    assert upstream.history_at_close == (frozenset(expected_rejected), frozenset({"r-suppressed"}), 1)
     assert len(upstream.sent) == 4
     assert len(fresh.sent) == 1
     assert fresh.sent[0]["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "After cleanup"}]}]

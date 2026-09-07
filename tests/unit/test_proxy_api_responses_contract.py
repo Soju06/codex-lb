@@ -11,6 +11,7 @@ import pytest
 import app.modules.proxy.api as proxy_api_module
 from app.core.openai.models import CompactResponsePayload
 from app.core.types import JsonValue
+from app.core.utils.sse import ParsedSseBlock, format_sse_event, sse_block_with_payload
 
 pytestmark = pytest.mark.unit
 
@@ -2079,3 +2080,216 @@ async def test_normalize_public_stream_reframes_data_only_blocks_with_event_name
     reframed = [block for block in blocks if '"delta":"x"' in block]
     assert reframed
     assert reframed[0].startswith("event: response.output_text.delta\n")
+
+
+class _FrozenDict(dict[str, Any]):
+    """Test-only dict that fails loudly when a stream stage mutates a shared payload."""
+
+    def _frozen(self, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("shared SSE payload was mutated in place")
+
+    __setitem__ = __delitem__ = _frozen
+    clear = pop = popitem = setdefault = update = _frozen
+
+
+class _FrozenList(list[Any]):
+    def _frozen(self, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("shared SSE payload list was mutated in place")
+
+    __setitem__ = __delitem__ = __iadd__ = _frozen
+    append = extend = insert = pop = remove = clear = sort = reverse = _frozen
+
+
+def _deep_freeze(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _FrozenDict({key: _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return _FrozenList(_deep_freeze(item) for item in value)
+    return value
+
+
+_CARRIER_STREAM_PAYLOADS: list[dict[str, Any]] = [
+    {"type": "codex.rate_limits", "plan_type": "pro", "rate_limits": {"allowed": True}},
+    {"type": "response.created", "sequence_number": 0, "response": {"id": "resp_c", "status": "in_progress"}},
+    {
+        "type": "response.output_item.added",
+        "sequence_number": 1,
+        "output_index": 0,
+        "item": {"id": "rs_1", "type": "reasoning", "summary": []},
+    },
+    {
+        "type": "response.reasoning_summary_text.delta",
+        "sequence_number": 2,
+        "item_id": "rs_1",
+        "output_index": 0,
+        "summary_index": 0,
+        "delta": "\ud55c\uae00 thinking",
+    },
+    {
+        "type": "response.reasoning_summary_text.delta",
+        "sequence_number": 3,
+        "item_id": "rs_1",
+        "output_index": 0,
+        "summary_index": 0,
+        "delta": " more",
+    },
+    {
+        "type": "response.reasoning_summary_text.done",
+        "sequence_number": 4,
+        "item_id": "rs_1",
+        "output_index": 0,
+        "summary_index": 0,
+        "text": "\ud55c\uae00 thinking more",
+    },
+    {
+        "type": "response.output_item.done",
+        "sequence_number": 5,
+        "output_index": 0,
+        "item": {
+            "id": "rs_1",
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "\ud55c\uae00 thinking more"}],
+        },
+    },
+    {
+        "type": "response.output_item.added",
+        "sequence_number": 6,
+        "output_index": 1,
+        "item": {"id": "msg_1", "type": "message", "status": "in_progress", "role": "assistant", "content": []},
+    },
+    {
+        "type": "response.output_text.delta",
+        "sequence_number": 7,
+        "item_id": "msg_1",
+        "output_index": 1,
+        "content_index": 0,
+        "delta": "caf\u00e9 \u2028",
+    },
+    {
+        "type": "response.output_text.delta",
+        "sequence_number": 8,
+        "item_id": "msg_1",
+        "output_index": 1,
+        "content_index": 0,
+        "delta": " done",
+    },
+    {
+        "type": "response.output_item.done",
+        "sequence_number": 9,
+        "output_index": 1,
+        "item": {
+            "id": "msg_1",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "caf\u00e9 \u2028 done", "annotations": []}],
+        },
+    },
+    {
+        "type": "response.completed",
+        "sequence_number": 10,
+        "response": {
+            "id": "resp_c",
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        },
+    },
+]
+
+
+def _carrier_blocks(*, frozen: bool) -> list[str]:
+    blocks: list[str] = []
+    for payload in _CARRIER_STREAM_PAYLOADS:
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        event_type = payload["type"]
+        block = f"event: {event_type}\ndata: {text}\n\n"
+        blocks.append(sse_block_with_payload(block, _deep_freeze(payload) if frozen else json.loads(text)))
+    return blocks
+
+
+async def _iter_prebuilt_blocks(blocks: list[str]) -> AsyncIterator[str]:
+    for block in blocks:
+        yield block
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enforce_openai_sdk_contract", [True, False])
+async def test_normalize_public_responses_stream_reuses_carried_payload_without_mutating_it(
+    enforce_openai_sdk_contract: bool,
+) -> None:
+    plain_blocks = [str(block) for block in _carrier_blocks(frozen=False)]
+    carrier_blocks = _carrier_blocks(frozen=True)
+
+    expected = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_prebuilt_blocks(plain_blocks),
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+        )
+    ]
+    actual = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_prebuilt_blocks(carrier_blocks),
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+        )
+    ]
+
+    # Same bytes whether or not the payload rode along with the block, and no
+    # stage mutated the shared (frozen) payload in place.
+    assert actual == expected
+    assert [type(block) is str for block in expected] == [True] * len(expected)
+    # Unchanged text deltas pass through as the very same carrier object.
+    delta_blocks = [block for block in carrier_blocks if block.startswith("event: response.output_text.delta\n")]
+    assert delta_blocks
+    for delta_block in delta_blocks:
+        assert any(block is delta_block for block in actual)
+    # Re-serialized blocks come back as plain ``str`` (full parse downstream).
+    reserialized = [block for block in actual if not isinstance(block, ParsedSseBlock)]
+    if enforce_openai_sdk_contract:
+        assert reserialized, "created/completed are re-framed on the public surface"
+        assert not any(block.startswith("event: codex.") for block in actual)
+    assert "\ud55c\uae00" in "".join(actual)
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_passes_carrier_through_and_reads_its_payload() -> None:
+    payload = {"type": "response.output_text.delta", "item_id": "msg_1", "delta": "plain"}
+    block = sse_block_with_payload(format_sse_event(payload), _deep_freeze(payload))
+    typeless_error = sse_block_with_payload(
+        'data: {"error":{"code":"server_error","message":"boom"}}\n\n',
+        _deep_freeze({"error": {"code": "server_error", "message": "boom"}}),
+    )
+
+    blocks = [
+        emitted
+        async for emitted in proxy_api_module._normalize_reasoning_summary_stream(_iter_blocks(block, typeless_error))
+    ]
+
+    assert blocks[0] is block
+    assert blocks[1] is typeless_error
+
+
+def test_looks_like_sse_comment_block_fast_path_matches_scan() -> None:
+    blocks = [
+        ": keepalive\n\n",
+        ":\n: two\n\n",
+        "\n\n",
+        "",
+        "   ",
+        "data: [DONE]\n\n",
+        'data: {"type":"x"}\n\n',
+        'event: x\ndata: {"type":"x"}\n\n',
+        "event: x\r\ndata: {}\r\n\r\n",
+        "retry: 100\n\n",
+        ": comment\ndata: {}\n\n",
+    ]
+
+    def scan(event_block: str) -> bool:
+        return bool(event_block.strip()) and all(
+            not line.strip() or line.lstrip().startswith(":") for line in event_block.splitlines()
+        )
+
+    for event_block in blocks:
+        assert proxy_api_module._looks_like_sse_comment_block(event_block) is scan(event_block), repr(event_block)

@@ -1,19 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import secrets
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import aiohttp
 import pytest
 from websockets.asyncio.server import serve as websocket_serve
 
 from app.core.clients.codex import CodexClient
 from app.core.clients.native_egress import (
-    NativeEgressRequest,
-    NativeWebSocketMessage,
     SubprocessNativeEgressClient,
+    close_discovered_native_egress_client,
+    discover_native_egress_client,
 )
+from app.core.clients.proxy import stream_responses
+from app.core.clients.proxy_websocket import (
+    _RESPONSES_WEBSOCKET_POLICY,
+    _connect_upstream_websocket,
+)
+from app.core.openai.requests import ResponsesRequest
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 
@@ -35,22 +44,32 @@ async def _copy_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
 
 
 @pytest.mark.asyncio
-async def test_direct_sse_and_routed_http_websocket_share_native_helper() -> None:
+async def test_direct_sse_and_routed_http_websocket_share_native_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     helper_value = os.environ.get("CODEX_LB_NATIVE_EGRESS_TEST_BINARY")
     if not helper_value:
         pytest.skip("set CODEX_LB_NATIVE_EGRESS_TEST_BINARY to run the native route wire probe")
     helper = Path(helper_value)
     if not helper.is_file():
         pytest.skip(f"native helper is unavailable: {helper}")
+    access_token = secrets.token_urlsafe(32)
 
     proxy_hits: list[str] = []
     http_bodies: list[bytes] = []
     direct_hits: list[str] = []
+    direct_bodies: list[bytes] = []
 
     async def direct_http_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         head = await reader.readuntil(b"\r\n\r\n")
         direct_hits.append(head.split(b"\r\n", 1)[0].decode("ascii"))
-        body = b'data: {"type":"response.created"}\n\ndata: [DONE]\n\n'
+        content_length = 0
+        for line in head.split(b"\r\n")[1:]:
+            name, _, value = line.partition(b":")
+            if name.lower() == b"content-length":
+                content_length = int(value.strip())
+        direct_bodies.append(await reader.readexactly(content_length))
+        body = b'data: {"type":"response.completed","response":{"id":"resp_direct"}}\n\n'
         writer.write(
             b"HTTP/1.1 200 OK\r\n"
             b"Content-Type: text/event-stream\r\n"
@@ -94,10 +113,10 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper() -> Non
                 if name.lower() == b"content-length":
                     content_length = int(value.strip())
             http_bodies.append(await reader.readexactly(content_length))
-            body = b'{"ok":true}'
+            body = b'data: {"type":"response.completed","response":{"id":"resp_wire"}}\n\n'
             writer.write(
                 b"HTTP/1.1 200 OK\r\n"
-                b"Content-Type: application/json\r\n"
+                b"Content-Type: text/event-stream\r\n"
                 + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
                 + body
             )
@@ -111,51 +130,92 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper() -> Non
             pool_id="wire-probe",
             endpoint=ResolvedProxyEndpoint("proxy-1", "http", "127.0.0.1", proxy_port),
         )
-        native = SubprocessNativeEgressClient(helper)
-        client = CodexClient(_UnexpectedPythonSession(), native_egress_client=native)
+        await close_discovered_native_egress_client()
+        monkeypatch.setenv("PATH", f"{helper.parent}{os.pathsep}{os.environ.get('PATH', '')}")
+        native = discover_native_egress_client()
+        assert isinstance(native, SubprocessNativeEgressClient)
+        python_session = _UnexpectedPythonSession()
+        client = CodexClient(python_session)
         try:
-            direct_response = await native.request(
-                NativeEgressRequest(
-                    method="GET",
-                    url=f"http://127.0.0.1:{direct_port}/v1/responses",
-                    headers={"accept": "text/event-stream"},
-                    timeout_seconds=2,
+            direct_events = [
+                event
+                async for event in stream_responses(
+                    ResponsesRequest(
+                        model="gpt-5.4",
+                        instructions="",
+                        input="direct probe",
+                        stream=True,
+                    ),
+                    {},
+                    access_token,
+                    "account-1",
+                    base_url=f"http://127.0.0.1:{direct_port}",
+                    upstream_stream_transport_override="http",
+                    allow_direct_egress=False,
+                    suppress_live_usage=True,
+                    session=cast(aiohttp.ClientSession, python_session),
                 )
-            )
-            assert await direct_response.read() == (b'data: {"type":"response.created"}\n\ndata: [DONE]\n\n')
+            ]
+            assert direct_events == ['data: {"type":"response.completed","response":{"id":"resp_direct"}}\n\n']
             helper_process = native._process
 
-            http_result = await client.request_with_route_metadata(
-                "POST",
-                "http://upstream.invalid/v1/responses",
-                route=route,
-                json={"input": "probe"},
-                timeout=2,
-            )
-            assert await http_result.response.read() == b'{"ok":true}'
+            routed_events = [
+                event
+                async for event in stream_responses(
+                    ResponsesRequest(
+                        model="gpt-5.4",
+                        instructions="",
+                        input="probe",
+                        stream=True,
+                    ),
+                    {},
+                    access_token,
+                    "account-1",
+                    base_url="http://upstream.invalid",
+                    upstream_stream_transport_override="http",
+                    route=route,
+                    codex_client=client,
+                    allow_direct_egress=False,
+                    suppress_live_usage=True,
+                    session=cast(aiohttp.ClientSession, python_session),
+                )
+            ]
+            assert routed_events == ['data: {"type":"response.completed","response":{"id":"resp_wire"}}\n\n']
             assert native._process is helper_process
 
-            websocket_result = await client.open_ws_with_route_metadata(
-                f"ws://127.0.0.1:{websocket_port}/v1/responses",
+            websocket = await _connect_upstream_websocket(
+                {},
+                access_token,
+                "account-1",
+                url=f"ws://127.0.0.1:{websocket_port}/v1/responses",
                 route=route,
-                timeout=2,
-                max_msg_size=1024,
+                codex_client=client,
+                policy=_RESPONSES_WEBSOCKET_POLICY,
             )
-            assert websocket_result.native is True
-            await websocket_result.websocket.send_text("probe")
-            message = await websocket_result.websocket.receive()
-            assert message == NativeWebSocketMessage(kind="text", text="echo:probe")
-            await websocket_result.websocket.close()
+            assert getattr(websocket, "upstream_proxy_endpoint_id", None) == "proxy-1"
+            assert getattr(websocket, "upstream_proxy_fallback_used", None) is False
+            await websocket.send_text("probe")
+            message = await websocket.receive()
+            assert message.kind == "text"
+            assert message.text == "echo:probe"
+            await websocket.close()
 
             assert native._process is helper_process
             assert helper_process is not None and helper_process.returncode is None
-            assert direct_hits == ["GET /v1/responses HTTP/1.1"]
-            assert http_bodies == [b'{"input":"probe"}']
-            assert proxy_hits[0].startswith("POST http://upstream.invalid/v1/responses ")
+            assert direct_hits == ["POST /codex/responses HTTP/1.1"]
+            assert len(direct_bodies) == 1
+            direct_body = json.loads(direct_bodies[0])
+            assert direct_body["model"] == "gpt-5.4"
+            assert direct_body["input"]
+            assert len(http_bodies) == 1
+            routed_body = json.loads(http_bodies[0])
+            assert routed_body["model"] == "gpt-5.4"
+            assert routed_body["input"]
+            assert proxy_hits[0].startswith("POST http://upstream.invalid/codex/responses ")
             assert any(hit.startswith("CONNECT ") for hit in proxy_hits[1:])
         finally:
             proxy_server.close()
             await proxy_server.wait_closed()
-            await native.aclose()
+            await close_discovered_native_egress_client()
             direct_server.close()
             await direct_server.wait_closed()

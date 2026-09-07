@@ -51,4 +51,6 @@ An authenticated key holder opens Install, chooses macOS, and clicks Download sc
 
 ## Example
 
+Administrator route recovery remains inside `AdministratorApp` and its authentication boundary. Unknown administrator paths show the recovery view, but subsequently navigating to `/key-dashboard` exits that boundary and loads the standalone lazy route. The key entry screen does not request administrator session, settings, status or account data; route errors must not turn key authentication into administrator login. See [the route recovery contract](spec.md).
+
 A user opens `/key-dashboard`, optionally enables “remember on this browser,” enters `sk-clb-…`, and the browser concurrently requests `/api/key-dashboard/profile`, `/v1/usage`, and `/api/key-dashboard/request-logs?limit=25&offset=0` with that value in the Bearer header. After all three succeed, Overview may show the key name and masked prefix, lifecycle and models, limit consumption, 42 requests, 12K total tokens, 3K cached tokens, $0.42 cost, and recent rows with model/status/token/latency values. It cannot show which account handled a row, the API key's database ID/hash, a client IP, or any upstream proxy route.

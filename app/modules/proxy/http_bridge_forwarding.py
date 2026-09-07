@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import hmac
 import json
-import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from typing import cast
@@ -12,6 +11,7 @@ from typing import cast
 import aiohttp
 
 from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
+from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
 from app.core.config.settings import get_settings
 from app.core.crypto import get_or_create_key
 from app.core.errors import OpenAIErrorEnvelope, openai_error, response_failed_event
@@ -114,6 +114,54 @@ class OwnerForwardRelayFailure(Exception):
     event_block: str
 
 
+def _bridge_header_name_has_illegal_control_char(name: str) -> bool:
+    return any(ord(char) < 32 or ord(char) == 127 for char in name)
+
+
+def _bridge_header_value_has_illegal_control_char(value: str) -> bool:
+    return any((ord(char) < 32 and char != "\t") or ord(char) == 127 for char in value)
+
+
+def _bridge_header_has_illegal_control_char(name: str, value: str) -> bool:
+    """Return whether reconstructed metadata is unsafe as an HTTP header."""
+
+    return _bridge_header_name_has_illegal_control_char(name) or _bridge_header_value_has_illegal_control_char(value)
+
+
+def _reject_illegal_bridge_header_value(name: str, value: str | None) -> None:
+    if value is None or not _bridge_header_has_illegal_control_char(name, value):
+        return
+    raise ProxyResponseError(
+        400,
+        openai_error(
+            "bridge_forward_invalid",
+            "Internal bridge forward metadata is not safe to forward",
+            error_type="invalid_request_error",
+        ),
+    )
+
+
+def _validate_bridge_forward_context_headers(context: HTTPBridgeForwardContext) -> None:
+    for name, value in (
+        (HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER, context.origin_instance),
+        (HTTP_BRIDGE_TARGET_INSTANCE_HEADER, context.target_instance),
+        ("x-codex-turn-state", context.downstream_turn_state),
+        (HTTP_BRIDGE_AFFINITY_KIND_HEADER, context.original_affinity_kind),
+        (HTTP_BRIDGE_AFFINITY_KEY_HEADER, context.original_affinity_key),
+        (HTTP_BRIDGE_FILE_OWNER_HEADER, context.file_owner_account_id),
+        (HTTP_BRIDGE_CLIENT_IP_HEADER, context.client_ip),
+    ):
+        _reject_illegal_bridge_header_value(name, value)
+    if context.reservation is None:
+        return
+    for name, value in (
+        (HTTP_BRIDGE_RESERVATION_ID_HEADER, context.reservation.reservation_id),
+        (HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER, context.reservation.key_id),
+        (HTTP_BRIDGE_RESERVATION_MODEL_HEADER, context.reservation.model),
+    ):
+        _reject_illegal_bridge_header_value(name, value)
+
+
 class HTTPBridgeOwnerClient:
     async def stream_responses(
         self,
@@ -127,6 +175,8 @@ class HTTPBridgeOwnerClient:
         on_response_rejected: Callable[[], None] | None = None,
         on_response_wait: Callable[[], None] | None = None,
         on_response_ready: Callable[[], None] | None = None,
+        scheduler: Scheduler = REAL_SCHEDULER,
+        clock: Clock = REAL_CLOCK,
     ) -> AsyncIterator[str]:
         settings = get_settings()
         timeout = _owner_forward_timeout(
@@ -175,6 +225,8 @@ class HTTPBridgeOwnerClient:
                             request_started_at=request_started_at,
                             proxy_request_budget_seconds=_http_bridge_request_budget_seconds(settings),
                             stream_idle_timeout_seconds=settings.stream_idle_timeout_seconds,
+                            scheduler=scheduler,
+                            clock=clock,
                         ):
                             yielded_event = True
                             yield event_block
@@ -217,6 +269,10 @@ def build_owner_forward_headers(
     payload: ResponsesRequest,
     context: HTTPBridgeForwardContext,
 ) -> dict[str, str]:
+    # WebSocket client metadata is reconstructed as a header mapping without
+    # passing through an HTTP parser. Validate it before signing so aiohttp is
+    # never the first component to discover illegal wire bytes.
+    _validate_bridge_forward_context_headers(context)
     filtered = filter_inbound_headers(headers)
     # Per the hop-by-hop contract, also drop any header named by the inbound
     # Connection header in addition to the fixed unsafe set.
@@ -235,7 +291,9 @@ def build_owner_forward_headers(
     forwarded = {
         key: value
         for key, value in filtered.items()
-        if key.lower() not in drop and not key.lower().startswith("x-codex-bridge-")
+        if key.lower() not in drop
+        and not key.lower().startswith("x-codex-bridge-")
+        and not _bridge_header_has_illegal_control_char(key, value)
     }
     # filter_inbound_headers strips Authorization, but the owner instance
     # re-validates the client API key from this header (see
@@ -246,7 +304,7 @@ def build_owner_forward_headers(
         (value for key, value in headers.items() if key.lower() == "authorization"),
         None,
     )
-    if authorization is not None:
+    if authorization is not None and not _bridge_header_has_illegal_control_char("authorization", authorization):
         forwarded["authorization"] = authorization
     forwarded[HTTP_BRIDGE_FORWARDED_HEADER] = "1"
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
@@ -632,6 +690,8 @@ async def _iter_sse_event_blocks(
     request_started_at: float,
     proxy_request_budget_seconds: float,
     stream_idle_timeout_seconds: float,
+    scheduler: Scheduler,
+    clock: Clock,
 ) -> AsyncIterator[str]:
     buffer = b""
     chunks = response.content.iter_chunked(65536)
@@ -640,9 +700,10 @@ async def _iter_sse_event_blocks(
             request_started_at=request_started_at,
             proxy_request_budget_seconds=proxy_request_budget_seconds,
             stream_idle_timeout_seconds=stream_idle_timeout_seconds,
+            now=clock.monotonic(),
         )
         try:
-            chunk = await asyncio.wait_for(chunks.__anext__(), timeout=receive_timeout.timeout_seconds)
+            chunk = await scheduler.wait_for(chunks.__anext__(), timeout=receive_timeout.timeout_seconds)
         except StopAsyncIteration:
             break
         except asyncio.TimeoutError as exc:
@@ -667,9 +728,10 @@ def _owner_forward_receive_timeout(
     request_started_at: float,
     proxy_request_budget_seconds: float,
     stream_idle_timeout_seconds: float,
+    now: float,
 ) -> _OwnerForwardReceiveTimeout:
     idle_timeout_seconds = max(0.001, stream_idle_timeout_seconds)
-    remaining_budget = _remaining_budget_seconds(request_started_at + proxy_request_budget_seconds)
+    remaining_budget = max(0.0, request_started_at + proxy_request_budget_seconds - now)
     idle_timeout_matches_request_budget = idle_timeout_seconds == max(0.001, proxy_request_budget_seconds)
     if remaining_budget <= 0 and idle_timeout_matches_request_budget:
         return _OwnerForwardReceiveTimeout(
@@ -700,10 +762,6 @@ def _owner_forward_receive_timeout(
         error_code="upstream_request_timeout",
         error_message="Proxy request budget exhausted",
     )
-
-
-def _remaining_budget_seconds(deadline: float) -> float:
-    return max(0.0, deadline - time.monotonic())
 
 
 def _owner_forward_error_payload(*, status_code: int, payload_text: str) -> OpenAIErrorEnvelope:

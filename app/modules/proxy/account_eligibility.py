@@ -49,7 +49,9 @@ def reauth_access_token_is_expired(
 def all_accounts_require_reauthentication(
     accounts: Collection[Account],
     encryptor: TokenEncryptor,
+    *,
+    now: float,
 ) -> bool:
     """Return whether every candidate is quarantined pending reauthentication."""
-    del encryptor
+    del encryptor, now
     return bool(accounts) and all(account.status == AccountStatus.REAUTH_REQUIRED for account in accounts)

@@ -1042,6 +1042,104 @@ async def test_dashboard_projections_weekly_only_depletion_uses_current_stream(a
     assert payload["depletionSecondary"]["risk"] == pytest.approx(0.37, abs=0.02)
 
 
+def _assert_json_close(actual: object, expected: object, path: str = "$") -> None:
+    if isinstance(expected, dict):
+        assert isinstance(actual, dict), path
+        assert actual.keys() == expected.keys(), path
+        for key in expected:
+            _assert_json_close(actual[key], expected[key], f"{path}.{key}")
+    elif isinstance(expected, list):
+        assert isinstance(actual, list) and len(actual) == len(expected), path
+        for index, (left, right) in enumerate(zip(actual, expected)):
+            _assert_json_close(left, right, f"{path}[{index}]")
+    elif isinstance(expected, float) and not isinstance(expected, bool):
+        assert actual == pytest.approx(expected, rel=1e-12, abs=1e-12), path
+    else:
+        assert actual == expected, path
+
+
+@pytest.mark.asyncio
+async def test_dashboard_projections_ewma_tail_cap_matches_uncapped_history(async_client, db_setup, monkeypatch):
+    """The projections fetch caps rows older than the equal-weight floor to
+    the newest 64 per account. For a dense weekly-only account sourced from
+    the primary stream (the production shape) the response must be
+    equivalent to the uncapped fetch: exact for the floor-covered weekly
+    pace values, within floating-point noise for the EWMA-derived fields."""
+    from app.db.models import UsageHistory
+    from app.db.session import engine
+    from app.modules.dashboard import service as dashboard_service
+    from app.modules.dashboard.repository import DashboardRepository
+
+    now = utcnow().replace(microsecond=0)
+    # Freeze the service clock so both responses are computed for the same
+    # instant and only the fetched history can differ between them.
+    monkeypatch.setattr(dashboard_service, "utcnow", lambda: now)
+    fetched_row_counts: list[int] = []
+    real_bulk_fetch = DashboardRepository.bulk_usage_history_since
+
+    async def _recording_bulk_fetch(self, *args, **kwargs):
+        grouped = await real_bulk_fetch(self, *args, **kwargs)
+        fetched_row_counts.append(sum(len(rows) for rows in grouped.values()))
+        return grouped
+
+    monkeypatch.setattr(DashboardRepository, "bulk_usage_history_since", _recording_bulk_fetch)
+    reset_at = int(naive_utc_to_epoch(now + timedelta(days=2)))
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_dense_weekly", "dense@example.com", plan_type="pro"))
+        # One row every 10 minutes for 7 days on the primary stream carrying
+        # the weekly window: ~1000 rows, far more than the 64-row tail
+        # between the 7-day cutoff and the 3h floor.
+        rows = []
+        used = 3.0
+        for index in range(7 * 24 * 6, 0, -1):
+            used += 0.04 + 0.03 * ((index * 7919) % 11) / 11.0
+            rows.append(
+                UsageHistory(
+                    account_id="acc_dense_weekly",
+                    window="primary",
+                    window_minutes=10080,
+                    used_percent=round(used, 6),
+                    reset_at=reset_at,
+                    recorded_at=now - timedelta(minutes=10 * (index - 1) + 1),
+                )
+            )
+        session.add_all(rows)
+        await session.commit()
+
+    capped = await async_client.get("/api/dashboard/projections")
+    assert capped.status_code == 200
+    capped_payload = capped.json()
+    assert capped_payload["depletionSecondary"] is not None
+    assert capped_payload["weeklyCreditPace"] is not None
+    assert capped_payload["weeklyCreditPace"]["burnRateRecentCreditsPerHour"] > 0
+
+    # Same database, same instant: lift the cap so every in-cutoff row is
+    # hydrated, and compare against the capped response.
+    monkeypatch.setattr(dashboard_service, "_PROJECTION_EWMA_TAIL_ROWS", 10**6)
+    uncapped = await async_client.get("/api/dashboard/projections")
+    assert uncapped.status_code == 200
+    uncapped_payload = uncapped.json()
+
+    # One primary-window fetch per request (weekly-only primary-source
+    # account, no secondary rows). On PostgreSQL the capped fetch hydrates
+    # the 18 rows inside the 3h floor plus the 64-row tail; SQLite serves its
+    # shared-floor snapshot cache and ignores the cap.
+    assert len(fetched_row_counts) == 2
+    capped_rows, uncapped_rows = fetched_row_counts
+    assert uncapped_rows == 7 * 24 * 6
+    if str(engine.url).startswith("postgresql"):
+        assert capped_rows == 18 + 64
+    else:
+        assert capped_rows == uncapped_rows
+
+    _assert_json_close(
+        capped_payload["depletionSecondary"], uncapped_payload["depletionSecondary"], "$.depletionSecondary"
+    )
+    _assert_json_close(capped_payload["weeklyCreditPace"], uncapped_payload["weeklyCreditPace"], "$.weeklyCreditPace")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("timeframe", "expected_requests", "expected_bucket_count"),

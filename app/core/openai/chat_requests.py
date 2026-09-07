@@ -3,16 +3,19 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, SkipValidation, field_validator, model_validator
 
 from app.core.openai.contracts import OpenAIMessage
 from app.core.openai.message_coercion import coerce_messages
 from app.core.openai.requests import (
+    PassthroughJsonList,
+    PassthroughJsonValue,
     ResponsesRequest,
     ResponsesTextControls,
     ResponsesTextFormat,
     normalize_reasoning_aliases,
     normalize_tool_type,
+    validate_passthrough_depth,
     validate_tool_types,
 )
 from app.core.types import JsonValue
@@ -46,10 +49,12 @@ class ChatCompletionsRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     model: str = Field(min_length=1)
-    messages: list[OpenAIMessage] | None = None
-    input: JsonValue | None = None
+    # Passthrough JSON (see ``PassthroughJsonValue``): shape checks live in
+    # the validators below, not in pydantic's type validation.
+    messages: SkipValidation[SerializeAsAny[list[OpenAIMessage] | None]] = None
+    input: PassthroughJsonValue = None
     instructions: str | None = None
-    tools: list[JsonValue] = Field(default_factory=list)
+    tools: PassthroughJsonList = Field(default_factory=list)
     tool_choice: str | dict[str, JsonValue] | None = None
     parallel_tool_calls: bool | None = None
     stream: bool | None = None
@@ -69,11 +74,23 @@ class ChatCompletionsRequest(BaseModel):
     store: bool | None = None
     stream_options: ChatStreamOptions | None = None
 
+    @field_validator("tools")
+    @classmethod
+    def _validate_tools_type(cls, value: list[JsonValue]) -> list[JsonValue]:
+        # Keep the array check at field level so the error names ``param="tools"``.
+        if not isinstance(value, list):
+            raise ValueError("tools must be an array")
+        validate_passthrough_depth(value)
+        return value
+
     @field_validator("messages")
     @classmethod
     def _reject_file_id(cls, value: list[OpenAIMessage] | None) -> list[OpenAIMessage] | None:
         if value is None:
             return value
+        if not isinstance(value, list):
+            raise ValueError("messages must be an array")
+        validate_passthrough_depth(value)
         for message in value:
             message_mapping = _json_mapping(message)
             if message_mapping is None:
@@ -133,16 +150,21 @@ class ChatCompletionsRequest(BaseModel):
         return self
 
     def to_responses_request(self) -> ResponsesRequest:
-        data = self.model_dump(mode="json", exclude_none=True)
+        # The passthrough fields are already plain JSON (shape-checked by the
+        # validators above), so attach them directly instead of deep-copying
+        # them through ``model_dump``.
+        data = self.model_dump(mode="json", exclude_none=True, exclude={"input", "messages", "tools"})
+        if self.input is not None:
+            data["input"] = self.input
         tools_were_set = "tools" in self.model_fields_set
-        messages = data.pop("messages", None)
+        messages = self.messages
         data.pop("store", None)
         data.pop("n", None)
         data.pop("max_tokens", None)
         data.pop("max_completion_tokens", None)
         response_format = data.pop("response_format", None)
         stream_options = data.pop("stream_options", None)
-        raw_tools = data.pop("tools", [])
+        raw_tools = self.tools
         raw_tool_choice = data.pop("tool_choice", None)
         preserve_instruction_roles = _is_json_object_response_format(response_format)
         normalize_reasoning_aliases(data)

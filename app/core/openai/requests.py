@@ -6,7 +6,16 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializeAsAny,
+    SkipValidation,
+    field_validator,
+    model_validator,
+)
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.tool_call_safety import is_downstream_side_effect_tool_call_item
@@ -14,6 +23,26 @@ from app.core.types import JsonObject, JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 
 type MutableJsonObject = dict[str, JsonValue]
+
+# Passthrough request fields (``input``, ``tools``, ``messages``, ``schema``)
+# arrive from ``json.loads`` and are forwarded upstream as-is, so validating
+# every node against the recursive ``JsonValue`` union only burns CPU (a
+# Python-level ``Mapping`` ABC ``isinstance`` per dict node) and copies the
+# tree. ``SkipValidation`` keeps the client's objects; ``SerializeAsAny``
+# (inner) serializes them by runtime type instead of through a wrap
+# serializer, which keeps ``model_dump(mode="json")`` byte-identical and
+# faster. Field validators still run, so shape checks live there. The
+# subscript form expands to ``Annotated[T, SerializeAsAny(), SkipValidation()]``
+# (``SerializeAsAny`` inner, ``SkipValidation`` outermost) and type-checks as ``T``.
+type PassthroughJsonValue = SkipValidation[SerializeAsAny[JsonValue]]
+type PassthroughJsonList = SkipValidation[SerializeAsAny[list[JsonValue]]]
+
+# pydantic-core's serializer refuses container nesting deeper than ~250 levels
+# (a 500 from ``model_dump`` long after validation); deep validation used to
+# reject such bodies first (``recursion_loop`` -> 400), so the passthrough
+# validators keep that contract with an explicit, cheaper depth check.
+PASSTHROUGH_MAX_DEPTH = 200
+_JSON_CONTAINER_TYPES = (dict, list)
 
 _RESPONSES_INCLUDE_ALLOWLIST = {
     "code_interpreter_call.outputs",
@@ -89,7 +118,29 @@ def normalize_tool_choice(choice: JsonValue | None) -> JsonValue | None:
     return choice
 
 
+def validate_passthrough_depth(value: object, *, limit: int = PASSTHROUGH_MAX_DEPTH) -> None:
+    """Reject JSON nested deeper than ``limit`` container levels (iterative walk over
+    ``dict``/``list`` nodes; ``isinstance`` because the WebSocket parser yields ``dict`` subclasses)."""
+    if not isinstance(value, _JSON_CONTAINER_TYPES):
+        return
+    frontier: list[object] = [value]
+    depth = 0
+    while frontier:
+        depth += 1
+        if depth > limit:
+            raise ValueError(f"nesting exceeds {limit} levels")
+        next_frontier: list[object] = []
+        for node in frontier:
+            children: Iterable[object] = node.values() if isinstance(node, dict) else cast(list[object], node)
+            next_frontier.extend([child for child in children if isinstance(child, _JSON_CONTAINER_TYPES)])
+        frontier = next_frontier
+
+
 def validate_tool_types(tools: list[JsonValue], *, allow_builtin_tools: bool = False) -> list[JsonValue]:
+    # ``tools`` skips pydantic's ``list`` validation, so the array check that
+    # used to yield ``list_type`` lives here (same ``param``: ``tools``).
+    if not isinstance(tools, list):
+        raise ValueError("tools must be an array")
     normalized_tools: list[JsonValue] = []
     for tool in tools:
         if not is_json_mapping(tool):
@@ -599,8 +650,14 @@ class ResponsesTextFormat(BaseModel):
 
     type: str | None = None
     strict: bool | None = None
-    schema_: JsonValue | None = Field(default=None, alias="schema")
+    schema_: PassthroughJsonValue = Field(default=None, alias="schema")
     name: str | None = None
+
+    @field_validator("schema_")
+    @classmethod
+    def _validate_schema_depth(cls, value: JsonValue) -> JsonValue:
+        validate_passthrough_depth(value)
+        return value
 
 
 class ResponsesTextControls(BaseModel):
@@ -622,8 +679,8 @@ class ResponsesRequest(BaseModel):
 
     model: str = Field(min_length=1)
     instructions: str
-    input: JsonValue
-    tools: list[JsonValue] = Field(default_factory=list)
+    input: PassthroughJsonValue
+    tools: PassthroughJsonList = Field(default_factory=list)
     tool_choice: str | JsonObject | None = None
     parallel_tool_calls: bool | None = None
     reasoning: ResponsesReasoning | None = None
@@ -649,8 +706,8 @@ class ResponsesRequest(BaseModel):
             normalized = _normalize_input_text(value)
             return _sanitize_input_items(normalized)
         if is_json_list(value):
-            input_items = value
-            return _sanitize_input_items(input_items)
+            validate_passthrough_depth(value)
+            return _sanitize_input_items(value)
         raise ValueError("input must be a string or array")
 
     @field_validator("include")
@@ -686,7 +743,9 @@ class ResponsesRequest(BaseModel):
     @field_validator("tools")
     @classmethod
     def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
-        return validate_tool_types(value, allow_builtin_tools=True)
+        validated = validate_tool_types(value, allow_builtin_tools=True)
+        validate_passthrough_depth(validated)
+        return validated
 
     @field_validator("tool_choice")
     @classmethod
@@ -752,7 +811,7 @@ class ResponsesCompactRequest(BaseModel):
 
     model: str = Field(min_length=1)
     instructions: str
-    input: JsonValue
+    input: PassthroughJsonValue
     reasoning: ResponsesReasoning | None = None
     store: bool = False
     service_tier: str | None = None
@@ -767,8 +826,8 @@ class ResponsesCompactRequest(BaseModel):
             normalized = _normalize_input_text(value)
             return _sanitize_input_items(normalized)
         if is_json_list(value):
-            input_items = value
-            return _sanitize_input_items(input_items)
+            validate_passthrough_depth(value)
+            return _sanitize_input_items(value)
         raise ValueError("input must be a string or array")
 
     @model_validator(mode="before")

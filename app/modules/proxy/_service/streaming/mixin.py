@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import time
 from typing import Any, AsyncIterator, Mapping, cast
 
 import aiohttp
@@ -33,6 +32,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clock import clock_for, scheduler_for
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE,
 )
@@ -271,15 +271,16 @@ from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
 from app.modules.proxy._service.streaming.helpers import (
-    _handle_stream_error as _handle_stream_error_helper,
-)
-from app.modules.proxy._service.streaming.helpers import (
+    _classify_terminal_stream_error_frame,
     _mark_downstream_stream_cancelled,
     _mark_upstream_stream_incomplete,
+    _observe_terminal_stream_error_frame,
     _openai_error_fields,
-    _raw_stream_error_code_or_upstream,
     _rewrite_malformed_stream_error_event,
     _stream_transport_failure_event_or_raise,
+)
+from app.modules.proxy._service.streaming.helpers import (
+    _handle_stream_error as _handle_stream_error_helper,
 )
 from app.modules.proxy._service.streaming.helpers import _raw_stream_error_fields as _raw_error_fields
 from app.modules.proxy._service.streaming.helpers import (
@@ -288,6 +289,7 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.helpers import (
     _select_account_with_budget_for_stream as _select_account_with_budget_for_stream_helper,
 )
+from app.modules.proxy._service.streaming.helpers import _settle_background_ack as _settle_bg_ack
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.streaming.retry import _StreamingRetryMixin
 from app.modules.proxy._service.support import (
@@ -495,6 +497,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
+        clock = clock_for(proxy)
         preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(headers)
         account_id_value = account.id
         access_token = proxy._encryptor.decrypt(account.access_token_encrypted)
@@ -505,7 +508,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         actual_service_tier: str | None = None
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         session_id = _owner_lookup_session_id_from_headers(headers)
-        start = time.monotonic()
+        start = clock.monotonic()
         # Keep selection/failover waits out of latency and TTFT, record them as
         # queue time, then re-anchor after this attempt's admission wait.
         attempt_started_at = start
@@ -536,10 +539,20 @@ class _StreamingMixin(_StreamingRetryMixin):
                 surface="stream",
             )
 
+        async def _record_or_defer_owner_recovery_health(error: UpstreamError, code: str | None) -> None:
+            if code is None:
+                return
+            if api_key_reservation is None:
+                await proxy._handle_stream_error(account, error, code)
+                return
+            settlement.error_code = code
+            settlement.account_health_error = True
+            settlement.settlement_order_required = True
+
         api_key_reservation_heartbeat_stop = asyncio.Event()
         api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None
         if api_key_reservation is not None:
-            api_key_reservation_heartbeat_task = asyncio.create_task(
+            api_key_reservation_heartbeat_task = scheduler_for(proxy).create_task(
                 proxy._run_api_key_reservation_heartbeat(
                     api_key=api_key,
                     reservation=api_key_reservation,
@@ -558,7 +571,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 concurrency_caps=concurrency_caps or _facade().effective_account_concurrency_caps(),
             )
             response_create_lease = await proxy._get_work_admission().acquire_response_create()
-            attempt_started_at = time.monotonic()
+            attempt_started_at = clock.monotonic()
             latency_queue_ms = max(0, int((attempt_started_at - request_started_at) * 1000))
             stream_optional_kwargs: dict[str, object] = {
                 "route": route,
@@ -622,7 +635,6 @@ class _StreamingMixin(_StreamingRetryMixin):
             first_payload = parse_sse_data_json(first)
             event_type = classify_event_type(first_payload)
             event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
-            terminal_event_seen = False
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
             malformed_error_rewrite = _rewrite_malformed_stream_error_event(
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -633,6 +645,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             )
             if malformed_error_rewrite is not None:
                 first, event, first_payload, event_type = malformed_error_rewrite
+            terminal_event_seen, response_id, usage = _settle_bg_ack(settlement, payload, first_payload, response_id)
             if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
                 await _touch_api_key_reservation()
             event_service_tier = _facade()._service_tier_from_event_payload(first_payload)
@@ -668,7 +681,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         error.code if error else None,
                         raw_error_type,
                     )
-                code = _raw_stream_error_code_or_upstream(event_type, first_payload, code)
+                code = _classify_terminal_stream_error_frame(event_type, first_payload, code, raw_error_message)
                 rewritten_error = _facade()._rewrite_previous_response_stream_error(
                     previous_response_id=payload.previous_response_id,
                     preferred_account_id=preferred_account_id,
@@ -684,12 +697,6 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.record_success = False
                 if rewritten_error is not None:
                     rewritten_code, rewritten_message, upstream_error_code = rewritten_error
-                    if upstream_error_code is not None:
-                        await proxy._handle_stream_error(
-                            account,
-                            upstream_error,
-                            upstream_error_code,
-                        )
                     first, event, first_payload, event_type = _facade()._build_rewritten_stream_response_failed_event(
                         response_id=response_id,
                         error_code=rewritten_code,
@@ -697,11 +704,10 @@ class _StreamingMixin(_StreamingRetryMixin):
                     )
                     error_code = rewritten_code
                     error_message = rewritten_message
+                    await _record_or_defer_owner_recovery_health(upstream_error, upstream_error_code)
                     upstream_error = cast(
                         UpstreamError, {"message": rewritten_message, "type": "upstream_error", "code": rewritten_code}
                     )
-                    settlement.error = upstream_error
-                    settlement.account_health_error = False
                 else:
                     error_code = code
                     error_message = raw_error_message
@@ -769,7 +775,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         terminal_event_seen = True
                     if latency_first_token_ms is None:
                         latency_first_token_ms = _ttft_event_latency_ms(
-                            event_type, first_payload, ttft_reasoning_deltas, attempt_started_at
+                            event_type, first_payload, ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
                         )
                     settlement.downstream_visible = True
                     if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
@@ -835,10 +841,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                         else:
                             raw_error_code = _normalize_error_code(error.code if error else None, raw_error_type)
                             upstream_error = _upstream_error_from_openai(error)
-                        raw_error_code = _raw_stream_error_code_or_upstream(
-                            event_type,
-                            event_payload,
-                            raw_error_code,
+                        raw_error_code = _classify_terminal_stream_error_frame(
+                            event_type, event_payload, raw_error_code, raw_error_message
                         )
                         rewritten_error = _facade()._rewrite_previous_response_stream_error(
                             previous_response_id=payload.previous_response_id,
@@ -855,12 +859,6 @@ class _StreamingMixin(_StreamingRetryMixin):
                                 else request_id
                             )
                             rewritten_code, rewritten_message, upstream_error_code = rewritten_error
-                            if upstream_error_code is not None:
-                                await proxy._handle_stream_error(
-                                    account,
-                                    _upstream_error_from_openai(error),
-                                    upstream_error_code,
-                                )
                             (
                                 line,
                                 event,
@@ -875,7 +873,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                             error_message = rewritten_message
                             settlement.error = _upstream_error_from_openai(error)
                             settlement.record_success = False
-                            settlement.account_health_error = False
+                            await _record_or_defer_owner_recovery_health(
+                                _upstream_error_from_openai(error), upstream_error_code
+                            )
                         else:
                             error_code = raw_error_code
                             error_message = raw_error_message
@@ -897,6 +897,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         event_type,
                         event_payload,
                     )
+                    _observe_terminal_stream_error_frame(raw_error_code, raw_error_message)
                     status = "error"
                     error_code = raw_error_code
                     error_message = raw_error_message
@@ -919,17 +920,17 @@ class _StreamingMixin(_StreamingRetryMixin):
                         event_type,
                     ) = _facade()._build_rewritten_stream_response_failed_event(
                         response_id=response_id,
-                        error_code="stream_incomplete",
+                        error_code=_facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE,
                         error_message=_facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE,
                     )
                     status = "error"
-                    error_code = "stream_incomplete"
+                    error_code = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE
                     error_message = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE
                     settlement.record_success = False
                     settlement.account_health_error = False
                 if latency_first_token_ms is None:
                     latency_first_token_ms = _ttft_event_latency_ms(
-                        event_type, event_payload, ttft_reasoning_deltas, attempt_started_at
+                        event_type, event_payload, ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
                     )
                 if mark_duplicate_tool_call_downstream_event(
                     event_payload,
@@ -966,17 +967,12 @@ class _StreamingMixin(_StreamingRetryMixin):
             )
             if rewritten_error is not None:
                 rewritten_code, rewritten_message, upstream_error_code = rewritten_error
-                if upstream_error_code is not None:
-                    await proxy._handle_stream_error(
-                        account,
-                        _upstream_error_from_openai(error),
-                        upstream_error_code,
-                    )
                 status = "error"
                 error_code = rewritten_code
                 error_message = rewritten_message
                 settlement.record_success = False
-                settlement.account_health_error = False
+                settlement.error = _upstream_error_from_openai(error)
+                await _record_or_defer_owner_recovery_health(_upstream_error_from_openai(error), upstream_error_code)
                 yield _facade()._build_rewritten_stream_response_failed_event(
                     response_id=request_id,
                     error_code=rewritten_code,
@@ -1040,14 +1036,17 @@ class _StreamingMixin(_StreamingRetryMixin):
                 usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
             )
             if latency_first_token_ms is None:
-                latency_first_token_ms = _finalize_ttft_latency_ms(ttft_reasoning_deltas, attempt_started_at)
+                latency_first_token_ms = _finalize_ttft_latency_ms(
+                    ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
+                )
             settlement.status = status
             settlement.model = model
             settlement.service_tier = service_tier
             settlement.input_tokens = input_tokens
             settlement.output_tokens = output_tokens
             settlement.cached_input_tokens = cached_input_tokens
-            settlement.error_code = error_code
+            if settlement.error_code is None:
+                settlement.error_code = error_code
             settlement.error_message = error_message
             await proxy._write_request_log(
                 account_id=account_id_value,
@@ -1055,7 +1054,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 request_id=response_id,
                 archive_request_id=request_id,
                 model=model,
-                latency_ms=int((time.monotonic() - attempt_started_at) * 1000),
+                latency_ms=int((clock.monotonic() - attempt_started_at) * 1000),
                 status=status,
                 error_code=error_code,
                 error_message=error_message,

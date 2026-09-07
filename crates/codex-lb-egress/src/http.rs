@@ -16,6 +16,7 @@ pub(crate) const CODEX_H2_MAX_HEADER_LIST_SIZE: u32 = 16 * 1024;
 pub(crate) struct ClientKey {
     pub(crate) proxy_url: Option<String>,
     pub(crate) connect_timeout_ms: Option<u64>,
+    pub(crate) decode_response: bool,
 }
 
 #[derive(Default)]
@@ -36,6 +37,9 @@ impl ClientPool {
             .http2_max_header_list_size(CODEX_H2_MAX_HEADER_LIST_SIZE)
             .pool_idle_timeout(Duration::from_secs(120))
             .pool_max_idle_per_host(8);
+        if !key.decode_response {
+            builder = builder.no_brotli().no_deflate().no_gzip().no_zstd();
+        }
         if let Some(connect_timeout_ms) = key.connect_timeout_ms {
             builder = builder.connect_timeout(Duration::from_millis(connect_timeout_ms));
         }
@@ -54,13 +58,7 @@ pub(crate) async fn execute_request(
     output: &Output,
 ) -> Result<(), RequestError> {
     let method = reqwest::Method::from_bytes(request.method.as_bytes())?;
-    let mut headers = HeaderMap::new();
-    for (name, value) in request.headers {
-        headers.append(
-            HeaderName::from_bytes(name.as_bytes())?,
-            HeaderValue::from_str(&value)?,
-        );
-    }
+    let headers = forwarded_headers(request.headers)?;
     let mut builder = client
         .request(method, request.url)
         .headers(headers)
@@ -109,6 +107,15 @@ pub(crate) async fn execute_request(
     )
     .await?;
     Ok(())
+}
+
+fn forwarded_headers(request_headers: Vec<(String, String)>) -> Result<HeaderMap, RequestError> {
+    let mut headers = HeaderMap::new();
+    for (name, value) in request_headers {
+        let name = HeaderName::from_bytes(name.as_bytes())?;
+        headers.append(name, HeaderValue::from_str(&value)?);
+    }
+    Ok(headers)
 }
 
 pub(crate) fn classify_error(
@@ -164,4 +171,31 @@ pub(crate) fn error_chain_has_invalid_certificate(
         current = source.source();
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use reqwest::header::{ACCEPT, ACCEPT_ENCODING};
+
+    use super::forwarded_headers;
+
+    #[test]
+    fn forwarded_headers_preserve_inbound_accept_encoding() {
+        let headers = forwarded_headers(vec![
+            ("accept".to_owned(), "application/json".to_owned()),
+            ("accept-encoding".to_owned(), "br, zstd, gzip".to_owned()),
+        ])
+        .expect("valid forwarded headers");
+
+        assert_eq!(
+            headers.get(ACCEPT).and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        assert_eq!(
+            headers
+                .get(ACCEPT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+            Some("br, zstd, gzip")
+        );
+    }
 }

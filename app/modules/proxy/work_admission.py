@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 
 from app.core.clients.proxy import ProxyResponseError
+from app.core.clock import REAL_SCHEDULER, Scheduler
 from app.core.resilience.overload import local_overload_error
 from app.core.utils.request_id import get_request_id
 
@@ -60,7 +61,9 @@ class WorkAdmissionController:
         response_create_limit: int,
         compact_response_create_limit: int,
         admission_wait_timeout_seconds: float = _DEFAULT_ADMISSION_WAIT_TIMEOUT_SECONDS,
+        scheduler: Scheduler = REAL_SCHEDULER,
     ) -> None:
+        self._scheduler = scheduler
         self._token_refresh = _make_gate(token_refresh_limit, admission_wait_timeout_seconds)
         self._websocket_connect = _make_gate(websocket_connect_limit, admission_wait_timeout_seconds)
         self._response_create = _make_gate(response_create_limit, admission_wait_timeout_seconds)
@@ -81,7 +84,7 @@ class WorkAdmissionController:
         if gate is None:
             return AdmissionLease(None, stage=stage, request_id=get_request_id())
         try:
-            await asyncio.wait_for(gate.semaphore.acquire(), timeout=gate.wait_timeout_seconds)
+            await self._scheduler.wait_for(gate.semaphore.acquire(), timeout=gate.wait_timeout_seconds)
         except asyncio.TimeoutError:
             available = gate.semaphore._value  # noqa: SLF001
             message = f"codex-lb is temporarily overloaded during {stage}"

@@ -133,8 +133,8 @@ async def test_helper_shutdown_releases_unread_data(tmp_path: Path) -> None:
 def test_raw_and_decoded_stages_share_a_byte_budget() -> None:
     shared = BufferBudget(2000)
     connection = BufferBudget(1000)
-    raw: ByteQueue[str | BaseException] = ByteQueue(connection, shared, event_size)
-    decoded: ByteQueue[str | BaseException] = ByteQueue(connection, shared, event_size)
+    raw = ByteQueue[str | BaseException](connection, shared, event_size)
+    decoded = ByteQueue[str | BaseException](connection, shared, event_size)
     raw.put_nowait("x" * 400)
     with pytest.raises(BufferFull):
         decoded.put_nowait("y" * 400)
@@ -152,9 +152,16 @@ async def test_shutdown_wakes_receiver_already_waiting_on_empty_queue(tmp_path: 
     await asyncio.sleep(0)
     try:
         await client.aclose()
-        with pytest.raises(native.NativeEgressTransportError):
+        # Closing stdin can deliver the helper's stdout EOF before aclose's
+        # explicit shutdown failure. Either native terminal must wake the
+        # existing receiver; unrelated protocol failures remain unexpected.
+        with pytest.raises((native.NativeEgressTransportError, native.NativeEgressProtocolError)) as failure:
             await asyncio.wait_for(receiver, timeout=1)
+        if isinstance(failure.value, native.NativeEgressProtocolError):
+            assert str(failure.value) == "native helper closed its stream unexpectedly"
         assert client._websocket_budget.used == 0
+        assert socket._pump_task.done()
+        assert not client._cancel_tasks
     finally:
         receiver.cancel()
         await asyncio.gather(receiver, return_exceptions=True)

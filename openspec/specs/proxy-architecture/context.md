@@ -142,3 +142,9 @@ OpenSpec-owned limit and exits non-zero.
   reverting to defaults.
 - The threshold block is intentionally visible beside the requirement so code
   review sees policy and implementation changes together.
+
+## Beta.4 fork integration
+
+The AnyIO cancelled-waiter contract in [spec.md](spec.md) accompanies the dependency floor of 4.14.0; a dependency bump alone is checked with deterministic release/cancel/acquire regressions for both locks and semaphores. For example, a newcomer acquiring after a cancelled queued waiter must not be stranded by the previous owner's release.
+
+Bridge and direct-websocket transport failure diagnostics share `_service/support.py`. Importing the helper from `websocket.helpers` into bridge event handling would create a cycle through the websocket package and bridge request submission. The shared helper copies optional bounded transport metadata without overwriting a more specific request override; absence of metadata must not interrupt terminal settlement. This placement does not move retry or account-selection ownership into the transport layer.

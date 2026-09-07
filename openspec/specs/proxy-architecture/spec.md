@@ -28,6 +28,75 @@ incomplete, or otherwise invalid threshold definition SHALL fail the
 architecture check without preventing unrelated architecture checks from
 reporting their own independently evaluable violations.
 
+The proxy turn-lifecycle timing seams are enforced by
+`scripts/check_proxy_timing_seams.py`, which loads its required-keyword list
+and per-module raw-site allowances from the marked TOML block below. Timing
+allowances are tracked per rule (`{ raw-sleep = 1, raw-timeout = 2 }`), so a
+module cannot offset a new raw site of one kind against a removed site of
+another; the single-rule clock table is written as plain integers. Unlisted
+modules and rules have an allowance of zero; a raw site is exempted only by
+editing this block in the same change that introduces it, and the committed
+allowances SHALL equal the counts the checker reports (restore or lower rather
+than increase).
+
+<!-- proxy-timing-seams:start -->
+```toml
+[scheduler_kwarg_required]
+_await_cancelled_task = "scheduler"
+_await_cleanup_deferring_cancellation = "scheduler"
+_await_owned_websocket_task_after_reader_cancellation = "scheduler"
+_await_result_deferring_cancellation = "scheduler"
+_cancel_and_track_cancelled_task = "scheduler"
+_cancel_http_bridge_reader_child = "scheduler_owner"
+_create_first_stream_probe_task = "scheduler"
+_iter_account_capacity_recovery_wait = ["scheduler", "clock"]
+_iter_account_capacity_wait_sse = ["scheduler", "clock"]
+_iter_sse_event_blocks = ["scheduler", "clock"]
+_probe_chat_stream_startup_error = ["scheduler", "clock"]
+_probe_stream_startup_error = ["scheduler", "clock"]
+_process_parsed_http_bridge_upstream_event = ["scheduler", "clock"]
+_release_reservation_best_effort = "scheduler"
+_release_websocket_response_create_gate = "scheduler"
+_sleep_for_account_selection_recovery = ["scheduler", "clock"]
+_stream_proxy_errors_as_response_failed = "scheduler"
+_stream_response_error_events = "scheduler"
+_wait_before_http_bridge_model_capacity_retry = ["scheduler", "clock"]
+_wait_for_first_stream_probe = ["scheduler", "clock"]
+_wait_for_websocket_continuity_gap = ["scheduler", "clock"]
+
+[allowances.timing]  # per-rule counts of raw-sleep + raw-timeout + raw-task-spawn + missing-scheduler-kwarg; unlisted modules and rules = 0
+"app/core/utils/shared_future.py" = { raw-task-spawn = 1 }
+"app/modules/proxy/_service/compact.py" = { raw-sleep = 1, raw-timeout = 1, raw-task-spawn = 1 }
+"app/modules/proxy/_service/http_bridge/mixin.py" = { raw-timeout = 1 }
+"app/modules/proxy/_service/realtime_live.py" = { raw-timeout = 2, raw-task-spawn = 3 }
+"app/modules/proxy/_service/request_log.py" = { raw-timeout = 1 }
+"app/modules/proxy/api.py" = { missing-scheduler-kwarg = 19 }
+"app/modules/proxy/http_bridge_event_batcher.py" = { raw-timeout = 1, raw-task-spawn = 1 }
+
+[allowances.clock]  # raw-clock-read; unlisted modules = 0
+"app/modules/proxy/_service/clock_budget.py" = 1
+"app/modules/proxy/_service/codex_control.py" = 2
+"app/modules/proxy/_service/compact.py" = 6
+"app/modules/proxy/_service/file_ops.py" = 2
+"app/modules/proxy/_service/http_bridge/helpers.py" = 1
+"app/modules/proxy/_service/rate_limit.py" = 2
+"app/modules/proxy/_service/realtime_live.py" = 2
+"app/modules/proxy/_service/request_log.py" = 2
+"app/modules/proxy/_service/support.py" = 2
+"app/modules/proxy/_service/transcribe.py" = 2
+"app/modules/proxy/_service/warmup.py" = 2
+"app/modules/proxy/_service/websocket/helpers.py" = 3
+"app/modules/proxy/account_cache.py" = 2
+"app/modules/proxy/account_eligibility.py" = 1
+"app/modules/proxy/api.py" = 8
+"app/modules/proxy/durable_bridge_repository.py" = 2
+"app/modules/proxy/images_observability.py" = 1
+"app/modules/proxy/images_service.py" = 2
+"app/modules/proxy/load_balancer.py" = 3
+"app/modules/proxy/rate_limit_cache.py" = 2
+```
+<!-- proxy-timing-seams:end -->
+
 #### Scenario: OpenSpec-owned ratchets drive the checker
 
 - **WHEN** the normative threshold block changes while the checker implementation remains unchanged
@@ -119,3 +188,37 @@ remain outside reusable transport and domain libraries.
 - **WHEN** a future migration cutover makes Rust authoritative for a domain
 - **THEN** the prior Python owner is removed after contract verification
 - **AND** no permanent dual implementation independently makes that domain decision
+
+### Requirement: AnyIO synchronization primitives survive cancelled-waiter releases
+
+The proxy uses two families of asyncio synchronization primitives: the AnyIO asyncio-backend `anyio.Lock` and `anyio.Semaphore` (every HTTP-bridge session `pending_lock`, the bridge registry lock, websocket mixin locks, and cache locks) and the stdlib `asyncio.Lock` and `asyncio.Semaphore`. When a release happens while a queued waiter has already been cancelled but has not yet removed itself from the waiter queue, each primitive MUST satisfy the following:
+
+- **Lock**: the release MUST either hand ownership to a live (non-cancelled) queued waiter or leave the lock unowned such that the next `acquire()` call succeeds. A release MUST NOT leave the lock with no owner and a queued waiter that is never woken.
+- **Semaphore**: the released permit MUST become available to a live queued waiter or to the next acquirer. A release MUST NOT strand the permit behind a cancelled waiter entry so that waiter progress stops while the permit count is positive.
+
+The stdlib primitives already satisfy this (they skip cancelled waiters on acquire) and serve as the reference behaviour. The repository MUST declare an AnyIO dependency floor whose asyncio-backend implementation satisfies this (anyio 4.14.0 or later) and MUST keep a deterministic regression that drives the release/cancel/acquire interleaving against `anyio.Lock`, `anyio.Semaphore`, and the stdlib reference.
+
+#### Scenario: AnyIO Lock newcomer acquires after a release coinciding with a cancelled waiter
+
+- **GIVEN** task O holds an `anyio.Lock` and task W1 is queued behind it
+- **WHEN** W1 is cancelled, O releases, and a newcomer A calls `acquire()` before W1 has run its cancellation handler
+- **THEN** A acquires the lock within the same bounded wait
+- **AND** the lock reports no owner and no waiting tasks after A releases
+
+#### Scenario: AnyIO Semaphore newcomer acquires a permit after a release coinciding with a cancelled waiter
+
+- **GIVEN** task O holds the only permit of an `anyio.Semaphore(1)` and task W1 is queued behind it
+- **WHEN** W1 is cancelled, O releases, and a newcomer A calls `acquire()` before W1 has run its cancellation handler
+- **THEN** A acquires the permit within the same bounded wait
+- **AND** the semaphore reports its full permit count and no waiting tasks after A releases
+
+#### Scenario: Stdlib reference behaviour is preserved
+
+- **GIVEN** the same interleaving is driven against the stdlib `asyncio.Lock`
+- **THEN** the newcomer acquires within the same bounded wait
+
+#### Scenario: Dependency floor pins the fixed primitive
+
+- **WHEN** the project dependencies are resolved
+- **THEN** the resolved anyio version is at least 4.14.0
+- **AND** the regression covering the cancelled-waiter release interleaving passes for both AnyIO primitives and the stdlib reference

@@ -307,6 +307,9 @@ export const UpstreamProxyEndpointSchema = z.object({
   port: z.number().int(),
   username: z.string().nullable().optional(),
   isActive: z.boolean(),
+  // Credentials cross the LB-to-proxy hop unencrypted (http/socks5 with a
+  // username or password); the endpoint list renders a warning.
+  plaintextCredentials: z.boolean().optional().default(false),
 });
 
 export const UpstreamProxyEndpointCreateRequestSchema = z.object({

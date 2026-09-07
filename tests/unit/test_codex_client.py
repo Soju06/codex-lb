@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -9,7 +10,14 @@ import pytest
 from aiohttp.client_reqrep import ConnectionKey
 from python_socks import ProxyType
 
-from app.core.clients.codex import CodexClient, CodexTransportError, require_route_or_direct_egress_opt_in
+from app.core.clients import codex as codex_module
+from app.core.clients.codex import (
+    CodexClient,
+    CodexTransportError,
+    create_codex_session,
+    require_route_or_direct_egress_opt_in,
+)
+from app.core.clients.http import _reset_shared_ssl_context, _shared_ssl_context
 from app.core.clients.native_egress import (
     NativeEgressRequest,
     NativeEgressTransportError,
@@ -24,6 +32,21 @@ pytestmark = pytest.mark.unit
 
 def _route_basic_auth_url(user: str, value: str, authority: str) -> str:
     return runtime_basic_auth_url(user, value, authority).replace("http://", "https://", 1)
+
+
+# The Basic token aiohttp itself derives from ``https://u:p@`` userinfo (latin1).
+_ROUTE_PROXY_BASIC_TOKEN = "Basic " + base64.b64encode(b"u:p").decode("latin1")
+
+
+def _assert_credentialed_proxy_call(call: dict[str, Any]) -> None:
+    # Credentials ride in Proxy-Authorization, never in the pooled proxy URL.
+    assert call["proxy"] == "https://proxy.test:8080"
+    assert call["proxy_headers"] == {"Proxy-Authorization": _ROUTE_PROXY_BASIC_TOKEN}
+
+
+def _assert_credential_free_proxy_call(call: dict[str, Any], proxy_url: str) -> None:
+    assert call["proxy"] == proxy_url
+    assert "proxy_headers" not in call
 
 
 @dataclass
@@ -171,7 +194,7 @@ async def test_request_passes_resolver_proxy_and_builtin_fingerprint(route: Reso
 
     response = await client.request("POST", "https://upstream.test", route=route, json={"x": 1})
 
-    assert session.calls[0]["proxy"] == _route_basic_auth_url("u", "p", "proxy.test:8080")
+    _assert_credentialed_proxy_call(session.calls[0])
     assert session.calls[0]["json"] == {"x": 1}
     assert response.content == b'{"ok": true}'
 
@@ -237,7 +260,7 @@ async def test_routed_native_unavailable_falls_back_before_dispatch(route: Resol
 
     assert len(native.request_calls) == 1
     assert len(session.calls) == 1
-    assert session.calls[0]["proxy"] == _route_basic_auth_url("u", "p", "proxy.test:8080")
+    _assert_credentialed_proxy_call(session.calls[0])
 
 
 @pytest.mark.asyncio
@@ -317,7 +340,7 @@ async def test_streaming_request_can_opt_out_of_response_buffering(route: Resolv
         json={"x": 1},
     )
 
-    assert session.calls[0]["proxy"] == _route_basic_auth_url("u", "p", "proxy.test:8080")
+    _assert_credentialed_proxy_call(session.calls[0])
     assert "buffer_response" not in session.calls[0]
     assert isinstance(result.response, _Response)
 
@@ -337,11 +360,11 @@ async def test_request_converts_legacy_files_payload_to_form_data(route: Resolve
 
     assert "files" not in session.calls[0]
     assert isinstance(session.calls[0]["data"], aiohttp.FormData)
-    assert session.calls[0]["proxy"] == _route_basic_auth_url("u", "p", "proxy.test:8080")
+    _assert_credentialed_proxy_call(session.calls[0])
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("override", ["akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy"])
+@pytest.mark.parametrize("override", ["akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy", "proxy_headers"])
 async def test_runtime_route_and_fingerprint_overrides_are_rejected(
     route: ResolvedUpstreamRoute,
     override: str,
@@ -349,6 +372,63 @@ async def test_runtime_route_and_fingerprint_overrides_are_rejected(
     client = CodexClient(_Session())
     with pytest.raises(ValueError, match="controlled centrally"):
         await client.request("GET", "https://upstream.test", route=route, **{override: "bad"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["POST", "GET"])
+async def test_credentialed_route_requires_tls_target_for_request(route: ResolvedUpstreamRoute, method: str) -> None:
+    # aiohttp forwards proxy_headers only on the CONNECT tunnel, so a plaintext
+    # target would silently drop the proxy credentials; fail closed before any
+    # dispatch. The idempotent GET must not slip through the credential-free
+    # fallback endpoint either (the route fixture carries one). Surfaces as a
+    # connect-phase transport error so callers answer upstream-unavailable.
+    session = _Session()
+    client = CodexClient(session)
+
+    with pytest.raises(CodexTransportError, match="https/wss upstream target") as exc_info:
+        await client.request(method, "http://upstream.test", route=route, json={"x": 1})
+
+    assert session.calls == []
+    assert "proxy.test" not in str(exc_info.value)
+    assert exc_info.value.failure_phase == "connect"
+    assert exc_info.value.retryable_same_contract is False
+
+
+@pytest.mark.asyncio
+async def test_credentialed_route_requires_tls_target_for_ws_connect(route: ResolvedUpstreamRoute) -> None:
+    session = _Session()
+    client = CodexClient(session)
+
+    with pytest.raises(CodexTransportError, match="https/wss upstream target"):
+        await client.ws_connect("ws://upstream.test", route=route)
+
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_credentialed_route_requires_tls_target_for_ws_open_with_fallback(route: ResolvedUpstreamRoute) -> None:
+    session = _Session()
+    client = CodexClient(session)
+
+    with pytest.raises(CodexTransportError, match="https/wss upstream target"):
+        await client.open_ws_with_route_metadata("ws://upstream.test", route=route)
+
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_credential_free_route_allows_plaintext_target() -> None:
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "https", "proxy.test", 8080),
+    )
+    session = _Session()
+    client = CodexClient(session)
+
+    await client.request("GET", "http://upstream.test", route=route)
+
+    _assert_credential_free_proxy_call(session.calls[0], "https://proxy.test:8080")
 
 
 @pytest.mark.asyncio
@@ -360,10 +440,8 @@ async def test_pre_response_failure_uses_same_pool_fallback(route: ResolvedUpstr
 
     assert result.fallback_used is True
     assert result.route.endpoint_id == "ep_2"
-    assert [call["proxy"] for call in session.calls] == [
-        _route_basic_auth_url("u", "p", "proxy.test:8080"),
-        "http://proxy-two.test:8081",
-    ]
+    _assert_credentialed_proxy_call(session.calls[0])
+    _assert_credential_free_proxy_call(session.calls[1], "http://proxy-two.test:8081")
 
 
 @pytest.mark.asyncio
@@ -376,7 +454,7 @@ async def test_non_idempotent_request_failure_does_not_fallback(route: ResolvedU
 
     assert "ep_1" in str(exc_info.value)
     assert len(session.calls) == 1
-    assert session.calls[0]["proxy"] == _route_basic_auth_url("u", "p", "proxy.test:8080")
+    _assert_credentialed_proxy_call(session.calls[0])
 
 
 def _proxy_connect_error() -> aiohttp.ClientProxyConnectionError:
@@ -413,10 +491,8 @@ async def test_non_idempotent_pre_dispatch_proxy_failure_uses_same_pool_fallback
 
     assert result.fallback_used is True
     assert result.route.endpoint_id == "ep_2"
-    assert [call["proxy"] for call in session.calls] == [
-        _route_basic_auth_url("u", "p", "proxy.test:8080"),
-        "http://proxy-two.test:8081",
-    ]
+    _assert_credentialed_proxy_call(session.calls[0])
+    _assert_credential_free_proxy_call(session.calls[1], "http://proxy-two.test:8081")
 
 
 @pytest.mark.asyncio
@@ -589,7 +665,7 @@ async def test_routed_native_websocket_unavailable_uses_python_connector(
     assert result.native is False
     assert len(native.websocket_calls) == 1
     assert len(session.calls) == 1
-    assert session.calls[0]["proxy"] == _route_basic_auth_url("u", "p", "proxy.test:8080")
+    _assert_credentialed_proxy_call(session.calls[0])
 
 
 @pytest.mark.asyncio
@@ -898,3 +974,64 @@ async def test_socks_websocket_cancel_during_enter_closes_local_session(
     assert session.closed == 1
     assert session.context.exited is False
     assert session.context.owned is False
+
+
+async def test_socks_session_owned_response_releases_before_closing_session() -> None:
+    order: list[str] = []
+
+    async def _noop() -> None:
+        return None
+
+    class _Content:
+        async def iter_chunked(self, size: int):
+            del size
+            yield b"data: first\n\n"
+            yield b"data: second\n\n"
+
+    class _RawResponse:
+        status = 200
+        headers: dict[str, str] = {}
+        content = _Content()
+
+        def release(self) -> Any:
+            order.append("release")
+            return _noop()
+
+    class _Session:
+        async def close(self) -> None:
+            order.append("session_close")
+
+    owned = codex_module._SessionOwnedResponse(_RawResponse(), cast(Any, _Session()))
+
+    async for _ in owned.content.iter_chunked(1024):
+        break
+    await owned.release()
+
+    assert order == ["release", "session_close"]
+
+
+@pytest.mark.asyncio
+async def test_create_codex_session_connectors_share_one_ssl_context() -> None:
+    _reset_shared_ssl_context()
+    first = create_codex_session()
+    second = create_codex_session()
+    try:
+        assert first.connector._ssl is second.connector._ssl
+        assert first.connector._ssl is _shared_ssl_context()
+    finally:
+        await first.close()
+        await second.close()
+        _reset_shared_ssl_context()
+
+
+@pytest.mark.asyncio
+async def test_socks_proxy_connector_reuses_shared_ssl_context() -> None:
+    _reset_shared_ssl_context()
+    endpoint = ResolvedProxyEndpoint("ep_1", "socks5h", "proxy.test", 1080)
+    connector = codex_module._socks_proxy_connector(endpoint)
+    try:
+        assert connector._ssl is _shared_ssl_context()
+        assert connector._rdns is True
+    finally:
+        await connector.close()
+        _reset_shared_ssl_context()

@@ -307,6 +307,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_service_tier_trace as _maybe_log_proxy_service_tier_trace,
 )
+from app.modules.proxy._service.observability import _observe_terminal_stream_error_frame
 from app.modules.proxy._service.observability import (
     _record_continuity_fail_closed as _record_continuity_fail_closed,
 )
@@ -6302,6 +6303,7 @@ class _WebSocketMixin:
         if completed_empty_prewarm:
             settlement.record_success = False
         if event_type in {"response.failed", "error"}:
+            _observe_terminal_stream_error_frame(error_code, error_message)
             settlement.account_health_error = _facade()._should_penalize_stream_error(error_code) and not getattr(
                 request_state,
                 "account_health_error_handled",

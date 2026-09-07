@@ -271,15 +271,16 @@ from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
 from app.modules.proxy._service.streaming.helpers import (
-    _handle_stream_error as _handle_stream_error_helper,
-)
-from app.modules.proxy._service.streaming.helpers import (
+    _classify_terminal_stream_error_frame,
     _mark_downstream_stream_cancelled,
     _mark_upstream_stream_incomplete,
+    _observe_terminal_stream_error_frame,
     _openai_error_fields,
-    _raw_stream_error_code_or_upstream,
     _rewrite_malformed_stream_error_event,
     _stream_transport_failure_event_or_raise,
+)
+from app.modules.proxy._service.streaming.helpers import (
+    _handle_stream_error as _handle_stream_error_helper,
 )
 from app.modules.proxy._service.streaming.helpers import _raw_stream_error_fields as _raw_error_fields
 from app.modules.proxy._service.streaming.helpers import (
@@ -680,7 +681,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         error.code if error else None,
                         raw_error_type,
                     )
-                code = _raw_stream_error_code_or_upstream(event_type, first_payload, code)
+                code = _classify_terminal_stream_error_frame(event_type, first_payload, code, raw_error_message)
                 rewritten_error = _facade()._rewrite_previous_response_stream_error(
                     previous_response_id=payload.previous_response_id,
                     preferred_account_id=preferred_account_id,
@@ -840,10 +841,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                         else:
                             raw_error_code = _normalize_error_code(error.code if error else None, raw_error_type)
                             upstream_error = _upstream_error_from_openai(error)
-                        raw_error_code = _raw_stream_error_code_or_upstream(
-                            event_type,
-                            event_payload,
-                            raw_error_code,
+                        raw_error_code = _classify_terminal_stream_error_frame(
+                            event_type, event_payload, raw_error_code, raw_error_message
                         )
                         rewritten_error = _facade()._rewrite_previous_response_stream_error(
                             previous_response_id=payload.previous_response_id,
@@ -898,6 +897,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         event_type,
                         event_payload,
                     )
+                    _observe_terminal_stream_error_frame(raw_error_code, raw_error_message)
                     status = "error"
                     error_code = raw_error_code
                     error_message = raw_error_message

@@ -46,9 +46,15 @@ reasoning items are counted.
   throttling and quota codes are excluded: throttling is transient, and quota
   codes already pin `used_percent=100` in runtime state.
 - `codex_lb_upstream_reasoning_replay_400_total` counts upstream HTTP 400
-  rejections (or code-less `invalid_request_error` frames) whose message
-  references reasoning. Observation only: classification, account health and
-  failover are unchanged, and the counter is a no-op without `prometheus_client`.
+  rejections and terminal `error` / `response.failed` frames carrying
+  `invalid_request_error` whose message references reasoning. Frames are counted
+  where they are classified (SSE streaming first-event and mid-stream sites, and
+  websocket finalization, which the HTTP bridge reuses), not in
+  `_handle_stream_error`: `invalid_request_error` is never penalized, so the
+  health handler never sees those frames. The helpers live in
+  `_service/observability.py`, the one module every transport domain may import.
+  Observation only: classification, account health and failover are unchanged,
+  and the counter is a no-op without `prometheus_client`.
 - No overflow behaviour is wired; the change is valuable stand-alone.
 
 ## Capabilities

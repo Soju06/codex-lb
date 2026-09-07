@@ -75,6 +75,7 @@ from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import compact as proxy_compact_service
 from app.modules.proxy._service import file_ops as proxy_file_ops
+from app.modules.proxy._service import observability as proxy_observability_module
 from app.modules.proxy._service import support as proxy_support
 from app.modules.proxy._service import warmup as proxy_warmup_service
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
@@ -705,8 +706,8 @@ async def test_reasoning_replay_400_increments_counter_without_changing_health(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     counter = MagicMock()
-    monkeypatch.setattr(streaming_helpers_module, "PROMETHEUS_AVAILABLE", True)
-    monkeypatch.setattr(streaming_helpers_module, "upstream_reasoning_replay_400_total", counter)
+    monkeypatch.setattr(proxy_observability_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_observability_module, "upstream_reasoning_replay_400_total", counter)
     load_balancer = _stream_error_load_balancer()
     proxy = SimpleNamespace(_load_balancer=load_balancer, _schedule_cancel_safe_cleanup=MagicMock())
 
@@ -742,8 +743,8 @@ async def test_reasoning_replay_counter_ignores_non_matching_stream_errors(
     message: str,
 ) -> None:
     counter = MagicMock()
-    monkeypatch.setattr(streaming_helpers_module, "PROMETHEUS_AVAILABLE", True)
-    monkeypatch.setattr(streaming_helpers_module, "upstream_reasoning_replay_400_total", counter)
+    monkeypatch.setattr(proxy_observability_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_observability_module, "upstream_reasoning_replay_400_total", counter)
     proxy = SimpleNamespace(_load_balancer=_stream_error_load_balancer())
 
     await streaming_helpers_module._handle_stream_error(
@@ -757,6 +758,53 @@ async def test_reasoning_replay_counter_ignores_non_matching_stream_errors(
     counter.inc.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_handle_stream_error_leaves_frame_counting_to_frame_sites(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Terminal frames (no HTTP status) are counted where they are classified, never twice via the handler."""
+    counter = MagicMock()
+    monkeypatch.setattr(proxy_observability_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_observability_module, "upstream_reasoning_replay_400_total", counter)
+    proxy = SimpleNamespace(_load_balancer=_stream_error_load_balancer())
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": _REASONING_REPLAY_400_MESSAGE},
+        "invalid_request_error",
+        None,
+    )
+
+    counter.inc.assert_not_called()
+    assert classified["failure_class"] == "non_retryable"
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "expected_increments"),
+    [
+        ("invalid_request_error", _REASONING_REPLAY_400_MESSAGE, 1),
+        ("invalid_request_error", "Reasoning item rs_abc was not found in the conversation.", 1),
+        ("invalid_request_error", "No tool output found for function call call_abc.", 0),
+        ("upstream_error", _REASONING_REPLAY_400_MESSAGE, 0),
+        ("server_error", _REASONING_REPLAY_400_MESSAGE, 0),
+        ("invalid_request_error", None, 0),
+        (None, _REASONING_REPLAY_400_MESSAGE, 0),
+    ],
+)
+def test_observe_terminal_stream_error_frame_counts_reasoning_replay_only(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str | None,
+    message: str | None,
+    expected_increments: int,
+) -> None:
+    counter = MagicMock()
+    monkeypatch.setattr(proxy_observability_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_observability_module, "upstream_reasoning_replay_400_total", counter)
+
+    proxy_observability_module._observe_terminal_stream_error_frame(code, message)
+
+    assert counter.inc.call_count == expected_increments
+
+
 @pytest.mark.parametrize("prometheus_available", [False, True])
 @pytest.mark.asyncio
 async def test_reasoning_replay_counter_is_noop_without_prometheus(
@@ -764,10 +812,10 @@ async def test_reasoning_replay_counter_is_noop_without_prometheus(
     prometheus_available: bool,
 ) -> None:
     counter = MagicMock()
-    monkeypatch.setattr(streaming_helpers_module, "PROMETHEUS_AVAILABLE", prometheus_available)
+    monkeypatch.setattr(proxy_observability_module, "PROMETHEUS_AVAILABLE", prometheus_available)
     # Unavailable client: the counter object is absent; disabled flag: the object exists but is skipped.
     monkeypatch.setattr(
-        streaming_helpers_module,
+        proxy_observability_module,
         "upstream_reasoning_replay_400_total",
         None if prometheus_available else counter,
     )

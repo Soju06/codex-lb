@@ -14,6 +14,7 @@ import asyncio
 import base64
 import json
 import time
+from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
@@ -30,6 +31,7 @@ from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
+from app.modules.proxy._service import observability as proxy_observability_module
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage import updater as usage_updater_module
 from app.modules.usage.repository import UsageRepository
@@ -1452,3 +1454,74 @@ async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exh
         release_fetch.set()
         usage_updater_module._clear_usage_refresh_state()
         selection_cache.invalidate()
+
+
+# ===========================================================================
+# Streaming — upstream reasoning-replay rejections are counted once per failure (#2123 CP-15)
+# ===========================================================================
+
+
+_REASONING_REPLAY_MESSAGE = (
+    "Item with id 'rs_0f3a' of type 'reasoning' was provided without its required following item."
+)
+
+
+@pytest.mark.parametrize(
+    ("upstream_shape", "message", "expected_increments"),
+    [
+        ("status_400", _REASONING_REPLAY_MESSAGE, 1),
+        ("error_frame", _REASONING_REPLAY_MESSAGE, 1),
+        ("error_frame_enveloped", _REASONING_REPLAY_MESSAGE, 1),
+        ("response_failed_frame", _REASONING_REPLAY_MESSAGE, 1),
+        ("error_frame", "Selected model is at capacity. Please try a different model.", 0),
+        ("response_failed_frame", "No tool output found for function call call_abc.", 0),
+    ],
+)
+@pytest.mark.asyncio
+async def test_stream_reasoning_replay_rejection_counted_once_for_status_and_terminal_frames(
+    async_client, monkeypatch, upstream_shape: str, message: str, expected_increments: int
+):
+    """invalid_request_error is never penalized, so terminal ``error``/``response.failed`` frames
+    never reach ``_handle_stream_error``; the counter must fire at frame classification for them
+    and exactly once for the HTTP-400 status path."""
+    counter = MagicMock()
+    monkeypatch.setattr(proxy_observability_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_observability_module, "upstream_reasoning_replay_400_total", counter)
+    await _import_account(async_client, "acc_reasoning_replay", "reasoning-replay@example.com")
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        if upstream_shape == "status_400":
+            raise ProxyResponseError(
+                400,
+                openai_error("invalid_request_error", message),
+                failure_phase="status",
+            )
+        if upstream_shape == "error_frame":
+            yield _sse_event({"type": "error", "code": "invalid_request_error", "message": message})
+        elif upstream_shape == "error_frame_enveloped":
+            yield _sse_event({"type": "error", "error": {"code": "invalid_request_error", "message": message}})
+        else:
+            yield _sse_event(
+                {
+                    "type": "response.failed",
+                    "response": {"error": {"code": "invalid_request_error", "message": message}},
+                }
+            )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    if upstream_shape == "status_400":
+        response = await async_client.post("/backend-api/codex/responses", json=payload)
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "invalid_request_error"
+    else:
+        async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+            assert resp.status_code == 200
+            lines = [line async for line in resp.aiter_lines() if line]
+        events = _extract_events(lines)
+        terminal = [event for event in events if event.get("type") in {"error", "response.failed"}]
+        assert len(terminal) == 1
+
+    assert counter.inc.call_count == expected_increments

@@ -58,7 +58,13 @@ def _account(account_id: str, *, encryptor: TokenEncryptor, expires_at: int, pla
     )
 
 
-def _additional_usage(account_id: str, *, used_percent: float, reset_at: int | None) -> AdditionalUsageHistory:
+def _naive_utc(clock: VirtualClock) -> datetime:
+    return datetime.fromtimestamp(clock.time(), timezone.utc).replace(tzinfo=None)
+
+
+def _additional_usage(
+    account_id: str, *, used_percent: float, reset_at: int | None, recorded_at: datetime
+) -> AdditionalUsageHistory:
     return AdditionalUsageHistory(
         account_id=account_id,
         quota_key="codex_spark",
@@ -67,7 +73,7 @@ def _additional_usage(account_id: str, *, used_percent: float, reset_at: int | N
         window="primary",
         used_percent=used_percent,
         reset_at=reset_at,
-        recorded_at=datetime(2026, 1, 1),
+        recorded_at=recorded_at,
     )
 
 
@@ -95,7 +101,12 @@ async def test_additional_limit_filter_evaluates_quota_resets_on_the_injected_cl
     exhausted = _account("exhausted", encryptor=encryptor, expires_at=int(clock.time()) + 3600)
     exhausted.status = AccountStatus.ACTIVE
     reset_at = int(clock.time()) + 600
-    entries = {exhausted.id: _additional_usage(exhausted.id, used_percent=100.0, reset_at=reset_at)}
+    # Evidence recorded "now" on the injected clock, as the usage refresher leaves it.
+    entries = {
+        exhausted.id: _additional_usage(
+            exhausted.id, used_percent=100.0, reset_at=reset_at, recorded_at=_naive_utc(clock)
+        )
+    }
     _forbid_wall_clock(monkeypatch)
 
     fresh_since_cutoffs: list[datetime] = []
@@ -108,39 +119,41 @@ async def test_additional_limit_filter_evaluates_quota_resets_on_the_injected_cl
             fresh_since_cutoffs.append(since)
         if window != "primary":
             return {}
-        # A running usage refresher would have stamped the evidence "now" on
-        # the same clock; the double honors ``since`` like the real repository.
-        recorded_at = datetime.fromtimestamp(clock.time(), timezone.utc).replace(tzinfo=None)
-        for entry in entries.values():
-            entry.recorded_at = recorded_at
+        # Honor ``since`` like the real repository; never mutate the evidence on a read.
         return {key: entry for key, entry in entries.items() if since is None or entry.recorded_at >= since}
 
     repos = SimpleNamespace(additional_usage=SimpleNamespace(latest_by_quota_key=latest_by_quota_key))
 
-    before_reset = await balancer._filter_accounts_for_additional_limit(
-        [exhausted],
-        model="gpt-5.3-codex-spark",
-        limit_name="codex-spark",
-        explicit_limit=True,
-        repos=cast(Any, repos),
-    )
+    async def filter_accounts() -> Any:
+        return await balancer._filter_accounts_for_additional_limit(
+            [exhausted],
+            model="gpt-5.3-codex-spark",
+            limit_name="codex-spark",
+            explicit_limit=True,
+            repos=cast(Any, repos),
+        )
+
+    before_reset = await filter_accounts()
     clock.advance(600.0)
-    at_reset = await balancer._filter_accounts_for_additional_limit(
-        [exhausted],
-        model="gpt-5.3-codex-spark",
-        limit_name="codex-spark",
-        explicit_limit=True,
-        repos=cast(Any, repos),
+    # The reset has passed, but the only evidence is 600s old: outside the
+    # freshness window (max(2 * refresh interval, 180s)), so it is not fresh proof.
+    stale_after_reset = await filter_accounts()
+    # The usage refresher polls again and records the post-reset state.
+    entries[exhausted.id] = _additional_usage(
+        exhausted.id, used_percent=0.0, reset_at=None, recorded_at=_naive_utc(clock)
     )
+    refreshed_after_reset = await filter_accounts()
 
     assert before_reset.accounts == []
     assert before_reset.error_code == "quota_exhausted"
-    assert [account.id for account in at_reset.accounts] == ["exhausted"]
-    assert at_reset.error_code is None
+    assert stale_after_reset.accounts == []
+    assert stale_after_reset.error_code == "additional_quota_data_unavailable"
+    assert [account.id for account in refreshed_after_reset.accounts] == ["exhausted"]
+    assert refreshed_after_reset.error_code is None
     # The freshness cutoff shares the injected clock with the exhaustion check:
-    # both calls sample it once per call, and it moves with the virtual clock.
-    assert len(fresh_since_cutoffs) == 4
+    # both windows sample it once per call, and it moves with the virtual clock.
+    assert len(fresh_since_cutoffs) == 6
     assert fresh_since_cutoffs[0] == fresh_since_cutoffs[1]
-    assert fresh_since_cutoffs[2] == fresh_since_cutoffs[3]
+    assert fresh_since_cutoffs[2] == fresh_since_cutoffs[3] == fresh_since_cutoffs[4] == fresh_since_cutoffs[5]
     assert fresh_since_cutoffs[2] - fresh_since_cutoffs[0] == timedelta(seconds=600)
-    assert fresh_since_cutoffs[2] < datetime.fromtimestamp(clock.time(), timezone.utc).replace(tzinfo=None)
+    assert fresh_since_cutoffs[2] < _naive_utc(clock)

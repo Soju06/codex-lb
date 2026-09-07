@@ -38,6 +38,7 @@ from app.modules.proxy.api import _prepend_first_task
 
 pytestmark = pytest.mark.unit
 
+
 async def _run_level_cancelled_consumer(stream: AsyncIterator[str]) -> asyncio.Task[None]:
     """Consume ``stream`` inside a task group whose scope is then cancelled.
 

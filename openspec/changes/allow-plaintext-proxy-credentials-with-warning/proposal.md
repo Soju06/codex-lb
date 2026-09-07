@@ -10,7 +10,7 @@ The exposure is the proxy account credential on the LB-to-proxy hop only; upstre
 - The upstream proxy admin API exposes `plaintextCredentials` on every endpoint (true when the scheme is not `https` and the endpoint has a username or password); endpoint creation no longer rejects such payloads.
 - The settings dashboard renders a warning under each flagged endpoint telling the operator the credentials are sent unencrypted over that scheme and recommending an `https://` proxy or a credential-free IP allowlist.
 - `ResolvedProxyEndpoint` keeps delivering credentials to aiohttp through `Proxy-Authorization` on the CONNECT tunnel (TLS targets) and to the SOCKS connector through its username/password parameters; the target-side guard (`_reject_credentialed_plaintext_target`, credentialed proxies require an https/wss upstream target) is unchanged.
-- No configuration, persistence schema, or wire-format changes; `plaintextCredentials` is an additive response field.
+- Additive wire-format change: the upstream proxy admin API's endpoint objects (creation response and `GET /api/settings/upstream-proxy` listing) gain a boolean `plaintextCredentials` field. Existing fields, request payloads, configuration, and the persistence schema are unchanged; the dashboard schema reads the field with a `false` default so older servers still render.
 
 ## Capabilities
 

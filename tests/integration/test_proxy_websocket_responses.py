@@ -14201,3 +14201,65 @@ def test_backend_responses_websocket_re_sends_a_turn_state_accepted_abrupt_close
         owner_recovered_upstream=owner_recovered_upstream,
         other_account_upstream=other_account_upstream,
     )
+
+
+def test_backend_responses_websocket_reconnects_a_client_anchored_accepted_abrupt_close_to_its_owner(
+    app_instance,
+    monkeypatch,
+):
+    """#2127 round 3 P2 (transport-close path): the client anchors its
+    follow-up on the first turn's id itself and repeats the history. When the
+    owner accepts the turn and drops the socket before any output, the replay
+    swaps the retained full resend in but the anchor was the client's, so the
+    owner pin stays: the proxy reconnects to the owner without excluding it
+    (spec: a client-supplied anchor cannot release the pin; the capacity path
+    already keeps the turn on its owner). The pin reconciliation had released
+    it and moved the client's continuation to the other account."""
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            _completed_first_turn_upstream_batch("resp_ws_client_anchor_close_turn_1"),
+            [
+                *_accepted_output_free_prelude("resp_ws_client_anchored_accepted_closed"),
+                _FakeUpstreamMessage("close", close_code=1011),
+            ],
+        ],
+    )
+    owner_recovered_upstream = _recovered_upstream("resp_ws_client_anchored_close_owner_recovered")
+    other_account_upstream = _recovered_upstream("resp_ws_client_anchored_close_other_account")
+    failover = _TwoAccountWebSocketFailover(first_upstream, other_account_upstream)
+    failover.upstreams_by_account[failover.FIRST_ACCOUNT_ID].append(owner_recovered_upstream)
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run(
+        app_instance,
+        requests=[
+            failover.response_create([failover.HISTORICAL_INPUT]),
+            {
+                **failover.response_create([failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]),
+                "previous_response_id": "resp_ws_client_anchor_close_turn_1",
+            },
+        ],
+        headers={"Authorization": "Bearer external-token", "session_id": "sid-ws-client-anchored-close"},
+    )
+
+    created_id = _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    assert created_id == "resp_ws_client_anchored_accepted_closed"
+    assert [event["type"] for event in failover.turn_events[0]] == ["response.created", "response.completed"]
+    assert not failover.refused_connects, failover.refused_connects
+    assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID, failover.FIRST_ACCOUNT_ID], (
+        failover.connect_accounts
+    )
+    assert failover.excluded_at_connect[-1] == set(), failover.excluded_at_connect
+    assert failover.required_at_connect[-1] == failover.FIRST_ACCOUNT_ID, failover.required_at_connect
+    assert len(first_upstream.sent_text) == 2
+    anchored_payload = json.loads(first_upstream.sent_text[1])
+    assert anchored_payload["previous_response_id"] == "resp_ws_client_anchor_close_turn_1"
+    # The owner receives the client's full resend with the anchor stripped
+    # (the transport close leaves the anchor's fate unknown, so the
+    # self-contained history is what goes upstream, as on ``main``).
+    assert len(owner_recovered_upstream.sent_text) == 1
+    replayed_payload = json.loads(owner_recovered_upstream.sent_text[0])
+    assert "previous_response_id" not in replayed_payload
+    assert replayed_payload["input"] == [failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]
+    assert other_account_upstream.sent_text == []

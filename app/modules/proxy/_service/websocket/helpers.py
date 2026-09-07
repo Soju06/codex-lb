@@ -463,10 +463,19 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     )
     fresh_request_text = request_state.fresh_upstream_request_text
     if request_state.fresh_upstream_request_is_retry_safe and fresh_request_text:
+        # Only a proxy-injected anchor is the proxy's to release: its pin was
+        # derived from an anchor the client never asked for. A client-supplied
+        # anchor is the client's own continuation, so its fresh body keeps the
+        # owner pin and reconnects there (the capacity path re-sends such a
+        # turn to its owner; ``_websocket_auth_request_can_switch_account``
+        # treats it as account-bound).
         _install_fresh_replay_body(
             request_state,
             fresh_request_text,
             account_neutral=_websocket_request_text_is_account_neutral_fresh_replay(fresh_request_text),
+            release_owner_pin=(
+                request_state.previous_response_id is None or request_state.proxy_injected_previous_response_id
+            ),
         )
     request_text = request_state.request_text
     if not isinstance(request_text, str):
@@ -545,6 +554,7 @@ def _install_fresh_replay_body(
     fresh_request_text: str,
     *,
     account_neutral: bool,
+    release_owner_pin: bool = True,
 ) -> str:
     """Swap the retained fresh body in and re-derive the owner requirement from it.
 
@@ -563,6 +573,11 @@ def _install_fresh_replay_body(
     carries an owner, so the fresh body cannot release it: clearing it here
     only hid the requirement from the exclusion decision, and the replay then
     excluded the account its reconnect was about to require.
+
+    ``release_owner_pin=False`` keeps both pins untouched for a replay whose
+    anchor the proxy is not entitled to release (a client-supplied
+    ``previous_response_id``): the fresh body is still what goes upstream,
+    but it stays with the owner the anchored body was bound to.
     """
     replay_required_account_id = request_state.replay_required_account_id or request_state.preferred_account_id
     turn_state_owner_account_id = (
@@ -572,8 +587,9 @@ def _install_fresh_replay_body(
     )
     request_state.request_text = fresh_request_text
     request_state.previous_response_id = None
-    request_state.preferred_account_id = turn_state_owner_account_id
-    request_state.replay_required_account_id = None if account_neutral else replay_required_account_id
+    if release_owner_pin:
+        request_state.preferred_account_id = turn_state_owner_account_id
+        request_state.replay_required_account_id = None if account_neutral else replay_required_account_id
     request_state.proxy_injected_previous_response_id = False
     request_state.fresh_upstream_request_is_retry_safe = False
     request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model

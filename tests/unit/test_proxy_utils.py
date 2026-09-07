@@ -53967,6 +53967,69 @@ def test_prepare_visible_output_replay_keeps_the_owner_for_an_account_bound_fres
     assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is False
 
 
+def test_prepare_visible_output_replay_keeps_the_owner_for_a_client_supplied_anchor():
+    """#2127 round 3 P2: the client anchored its follow-up itself and repeated
+    the history (proof-gated full resend). The fresh body still replaces the
+    anchored one on a transport close, but the anchor is the client's, not the
+    proxy's, so the owner pin stays (as on ``main``): the accepted replay
+    reconnects to the owner instead of excluding it and moving the client's
+    continuation to another account, matching the capacity path."""
+    request_state = _anchored_accepted_lifecycle_request_state(proxy_injected_previous_response_id=False)
+
+    replay_text = proxy_service._prepare_websocket_request_state_for_visible_output_replay(request_state)
+
+    assert replay_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.replay_required_account_id == "acc_ws_anchor_owner"
+    assert request_state.preferred_account_id == "acc_ws_anchor_owner"
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is False
+
+
+@pytest.mark.asyncio
+async def test_transport_end_replay_of_a_client_anchored_accepted_turn_stays_on_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#2127 round 3 P2 (direct websocket, transport close): the accepted
+    client-anchored turn is replayed with the fresh body on the owner that
+    accepted it -- no exclusion, owner pin kept -- rather than moved."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        response_create_sent_at=1.0,
+        proxy_injected_previous_response_id=False,
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    replayed = await websocket_mixin._process_upstream_websocket_transport_end(
+        service,
+        cast(WebSocket, SimpleNamespace(send_text=AsyncMock())),
+        cast(UpstreamWebSocket, _ClosableUpstream()),
+        message=SimpleNamespace(kind="close", text=None, data=None, close_code=1011, error=None, error_code=None),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    assert replayed is True
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert request_state.replay_required_account_id == account.id
+    assert request_state.preferred_account_id == account.id
+    assert request_state.excluded_account_ids == set()
+    assert request_state.affinity_policy.reallocate_sticky is False
+
+
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [

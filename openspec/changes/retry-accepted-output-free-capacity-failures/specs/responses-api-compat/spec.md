@@ -87,6 +87,13 @@ The replay MUST capture the client-visible response id and arm prelude suppressi
 - **WHEN** an accepted replay's body still requires one account (bound replay owner, uploaded file, anchored owner, or turn-state owner)
 - **THEN** the proxy MUST NOT exclude that account and MUST reconnect to it
 
+#### Scenario: A transport close of a client-anchored accepted turn reconnects to its owner
+
+- **GIVEN** a direct WebSocket accepted turn (`response.created` and `response.in_progress` forwarded) whose `previous_response_id` the client supplied and whose full resend is retained as a retry-safe fresh body
+- **WHEN** upstream closes the transport abruptly before any output
+- **THEN** the proxy re-sends the fresh body once to the account that accepted it, keeping the owner pin the client's anchor established and without excluding that account
+- **AND** the client observes exactly one `response.created` and a `response.completed` carrying that id
+
 #### Scenario: A turn-state session re-sends an accepted replay to its owner
 
 - **GIVEN** a direct WebSocket connection whose `x-codex-turn-state` resolves to an owner account (the native Codex flow: the handshake token of the previous connection is echoed and the proxy injects the completed id as `previous_response_id`, retaining the full resend as a retry-safe fresh body)

@@ -6141,11 +6141,21 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         async with pending_lock:
+            # Keepalives carry the id the client is reading. A replayed request
+            # keeps its captured ``replay_downstream_response_id`` while its
+            # upstream response runs under a new id, and a staged replay whose
+            # replacement ``response.created`` has not arrived yet still owns
+            # a response the client already saw: both stay ``response.in_progress``
+            # under the visible id, like the bridge relay's idle keepalive.
             keepalive_ids = [
-                request_state.response_id for request_state in pending_requests if request_state.response_id is not None
+                _websocket_downstream_response_id(request_state)
+                for request_state in pending_requests
+                if request_state.response_id is not None or request_state.replay_downstream_response_id is not None
             ]
             precreated_request_ids = [
-                request_state.request_id for request_state in pending_requests if request_state.response_id is None
+                request_state.request_id
+                for request_state in pending_requests
+                if request_state.response_id is None and request_state.replay_downstream_response_id is None
             ]
         emitted = False
         for response_id in keepalive_ids:

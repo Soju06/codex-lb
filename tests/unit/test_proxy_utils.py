@@ -53498,3 +53498,54 @@ async def test_process_upstream_websocket_text_marks_model_output_and_refuses_ac
     assert pending_request.replay_count == 0
     assert pending_request.replay_downstream_response_id is None
     assert pending_request.suppress_next_created_downstream is False
+
+
+@pytest.mark.asyncio
+async def test_emit_pending_websocket_keepalive_uses_the_visible_response_id_for_replayed_requests():
+    """Idle keepalives on the direct websocket surface must carry the id the
+    client already read: a replayed request whose upstream response now runs
+    under Y keeps X, a staged replay still waiting for its replacement
+    ``response.created`` keeps X as ``response.in_progress`` instead of a
+    pre-created ``codex.keepalive``, and a plain pre-created request is
+    unchanged."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    sent_text: list[str] = []
+
+    class _FakeDownstreamWebSocket:
+        async def send_text(self, text: str) -> None:
+            sent_text.append(text)
+
+    replayed = _accepted_lifecycle_request_state(
+        request_id="ws_req_keepalive_replayed",
+        response_id="resp_y_upstream_replay",
+        replay_downstream_response_id="resp_x_visible",
+    )
+    staged = _accepted_lifecycle_request_state(
+        request_id="ws_req_keepalive_staged",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        replay_downstream_response_id="resp_x_staged",
+    )
+    precreated = _accepted_lifecycle_request_state(
+        request_id="ws_req_keepalive_precreated",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+    )
+
+    emitted = await service._emit_pending_websocket_keepalive(
+        cast(WebSocket, _FakeDownstreamWebSocket()),
+        pending_requests=deque([replayed, staged, precreated]),
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+        codex_session_affinity=True,
+    )
+
+    assert emitted is True
+    assert [json.loads(text) for text in sent_text] == [
+        {"type": "response.in_progress", "response": {"id": "resp_x_visible", "status": "in_progress"}},
+        {"type": "response.in_progress", "response": {"id": "resp_x_staged", "status": "in_progress"}},
+        {"type": "codex.keepalive", "request_id": "ws_req_keepalive_precreated", "status": "pending_response_created"},
+    ]

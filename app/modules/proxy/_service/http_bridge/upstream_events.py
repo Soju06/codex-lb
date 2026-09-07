@@ -1024,9 +1024,19 @@ async def _wait_before_http_bridge_model_capacity_retry(
     emit_keepalives: bool,
     error_message: str | None,
     cancel_when_detached: bool = False,
+    signal_startup_wait: bool = True,
     scheduler: Scheduler = REAL_SCHEDULER,
     clock: Clock = REAL_CLOCK,
 ) -> bool:
+    """Sleep the bounded selected-model capacity delay before a bridge replay.
+
+    A propagated-error stream (``emit_keepalives=False``) normally signals the
+    pre-response startup wait so its startup probe keeps waiting instead of
+    timing out. An accepted request already committed its response start, so
+    the wait branch passes ``signal_startup_wait=False`` for it: re-signalling
+    would re-arm the startup wait behind a stream that is already open (spec:
+    "Accepted public streams are replayed without keepalives").
+    """
     if request_state is None or not is_upstream_model_capacity_error(error_message):
         return True
 
@@ -1043,7 +1053,7 @@ async def _wait_before_http_bridge_model_capacity_retry(
     request_state.account_capacity_wait_started_at = request_state.account_capacity_wait_started_at or clock.monotonic()
     request_state.account_capacity_wait_retry_after_seconds = sleep_seconds
     request_state.account_capacity_wait_suppress_keepalive = not emit_keepalives
-    if not emit_keepalives:
+    if not emit_keepalives and signal_startup_wait:
         _signal_http_bridge_capacity_startup_wait(request_state)
     try:
         remaining_sleep_seconds = sleep_seconds
@@ -3473,6 +3483,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     emit_keepalives=not status_request_state.propagate_http_errors,
                     error_message=retry_error_message,
                     cancel_when_detached=True,
+                    signal_startup_wait=not accepted_lifecycle_replay,
                     scheduler=scheduler,
                     clock=clock,
                 )

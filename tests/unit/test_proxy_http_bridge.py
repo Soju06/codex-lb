@@ -5644,6 +5644,62 @@ async def test_http_bridge_accepted_capacity_error_waits_then_stages_single_life
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_accepted_propagated_error_stream_capacity_replay_does_not_resignal_the_startup_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2127 round 4 P3-C (mutant M18). A propagated-error (public) bridge
+    stream signals the pre-response startup wait when a capacity message
+    arrives *before* ``response.created`` so its startup probe keeps waiting.
+    An accepted request already committed its response start -- the probe is
+    ready and the client is reading the stream -- so neither the wait branch
+    nor the capacity sleep may re-arm that wait: the per-request and the
+    propagated startup events stay ready, the replay is staged, and no
+    keepalive or terminal reaches the client (spec: "Accepted public streams
+    are replayed without keepalives")."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
+    request_wait_event = asyncio.Event()
+    request_ready_event = asyncio.Event()
+    request_ready_event.set()
+    propagated_wait_event = asyncio.Event()
+    propagated_ready_event = asyncio.Event()
+    propagated_ready_event.set()
+    wait_token = proxy_support_module._bind_propagated_capacity_startup_wait(propagated_wait_event)
+    ready_token = proxy_support_module._bind_propagated_capacity_startup_ready(propagated_ready_event)
+    request_state = _accepted_bridge_request_state(
+        request_id="req-accepted-propagated-startup-wait",
+        propagate_http_errors=True,
+        capacity_startup_wait_event=request_wait_event,
+        capacity_startup_ready_event=request_ready_event,
+    )
+    session = _make_bridge_session(
+        key_value="bridge-accepted-propagated-startup-wait",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    try:
+        await service._process_http_bridge_upstream_text(
+            session,
+            _capacity_error_text(code="model_at_capacity", message=_CAPACITY_MESSAGE),
+        )
+    finally:
+        proxy_support_module._reset_propagated_capacity_startup_ready(ready_token)
+        proxy_support_module._reset_propagated_capacity_startup_wait(wait_token)
+
+    _assert_staged_for_single_lifecycle_replay(request_state, session)
+    retry_precreated.assert_awaited_once_with(session, request_state=request_state)
+    assert request_wait_event.is_set() is False, "the accepted replay re-armed the request's startup wait"
+    assert request_ready_event.is_set() is True
+    assert propagated_wait_event.is_set() is False, "the accepted replay re-armed the propagated startup wait"
+    assert propagated_ready_event.is_set() is True
+    assert request_state.account_capacity_waiting is False
+    assert request_state.account_capacity_wait_suppress_keepalive is False
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty(), "a public stream must not receive keepalives or the terminal"
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_accepted_overload_code_stages_single_lifecycle_replay_without_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6534,6 +6590,9 @@ async def test_http_bridge_model_capacity_waits_before_retrying_safe_injected_an
             "emit_keepalives": True,
             "error_message": capacity_message,
             "cancel_when_detached": True,
+            # A pre-created request still owns the startup wait; only an
+            # accepted lifecycle passes ``signal_startup_wait=False``.
+            "signal_startup_wait": True,
             "scheduler": service._scheduler,
             "clock": service._clock,
         }

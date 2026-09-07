@@ -713,6 +713,13 @@ _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR = "http_bridge_prepared_continuity_anchor"
 # which is overload or host-network evidence and must not be replayed.
 _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR = "http_bridge_cooldown_suppression"
 _HTTP_BRIDGE_STALE_INFLIGHT_MIN_SECONDS = 120.0
+# Upper bound for the per-request fail-safe sweep's wait on a detached
+# session's ``pending_lock``. The sweep runs on every bridge request, so a
+# single detached generation whose lock never frees (2026-09-07: an anyio 4.13
+# Lock lost-wakeup left ~100 live request tasks queued behind one detached
+# session) must not park every request; a skipped pass is revisited by the
+# next request's sweep and by the session's own close/drain paths.
+_HTTP_BRIDGE_DETACHED_RETIRE_LOCK_WAIT_SECONDS = 5.0
 _HTTP_BRIDGE_STALE_INFLIGHT_TIMEOUT_MULTIPLIER = 6.0
 
 
@@ -2782,7 +2789,12 @@ async def _release_http_bridge_unanchored_handoffs_for_request(
         # cannot leave a fully drained predecessor owning a socket and cap slot.
         detached_sessions = tuple(service._http_bridge_detached_sessions.values())
     for session in detached_sessions:
-        await service._retire_http_bridge_after_drain_if_ready(session)
+        # Bounded: this sweep is on every request's path, so one detached
+        # session whose lock stays busy (or wedged) must not stall the fleet.
+        await service._retire_http_bridge_after_drain_if_ready(
+            session,
+            lock_wait_timeout_seconds=_HTTP_BRIDGE_DETACHED_RETIRE_LOCK_WAIT_SECONDS,
+        )
 
 
 def _track_alias_registration(session: _HTTPBridgeSession, alias: str, *, turn_state: bool) -> int:

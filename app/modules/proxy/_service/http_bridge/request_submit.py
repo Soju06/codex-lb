@@ -3386,14 +3386,48 @@ class _HTTPBridgeRequestSubmitMixin:
         await self._maybe_release_idle_http_bridge_session_lease(session)
         return True
 
-    async def _retire_http_bridge_after_drain_if_ready(self: Any, session: "_HTTPBridgeSession") -> bool:
+    async def _retire_http_bridge_after_drain_if_ready(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        lock_wait_timeout_seconds: float | None = None,
+    ) -> bool:
+        """Retire a drained session flagged ``retire_after_drain``.
+
+        ``lock_wait_timeout_seconds`` bounds the ``pending_lock`` wait for
+        callers on a shared hot path (the per-request fail-safe sweep over
+        detached sessions). When the bound elapses the check is skipped for
+        this pass and ``False`` is returned; the session stays tracked and is
+        reconsidered by the next sweep or by its own drain/close paths.
+        ``None`` keeps the unbounded wait for owners of the session lifecycle.
+        """
         if not (session.upstream_control.reconnect_requested and session.upstream_control.retire_after_drain):
             return False
-        async with session.pending_lock:
-            should_reconnect = _http_bridge_session_unowned_locked(session)
-            if should_reconnect:
+
+        def decide_locked() -> bool:
+            unowned = _http_bridge_session_unowned_locked(session)
+            if unowned:
                 session.pending_requests.clear()
                 session.upstream_close_attempted = True
+            return unowned
+
+        if lock_wait_timeout_seconds is None:
+            async with session.pending_lock:
+                should_reconnect = decide_locked()
+        else:
+            try:
+                await scheduler_for(self).wait_for(session.pending_lock.acquire(), timeout=lock_wait_timeout_seconds)
+            except TimeoutError:
+                logger.warning(
+                    "Skipping detached HTTP bridge retire check: pending_lock busy for %.1fs session_key=%s",
+                    lock_wait_timeout_seconds,
+                    _hash_identifier(session.key.affinity_key),
+                )
+                return False
+            try:
+                should_reconnect = decide_locked()
+            finally:
+                session.pending_lock.release()
         if not should_reconnect:
             return False
 

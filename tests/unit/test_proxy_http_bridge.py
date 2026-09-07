@@ -2539,7 +2539,7 @@ async def test_release_handoffs_retires_ready_detached_generation(
     )
 
     assert session.unanchored_reservation_id is None
-    retire.assert_awaited_once_with(session)
+    retire.assert_awaited_once_with(session, lock_wait_timeout_seconds=5.0)
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,11 @@
 ## Decision
 
+Tungstenite represents a peer TCP reset without a Close frame as
+`ProtocolError::ResetWithoutClosingHandshake`. Despite the enum category, the
+native helper emits this specific case as a terminal transport failure; actual
+frame-protocol violations remain protocol failures. Neither classification
+authorizes replay after output.
+
 A terminal WebSocket message without an upstream-authored close frame is
 transport evidence, not account evidence. This remains true after response
 events have started. Request progress is still load-bearing for replay safety:

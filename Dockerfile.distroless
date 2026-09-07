@@ -12,7 +12,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked --package codex-lb-egress-worker --bin codex-lb-native-egress \
     && cp target/release/codex-lb-native-egress /tmp/codex-lb-native-egress
 
-FROM oven/bun:1.4.0-alpine AS frontend-build
+FROM oven/bun:1.4.2-alpine AS frontend-build
 
 WORKDIR /app/frontend
 

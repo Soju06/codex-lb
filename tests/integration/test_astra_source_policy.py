@@ -202,6 +202,7 @@ async def test_source_reasoning_fields_count_toward_overlapping_request_budget(
             reserved = await session.scalar(
                 select(ApiKeyLimit.current_value).where(ApiKeyLimit.api_key_id == key["id"])
             )
+        assert reserved is not None
         second = await async_client.post(
             endpoint,
             json={"model": "gpt-6-astra", "reasoning": {"effort": "low"}, "input": "next"},

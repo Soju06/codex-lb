@@ -4197,8 +4197,9 @@ async def test_v1_responses_http_bridge_reconnect_fails_when_reader_cancel_times
     blocking_reader = asyncio.create_task(blocking_reader_task())
     bridge_session.upstream_reader = blocking_reader
 
-    async def fake_await_cancelled_task(task, *, timeout_seconds=1.0, label, cleanup_tasks=None):
+    async def fake_await_cancelled_task(task, *, timeout_seconds=1.0, label, cleanup_tasks=None, scheduler):
         del task, timeout_seconds, label, cleanup_tasks
+        assert scheduler is service._scheduler
         return False
 
     monkeypatch.setattr(proxy_module, "_await_cancelled_task", fake_await_cancelled_task)
@@ -7362,6 +7363,59 @@ async def test_backend_responses_http_bridge_pool_usage_exhaustion_returns_429(a
     assert response.json()["error"]["type"] == "usage_limit_reached"
     assert response.json()["error"]["code"] == "usage_limit_reached"
     assert "x-codex-turn-state" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_pool_usage_exhaustion_with_retry_hint_is_terminal(
+    async_client, monkeypatch
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    select_calls = 0
+
+    async def fake_select_account_with_budget(*_args, **_kwargs):
+        nonlocal select_calls
+        select_calls += 1
+        # The exhausted pool's earliest reset is known, so the selector attaches
+        # its capped human-facing retry hint alongside the structured reset.
+        return proxy_module.AccountSelection(
+            account=None,
+            error_message="Rate limit exceeded. Try again in 300s",
+            error_code="usage_limit_reached",
+            resets_at=1_700_003_600,
+        )
+
+    def fail_capacity_wait(**kwargs):
+        raise AssertionError(f"usage_limit_reached must not enter the bridge capacity wait: {kwargs!r}")
+
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_account_with_budget",
+        fake_select_account_with_budget,
+    )
+    monkeypatch.setattr(http_bridge_streaming_module, "_iter_account_capacity_wait_sse", fail_capacity_wait)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 429
+    error = response.json()["error"]
+    assert error["code"] == "usage_limit_reached"
+    assert error["type"] == "usage_limit_reached"
+    assert error["resets_at"] == 1_700_003_600
+    # Pool exhaustion is not a local overload, so no Retry-After is synthesized;
+    # clients read the structured resets_at instead.
+    assert "retry-after" not in response.headers
+    assert "codex.keepalive" not in response.text
+    assert "waiting_for_account_capacity" not in response.text
+    assert "x-codex-turn-state" not in response.headers
+    assert select_calls == 1
 
 
 @pytest.mark.asyncio

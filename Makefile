@@ -101,6 +101,7 @@ lint: architecture-check
 architecture-check:
 	uv run python scripts/check_proxy_architecture.py
 	uv run python scripts/check_cancellation_safety.py
+	uv run python scripts/check_proxy_timing_seams.py
 
 typecheck:
 	uv sync --dev --frozen
@@ -128,7 +129,7 @@ rust-audit:
 	test-integration-bridge test-e2e test-postgres
 test-unit: frontend-build
 	uv sync --dev --frozen
-	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) tests/unit tests/test_request_logs_options_api.py
+	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) tests/unit tests/simulation tests/test_request_logs_options_api.py
 
 test-integration-core: frontend-build
 	uv sync --dev --frozen

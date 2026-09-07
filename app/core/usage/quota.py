@@ -19,7 +19,9 @@ def apply_usage_quota(
     credits_unlimited: bool | None = None,
     credits_balance: float | None = None,
     infer_status_from_usage: bool = True,
+    now: float | None = None,
 ) -> tuple[AccountStatus, float | None, float | None]:
+    now = time.time() if now is None else now
     used_percent = primary_used
     reset_at = runtime_reset
 
@@ -45,7 +47,7 @@ def apply_usage_quota(
                     status = AccountStatus.QUOTA_EXCEEDED
                     return status, used_percent, reset_at
         if status == AccountStatus.QUOTA_EXCEEDED:
-            if runtime_reset and runtime_reset > time.time():
+            if runtime_reset and runtime_reset > now:
                 reset_at = runtime_reset
             else:
                 status = AccountStatus.ACTIVE
@@ -66,11 +68,11 @@ def apply_usage_quota(
                 if primary_reset is not None:
                     reset_at = primary_reset
                 else:
-                    reset_at = _fallback_primary_reset(primary_window_minutes) or reset_at
+                    reset_at = _fallback_primary_reset(primary_window_minutes, now=now) or reset_at
                 status = AccountStatus.RATE_LIMITED
                 return status, used_percent, reset_at
         if status == AccountStatus.RATE_LIMITED:
-            if runtime_reset and runtime_reset > time.time():
+            if runtime_reset and runtime_reset > now:
                 reset_at = runtime_reset
             else:
                 status = AccountStatus.ACTIVE
@@ -82,7 +84,7 @@ def apply_usage_quota(
         # account rate-limited indefinitely. Callers that cannot tie the
         # sample to a reset deadline or post-block evidence must preserve
         # the block themselves.
-        if runtime_reset and runtime_reset > time.time():
+        if runtime_reset and runtime_reset > now:
             reset_at = runtime_reset
         else:
             status = AccountStatus.ACTIVE
@@ -91,11 +93,11 @@ def apply_usage_quota(
     return status, used_percent, reset_at
 
 
-def _fallback_primary_reset(primary_window_minutes: int | None) -> float | None:
+def _fallback_primary_reset(primary_window_minutes: int | None, *, now: float) -> float | None:
     window_minutes = primary_window_minutes or usage_core.default_window_minutes("primary")
     if not window_minutes:
         return None
-    return time.time() + float(window_minutes) * 60.0
+    return now + float(window_minutes) * 60.0
 
 
 def _has_credit_override(

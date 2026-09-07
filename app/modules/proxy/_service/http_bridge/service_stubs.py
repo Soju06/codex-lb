@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Mapping, NoReturn, TypeVar, cast
 
@@ -65,10 +64,6 @@ def _service_get_settings() -> Any:
 
 def _service_get_settings_cache() -> Any:
     return _service_global_or("get_settings_cache", get_settings_cache)()
-
-
-def _service_time() -> Any:
-    return _service_global_or("time", time)
 
 
 def _service_lease_http_session() -> Any:

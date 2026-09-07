@@ -48,6 +48,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     WebsocketsUpstreamWebSocket,
 )
+from app.core.clock import REAL_CLOCK, REAL_SCHEDULER
 from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
 from app.core.errors import SYNTHETIC_TRANSPORT_FAILURE_MARKER, OpenAIErrorParam, openai_error
@@ -74,6 +75,7 @@ from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import compact as proxy_compact_service
 from app.modules.proxy._service import file_ops as proxy_file_ops
+from app.modules.proxy._service import observability as proxy_observability_module
 from app.modules.proxy._service import support as proxy_support
 from app.modules.proxy._service import warmup as proxy_warmup_service
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
@@ -107,6 +109,7 @@ from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.proxy.work_admission import AdmissionLease
 from app.modules.request_logs.repository import PreviousResponseOwnerRecord, RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+from app.modules.usage.updater import UsageUpdater
 from tests.unit._proxy_test_helpers import runtime_basic_auth_url
 from tests.unit.hypothesis_strategies import json_objects, json_values
 
@@ -501,6 +504,333 @@ async def test_rate_limit_still_marks_rate_limit() -> None:
 
     load_balancer.mark_rate_limit.assert_awaited_once()
     load_balancer.record_error.assert_not_awaited()
+
+
+def _stream_error_load_balancer() -> SimpleNamespace:
+    return SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+
+
+async def _sentinel_usage_refresh() -> None:
+    return None
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_stream_error_requests_tracked_usage_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A streamed usage_limit_reached persists status via mark_rate_limit and also requests an
+    immediate usage refresh as a tracked background task, so the >= 100 % row that the pool
+    exhaustion predicate needs does not wait for the next scheduler tick."""
+    load_balancer = _stream_error_load_balancer()
+    schedule = MagicMock()
+    proxy = SimpleNamespace(_load_balancer=load_balancer, _schedule_cancel_safe_cleanup=schedule)
+    requested: list[str] = []
+    refresh = _sentinel_usage_refresh()
+
+    def fake_request_refresh(account_id: str):
+        requested.append(account_id)
+        return refresh
+
+    # ``raising=False`` keeps this a behavioural assertion on main, where the API does not exist.
+    monkeypatch.setattr(UsageUpdater, "request_refresh", staticmethod(fake_request_refresh), raising=False)
+    token = set_request_id("req_usage_limit_refresh")
+    try:
+        classified = await streaming_helpers_module._handle_stream_error(
+            proxy,
+            cast(Account, SimpleNamespace(id="acc-usage-limit")),
+            {"message": "usage limit reached"},
+            "usage_limit_reached",
+            429,
+        )
+    finally:
+        reset_request_id(token)
+        refresh.close()
+
+    assert classified["failure_class"] == "rate_limit"
+    load_balancer.mark_rate_limit.assert_awaited_once()
+    load_balancer.record_error.assert_not_awaited()
+    assert requested == ["acc-usage-limit"]
+    schedule.assert_called_once()
+    args, kwargs = schedule.call_args
+    assert args == (refresh,)
+    assert kwargs == {"action": "request_usage_refresh", "request_id": "req_usage_limit_refresh"}
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_stream_error_uses_unknown_request_id_outside_request_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schedule = MagicMock()
+    proxy = SimpleNamespace(_load_balancer=_stream_error_load_balancer(), _schedule_cancel_safe_cleanup=schedule)
+    refresh = _sentinel_usage_refresh()
+    monkeypatch.setattr(UsageUpdater, "request_refresh", staticmethod(lambda account_id: refresh))
+    assert get_request_id() is None
+
+    try:
+        await streaming_helpers_module._handle_stream_error(
+            proxy,
+            cast(Account, SimpleNamespace(id="acc-usage-limit")),
+            {"message": "usage limit reached"},
+            "usage_limit_reached",
+            429,
+        )
+    finally:
+        refresh.close()
+
+    assert schedule.call_args.kwargs["request_id"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_stream_error_skips_refresh_when_debounced(monkeypatch: pytest.MonkeyPatch) -> None:
+    load_balancer = _stream_error_load_balancer()
+    schedule = MagicMock()
+    proxy = SimpleNamespace(_load_balancer=load_balancer, _schedule_cancel_safe_cleanup=schedule)
+    monkeypatch.setattr(UsageUpdater, "request_refresh", staticmethod(lambda account_id: None))
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-usage-limit")),
+        {"message": "usage limit reached"},
+        "usage_limit_reached",
+        429,
+    )
+
+    load_balancer.mark_rate_limit.assert_awaited_once()
+    schedule.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_stream_error_tolerates_proxy_without_cleanup_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test doubles without ``_schedule_cancel_safe_cleanup`` keep working; no coroutine is minted."""
+    load_balancer = _stream_error_load_balancer()
+    proxy = SimpleNamespace(_load_balancer=load_balancer)
+    monkeypatch.setattr(
+        UsageUpdater,
+        "request_refresh",
+        staticmethod(lambda account_id: pytest.fail("no scheduler available: refresh must not be requested")),
+    )
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-usage-limit")),
+        {"message": "usage limit reached"},
+        "usage_limit_reached",
+        429,
+    )
+
+    assert classified["failure_class"] == "rate_limit"
+    load_balancer.mark_rate_limit.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("code", "http_status", "message"),
+    [
+        # Plain throttling is transient; only the pool-exhaustion signal triggers a fetch.
+        ("rate_limit_exceeded", 429, "Rate limit reached"),
+        # Quota codes already pin used_percent=100 in runtime state.
+        ("insufficient_quota", 429, "You exceeded your current quota"),
+        ("quota_exceeded", 429, "quota exceeded"),
+        # Account-neutral and model-scoped rejections never touch account health.
+        ("invalid_request_error", 400, "No tool output found for function call call_abc."),
+        (
+            "invalid_request_error",
+            400,
+            "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+        ),
+        # Transient and local failures.
+        ("upstream_error", 500, "Upstream request failed"),
+        ("stream_idle_timeout", None, "idle"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_non_usage_limit_stream_errors_do_not_request_usage_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    http_status: int | None,
+    message: str,
+) -> None:
+    schedule = MagicMock()
+    proxy = SimpleNamespace(_load_balancer=_stream_error_load_balancer(), _schedule_cancel_safe_cleanup=schedule)
+    monkeypatch.setattr(
+        UsageUpdater,
+        "request_refresh",
+        staticmethod(lambda account_id: pytest.fail(f"{code} must not request a usage refresh")),
+    )
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": message},
+        code,
+        http_status,
+    )
+
+    schedule.assert_not_called()
+
+
+_REASONING_REPLAY_400_MESSAGE = (
+    "Item with id 'rs_0123456789abcdef' of type 'reasoning' was provided without its required following item."
+)
+
+
+@pytest.mark.parametrize(
+    ("code", "http_status", "message", "expected"),
+    [
+        ("invalid_request_error", 400, _REASONING_REPLAY_400_MESSAGE, True),
+        # Case-insensitive; the live streaming path normalizes code-less 400s to upstream_error.
+        ("upstream_error", 400, "Reasoning item rs_abc was not found in the conversation.", True),
+        # Without an HTTP status (websocket error frames) only invalid_request_error qualifies.
+        ("invalid_request_error", None, _REASONING_REPLAY_400_MESSAGE, True),
+        ("upstream_error", None, _REASONING_REPLAY_400_MESSAGE, False),
+        ("invalid_request_error", 400, "No tool output found for function call call_abc.", False),
+        ("invalid_request_error", 400, None, False),
+        ("invalid_request_error", 400, "", False),
+        ("rate_limit_exceeded", 429, "reasoning quota exhausted", False),
+        ("server_error", 500, _REASONING_REPLAY_400_MESSAGE, False),
+    ],
+)
+def test_is_reasoning_replay_rejection(code: str, http_status: int | None, message: str | None, expected: bool) -> None:
+    assert (
+        streaming_helpers_module._is_reasoning_replay_rejection(code=code, http_status=http_status, message=message)
+        is expected
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_replay_400_increments_counter_without_changing_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    counter = MagicMock()
+    monkeypatch.setattr(proxy_observability_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_observability_module, "upstream_reasoning_replay_400_total", counter)
+    load_balancer = _stream_error_load_balancer()
+    proxy = SimpleNamespace(_load_balancer=load_balancer, _schedule_cancel_safe_cleanup=MagicMock())
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": _REASONING_REPLAY_400_MESSAGE},
+        "invalid_request_error",
+        400,
+    )
+
+    counter.inc.assert_called_once_with()
+    # Observation only: classification and account health handling are exactly today's.
+    assert classified["failure_class"] == "non_retryable"
+    load_balancer.record_error.assert_awaited_once()
+    load_balancer.mark_rate_limit.assert_not_awaited()
+    proxy._schedule_cancel_safe_cleanup.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("code", "http_status", "message"),
+    [
+        ("invalid_request_error", 400, "No tool output found for function call call_abc."),
+        ("rate_limit_exceeded", 429, "reasoning quota exhausted"),
+        ("upstream_error", 500, _REASONING_REPLAY_400_MESSAGE),
+    ],
+)
+@pytest.mark.asyncio
+async def test_reasoning_replay_counter_ignores_non_matching_stream_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    http_status: int,
+    message: str,
+) -> None:
+    counter = MagicMock()
+    monkeypatch.setattr(proxy_observability_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_observability_module, "upstream_reasoning_replay_400_total", counter)
+    proxy = SimpleNamespace(_load_balancer=_stream_error_load_balancer())
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": message},
+        code,
+        http_status,
+    )
+
+    counter.inc.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_stream_error_leaves_frame_counting_to_frame_sites(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Terminal frames (no HTTP status) are counted where they are classified, never twice via the handler."""
+    counter = MagicMock()
+    monkeypatch.setattr(proxy_observability_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_observability_module, "upstream_reasoning_replay_400_total", counter)
+    proxy = SimpleNamespace(_load_balancer=_stream_error_load_balancer())
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": _REASONING_REPLAY_400_MESSAGE},
+        "invalid_request_error",
+        None,
+    )
+
+    counter.inc.assert_not_called()
+    assert classified["failure_class"] == "non_retryable"
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "expected_increments"),
+    [
+        ("invalid_request_error", _REASONING_REPLAY_400_MESSAGE, 1),
+        ("invalid_request_error", "Reasoning item rs_abc was not found in the conversation.", 1),
+        ("invalid_request_error", "No tool output found for function call call_abc.", 0),
+        ("upstream_error", _REASONING_REPLAY_400_MESSAGE, 0),
+        ("server_error", _REASONING_REPLAY_400_MESSAGE, 0),
+        ("invalid_request_error", None, 0),
+        (None, _REASONING_REPLAY_400_MESSAGE, 0),
+    ],
+)
+def test_observe_terminal_stream_error_frame_counts_reasoning_replay_only(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str | None,
+    message: str | None,
+    expected_increments: int,
+) -> None:
+    counter = MagicMock()
+    monkeypatch.setattr(proxy_observability_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_observability_module, "upstream_reasoning_replay_400_total", counter)
+
+    proxy_observability_module._observe_terminal_stream_error_frame(code, message)
+
+    assert counter.inc.call_count == expected_increments
+
+
+@pytest.mark.parametrize("prometheus_available", [False, True])
+@pytest.mark.asyncio
+async def test_reasoning_replay_counter_is_noop_without_prometheus(
+    monkeypatch: pytest.MonkeyPatch,
+    prometheus_available: bool,
+) -> None:
+    counter = MagicMock()
+    monkeypatch.setattr(proxy_observability_module, "PROMETHEUS_AVAILABLE", prometheus_available)
+    # Unavailable client: the counter object is absent; disabled flag: the object exists but is skipped.
+    monkeypatch.setattr(
+        proxy_observability_module,
+        "upstream_reasoning_replay_400_total",
+        None if prometheus_available else counter,
+    )
+    proxy = SimpleNamespace(_load_balancer=_stream_error_load_balancer())
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": _REASONING_REPLAY_400_MESSAGE},
+        "invalid_request_error",
+        400,
+    )
+
+    counter.inc.assert_not_called()
+    assert classified["failure_class"] == "non_retryable"
 
 
 @pytest.mark.asyncio
@@ -1061,8 +1391,7 @@ def test_account_selection_recovery_sleep_ignores_permanent_selection_failures(m
     assert _account_selection_recovery_sleep_seconds(selection) is None
 
 
-def test_account_capacity_wait_payload_reports_status_and_wait_time(monkeypatch):
-    monkeypatch.setattr(proxy_support.time, "monotonic", lambda: 125.4)
+def test_account_capacity_wait_payload_reports_status_and_wait_time():
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_capacity_wait",
         model="gpt-5.1",
@@ -1078,6 +1407,7 @@ def test_account_capacity_wait_payload_reports_status_and_wait_time(monkeypatch)
         request_id="req_capacity_wait",
         reason="Rate limit exceeded. Try again in 120s",
         retry_after_seconds=119.8,
+        now=125.4,
     )
 
     assert payload["type"] == "codex.keepalive"
@@ -1098,7 +1428,6 @@ async def test_account_selection_recovery_sleep_clamps_to_remaining_budget(monke
     async def heartbeat(remaining_seconds: float) -> None:
         heartbeats.append(remaining_seconds)
 
-    monkeypatch.setattr(proxy_support.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(proxy_support, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 10.0)
 
     waited = await _sleep_for_account_selection_recovery(
@@ -1113,6 +1442,8 @@ async def test_account_selection_recovery_sleep_clamps_to_remaining_budget(monke
         model="gpt-5.4",
         max_sleep_seconds=3.0,
         heartbeat=heartbeat,
+        scheduler=cast(Any, SimpleNamespace(sleep=fake_sleep)),
+        clock=REAL_CLOCK,
     )
 
     assert waited is True
@@ -1136,6 +1467,8 @@ async def test_account_selection_recovery_sleep_refuses_exhausted_budget(monkeyp
         request_stage="initial",
         model="gpt-5.4",
         max_sleep_seconds=0.0,
+        scheduler=REAL_SCHEDULER,
+        clock=REAL_CLOCK,
     )
 
     assert waited is False
@@ -13364,7 +13697,7 @@ async def test_service_compact_budget_bounds_unconfigured_upstream_read_timeout(
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(runtime_settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -15174,7 +15507,7 @@ async def test_stream_with_retry_preserves_stream_cap_error_type_when_wait_exhau
     def fake_remaining_budget(_deadline: float) -> float:
         return next(remaining_budget_values, 0.0)
 
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", fake_remaining_budget)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", fake_remaining_budget)
 
     async def select_account(_deadline: float, **_kwargs: object) -> AccountSelection:
         return AccountSelection(
@@ -15662,7 +15995,7 @@ async def test_stream_with_retry_waits_after_response_create_cap_has_no_alternat
     monkeypatch.setattr(service, "_stream_once", fake_stream_once)
     monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
     monkeypatch.setattr(
-        proxy_service,
+        service,
         "_remaining_budget_seconds",
         lambda _deadline: 0.0 if budget_expires and stream_once_calls >= 1 and len(selection_exclusions) >= 2 else 10.0,
     )
@@ -16030,7 +16363,7 @@ async def test_stream_with_retry_post_refresh_model_capacity_retries_same_accoun
     stream_once_calls = 0
     sleeps: list[float] = []
 
-    async def fake_sleep(delay: float) -> None:
+    async def fake_sleep(delay: float, result: None = None) -> None:
         sleeps.append(delay)
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
@@ -16126,7 +16459,7 @@ async def test_stream_with_retry_post_refresh_confirmed_proxy_connect_failure_fa
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
 
-    async def fake_sleep(delay: float) -> None:
+    async def fake_sleep(delay: float, result: None = None) -> None:
         sleeps.append(delay)
 
     monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", fake_sleep)
@@ -18545,7 +18878,7 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_penalizes_wit
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
     monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
     monkeypatch.setattr(
-        proxy_service,
+        service,
         "_remaining_budget_seconds",
         lambda _deadline: 0.0 if terminal_outcome == "budget_before_selection" and stream_once_calls >= 2 else 10.0,
     )
@@ -18929,7 +19262,7 @@ async def test_stream_with_retry_post_refresh_capacity_exhaustion_preserves_orig
         lambda _selection: 1.0,
     )
     monkeypatch.setattr(
-        proxy_service,
+        service,
         "_remaining_budget_seconds",
         lambda _deadline: 0.0 if budget_exhausted else 1.0,
     )
@@ -19039,7 +19372,7 @@ async def test_stream_with_retry_surfaces_response_create_cap_when_wait_retries_
     def fake_remaining_budget(_deadline: float) -> float:
         return next(remaining_budget_values, 0.0)
 
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", fake_remaining_budget)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", fake_remaining_budget)
     monkeypatch.setattr(
         service,
         "_select_account_with_budget_compatible",
@@ -19119,7 +19452,7 @@ async def test_stream_with_retry_raises_response_create_cap_when_propagation_exh
     def fake_remaining_budget(_deadline: float) -> float:
         return next(remaining_budget_values, 0.0)
 
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", fake_remaining_budget)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", fake_remaining_budget)
     monkeypatch.setattr(
         service,
         "_select_account_with_budget_compatible",
@@ -19259,15 +19592,14 @@ async def test_stream_with_retry_capacity_wait_keeps_original_request_deadline(m
     def monotonic() -> float:
         return now
 
-    async def fake_sleep(seconds: float) -> None:
+    async def fake_sleep(seconds: float, result: None = None) -> None:
         nonlocal now
         sleeps.append(seconds)
         now += seconds
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", monotonic)
-    monkeypatch.setattr(streaming_retry_module.time, "monotonic", monotonic)
+    monkeypatch.setattr(time, "monotonic", monotonic)
     monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(
         streaming_retry_module,
@@ -23162,7 +23494,7 @@ async def test_connect_proxy_websocket_maps_budget_exhaustion_to_timeout_error(m
         started_at=100.0,
     )
 
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
 
     websocket_send = AsyncMock()
     websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
@@ -23633,7 +23965,7 @@ async def test_create_http_bridge_session_fails_over_after_repeated_401_refresh_
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
 
     async def select_account(**kwargs: object) -> AccountSelection:
         excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
@@ -24717,7 +25049,7 @@ async def test_select_websocket_capacity_wait_budget_preserves_original_cap(
         fake_sleep_for_account_selection_recovery,
     )
     monkeypatch.setattr(
-        proxy_service,
+        service,
         "_remaining_budget_seconds",
         lambda _deadline: next(remaining_budget, 0.0),
     )
@@ -25268,7 +25600,7 @@ async def test_connect_proxy_websocket_maps_handshake_budget_exhaustion_to_timeo
     )
     monkeypatch.setattr(service, "_handle_websocket_connect_error", handle_connect_error)
     monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
 
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_handshake_budget",
@@ -27070,6 +27402,8 @@ async def test_websocket_full_replay_waits_for_pending_continuity_gap():
             pending_requests,
             pending_lock=pending_lock,
             timeout_seconds=1.0,
+            scheduler=REAL_SCHEDULER,
+            clock=REAL_CLOCK,
         )
     finally:
         await clear_task
@@ -28052,13 +28386,12 @@ def test_slim_response_create_counts_oversized_historical_tool_outputs(sizes):
     assert cast(list[JsonValue], slimmed_payload["input"])[-1] == latest
 
 
-def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monkeypatch):
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
-
+def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows():
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [90.0, 95.0],
         proxy_request_budget_seconds=20.0,
         stream_idle_timeout_seconds=5.0,
+        now=100.0,
     )
 
     assert timeout is not None
@@ -28067,13 +28400,12 @@ def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monke
     assert timeout.error_message == "Upstream stream idle timeout"
 
 
-def test_websocket_receive_timeout_prefers_request_budget_when_sooner(monkeypatch):
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
-
+def test_websocket_receive_timeout_prefers_request_budget_when_sooner():
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [90.0],
         proxy_request_budget_seconds=11.0,
         stream_idle_timeout_seconds=5.0,
+        now=100.0,
     )
 
     assert timeout is not None
@@ -28082,13 +28414,12 @@ def test_websocket_receive_timeout_prefers_request_budget_when_sooner(monkeypatc
     assert timeout.error_message == "Proxy request budget exhausted"
 
 
-def test_websocket_receive_timeout_keeps_idle_classification_after_scheduler_jitter(monkeypatch):
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 700.001)
-
+def test_websocket_receive_timeout_keeps_idle_classification_after_scheduler_jitter():
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [100.0],
         proxy_request_budget_seconds=600.0,
         stream_idle_timeout_seconds=600.0,
+        now=700.001,
     )
 
     assert timeout is not None
@@ -28098,13 +28429,12 @@ def test_websocket_receive_timeout_keeps_idle_classification_after_scheduler_jit
     assert timeout.fail_all_pending is False
 
 
-def test_websocket_receive_timeout_uses_budget_when_equal_budget_is_sooner(monkeypatch):
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 400.0)
-
+def test_websocket_receive_timeout_uses_budget_when_equal_budget_is_sooner():
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [100.0],
         proxy_request_budget_seconds=600.0,
         stream_idle_timeout_seconds=600.0,
+        now=400.0,
     )
 
     assert timeout is not None
@@ -28114,13 +28444,12 @@ def test_websocket_receive_timeout_uses_budget_when_equal_budget_is_sooner(monke
     assert timeout.fail_all_pending is False
 
 
-def test_websocket_receive_timeout_honors_idle_when_equal_to_full_budget(monkeypatch):
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
-
+def test_websocket_receive_timeout_honors_idle_when_equal_to_full_budget():
     timeout = proxy_service._websocket_receive_timeout_for_pending_requests(
         [100.0],
         proxy_request_budget_seconds=600.0,
         stream_idle_timeout_seconds=600.0,
+        now=100.0,
     )
 
     assert timeout is not None
@@ -28222,7 +28551,7 @@ async def test_cancel_safe_cleanup_tracks_background_task_until_done():
 
 @pytest.mark.asyncio
 async def test_next_websocket_receive_timeout_ignores_draining_requests(monkeypatch):
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     draining_request = proxy_service._WebSocketRequestState(
         request_id="req_draining_near_budget",
@@ -28263,7 +28592,7 @@ async def test_fail_expired_pending_websocket_requests_keeps_newer_requests(monk
 
     monkeypatch.setattr(service, "_emit_websocket_terminal_error", emit_terminal_error)
     monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
 
     expired_request = proxy_service._WebSocketRequestState(
         request_id="ws_req_expired",
@@ -31190,7 +31519,9 @@ async def test_process_upstream_websocket_text_retries_account_model_rejection_w
     assert response_create_gate.locked() is True
     assert list(pending_requests) == []
 
-    await proxy_service._release_websocket_response_create_gate(pending_request, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(
+        pending_request, response_create_gate, scheduler=REAL_SCHEDULER
+    )
 
     assert pending_request.response_create_gate is None
     assert pending_request.response_create_gate_acquired is False
@@ -32132,7 +32463,9 @@ async def test_hidden_http_bridge_model_capacity_retry_suppresses_reconnect_wait
     assert request_state.response_create_gate_acquired is True
     assert response_create_gate.locked() is True
     assert younger_gate_waiter.done() is False
-    await proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(
+        request_state, response_create_gate, scheduler=REAL_SCHEDULER
+    )
     await asyncio.wait_for(younger_gate_waiter, timeout=1.0)
     response_create_gate.release()
 
@@ -37704,7 +38037,7 @@ async def test_resolve_websocket_previous_response_owner_rechecks_same_scope_aft
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     clock = {"value": 100.0}
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: clock["value"])
+    monkeypatch.setattr(time, "monotonic", lambda: clock["value"])
 
     owner_1 = await service._resolve_websocket_previous_response_owner(
         previous_response_id="resp_prev_missing",
@@ -37743,7 +38076,7 @@ async def test_resolve_websocket_previous_response_owner_miss_does_not_evict_kno
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     clock = {"value": 100.0}
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: clock["value"])
+    monkeypatch.setattr(time, "monotonic", lambda: clock["value"])
     api_key = ApiKeyData(
         id="key_shared",
         name="shared-key",
@@ -39442,7 +39775,7 @@ async def test_stream_responses_budget_exhaustion_emits_timeout_event(monkeypatc
     runtime_settings = SimpleNamespace(**runtime_values)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
 
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
 
@@ -40066,7 +40399,7 @@ async def test_stream_refresh_budget_is_recomputed_after_selection(monkeypatch):
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(time, "monotonic", fake_monotonic)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -40122,7 +40455,7 @@ async def test_stream_attempt_timeout_overrides_follow_remaining_budget(monkeypa
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", fake_remaining_budget)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", fake_remaining_budget)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -40188,7 +40521,7 @@ async def test_stream_forced_refresh_reapplies_idle_and_total_budget_overrides(m
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", fake_remaining_budget)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", fake_remaining_budget)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -41213,7 +41546,7 @@ async def test_compact_responses_budget_exhaustion_returns_request_timeout(monke
     runtime_settings = SimpleNamespace(**runtime_values)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -43793,9 +44126,13 @@ async def test_response_create_admission_waits_on_session_gate_before_shared_cap
     shared_lease = await service._get_work_admission().acquire_response_create()
     shared_lease.release()
 
-    await proxy_service._release_websocket_response_create_gate(first_request, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(
+        first_request, response_create_gate, scheduler=REAL_SCHEDULER
+    )
     await second_task
-    await proxy_service._release_websocket_response_create_gate(second_request, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(
+        second_request, response_create_gate, scheduler=REAL_SCHEDULER
+    )
 
     assert second_request.response_create_gate_acquired is False
     assert second_request.response_create_admission is None
@@ -43833,7 +44170,9 @@ async def test_response_create_gate_release_waits_for_account_lease_release():
     request_state.account_response_create_release = release_account_lease
 
     release_task = asyncio.create_task(
-        proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+        proxy_service._release_websocket_response_create_gate(
+            request_state, response_create_gate, scheduler=REAL_SCHEDULER
+        )
     )
     await release_started.wait()
     await asyncio.sleep(0)
@@ -43882,7 +44221,9 @@ async def test_response_create_gate_release_reraises_caller_cancellation_after_c
     request_state.account_response_create_release = release_account_lease
 
     release_task = asyncio.create_task(
-        proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+        proxy_service._release_websocket_response_create_gate(
+            request_state, response_create_gate, scheduler=REAL_SCHEDULER
+        )
     )
     await release_started.wait()
     release_task.cancel()
@@ -43940,7 +44281,7 @@ async def test_select_account_with_budget_times_out_during_settings_fetch(monkey
             return settings
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SlowSettingsCache())
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 0.01)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 0.01)
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
@@ -43968,7 +44309,7 @@ async def test_select_account_with_budget_forwards_estimated_lease_tokens(monkey
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     selection = await service._select_account_with_budget(
         deadline=123.0,
@@ -44011,7 +44352,7 @@ async def test_select_account_with_budget_intersects_cap_spillover_with_request_
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     await service._select_account_with_budget(
         deadline=123.0,
@@ -44055,7 +44396,7 @@ async def test_select_account_with_budget_reconciles_sticky_mapping_for_preferre
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     await service._select_account_with_budget(
         deadline=123.0,
@@ -44107,7 +44448,7 @@ async def test_select_account_with_budget_keeps_thread_seed_for_first_exact_owne
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     await service._select_account_with_budget(
         deadline=123.0,
@@ -44148,7 +44489,7 @@ async def test_select_account_with_budget_preserves_conversation_check_for_prefe
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     selection = await service._select_account_with_budget(
         deadline=123.0,
@@ -44186,7 +44527,7 @@ async def test_single_account_routing_does_not_narrow_conversation_ownership_sco
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     selection = await service._select_account_with_budget(
         deadline=123.0,
@@ -44218,7 +44559,7 @@ async def test_single_account_routing_skips_soft_preferred_account_outside_singl
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     selection = await service._select_account_with_budget(
         deadline=123.0,
@@ -44255,7 +44596,7 @@ async def test_select_account_with_budget_reserves_stream_slot_for_reattach(
     settings.proxy_account_stream_recovery_reserve = 3
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda _deadline: 10.0)
 
     await service._select_account_with_budget(
         deadline=123.0,
@@ -44307,7 +44648,7 @@ async def test_transcribe_budget_exhaustion_blocks_401_retry_with_timeout(monkey
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(time, "monotonic", fake_monotonic)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -45678,7 +46019,7 @@ async def test_open_upstream_websocket_passes_absolute_deadline_to_recovery(monk
     monotonic = MagicMock(side_effect=[100.0, 100.0])
     monkeypatch.setattr(service, "_open_upstream_websocket", open_upstream)
     monkeypatch.setattr(websocket_mixin_module, "_wait_for_process_network_recovery", wait_for_recovery)
-    monkeypatch.setattr(websocket_mixin_module, "time", SimpleNamespace(monotonic=monotonic))
+    monkeypatch.setattr(service, "_clock", SimpleNamespace(monotonic=monotonic))
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await service._open_upstream_websocket_with_budget(
@@ -45720,7 +46061,7 @@ async def test_try_open_websocket_connect_attempt_does_not_refresh_twice_after_f
     handshake_error = proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "still invalid"))
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
     ensure_fresh = AsyncMock(return_value=account)
     open_upstream = AsyncMock(side_effect=handshake_error)
     retry_after_401 = AsyncMock(side_effect=AssertionError("forced refresh must not refresh same account twice"))
@@ -45771,7 +46112,7 @@ async def test_reconnect_http_bridge_skips_extra_same_account_retry_after_keepal
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
 
     async def select_account(**kwargs: object) -> AccountSelection:
         account_ids = kwargs.get("account_ids")
@@ -45837,7 +46178,7 @@ async def test_reconnect_http_bridge_discards_model_fallback_before_selected_rep
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -45903,7 +46244,7 @@ async def test_reconnect_http_bridge_does_not_fail_over_after_selected_model_rep
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
 
     async def select_account(**_kwargs: object) -> AccountSelection:
         selected = replacement_account if not selected_account_ids else third_account
@@ -45984,7 +46325,7 @@ async def test_reconnect_http_bridge_session_reuses_same_account_stream_lease(mo
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
 
     async def select_account(**kwargs: object) -> AccountSelection:
         seen_lease_kinds.append(kwargs.get("lease_kind"))
@@ -46070,9 +46411,9 @@ async def test_reconnect_http_bridge_session_serializes_lease_swap_with_reacquis
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    # Keep the deterministic service clock local; mutating the shared time
-    # module also freezes asyncio's event-loop timers.
-    monkeypatch.setattr(proxy_service, "time", SimpleNamespace(monotonic=lambda: 10.0))
+    # Pin the deterministic clock on the service's owner seam; mutating the
+    # shared time module would also freeze asyncio's event-loop timers.
+    monkeypatch.setattr(service, "_clock", SimpleNamespace(monotonic=lambda: 10.0))
 
     async def release_account_lease_side_effect(released_lease: proxy_service.AccountLease) -> None:
         assert released_lease is reacquired_lease
@@ -46144,7 +46485,7 @@ async def test_reconnect_http_bridge_security_rebind_clears_previous_response_st
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -46233,7 +46574,10 @@ async def test_reconnect_http_bridge_session_restarts_reader_before_local_close(
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    # Pin the deterministic clock on the service's owner seam; mutating the
+    # shared time module would also freeze asyncio's event-loop timers, so
+    # the ``wait_for`` below could never expire on a stuck replacement reader.
+    monkeypatch.setattr(service, "_clock", SimpleNamespace(monotonic=lambda: 10.0))
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -46328,7 +46672,7 @@ async def test_reconnect_http_bridge_session_fails_over_after_repeated_401_refre
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
 
     async def select_account(**kwargs: object) -> AccountSelection:
         excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
@@ -46390,7 +46734,7 @@ async def test_create_http_bridge_session_required_preferred_does_not_fall_back_
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
 
     async def select_account(**kwargs: object) -> AccountSelection:
         excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
@@ -50662,7 +51006,9 @@ async def test_retry_http_bridge_precreated_request_reacquires_replacement_respo
     assert request_state.response_create_admission_reacquire_required is False
     replacement_upstream.send_text.assert_awaited_once_with(request_state.request_text)
 
-    await proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(
+        request_state, response_create_gate, scheduler=REAL_SCHEDULER
+    )
 
     release_lease.assert_awaited_once_with(replacement_lease)
     assert request_state.account_response_create_lease is None
@@ -50812,17 +51158,15 @@ async def test_retry_http_bridge_precreated_request_does_not_send_after_admissio
         "_get_work_admission",
         lambda: SimpleNamespace(acquire_response_create=acquire_admission),
     )
-    monkeypatch.setattr(
-        proxy_http_bridge_request_submit,
-        "_service_time",
-        lambda: SimpleNamespace(monotonic=lambda: next(retry_times)),
-    )
+    monkeypatch.setattr(service, "_clock", SimpleNamespace(monotonic=lambda: next(retry_times)))
 
     assert await service._retry_http_bridge_precreated_request(session) is False
 
     acquire_admission.assert_awaited_once_with()
     upstream.send_text.assert_not_awaited()
-    await proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(
+        request_state, response_create_gate, scheduler=REAL_SCHEDULER
+    )
     release_lease.assert_awaited_once_with(replacement_lease)
     assert replacement_admission_gate._value == 1
 
@@ -50894,7 +51238,9 @@ async def test_retry_http_bridge_precreated_request_bounds_admission_wait_by_dea
     release_lease.assert_awaited_once_with(replacement_lease)
     assert request_state.account_response_create_lease is None
     assert request_state.response_create_admission is None
-    await proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(
+        request_state, response_create_gate, scheduler=REAL_SCHEDULER
+    )
 
 
 @pytest.mark.asyncio
@@ -51240,7 +51586,7 @@ async def test_retry_http_bridge_precreated_request_fails_closed_when_file_owner
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 10.0)
     monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=replacement_account))
     monkeypatch.setattr(

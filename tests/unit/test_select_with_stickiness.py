@@ -16,12 +16,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.core.balancer import AccountState, RoutingCost, RoutingCostsByAccount, RoutingStrategy
+from app.core.clock import REAL_CLOCK, Clock
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
     _sticky_refresh_write_skippable,
 )
 from app.modules.proxy.load_balancer import LoadBalancer
+from tests.simulation.virtual_time import VirtualClock
 
 pytestmark = pytest.mark.unit
 
@@ -84,6 +86,7 @@ async def _invoke_stickiness(
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
     sticky_refresh_skip_deadline: datetime | None = None,
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
+    clock: Clock = REAL_CLOCK,
 ):
     """Wrapper that calls production LoadBalancer._select_with_stickiness.
 
@@ -95,7 +98,7 @@ async def _invoke_stickiness(
     async def mock_repo_factory():
         yield AsyncMock()
 
-    lb = LoadBalancer(mock_repo_factory)
+    lb = LoadBalancer(mock_repo_factory, clock=clock)
     account_map = {s.account_id: cast(Account, AsyncMock()) for s in states}
 
     outcome = await lb._select_with_stickiness(
@@ -567,6 +570,24 @@ async def test_grace_period_returns_pinned_when_reset_imminent():
     assert result.account is not None
     assert result.account.account_id == "a"
     repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_grace_period_uses_injected_selection_clock():
+    clock = VirtualClock(epoch_value=time.time() + 1_000_000.0)
+    acc_a = _rate_limited("a", reset_at=clock.time() + 5.0)
+    acc_b = _active("b")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key-injected-clock",
+        repo,
+        clock=clock,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
 
 
 @pytest.mark.asyncio

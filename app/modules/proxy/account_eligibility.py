@@ -64,9 +64,14 @@ def reauth_account_is_routing_blocked(
 def all_accounts_require_reauthentication(
     accounts: Collection[Account],
     encryptor: TokenEncryptor,
+    *,
+    now: float,
 ) -> bool:
-    """Return whether every candidate requires reauthentication before routing."""
-    now = time.time()
+    """Return whether every candidate is reauthentication-blocked by known expiry.
+
+    ``now`` is the caller's epoch clock sample (the balancer passes
+    ``self._clock.time()``) so selection never mixes clock domains.
+    """
     return bool(accounts) and all(
         reauth_account_is_routing_blocked(
             account.status,

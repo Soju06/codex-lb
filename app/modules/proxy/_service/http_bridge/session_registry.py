@@ -7,6 +7,7 @@ from datetime import timedelta
 from typing import Any
 
 from app.core.clients.proxy import ProxyResponseError
+from app.core.clock import scheduler_for
 from app.core.config.settings import Settings
 from app.core.errors import openai_error
 from app.core.metrics.prometheus import (
@@ -207,7 +208,7 @@ class _HTTPBridgeSessionRegistryMixin:
                     raise result
             return background_cleanup_drained
 
-        shutdown_task = asyncio.create_task(finish_shutdown(), name="http-bridge-shutdown-close-all")
+        shutdown_task = scheduler_for(self).create_task(finish_shutdown(), name="http-bridge-shutdown-close-all")
         result, cancellation = await _await_task_deferring_cancellation(shutdown_task)
         if cancellation is not None:
             raise cancellation

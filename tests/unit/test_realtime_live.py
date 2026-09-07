@@ -25,6 +25,7 @@ from app.modules.proxy._service.realtime_live import (
     realtime_call_id_from_location,
 )
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 
 def _unscoped_api_key(*, key_id: str = "api-key-a") -> ApiKeyData:
@@ -992,3 +993,56 @@ async def test_live_sideband_unavailable_exact_owner_never_falls_back_or_decrypt
     assert service.selection_calls[0]["redact_sensitive_details"] is True
     assert service.decrypt_calls == []
     assert service._load_balancer.released == [None]
+
+
+class _RecordingScheduler(VirtualScheduler):
+    def __init__(self, clock: VirtualClock) -> None:
+        super().__init__(clock)
+        self.spawned: list[str] = []
+
+    def create_task(self, coroutine, *, name=None):
+        self.spawned.append(name or getattr(coroutine, "__qualname__", repr(coroutine)))
+        return super().create_task(coroutine, name=name)
+
+
+class _VirtualProxyService(_ProxyService):
+    def __init__(self, *args: Any, clock: VirtualClock, scheduler: VirtualScheduler, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._clock = clock
+        self._scheduler = scheduler
+
+
+@pytest.mark.asyncio
+async def test_live_sideband_owner_mismatch_lease_release_is_scheduler_owned() -> None:
+    clock = VirtualClock()
+    scheduler = _RecordingScheduler(clock)
+    lease = cast(AccountLease, object())
+    selected_account = SimpleNamespace(
+        id="account-b",
+        status=AccountStatus.ACTIVE,
+        access_token_encrypted="encrypted-token",
+        chatgpt_account_id="chatgpt-account-b",
+        codex_installation_id="installation-b",
+    )
+    service = _VirtualProxyService(
+        selected_account,
+        lease,
+        owner_account_id="account-a",
+        clock=clock,
+        scheduler=scheduler,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service.proxy_realtime_live_websocket(
+            cast(Any, _FakeDownstreamWebSocket()),
+            "rtc_example",
+            {},
+            protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+            api_key=_unscoped_api_key(),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert service._load_balancer.released == [lease]
+    # The lease release ran as a scheduler-owned task and was awaited to completion.
+    assert [name for name in scheduler.spawned if name.endswith("release_account_lease")] != []
+    assert scheduler.owned_tasks == frozenset()

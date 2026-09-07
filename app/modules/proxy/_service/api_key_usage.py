@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-import time
 from collections.abc import Coroutine, Mapping
 from typing import Any, Protocol, cast
 
@@ -11,6 +10,7 @@ import anyio
 from anyio.lowlevel import checkpoint_if_cancelled
 
 from app.core.clients.proxy import ProxyResponseError
+from app.core.clock import clock_for, scheduler_for
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
@@ -236,7 +236,7 @@ class _ApiKeyUsageMixin:
         with anyio.CancelScope(shield=True):
             while penalties:
                 penalty = penalties.pop(0)
-                apply_task = asyncio.create_task(
+                apply_task = scheduler_for(self).create_task(
                     proxy._handle_stream_error(penalty.account, penalty.error, penalty.code)
                 )
                 while True:
@@ -285,7 +285,7 @@ class _ApiKeyUsageMixin:
         if reservation is None:
             return last_touch_at
 
-        now = time.monotonic()
+        now = clock_for(self).monotonic()
         if now < last_touch_at + _api_key_reservation_heartbeat_seconds():
             return last_touch_at
 
@@ -318,9 +318,10 @@ class _ApiKeyUsageMixin:
         surface: str,
         stop_event: asyncio.Event,
     ) -> None:
+        scheduler = scheduler_for(self)
         while not stop_event.is_set():
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=_api_key_reservation_heartbeat_seconds())
+                await scheduler.wait_for(stop_event.wait(), timeout=_api_key_reservation_heartbeat_seconds())
                 return
             except TimeoutError:
                 touch_state.last_touch_at = await self._maybe_touch_api_key_reservation(
@@ -349,7 +350,7 @@ class _ApiKeyUsageMixin:
             return
         stop_event = asyncio.Event()
         request_state.api_key_reservation_heartbeat_stop = stop_event
-        request_state.api_key_reservation_heartbeat_task = asyncio.create_task(
+        request_state.api_key_reservation_heartbeat_task = scheduler_for(self).create_task(
             self._run_api_key_reservation_heartbeat(
                 api_key=api_key,
                 reservation=request_state.api_key_reservation,
@@ -513,9 +514,10 @@ class _ApiKeyUsageMixin:
         reservation_id = api_key_reservation.reservation_id
         model_name = api_key_reservation.model or settlement.model or ""
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
+        scheduler = scheduler_for(self)
 
         async def _release_ordering_sensitive_fallback() -> bool:
-            fallback_task = asyncio.create_task(
+            fallback_task = scheduler.create_task(
                 self._release_unsettled_stream_api_key_usage(
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
@@ -579,7 +581,7 @@ class _ApiKeyUsageMixin:
         # only over-restrict, never over-admit. Awaiting the ~5+2N-statement
         # settlement transaction here made every keyed stream's close wait on
         # it. Shutdown drains the task set (drain_persistence_tasks).
-        task = asyncio.create_task(_settle_once(), name=f"proxy-stream-api-key-settle-{request_id}")
+        task = scheduler.create_task(_settle_once(), name=f"proxy-stream-api-key-settle-{request_id}")
         settlement.usage_settlement_transferred = True
         self._track_stream_usage_settlement_task(
             task,
@@ -670,7 +672,7 @@ class _ApiKeyUsageMixin:
         action: str,
         request_id: str,
     ) -> None:
-        task = asyncio.create_task(coro, name=f"proxy-{action}-{request_id}")
+        task = scheduler_for(self).create_task(coro, name=f"proxy-{action}-{request_id}")
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
         proxy._background_cleanup_tasks.add(task)
 
@@ -735,7 +737,7 @@ class _ApiKeyUsageMixin:
             finally:
                 if retry_slot_acquired:
                     proxy._stream_api_key_release_retry_semaphore.release()
-            await asyncio.sleep(retry_delay_seconds)
+            await scheduler_for(self).sleep(retry_delay_seconds)
             retry_attempt += 1
             retry_delay_seconds = min(
                 _STREAM_API_KEY_RELEASE_RETRY_MAX_SECONDS,

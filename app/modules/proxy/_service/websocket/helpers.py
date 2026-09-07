@@ -38,6 +38,7 @@ from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # 
 from app.core.clients.proxy_websocket import (
     UpstreamWebSocketMessage,
 )
+from app.core.clock import Scheduler
 from app.core.errors import (
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_NOT_FOUND_CODE,
@@ -360,6 +361,9 @@ def _facade() -> Any:
 # concurrent request, so discovery always invalidates the negative entry.
 _WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_TTL_SECONDS = 60.0
 _WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_LIMIT = 4096
+# The index is process-global and shared by every turn, so its TTL stamps stay
+# on the real monotonic clock instead of a per-turn injected clock; the
+# simulation harness never reaches it (its fake turns carry no stale anchor).
 _websocket_stale_previous_response_index: dict[tuple[str, str | None], float] = {}
 
 
@@ -1836,7 +1840,11 @@ def _pop_matching_websocket_request_states(
 async def _release_websocket_response_create_gate(
     request_state: _WebSocketRequestState,
     response_create_gate: asyncio.Semaphore,
+    *,
+    scheduler: Scheduler,
 ) -> None:
+    """Release every create owner; ``scheduler`` owns the deferred lease-release task."""
+
     cancellation: asyncio.CancelledError | None = None
     account_response_create_lease = request_state.account_response_create_lease
     account_response_create_release = request_state.account_response_create_release
@@ -1847,7 +1855,8 @@ async def _release_websocket_response_create_gate(
         request_state.response_create_admission = None
     if account_response_create_lease is not None and account_response_create_release is not None:
         cancellation = await _await_cleanup_deferring_cancellation(
-            account_response_create_release(account_response_create_lease)
+            account_response_create_release(account_response_create_lease),
+            scheduler=scheduler,
         )
     request_state.awaiting_response_created = False
     request_state.response_create_gate = None
@@ -1924,6 +1933,7 @@ def _websocket_receive_timeout_for_pending_requests(
     *,
     proxy_request_budget_seconds: float,
     stream_idle_timeout_seconds: float,
+    now: float,
 ) -> _WebSocketReceiveTimeout | None:
     if not started_ats:
         return None
@@ -1931,7 +1941,8 @@ def _websocket_receive_timeout_for_pending_requests(
     idle_timeout_seconds = max(0.001, stream_idle_timeout_seconds)
     oldest_started_at = min(started_ats)
     budget_deadline = oldest_started_at + proxy_request_budget_seconds
-    remaining_budget = _facade()._remaining_budget_seconds(budget_deadline)
+    # ``started_ats`` come from the owner's clock; ``now`` must too.
+    remaining_budget = max(0.0, budget_deadline - now)
     idle_timeout_matches_request_budget = idle_timeout_seconds == max(0.001, proxy_request_budget_seconds)
 
     if remaining_budget <= 0 and idle_timeout_matches_request_budget:
@@ -2105,6 +2116,9 @@ def _websocket_input_item_type(item: JsonValue) -> str | None:
     return item_type if isinstance(item_type, str) else None
 
 
-def _websocket_connect_deadline(request_state: _WebSocketRequestState, budget_seconds: float) -> float:
-    started_at = request_state.started_at if request_state.started_at > 0 else time.monotonic()
+def _websocket_connect_deadline(request_state: _WebSocketRequestState, budget_seconds: float, *, now: float) -> float:
+    # ``now`` is the owner's clock sample: the fallback for a request state
+    # without a start stamp must live in the same time domain as the budget
+    # checks that later compare against this deadline.
+    started_at = request_state.started_at if request_state.started_at > 0 else now
     return started_at + budget_seconds

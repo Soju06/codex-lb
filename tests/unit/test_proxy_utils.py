@@ -54296,3 +54296,206 @@ def test_replay_before_visible_output_clean_close_retry_is_refused_after_an_acce
         )
         is expected
     )
+
+
+_OWNER_BOUND_ANCHORED_ACCEPTED_SHAPES = [
+    # The retained fresh body still names an account-scoped upload, so the
+    # owner-switch prep refuses to strip the proxy-injected anchor.
+    pytest.param(
+        {
+            "fresh_upstream_request_text": _ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT,
+            "file_required_preferred_account": True,
+        },
+        id="file_bound_fresh_body",
+    ),
+    # The client supplied ``previous_response_id`` itself; its proof-gated full
+    # resend is retry-safe for continuity but the owner-switch prep only strips
+    # proxy-injected anchors, so the turn stays with its owner.
+    pytest.param({"proxy_injected_previous_response_id": False}, id="client_supplied_anchor"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", _OWNER_BOUND_ANCHORED_ACCEPTED_SHAPES)
+async def test_process_upstream_websocket_text_replays_an_owner_bound_anchored_accepted_capacity_failure_on_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    shape: dict[str, Any],
+):
+    """#2127 round 2 P2: an accepted anchored turn the owner-switch prep cannot
+    move used to fall into the pre-created anchored branches, which failed it
+    closed as ``previous_response_owner_unavailable`` with an immediate health
+    write and no replay -- neither the owner reconnect the spec requires nor
+    main's unchanged terminal. The capacity path must re-send the anchored body
+    once to the account that accepted it, the way the transport-close path
+    already reconnects an account-bound accepted replay to its owner."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        request_id="ws_req_owner_bound_anchored_accepted_capacity",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_sent_at=1.0,
+        response_create_gate_acquired=True,
+        **shape,
+    )
+    anchored_request_text = request_state.request_text
+    fresh_request_text = request_state.fresh_upstream_request_text
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(0),
+        )
+
+    await process({"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    await process({"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}})
+    assert request_state.response_event_count == 2
+
+    terminal_text = await process(_accepted_capacity_error_payload())
+
+    # The replay is staged within the single lifecycle the client is reading.
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.replay_request_state is request_state
+    assert pending_requests == deque()
+    assert request_state.replay_downstream_response_id == "resp_x"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.suppress_next_in_progress_downstream is True
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_id is None
+    assert request_state.response_event_count == 0
+    assert request_state.replay_count == 1
+    # The anchored body goes back to its owner as-is: no swap, no exclusion.
+    assert request_state.request_text == anchored_request_text
+    assert request_state.previous_response_id == "resp_ws_anchor"
+    assert request_state.fresh_upstream_request_text == fresh_request_text
+    assert request_state.fresh_upstream_request_is_retry_safe is True
+    assert request_state.replay_required_account_id == account.id
+    assert request_state.preferred_account_id == account.id
+    assert request_state.excluded_account_ids == set()
+    assert request_state.affinity_policy.reallocate_sticky is False
+    assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is False
+    # The terminal is neither forwarded nor rewritten into an owner-unavailable failure.
+    assert "Previous response owner account is unavailable" not in terminal_text
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[0] is account
+    assert handle_stream_error.await_args.args[2] == "server_is_overloaded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", _OWNER_BOUND_ANCHORED_ACCEPTED_SHAPES)
+async def test_process_upstream_websocket_text_defers_owner_bound_accepted_replay_health_until_api_key_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+    shape: dict[str, Any],
+):
+    """#2127 round 2 P2 (settlement-before-health): the owner-bound accepted
+    replay keeps its API-key reservation open across the re-send, so the
+    owner's health write must queue behind the settlement exactly as it does
+    for the account-neutral replay; the pre-created anchored branch wrote it
+    immediately."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    calls: list[str] = []
+
+    async def settle_usage(*_args: object, **_kwargs: object) -> bool:
+        calls.append("settle")
+        return True
+
+    async def handle_stream_error(account: Account, _error: object, code: str, http_status: int | None = None) -> None:
+        del http_status
+        calls.append(f"health:{account.id}:{code}")
+
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    api_key = _make_api_key_data("key_ws_owner_bound_accepted_replay")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_ws_owner_bound_accepted_replay",
+        key_id=api_key.id,
+        model="gpt-5.6-sol",
+    )
+    owner = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        request_id="ws_req_owner_bound_accepted_keyed_replay",
+        api_key_reservation=reservation,
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_sent_at=1.0,
+        response_create_gate_acquired=True,
+        **shape,
+    )
+    request_state.api_key = api_key
+    anchored_request_text = request_state.request_text
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=owner,
+            account_id_value=owner.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=api_key,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(0),
+        )
+
+    await process({"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    await process({"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}})
+    await process(_accepted_capacity_error_payload())
+
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.request_text == anchored_request_text
+    assert request_state.excluded_account_ids == set()
+    assert request_state.replay_required_account_id == owner.id
+    # The reservation is still open, so no health write happened yet.
+    assert calls == []
+    assert [(penalty.account.id, penalty.code) for penalty in request_state.deferred_keyed_stream_health] == [
+        (owner.id, "server_is_overloaded")
+    ]
+    assert request_state.api_key_reservation is reservation
+
+    # The replay completes on the same owner; its terminal settles the
+    # reservation first and only then drains the deferred penalty.
+    pending_requests.append(request_state)
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    request_state.response_create_gate_acquired = True
+    replay_created_text = await process(
+        {"type": "response.created", "response": {"id": "resp_y", "status": "in_progress"}}
+    )
+    assert upstream_control.suppress_downstream_event is True
+    assert json.loads(replay_created_text)["response"]["id"] == "resp_x"
+    upstream_control.suppress_downstream_event = False
+    completed_text = await process(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_y",
+                "status": "completed",
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "OK"}]}
+                ],
+                "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
+            },
+        }
+    )
+
+    assert json.loads(completed_text)["response"]["id"] == "resp_x"
+    assert pending_requests == deque()
+    assert calls == ["settle", f"health:{owner.id}:server_is_overloaded"]
+    assert request_state.deferred_keyed_stream_health == []
+    assert request_state.api_key_reservation is None

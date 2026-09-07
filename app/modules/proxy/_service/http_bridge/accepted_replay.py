@@ -9,9 +9,11 @@ Responses turn is reported as an output item or as billed output tokens, so
 such a turn is as replay-safe as a pre-created failure. The helpers here let
 the existing pre-created replay machinery (``replay_downstream_response_id`` +
 prelude suppression + id rewriting) cover that state: the request is re-sent
-once, normally on another account, while the client keeps reading the single
-lifecycle it already observed. Quota and rate-limit terminals after acceptance
-deliberately stay fail-closed; see the openspec change
+once -- on another account when its body is account-neutral, otherwise to the
+account that accepted it (a client-supplied anchor or an account-bound fresh
+body keeps the anchored body on its owner) -- while the client keeps reading
+the single lifecycle it already observed. Quota and rate-limit terminals after
+acceptance deliberately stay fail-closed; see the openspec change
 ``retry-accepted-output-free-capacity-failures``.
 """
 
@@ -32,13 +34,12 @@ from app.modules.proxy.helpers import is_upstream_model_capacity_error
 logger = logging.getLogger("app.modules.proxy.service")
 
 _ACCEPTED_CAPACITY_REPLAY_ERROR_CODES = frozenset({"server_is_overloaded", "overloaded_error", "model_at_capacity"})
-# The code handed back is what the transparent-replay branches (the websocket
-# owner-switch path, ``_WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES``) and the
-# account-health write consume. ``model_at_capacity`` is not a transparent
-# replay code on either surface, so it is reported as ``server_is_overloaded``
-# exactly as the pre-created classifier reports the selected-model capacity
-# message; the raw code would skip the owner-switch path and re-send an
-# anchored body to a non-owner or exclude the owner it still required.
+# The code handed back is what the account-health write consumes and what the
+# spec requires to be a transparent replay code
+# (``_WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES``). ``model_at_capacity`` is not
+# one on either surface, so it is reported as ``server_is_overloaded`` exactly
+# as the pre-created classifier reports the selected-model capacity message;
+# the accepted replay itself no longer branches on the transparent set.
 _ACCEPTED_CAPACITY_REPLAY_REPORTED_CODES = {
     "server_is_overloaded": "server_is_overloaded",
     "overloaded_error": "overloaded_error",
@@ -63,7 +64,10 @@ def _websocket_accepted_replay_candidate(
     Mirrors the fresh-replay rules of the pre-created path: a single pending
     request with its body retained, no replay consumed yet, a send boundary on
     the direct websocket transport, and either no anchor or a retry-safe fresh
-    payload that drops it.
+    payload. The fresh payload replaces the anchored body only when the
+    owner-switch prep proves the move safe (proxy-injected anchor,
+    account-neutral body); otherwise the anchored body is re-sent to the owner
+    that accepted it, which the terminal proved produced nothing.
     """
     if has_other_pending_requests:
         return False

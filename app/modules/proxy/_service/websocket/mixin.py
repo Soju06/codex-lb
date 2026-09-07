@@ -5802,8 +5802,19 @@ class _WebSocketMixin:
                 payload=payload,
                 has_other_pending_requests=has_other_pending_requests,
             )
+        # An accepted lifecycle is classified only by the output-free capacity
+        # rule and never takes the pre-created anchored branches below: its
+        # anchor is handled where the replay is staged, so an anchored turn the
+        # owner-switch prep cannot move is re-sent to its owner instead of
+        # being failed closed as ``previous_response_owner_unavailable``.
+        accepted_lifecycle_replay = (
+            retry_error_code is not None
+            and request_state.response_id is not None
+            and not request_state.awaiting_response_created
+        )
         retry_safe_owner_replay = bool(
-            retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
+            not accepted_lifecycle_replay
+            and retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
             and request_state.previous_response_id is not None
             and request_state.preferred_account_id is not None
             and request_state.proxy_injected_previous_response_id
@@ -5811,7 +5822,8 @@ class _WebSocketMixin:
             and request_state.fresh_upstream_request_text
         )
         if (
-            retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
+            not accepted_lifecycle_replay
+            and retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
             and request_state.previous_response_id is not None
             and request_state.preferred_account_id is not None
             and not retry_safe_previous_response_not_found
@@ -5926,9 +5938,6 @@ class _WebSocketMixin:
                         upstream_control.replay_request_state = request_state
             else:
                 upstream_control.reconnect_requested = True
-                accepted_lifecycle_replay = (
-                    request_state.response_id is not None and not request_state.awaiting_response_created
-                )
                 # The loop re-acquires the create gate and admission for a
                 # replay whose gate is not held, so no gate is claimed here.
                 await _stage_websocket_request_state_for_replay(
@@ -5939,9 +5948,21 @@ class _WebSocketMixin:
                 )
                 request_state.replay_count += 1
                 _clear_websocket_request_error_overrides(request_state)
+                if accepted_lifecycle_replay and request_state.previous_response_id is not None:
+                    # The owner-switch prep swaps the retained fresh body in and
+                    # releases the anchor owner's pin only when the move is
+                    # proven safe (proxy-injected anchor, account-neutral fresh
+                    # body). A client-supplied anchor or a fresh body that still
+                    # names an account-scoped upload keeps the anchored body: the
+                    # terminal proved the accepted turn produced nothing, so it
+                    # is re-sent as-is to the owner that accepted it (parity with
+                    # the bridge's owner-bound anchored retry). The dispatch
+                    # binding already requires that owner on the reconnect.
+                    _prepare_websocket_request_state_for_account_switch(request_state)
                 if accepted_lifecycle_replay and _websocket_accepted_replay_can_switch_account(request_state):
                     # The accepted turn failed on this account; move the
                     # account-neutral replay to another one like the bridge does.
+                    # A replay still pinned to its owner reconnects there instead.
                     request_state.excluded_account_ids.add(account.id)
                     request_state.affinity_policy = replace(request_state.affinity_policy, reallocate_sticky=True)
                 upstream_control.suppress_downstream_event = True

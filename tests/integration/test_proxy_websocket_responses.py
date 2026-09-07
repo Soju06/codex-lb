@@ -13975,3 +13975,73 @@ def test_backend_responses_websocket_retries_anchored_accepted_capacity_error_wi
         anchor_response_id="resp_ws_anchor_capacity_turn_1",
     )
     assert (failover.FIRST_ACCOUNT_ID, "server_is_overloaded") in failover.stream_errors
+
+
+def test_backend_responses_websocket_replays_a_client_anchored_accepted_capacity_error_on_its_owner(
+    app_instance,
+    monkeypatch,
+):
+    """#2127 round 2 P2: the client anchors its follow-up on the first turn's
+    id itself and repeats the history (a proof-gated, retry-safe full resend).
+    The owner-switch prep only strips proxy-injected anchors, so this accepted
+    turn cannot leave the anchor's owner. When upstream accepts it and fails it
+    output-free with a capacity terminal, the proxy must re-send the anchored
+    body once to that owner -- not fail the turn closed as
+    ``previous_response_owner_unavailable`` (what the pre-created anchored
+    branch did) and not move it to the other account."""
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            _completed_first_turn_upstream_batch("resp_ws_client_anchor_turn_1"),
+            [
+                *_accepted_output_free_prelude("resp_ws_client_anchored_accepted_capacity_failed"),
+                _ws_event(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "service_unavailable_error",
+                            "code": "server_is_overloaded",
+                            "message": "Our servers are currently overloaded. Please try again later.",
+                        },
+                    }
+                ),
+            ],
+        ],
+    )
+    owner_recovered_upstream = _recovered_upstream("resp_ws_client_anchored_owner_recovered")
+    other_account_upstream = _recovered_upstream("resp_ws_client_anchored_other_account")
+    failover = _TwoAccountWebSocketFailover(first_upstream, other_account_upstream)
+    # The owner serves the replay on a fresh socket; the other account must stay idle.
+    failover.upstreams_by_account[failover.FIRST_ACCOUNT_ID].append(owner_recovered_upstream)
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run(
+        app_instance,
+        requests=[
+            failover.response_create([failover.HISTORICAL_INPUT]),
+            {
+                **failover.response_create([failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]),
+                "previous_response_id": "resp_ws_client_anchor_turn_1",
+            },
+        ],
+        headers={"Authorization": "Bearer external-token", "session_id": "sid-ws-client-anchored-accepted"},
+    )
+
+    created_id = _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    assert created_id == "resp_ws_client_anchored_accepted_capacity_failed"
+    assert [event["type"] for event in failover.turn_events[0]] == ["response.created", "response.completed"]
+    assert not failover.refused_connects, failover.refused_connects
+    assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID, failover.FIRST_ACCOUNT_ID], (
+        failover.connect_accounts
+    )
+    assert failover.excluded_at_connect[-1] == set(), failover.excluded_at_connect
+    assert failover.required_at_connect[-1] == failover.FIRST_ACCOUNT_ID, failover.required_at_connect
+    assert len(first_upstream.sent_text) == 2
+    anchored_payload = json.loads(first_upstream.sent_text[1])
+    assert anchored_payload["previous_response_id"] == "resp_ws_client_anchor_turn_1"
+    assert len(owner_recovered_upstream.sent_text) == 1
+    replayed_payload = json.loads(owner_recovered_upstream.sent_text[0])
+    assert replayed_payload["previous_response_id"] == "resp_ws_client_anchor_turn_1"
+    assert replayed_payload["input"] == anchored_payload["input"]
+    assert other_account_upstream.sent_text == []
+    assert (failover.FIRST_ACCOUNT_ID, "server_is_overloaded") in failover.stream_errors

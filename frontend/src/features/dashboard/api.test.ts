@@ -1,11 +1,28 @@
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 
-import { getConversationDetails } from "@/features/dashboard/api";
+import { getConversationDetails, getDashboardRequestActivity } from "@/features/dashboard/api";
 import { createConversationDetails } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 
 describe("dashboard api", () => {
+  it("loads bounded daily request activity", async () => {
+    const paths: string[] = [];
+    server.use(
+      http.get("/api/dashboard/request-activity", ({ request }) => {
+        paths.push(new URL(request.url).pathname);
+        return HttpResponse.json({
+          days: [{ date: "2026-01-01", requests: 12 }],
+        });
+      }),
+    );
+
+    const activity = await getDashboardRequestActivity();
+
+    expect(paths).toEqual(["/api/dashboard/request-activity"]);
+    expect(activity.days).toEqual([{ date: "2026-01-01", requests: 12 }]);
+  });
+
   it.each([".", ".."]) ("keeps dot-only conversation ID %s opaque", async (conversationId) => {
     const paths: string[] = [];
     server.use(

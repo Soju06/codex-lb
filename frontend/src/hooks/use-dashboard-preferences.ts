@@ -6,22 +6,27 @@ const ACCOUNT_BURNRATE_STORAGE_KEY = "codex-lb-account-burnrate-enabled";
 const ACCOUNT_VIEW_MODE_STORAGE_KEY = "codex-lb-dashboard-account-view-mode";
 const ACCOUNT_LIST_SORT_STORAGE_KEY = "codex-lb-dashboard-account-list-sort";
 const DASHBOARD_REFRESH_STORAGE_KEY = "codex-lb-dashboard-refresh-seconds";
+export const DASHBOARD_DISPLAY_MODE_STORAGE_KEY = "codex-lb-dashboard-display-mode";
 
 export type DashboardRefreshSeconds = 5 | 15 | 30 | 60;
 
 export type DashboardAccountViewMode = "cards" | "list";
+
+export type DashboardDisplayMode = "weeklyPace" | "requestHeatmap";
 
 type DashboardPreferencesState = {
   accountBurnrateEnabled: boolean;
   accountViewMode: DashboardAccountViewMode;
   accountListSort: AccountListSort;
   refreshSeconds: DashboardRefreshSeconds;
+  dashboardDisplayMode: DashboardDisplayMode;
   initialized: boolean;
   initializePreferences: () => void;
   setAccountBurnrateEnabled: (enabled: boolean) => void;
   setAccountViewMode: (mode: DashboardAccountViewMode) => void;
   setAccountListSort: (sort: AccountListSort) => void;
   setRefreshSeconds: (seconds: DashboardRefreshSeconds) => void;
+  setDashboardDisplayMode: (mode: DashboardDisplayMode) => void;
 };
 
 const ACCOUNT_LIST_SORT_KEYS: AccountListSortKey[] = [
@@ -95,6 +100,14 @@ function readStoredRefreshSeconds(): DashboardRefreshSeconds | null {
     : null;
 }
 
+function readStoredDashboardDisplayMode(): DashboardDisplayMode | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const stored = window.localStorage.getItem(DASHBOARD_DISPLAY_MODE_STORAGE_KEY);
+  return stored === "weeklyPace" || stored === "requestHeatmap" ? stored : null;
+}
+
 function persistAccountBurnrateEnabled(enabled: boolean): void {
   if (typeof window === "undefined") {
     return;
@@ -127,22 +140,39 @@ function persistRefreshSeconds(seconds: DashboardRefreshSeconds): void {
   window.localStorage.setItem(DASHBOARD_REFRESH_STORAGE_KEY, String(seconds));
 }
 
+function persistDashboardDisplayMode(mode: DashboardDisplayMode): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(DASHBOARD_DISPLAY_MODE_STORAGE_KEY, mode);
+}
+
 export const useDashboardPreferencesStore = create<DashboardPreferencesState>((set) => ({
   accountBurnrateEnabled: true,
   accountViewMode: "cards",
   accountListSort: null,
   refreshSeconds: 15,
+  dashboardDisplayMode: "weeklyPace",
   initialized: false,
   initializePreferences: () => {
     const accountBurnrateEnabled = readStoredAccountBurnrateEnabled() ?? true;
     const accountViewMode = readStoredAccountViewMode() ?? "cards";
     const accountListSort = readStoredAccountListSort();
     const refreshSeconds = readStoredRefreshSeconds() ?? 15;
+    const dashboardDisplayMode = readStoredDashboardDisplayMode() ?? "weeklyPace";
     persistAccountBurnrateEnabled(accountBurnrateEnabled);
     persistAccountViewMode(accountViewMode);
     persistAccountListSort(accountListSort);
     persistRefreshSeconds(refreshSeconds);
-    set({ accountBurnrateEnabled, accountViewMode, accountListSort, refreshSeconds, initialized: true });
+    persistDashboardDisplayMode(dashboardDisplayMode);
+    set({
+      accountBurnrateEnabled,
+      accountViewMode,
+      accountListSort,
+      refreshSeconds,
+      dashboardDisplayMode,
+      initialized: true,
+    });
   },
   setAccountBurnrateEnabled: (enabled) => {
     persistAccountBurnrateEnabled(enabled);
@@ -159,5 +189,9 @@ export const useDashboardPreferencesStore = create<DashboardPreferencesState>((s
   setRefreshSeconds: (seconds) => {
     persistRefreshSeconds(seconds);
     set({ refreshSeconds: seconds, initialized: true });
+  },
+  setDashboardDisplayMode: (mode) => {
+    persistDashboardDisplayMode(mode);
+    set({ dashboardDisplayMode: mode, initialized: true });
   },
 }));

@@ -29,11 +29,16 @@ import { DashboardViewSelector } from "@/features/dashboard/components/filters/d
 import { OverviewTimeframeSelect } from "@/features/dashboard/components/filters/overview-timeframe-select";
 import { RequestFilters } from "@/features/dashboard/components/filters/request-filters";
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
+import { RequestActivityHeatmap } from "@/features/dashboard/components/request-activity-heatmap";
 import { StatsGrid } from "@/features/dashboard/components/stats-grid";
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 import { WeeklyCreditsPaceCard } from "@/features/dashboard/components/weekly-credits-pace-card";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
+import {
+  useDashboard,
+  useDashboardProjections,
+  useDashboardRequestActivity,
+} from "@/features/dashboard/hooks/use-dashboard";
 import { useConversations } from "@/features/dashboard/hooks/use-conversations";
 import { useRequestLogTablePreferences } from "@/features/dashboard/hooks/use-request-log-table-preferences";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
@@ -79,6 +84,7 @@ export function DashboardPage() {
   const showAccountBurnrate = useDashboardPreferencesStore((s) => s.accountBurnrateEnabled);
   const accountViewMode = useDashboardPreferencesStore((s) => s.accountViewMode);
   const accountListSort = useDashboardPreferencesStore((s) => s.accountListSort);
+  const dashboardDisplayMode = useDashboardPreferencesStore((s) => s.dashboardDisplayMode);
   const setAccountViewMode = useDashboardPreferencesStore((s) => s.setAccountViewMode);
   const setAccountListSort = useDashboardPreferencesStore((s) => s.setAccountListSort);
   const canWrite = useAuthStore((state) => state.canWrite);
@@ -111,6 +117,7 @@ export function DashboardPage() {
   const dashboardTimeframe =
     dashboardView === "conversations" ? conversationTimeframe : overviewTimeframe;
   const dashboardQuery = useDashboard(dashboardTimeframe);
+  const requestActivityQuery = useDashboardRequestActivity(dashboardDisplayMode === "requestHeatmap");
   const [retainedDashboardLoadError, setRetainedDashboardLoadError] =
     useState<RetainedDashboardLoadError | null>(null);
   const [overviewRetryTimeframe, setOverviewRetryTimeframe] =
@@ -130,7 +137,11 @@ export function DashboardPage() {
   const activeListIsFetching = dashboardView === "request-logs"
     ? logsQuery.isFetching
     : conversationsQuery.isFetching;
-  const isRefreshing = dashboardQuery.isFetching || projectionsQuery.isFetching || activeListIsFetching;
+  const isRefreshing =
+    dashboardQuery.isFetching ||
+    projectionsQuery.isFetching ||
+    requestActivityQuery.isFetching ||
+    activeListIsFetching;
 
   const handleRefresh = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
@@ -464,7 +475,7 @@ export function DashboardPage() {
         <>
           <StatsGrid stats={view.stats} />
 
-          {view.weeklyCreditPace ? (
+          {view.weeklyCreditPace || dashboardDisplayMode === "requestHeatmap" ? (
             <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(18rem,1fr)]">
               <UsageDonuts
                 primaryItems={view.primaryUsageItems}
@@ -476,7 +487,15 @@ export function DashboardPage() {
                 safeLinePrimary={view.safeLinePrimary}
                 safeLineSecondary={view.safeLineSecondary}
               />
-              <WeeklyCreditsPaceCard pace={view.weeklyCreditPace} />
+              {dashboardDisplayMode === "requestHeatmap" ? (
+                <RequestActivityHeatmap
+                  days={requestActivityQuery.data?.days}
+                  error={requestActivityQuery.error}
+                  isLoading={requestActivityQuery.isPending || requestActivityQuery.isFetching}
+                />
+              ) : (
+                <WeeklyCreditsPaceCard pace={view.weeklyCreditPace} />
+              )}
             </div>
           ) : (
             <UsageDonuts

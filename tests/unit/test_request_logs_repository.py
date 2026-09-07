@@ -10,6 +10,7 @@ from sqlalchemy.exc import ResourceClosedError
 
 from app.db.models import ModelSource, RequestLog
 from app.db.session import SessionLocal
+from app.modules.accounts.usage_time_rollup import HourlyUsageRollupRow
 from app.modules.request_logs import repository as repository_module
 from app.modules.request_logs.repository import RequestLogsRepository
 
@@ -191,6 +192,44 @@ async def test_aggregate_activity_counts_only_nonblank_conversation_requests(db_
     assert aggregate.request_count == 6
     assert aggregate.conversation_count == 2
     assert aggregate.conversation_request_count == 4
+
+
+@pytest.mark.asyncio
+async def test_aggregate_request_activity_bounds_raw_tail_by_requested_at(monkeypatch) -> None:
+    session = AsyncMock()
+    session.get_bind = MagicMock(return_value=SimpleNamespace(dialect=SimpleNamespace(name="sqlite")))
+    since = datetime(2026, 7, 1)
+    until = datetime(2026, 7, 2)
+    day_epoch = int(datetime(2026, 7, 1, tzinfo=timezone.utc).timestamp())
+    session.execute.return_value = SimpleNamespace(all=lambda: [SimpleNamespace(day_epoch=day_epoch, request_count=2)])
+    monkeypatch.setattr(
+        repository_module,
+        "read_hourly_window",
+        AsyncMock(
+            return_value=(
+                [
+                    HourlyUsageRollupRow(
+                        bucket_epoch=day_epoch + 3_600,
+                        account_id="\x1f",
+                        api_key_id="\x1f",
+                        model="gpt-5.2",
+                        service_tier="\x1f",
+                        request_kind="normal",
+                        is_deleted=False,
+                        request_count=3,
+                    )
+                ],
+                [(since, until)],
+            )
+        ),
+    )
+
+    result = await RequestLogsRepository(session).aggregate_request_activity(since, until)
+
+    assert [(day.date, day.requests) for day in result] == [("2026-07-01", 5)]
+    statement = str(session.execute.await_args.args[0])
+    assert "request_logs.requested_at >=" in statement
+    assert "request_logs.requested_at <" in statement
 
 
 @pytest.mark.asyncio

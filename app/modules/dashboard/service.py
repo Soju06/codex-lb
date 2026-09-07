@@ -21,6 +21,8 @@ from app.modules.dashboard.schemas import (
     DashboardOverviewResponse,
     DashboardOverviewTimeframeKey,
     DashboardProjectionsResponse,
+    DashboardRequestActivityDay,
+    DashboardRequestActivityResponse,
     DashboardUsageWindows,
     DepletionResponse,
     WeeklyCreditApiKeyAttribution,
@@ -41,6 +43,8 @@ from app.modules.usage.depletion_service import (
 )
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import NormalizedUsageWindow
+
+_REQUEST_ACTIVITY_MONTHS = 6
 
 # Newest-first per-account row bound for the projections history fetch
 # (PostgreSQL; the SQLite snapshot cache keeps the shared floor). Live
@@ -268,6 +272,16 @@ class DashboardService:
             depletion_primary=pri_depletion,
             depletion_secondary=sec_depletion,
             weekly_credit_pace=weekly_credit_pace,
+        )
+
+    async def get_request_activity(self) -> DashboardRequestActivityResponse:
+        now = utcnow()
+        month_index = now.year * 12 + now.month - (_REQUEST_ACTIVITY_MONTHS - 1)
+        start_year, start_month_index = divmod(month_index, 12)
+        since = datetime(start_year, start_month_index + 1, 1)
+        rows = await self._repo.aggregate_request_activity(since, now)
+        return DashboardRequestActivityResponse(
+            days=[DashboardRequestActivityDay(date=row.date, requests=row.requests) for row in rows]
         )
 
 

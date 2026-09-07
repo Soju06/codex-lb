@@ -6,7 +6,11 @@ import { renderWithProviders } from "@/test/utils";
 import { createDashboardOverview, createDashboardProjections } from "@/test/mocks/factories";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
+import {
+  useDashboard,
+  useDashboardProjections,
+  useDashboardRequestActivity,
+} from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { useConversations } from "@/features/dashboard/hooks/use-conversations";
 import { REQUEST_LOG_TABLE_PREFERENCES_STORAGE_KEY } from "@/features/dashboard/hooks/use-request-log-table-preferences";
@@ -38,6 +42,7 @@ vi.mock("@/features/accounts/hooks/use-accounts", () => ({
 vi.mock("@/features/dashboard/hooks/use-dashboard", () => ({
   useDashboard: vi.fn(),
   useDashboardProjections: vi.fn(),
+  useDashboardRequestActivity: vi.fn(),
 }));
 
 vi.mock("@/features/dashboard/hooks/use-request-logs", async (importOriginal) => {
@@ -149,6 +154,7 @@ vi.mock("@/features/dashboard/components/weekly-credits-pace-card", () => ({
 const useAccountMutationsMock = vi.mocked(useAccountMutations);
 const useDashboardMock = vi.mocked(useDashboard);
 const useDashboardProjectionsMock = vi.mocked(useDashboardProjections);
+const useDashboardRequestActivityMock = vi.mocked(useDashboardRequestActivity);
 const useRequestLogsMock = vi.mocked(useRequestLogs);
 const useConversationsMock = vi.mocked(useConversations);
 const buildDashboardViewMock = vi.mocked(buildDashboardView);
@@ -182,6 +188,7 @@ describe("DashboardPage", () => {
     useAccountMutationsMock.mockReset();
     useDashboardMock.mockReset();
     useDashboardProjectionsMock.mockReset();
+    useDashboardRequestActivityMock.mockReset();
     useRequestLogsMock.mockReset();
     useConversationsMock.mockReset();
     buildDashboardViewMock.mockReset();
@@ -190,8 +197,15 @@ describe("DashboardPage", () => {
       accountBurnrateEnabled: true,
       accountViewMode: "cards",
       accountListSort: null,
+      dashboardDisplayMode: "weeklyPace",
       initialized: true,
     });
+    useDashboardRequestActivityMock.mockReturnValue({
+      data: undefined,
+      error: null,
+      isFetching: false,
+      isPending: false,
+    } as unknown as ReturnType<typeof useDashboardRequestActivity>);
   });
 
   function mockReadyDashboard(
@@ -565,6 +579,24 @@ describe("DashboardPage", () => {
     expect(screen.queryByTestId("account-list")).not.toBeInTheDocument();
     expect(accountCardsSpy).toHaveBeenCalledWith(overview.accounts);
     expect(screen.getByRole("radio", { name: "View accounts as cards" })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("replaces only the weekly pace slot with request activity", () => {
+    mockReadyDashboard();
+    useDashboardPreferencesStore.setState({ dashboardDisplayMode: "requestHeatmap" });
+    useDashboardRequestActivityMock.mockReturnValue({
+      data: { days: [] },
+      error: null,
+      isFetching: false,
+      isPending: false,
+    } as unknown as ReturnType<typeof useDashboardRequestActivity>);
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByTestId("usage-donuts")).toBeInTheDocument();
+    expect(screen.getByTestId("request-activity-heatmap")).toBeInTheDocument();
+    expect(screen.queryByTestId("weekly-credits-pace-card")).not.toBeInTheDocument();
+    expect(useDashboardRequestActivityMock).toHaveBeenCalledWith(true);
   });
 
   it("switches the Accounts section to list view", async () => {

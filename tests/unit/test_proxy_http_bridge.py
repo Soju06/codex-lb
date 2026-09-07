@@ -38025,6 +38025,7 @@ async def test_safety_policy_response_failed_does_not_poison_bridge_circuit(
         key_value="sid-policy-block",
         response_event_count=0,
     )
+    _request_state.response_id = "resp_failed_policy"
     record_failure = AsyncMock(return_value=None)
     monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
@@ -38032,6 +38033,19 @@ async def test_safety_policy_response_failed_does_not_poison_bridge_circuit(
     await service._process_http_bridge_upstream_text(session, _SAFETY_POLICY_RESPONSE_FAILED_FRAME)
 
     record_failure.assert_not_awaited()
+    assert _request_state.event_queue is not None
+    forwarded_frame = await asyncio.wait_for(_request_state.event_queue.get(), timeout=1.0)
+    assert forwarded_frame is not None
+    forwarded_payload = proxy_service.parse_sse_data_json(forwarded_frame)
+    assert isinstance(forwarded_payload, dict)
+    assert forwarded_payload["type"] == "response.failed"
+    forwarded_response = forwarded_payload["response"]
+    assert isinstance(forwarded_response, dict)
+    forwarded_error = forwarded_response["error"]
+    assert isinstance(forwarded_error, dict)
+    assert forwarded_error["code"] == "misalignment_policy_violation"
+    assert forwarded_error["message"] == "This request was blocked by our safety systems."
+    assert await asyncio.wait_for(_request_state.event_queue.get(), timeout=1.0) is None
 
 
 @pytest.mark.asyncio

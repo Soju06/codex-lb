@@ -544,6 +544,9 @@ async def lifespan(app: FastAPI):
         lambda: get_account_selection_cache().invalidate(propagate=False),
     )
     cache_poller.on_invalidation(
+        NAMESPACE_ACCOUNT_SELECTION, routing_availability_cache.refresh_usage_caps_from_db
+    )
+    cache_poller.on_invalidation(
         NAMESPACE_SETTINGS,
         lambda: get_settings_cache().invalidate(propagate=False),
     )
@@ -591,6 +594,7 @@ async def lifespan(app: FastAPI):
         logger.warning("cache invalidation baseline prime failed", exc_info=True)
     try:
         await routing_availability_cache.refresh_from_db()
+        await routing_availability_cache.refresh_usage_caps_from_db()
     except Exception:
         # Unseeded snapshot degrades to local-mark semantics; the next
         # account_routing bump retries the refresh via the poller callback.

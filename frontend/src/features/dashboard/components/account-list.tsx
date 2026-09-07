@@ -1,3 +1,4 @@
+import { UsageCapMarker, UsageCapValue } from "@/components/usage-cap-marker";
 import { ArrowDown, ArrowUp, ArrowUpDown, Clock, ExternalLink, List, Play, RotateCcw, Zap } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -21,7 +22,6 @@ import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import {
   formatDateTimeInline,
-  formatPercentNullable,
   formatQuotaResetLabel,
   formatSingleUnitRemaining,
   formatSlug,
@@ -29,7 +29,7 @@ import {
 
 const ACCOUNT_LIST_VISIBLE_ROWS = 8;
 const ACCOUNT_LIST_ROW_HEIGHT_REM = 4.5;
-const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2fr) 7.5rem 7.5rem minmax(8rem,0.8fr) 6.5rem";
+const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(19rem,1.4fr) 7.5rem 7.5rem minmax(8rem,0.8fr) 6.5rem";
 
 type AccountListProps = {
   accounts: AccountSummary[];
@@ -74,7 +74,6 @@ function quotaLabel(label: string, percent: number | null, resetAt: string | nul
   return {
     label,
     percent,
-    percentLabel: formatPercentNullable(percent, 1),
     resetLabel: formatQuotaResetLabel(resetAt ?? null),
   };
 }
@@ -254,10 +253,10 @@ function AccountQuotaCells({ account }: { account: AccountSummary }) {
   return (
     <div className="grid gap-1.5 text-xs">
       {quotas.map((quota) => (
-        <div key={quota.label} className="grid grid-cols-[2.75rem_minmax(3rem,auto)_minmax(2.75rem,0.45fr)_minmax(0,1fr)] items-center gap-2">
+        <div key={quota.label} className="grid grid-cols-[2.75rem_7.5rem_minmax(3rem,0.45fr)_minmax(0,1fr)] items-center gap-2">
           <span className="text-muted-foreground">{localizedQuotaLabel(quota.label, t)}</span>
-          <span className="font-medium tabular-nums text-foreground">{quota.percentLabel}</span>
-          <QuotaMeter percent={quota.percent} />
+          <span className="whitespace-nowrap font-medium tabular-nums text-foreground"><UsageCapValue percent={quota.percent} cap={quota.label === "5h" ? account.usageCap5HPercent : quota.label === "Weekly" ? account.usageCapWeeklyPercent : null} /></span>
+          <QuotaMeter percent={quota.percent} cap={quota.label === "5h" ? account.usageCap5HPercent : quota.label === "Weekly" ? account.usageCapWeeklyPercent : null} />
           <span className="inline-flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
             <Clock className="h-3 w-3 shrink-0" aria-hidden="true" />
             <span className="truncate">{quota.resetLabel}</span>
@@ -268,14 +267,14 @@ function AccountQuotaCells({ account }: { account: AccountSummary }) {
   );
 }
 
-function QuotaMeter({ percent }: { percent: number | null }) {
+function QuotaMeter({ percent, cap }: { percent: number | null; cap?: number | null }) {
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   return (
     <div
-      className={cn("h-1.5 overflow-hidden rounded-full", quotaBarTrack(clamped))}
-      aria-hidden="true"
+      className={cn("relative h-1.5 overflow-hidden rounded-full", quotaBarTrack(clamped))}
       data-testid="account-list-quota-meter"
     >
+      <UsageCapMarker cap={cap} />
       <div
         className={cn("h-full rounded-full transition-colors duration-500 ease-out", quotaBarColor(clamped))}
         style={{ width: `${clamped}%` }}

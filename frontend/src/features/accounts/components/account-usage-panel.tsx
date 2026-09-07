@@ -1,3 +1,4 @@
+import { UsageCapMarker, UsageCapValue } from "@/components/usage-cap-marker";
 import { lazy, Suspense } from "react";
 import { Clock, Flame, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -17,7 +18,6 @@ import {
   formatCompactNumber,
   formatCurrency,
   formatDateTimeInline,
-  formatPercentNullable,
   formatQuotaResetLabel,
   formatResetRelative,
   formatSingleUnitRemaining,
@@ -44,10 +44,12 @@ function QuotaRow({
   label,
   percent,
   resetAt,
+  cap,
 }: {
   label: string;
   percent: number | null;
   resetAt: string | null | undefined;
+  cap?: number | null;
 }) {
   const { t } = useTranslation();
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
@@ -68,10 +70,11 @@ function QuotaRow({
                   : "text-red-600 dark:text-red-400",
           )}
         >
-          {formatPercentNullable(percent, 1)}
+          <UsageCapValue percent={percent} cap={cap} />
         </span>
       </div>
-      <div className={cn("h-1.5 w-full overflow-hidden rounded-full", quotaBarTrack(clamped))}>
+      <div className={cn("relative h-1.5 w-full overflow-hidden rounded-full", quotaBarTrack(clamped))}>
+        <UsageCapMarker cap={cap} />
         <div
           className={cn("h-full rounded-full transition-colors duration-500 ease-out", quotaBarColor(clamped))}
           style={{ width: `${clamped}%` }}
@@ -261,8 +264,8 @@ export function AccountUsagePanel({
           <QuotaRow label={t("common.quota.monthly")} percent={monthly} resetAt={account.resetAtMonthly} />
         ) : (
           <>
-            {!weeklyOnly && <QuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} />}
-            <QuotaRow label={t("common.quota.weekly")} percent={secondary} resetAt={account.resetAtSecondary} />
+            {!weeklyOnly && <QuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} cap={account.usageCap5HPercent} />}
+            <QuotaRow label={t("common.quota.weekly")} percent={secondary} resetAt={account.resetAtSecondary} cap={account.usageCapWeeklyPercent} />
           </>
         )}
       </div>

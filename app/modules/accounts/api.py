@@ -44,6 +44,7 @@ from app.modules.accounts.schemas import (
     AccountTrendsResponse,
     AccountUpdateRequest,
     AccountUpdateResponse,
+    AccountUsageCapsRequest,
     AccountUsageResetConsumeRequest,
     AccountUsageResetConsumeResponse,
     AccountUsageResetCreditsResponse,
@@ -435,6 +436,28 @@ async def update_account_routing_policy(
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountRoutingPolicyUpdateResponse(account_id=account_id, routing_policy=payload.routing_policy)
+
+
+@router.put("/{account_id}/usage-caps", response_model=AccountUsageCapsRequest)
+async def update_account_usage_caps(
+    account_id: str,
+    payload: AccountUsageCapsRequest,
+    request: Request,
+    _write_access=Depends(require_dashboard_write_access),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountUsageCapsRequest:
+    success = await context.service.set_usage_caps(
+        account_id, cap_5h=payload.usage_cap_5h_percent, cap_weekly=payload.usage_cap_weekly_percent
+    )
+    if not success:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    AuditService.log_async(
+        "account_updated",
+        actor_ip=request.client.host if request.client else None,
+        details={"account_id": account_id, "changed_fields": list(payload.model_fields_set)},
+    )
+    return payload
+
 
 
 @router.delete("/{account_id}", response_model=AccountDeleteResponse)

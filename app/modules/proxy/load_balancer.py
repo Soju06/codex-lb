@@ -152,6 +152,7 @@ from app.modules.proxy.fair_share import (
     evaluate_stream_fair_share,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
+from app.modules.proxy.usage_caps import reached_usage_cap_resets
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
@@ -1328,6 +1329,15 @@ class LoadBalancer:
             # serializes statements per connection anyway.
             standard_latest_primary = await repos.usage.latest_by_account()
             standard_latest_secondary = await repos.usage.latest_by_account(window="secondary")
+            # Keep ownership candidates intact; operator caps are availability,
+            # not permission to move account-local state to another account.
+            accounts = [
+                account
+                for account in accounts
+                if not reached_usage_cap_resets(
+                    account, standard_latest_primary.get(account.id), standard_latest_secondary.get(account.id)
+                )
+            ]
             latest_monthly = await repos.usage.latest_by_account(window="monthly")
             if effective_limit_name:
                 model_allowed_plans = get_model_registry().plan_types_for_model(model) if model else None

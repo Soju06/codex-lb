@@ -96,3 +96,13 @@ short windows, or evaluated for a quota the plan does not have.
 Settlement is discarded if newer replica-local runtime activity arrives while
 that snapshot is loading, preventing an older probe success from clearing a
 later failure.
+
+## Per-account usage caps
+
+Accounts-page caps reserve standard subscription quota without pausing accounts or changing provider totals. For example, 80% used on 5h and 50% used weekly stops new admission at 20% or 50% remaining respectively, whichever comes first. Blank controls disable each cap independently; both start disabled.
+
+Only actual 300-minute and 10080-minute windows count. Weekly-only primary slots are remapped; monthly and missing windows do not count. An expired window stops blocking, but another reached cap continues blocking. Cap settings survive temporary window removal and remain removable in the UI.
+
+Selection uses standard usage even for additional-quota models. Reused HTTP bridges and direct WebSockets check an in-memory cap snapshot refreshed by usage updates and cross-replica account-selection invalidation. Pinned ownership is preserved; existing work finishes rather than being cancelled. Provider sampling, cache propagation, and in-flight work mean caps are not exact upstream spending guarantees.
+
+The nullable database columns require the normal schema upgrade. No environment variables or new dependencies are needed. The Accounts and Dashboard account bars retain provider percentages and mark the reserved threshold; aggregate pool totals remain unchanged.

@@ -15,6 +15,8 @@ from app.core.cache.invalidation import (
 )
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal, close_session
+from app.modules.proxy.usage_caps import reached_usage_cap_resets
+from app.modules.usage.repository import UsageRepository
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -115,6 +117,8 @@ class RoutingAvailabilityCache:
         self._session_factory = session_factory
         self._snapshot: dict[str, AccountStatus] | None = None
         self._local_marks: set[str] = set()
+        self._usage_caps: dict[str, tuple[int | None, ...]] = {}
+        self._usage_caps_lock = anyio.Lock()
 
     @property
     def seeded(self) -> bool:
@@ -174,10 +178,41 @@ class RoutingAvailabilityCache:
             or status in _ROUTING_UNAVAILABLE_STATUSES
         }
 
+    def is_usage_capped(self, account_id: str) -> bool:
+        now = time.time()
+        return any(reset is None or reset > now for reset in self._usage_caps.get(account_id, ()))
+
+    async def refresh_usage_caps_from_db(self) -> None:
+        """Refresh cap-only reuse eligibility; keep admission a memory-only check."""
+        async with self._usage_caps_lock:
+            factory = self._session_factory or SessionLocal
+            session = factory()
+            try:
+                result = await session.execute(
+                    select(Account).where(
+                        Account.delete_requested_at.is_(None),
+                        Account.usage_cap_5h_percent.is_not(None) | Account.usage_cap_weekly_percent.is_not(None),
+                    )
+                )
+                accounts = list(result.scalars().all())
+                ids = [account.id for account in accounts]
+                usage = UsageRepository(session)
+                primary = await usage.latest_by_account(account_ids=ids)
+                secondary = await usage.latest_by_account(window="secondary", account_ids=ids)
+                snapshot = {
+                    account.id: reached_usage_cap_resets(account, primary.get(account.id), secondary.get(account.id))
+                    for account in accounts
+                }
+            finally:
+                await close_session(session)
+            self._usage_caps = snapshot
+
+
     def reset(self) -> None:
         """Drop all state (snapshot back to unseeded). Test isolation helper."""
         self._snapshot = None
         self._local_marks.clear()
+        self._usage_caps.clear()
 
 
 _account_selection_cache = AccountSelectionCache()
@@ -212,6 +247,10 @@ def clear_all_account_routing_unavailable() -> None:
 
 def is_account_routing_unavailable(account_id: str) -> bool:
     return _routing_availability_cache.is_unavailable(account_id)
+
+
+def is_account_usage_capped(account_id: str) -> bool:
+    return _routing_availability_cache.is_usage_capped(account_id)
 
 
 async def propagate_account_routing_change() -> bool:

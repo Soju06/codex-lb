@@ -988,6 +988,20 @@ class AccountsRepository:
             await self._session.commit()
             return result.scalar_one_or_none() is not None
 
+    async def update_usage_caps(
+        self, account_id: str, *, cap_5h: float | None, cap_weekly: float | None
+    ) -> bool:
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(Account)
+                .where(Account.id == account_id, Account.delete_requested_at.is_(None))
+                .values(usage_cap_5h_percent=cap_5h, usage_cap_weekly_percent=cap_weekly)
+                .returning(Account.id)
+            )
+            await self._session.commit()
+            return result.scalar_one_or_none() is not None
+
+
     async def begin_delete(self, account_id: str, *, delete_history: bool = False) -> bool:
         """Mark an account for background deletion; commits in milliseconds.
 

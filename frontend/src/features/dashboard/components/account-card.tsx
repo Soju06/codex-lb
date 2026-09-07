@@ -1,3 +1,4 @@
+import { UsageCapMarker, UsageCapValue } from "@/components/usage-cap-marker";
 import { Clock, ExternalLink, Play, RotateCcw, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -21,7 +22,6 @@ import {
 } from "@/utils/account-status";
 import {
   formatDateTimeInline,
-  formatPercentNullable,
   formatQuotaResetLabel,
   formatSingleUnitRemaining,
   formatSlug,
@@ -44,10 +44,12 @@ function QuotaBar({
   label,
   percent,
   resetLabel,
+  cap,
 }: {
   label: string;
   percent: number | null;
   resetLabel: string;
+  cap?: number | null;
 }) {
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   const hasPercent = percent !== null;
@@ -67,10 +69,11 @@ function QuotaBar({
                   : "text-red-600 dark:text-red-400",
           )}
         >
-          {formatPercentNullable(percent, 1)}
+          <UsageCapValue percent={percent} cap={cap} />
         </span>
       </div>
-      <div className={cn("h-1.5 w-full overflow-hidden rounded-full", quotaBarTrack(clamped))}>
+      <div className={cn("relative h-1.5 w-full overflow-hidden rounded-full", quotaBarTrack(clamped))}>
+        <UsageCapMarker cap={cap} />
         <div
           className={cn("h-full rounded-full transition-colors duration-500 ease-out", quotaBarColor(clamped))}
           style={{ width: `${clamped}%` }}
@@ -171,8 +174,8 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
           <QuotaBar label={t("common.time.monthly")} percent={monthlyRemaining} resetLabel={monthlyReset} />
         ) : (
           <>
-            {!weeklyOnly && <QuotaBar label="5h" percent={primaryRemaining} resetLabel={primaryReset} />}
-            <QuotaBar label={t("common.time.weekly")} percent={secondaryRemaining} resetLabel={secondaryReset} />
+            {!weeklyOnly && <QuotaBar label="5h" percent={primaryRemaining} resetLabel={primaryReset} cap={account.usageCap5HPercent} />}
+            <QuotaBar label={t("common.time.weekly")} percent={secondaryRemaining} resetLabel={secondaryReset} cap={account.usageCapWeeklyPercent} />
           </>
         )}
       </div>

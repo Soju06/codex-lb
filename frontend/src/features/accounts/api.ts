@@ -2,6 +2,7 @@ import { del, get, patch, post, put } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
+  AccountUsageCapsSchema,
   AccountAliasRequestSchema,
   AccountAliasResponseSchema,
   AccountAuthExportResponseSchema,
@@ -31,6 +32,7 @@ import {
 } from "@/features/accounts/schemas";
 import type {
   AccountRoutingPolicy,
+  AccountUsageCaps,
   AccountUsageResetConsumeRequest,
 } from "@/features/accounts/schemas";
 
@@ -199,4 +201,12 @@ export function submitManualOauthCallback(payload: unknown) {
 
 export function getRuntimeConnectAddress() {
   return get("/api/settings/runtime/connect-address", RuntimeConnectAddressResponseSchema);
+}
+
+export function updateAccountUsageCaps(accountId: string, caps: AccountUsageCaps) {
+  return put(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/usage-caps`,
+    AccountUsageCapsSchema,
+    { body: AccountUsageCapsSchema.parse(caps) },
+  );
 }

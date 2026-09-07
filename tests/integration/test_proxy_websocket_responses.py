@@ -14398,3 +14398,43 @@ def test_backend_responses_websocket_re_sends_an_anchored_accepted_failure_in_a_
     assert "previous_response_id" not in replayed_payload
     assert replayed_payload["input"] == [failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]
     assert other_account_upstream.sent_text == []
+def test_reused_websocket_usage_cap_blocks_new_turn_and_recovers(app_instance, monkeypatch):
+    upstream = _SequencedUpstreamWebSocket([], deferred_message_batches=[
+        _websocket_response_batch("resp_before_cap"),
+        _websocket_response_batch("resp_after_cap"),
+    ])
+    capped = False
+
+    class SettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def select_account(self, deadline, **kwargs):
+        return SimpleNamespace(id="capped-ws", security_work_authorized=False)
+
+    async def open_account(self, account, headers, **kwargs):
+        return account, upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: SettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_websocket_connect_account", select_account)
+    monkeypatch.setattr(proxy_module.ProxyService, "_try_open_websocket_connect_attempt", open_account)
+    release = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "_release_websocket_request_state_reservation", release)
+    monkeypatch.setattr(websocket_mixin_module, "is_account_usage_capped", lambda _: capped)
+    with TestClient(app_instance, client=("127.0.0.1", 50000)) as client:
+        with client.websocket_connect("ws://localhost/backend-api/codex/responses") as websocket:
+            websocket.send_json(_websocket_response_create("first"))
+            assert websocket.receive_json()["type"] == "response.created"
+            assert websocket.receive_json()["type"] == "response.completed"
+            capped = True
+            websocket.send_json(_websocket_response_create("blocked"))
+            event = websocket.receive_json()
+            assert event["response"]["error"]["code"] == "account_usage_cap_reached"
+            assert len(upstream.sent_text) == 1
+            release.assert_awaited()
+            capped = False
+            websocket.send_json(_websocket_response_create("resumed"))
+            assert websocket.receive_json()["type"] == "response.created"
+            assert websocket.receive_json()["type"] == "response.completed"
+            assert len(upstream.sent_text) == 2

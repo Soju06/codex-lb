@@ -1298,3 +1298,23 @@ async def test_retire_without_timeout_still_waits_for_pending_lock() -> None:
     await holder
     assert await asyncio.wait_for(retire_task, timeout=1) is True
     close_bounded.assert_awaited_once()
+@pytest.mark.asyncio
+async def test_usage_cap_blocks_reused_bridge_before_send_without_releasing_other_work(monkeypatch):
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(api_key_id="key-capped")
+    session.account_lease = _make_lease("held")
+    monkeypatch.setattr(http_bridge_request_submit_module, "is_account_usage_capped", lambda _: True)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-capped", model="gpt-5.2", service_tier=None, reasoning_effort=None,
+        api_key_reservation=None, started_at=1.0, awaiting_response_created=True,
+        event_queue=asyncio.Queue(), transport="http", skip_request_log=True,
+    )
+    with pytest.raises(ProxyResponseError) as exc:
+        await service._submit_http_bridge_request(
+            session, request_state=request_state, text_data='{"type":"response.create"}', queue_limit=8,
+        )
+    assert exc.value.status_code == 429
+    assert exc.value.payload["error"]["code"] == "account_usage_cap_reached"
+    assert session.account_lease is not None
+    assert not session.closed
+    assert request_state.response_create_attempt_count == 0

@@ -76,6 +76,8 @@ export const AccountSummarySchema = z.object({
   seatType: z.string().nullable().optional(),
   planType: z.string(),
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]).optional(),
+  usageCap5HPercent: z.number().nullable().optional(),
+  usageCapWeeklyPercent: z.number().nullable().optional(),
   status: z.string(),
   securityWorkAuthorized: z.boolean().optional(),
   usage: AccountUsageSchema.nullable().optional(),
@@ -381,3 +383,9 @@ export type RuntimeConnectAddressResponse = z.infer<
 >;
 export type OAuthState = z.infer<typeof OAuthStateSchema>;
 export type ImportState = z.infer<typeof ImportStateSchema>;
+
+export const AccountUsageCapsSchema = z.object({
+  usageCap5HPercent: z.number().positive().max(100).nullable(),
+  usageCapWeeklyPercent: z.number().positive().max(100).nullable(),
+});
+export type AccountUsageCaps = z.infer<typeof AccountUsageCapsSchema>;

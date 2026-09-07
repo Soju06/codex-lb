@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
 from typing import Any
 
+from app.core.clock import clock_for
 from app.modules.proxy._service.http_bridge.helpers import _log_http_bridge_event
 from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_HTTP,
@@ -139,14 +139,17 @@ def _revoke_http_bridge_poison_quarantine(
         and entry.poison_generation == generation
     ):
         entry.poison_quarantined_until = 0.0
-        if entry.suppressed_weaker_reason is not None and entry.suppressed_weaker_until > time.monotonic():
+        if (
+            entry.suppressed_weaker_reason is not None
+            and entry.suppressed_weaker_until > clock_for(service).monotonic()
+        ):
             entry.reason = entry.suppressed_weaker_reason
             entry.quarantined_until = entry.suppressed_weaker_until
             entry.suppressed_weaker_reason = None
             entry.suppressed_weaker_until = 0.0
             entry.generation += 1
             return True
-        if restore_reason is not None and restore_until > time.monotonic():
+        if restore_reason is not None and restore_until > clock_for(service).monotonic():
             entry.reason = restore_reason
             entry.quarantined_until = restore_until
             entry.generation += 1
@@ -181,7 +184,7 @@ def _http_bridge_request_state_wedged_reattach(request_state: _WebSocketRequestS
 
 def _http_bridge_session_key_quarantined(service: Any, key: _HTTPBridgeSessionKey) -> bool:
     registry = _http_bridge_quarantine_registry(service)
-    now = time.monotonic()
+    now = clock_for(service).monotonic()
     _prune_http_bridge_quarantine_registry(registry, now)
     entry = registry.get(key)
     return entry is not None and entry.quarantined_until > now
@@ -199,7 +202,7 @@ def _http_bridge_session_key_poison_quarantined(service: Any, key: _HTTPBridgeSe
     request.
     """
     registry = _http_bridge_quarantine_registry(service)
-    now = time.monotonic()
+    now = clock_for(service).monotonic()
     _prune_http_bridge_quarantine_registry(registry, now)
     entry = registry.get(key)
     return (
@@ -215,7 +218,7 @@ def _http_bridge_session_key_poison_quarantined(service: Any, key: _HTTPBridgeSe
 def _http_bridge_quarantine_generation(service: Any, key: _HTTPBridgeSessionKey) -> int | None:
     """Return the active quarantine generation observed for one recovery."""
     registry = _http_bridge_quarantine_registry(service)
-    now = time.monotonic()
+    now = clock_for(service).monotonic()
     _prune_http_bridge_quarantine_registry(registry, now)
     entry = registry.get(key)
     if entry is None or entry.quarantined_until <= now:
@@ -232,7 +235,7 @@ def _http_bridge_quarantine_clear_fence(service: Any, key: _HTTPBridgeSessionKey
     capture, so a quarantine armed afterwards survives the clear.
     """
     registry = _http_bridge_quarantine_registry(service)
-    now = time.monotonic()
+    now = clock_for(service).monotonic()
     _prune_http_bridge_quarantine_registry(registry, now)
     entry = registry.get(key)
     if entry is None or entry.quarantined_until <= now:
@@ -260,7 +263,7 @@ def _quarantine_http_bridge_session(
     otherwise expire in the same instant the cooldown does, handing the
     poisoned anchor straight back to the request that cooldown was holding.
     """
-    now = time.monotonic()
+    now = clock_for(service).monotonic()
     registry = _http_bridge_quarantine_registry(service)
     entry = registry.setdefault(session.key, _HTTPBridgeQuarantineEntry())
     already_quarantined = entry.quarantined_until > now
@@ -354,7 +357,7 @@ def _record_http_bridge_quarantine_eventless_timeout(service: Any, session: _HTT
     consecutive one for the same session key proves that path is also
     rebuilding a wedged attach, so later requests must stop re-attaching.
     """
-    now = time.monotonic()
+    now = clock_for(service).monotonic()
     registry = _http_bridge_quarantine_registry(service)
     # Prune before touching the entry: a strike whose TTL already lapsed must
     # not be resurrected into a "consecutive" second strike hours later.
@@ -390,7 +393,7 @@ def _clear_http_bridge_quarantine(
     fence instead of evicting it.
     """
     registry = _http_bridge_quarantine_registry(service)
-    now = time.monotonic()
+    now = clock_for(service).monotonic()
 
     def clear_fenced(key: _HTTPBridgeSessionKey, captured_generation: int | None) -> bool:
         entry = registry.get(key)

@@ -191,9 +191,10 @@ async def test_send_during_processing_is_consumed_and_later_send_wakes_once(monk
     upstream = _ScriptedUpstream(['{"type":"response.output_text.delta","delta":"a"}'])
     session_holder: list[proxy_service._HTTPBridgeSession] = []
 
-    async def process_and_send(session: proxy_service._HTTPBridgeSession, text: str) -> None:
+    async def process_and_send(session: proxy_service._HTTPBridgeSession, text: str, **_kwargs: Any) -> None:
         # request_submit sets the event after a send; emulate a send landing
-        # while the reader is still inside message processing.
+        # while the reader is still inside message processing. The relay
+        # passes its per-session scheduler/clock; this double ignores them.
         session.upstream_reader_wakeup.set()
         await asyncio.sleep(0)
 

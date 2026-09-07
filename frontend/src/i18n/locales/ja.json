@@ -1454,6 +1454,7 @@
   "upstreamProxy.endpoints.connectionFailed": "接続に失敗しました",
   "upstreamProxy.endpoints.connectionOk": "接続成功",
   "upstreamProxy.endpoints.empty": "プロキシエンドポイントが設定されていません。",
+  "upstreamProxy.endpoints.plaintextCredentials": "認証情報は {{scheme}} 経由で暗号化されずにこのプロキシへ送信されます。認証情報を保護するには、https:// プロキシを使用するか、認証情報を使わずに IP 許可リストを利用してください。",
   "upstreamProxy.endpoints.title": "エンドポイント",
   "upstreamProxy.memberDialog.alreadyPresent": "このエンドポイントはすでに {{pool}} に含まれています。",
   "upstreamProxy.memberDialog.description": "既存のエンドポイントをプロキシプールに追加します。",

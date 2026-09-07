@@ -207,8 +207,8 @@ async def get_quota_planner_forecast(
     context: QuotaPlannerContext = Depends(get_quota_planner_context),
 ) -> QuotaPlannerForecastResponse:
     settings = await context.repository.get_settings()
-    demand_bins = await context.repository.aggregate_demand_bins()
-    forecast = build_demand_forecast(settings=settings, bins=demand_bins, horizon_hours=horizon_hours)
+    demand_slots = await context.repository.aggregate_demand_slot_units()
+    forecast = build_demand_forecast(settings=settings, slot_units=demand_slots, horizon_hours=horizon_hours)
     accounts = await AccountsRepository(context.session).list_accounts()
     usage_repo = UsageRepository(context.session)
     latest_primary = await usage_repo.latest_by_account()

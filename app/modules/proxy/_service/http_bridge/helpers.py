@@ -38,6 +38,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clock import REAL_SCHEDULER, Scheduler, clock_for, scheduler_for
 from app.core.config.settings import Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import (
@@ -382,7 +383,7 @@ def _schedule_http_bridge_background_cleanup(
         if inspect.iscoroutine(awaitable):
             awaitable.close()
         return None
-    task = asyncio.create_task(awaitable, name=name)
+    task = scheduler_for(service).create_task(awaitable, name=name)
     if attribute is not None:
         setattr(task, attribute[0], attribute[1])
     cleanup_tasks.add(task)
@@ -712,6 +713,13 @@ _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR = "http_bridge_prepared_continuity_anchor"
 # which is overload or host-network evidence and must not be replayed.
 _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR = "http_bridge_cooldown_suppression"
 _HTTP_BRIDGE_STALE_INFLIGHT_MIN_SECONDS = 120.0
+# Upper bound for the per-request fail-safe sweep's wait on a detached
+# session's ``pending_lock``. The sweep runs on every bridge request, so a
+# single detached generation whose lock never frees (2026-09-07: an anyio 4.13
+# Lock lost-wakeup left ~100 live request tasks queued behind one detached
+# session) must not park every request; a skipped pass is revisited by the
+# next request's sweep and by the session's own close/drain paths.
+_HTTP_BRIDGE_DETACHED_RETIRE_LOCK_WAIT_SECONDS = 5.0
 _HTTP_BRIDGE_STALE_INFLIGHT_TIMEOUT_MULTIPLIER = 6.0
 
 
@@ -756,10 +764,6 @@ def _service_get_settings() -> Any:
 
 def _service_get_settings_cache() -> Any:
     return _service_global_or("get_settings_cache", get_settings_cache)()
-
-
-def _service_time() -> Any:
-    return _service_global_or("time", time)
 
 
 def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
@@ -854,7 +858,7 @@ def _http_bridge_pending_count_nowait(
 
 
 def _cleanup_http_bridge_inflight_sessions_nowait(service: Any) -> dict[str, int]:
-    now = _service_time().monotonic()
+    now = clock_for(service).monotonic()
     stale_after_seconds = _http_bridge_stale_inflight_seconds()
     cleaned = 0
     stale = 0
@@ -1590,6 +1594,7 @@ async def _close_http_bridge_session_resources(
                 upstream_reader,
                 label="http bridge upstream reader",
                 cleanup_tasks=service._background_cleanup_tasks,
+                scheduler=scheduler_for(service),
             )
             if session.upstream_reader is upstream_reader:
                 session.upstream_reader = None
@@ -1641,7 +1646,7 @@ async def _close_http_bridge_session(
             not existing.done() or (not existing.cancelled() and existing.exception() is None)
         ):
             return existing
-        created = asyncio.create_task(
+        created = scheduler_for(service).create_task(
             _close_http_bridge_session_resources(
                 service,
                 session,
@@ -1676,7 +1681,7 @@ async def _close_http_bridge_session(
                 if service._http_bridge_detached_sessions.get(id(session)) is session:
                     service._http_bridge_detached_sessions.pop(id(session), None)
 
-    ownership_task = asyncio.create_task(
+    ownership_task = scheduler_for(service).create_task(
         finalize_detached_ownership(),
         name=f"http-bridge-detached-finalize-{_hash_identifier(session.key.affinity_key)}",
     )
@@ -1695,7 +1700,7 @@ async def _close_http_bridge_session_bounded(
     if session.upstream_reader is asyncio.current_task():
         session.upstream_reader = None
 
-    close_task = asyncio.create_task(
+    close_task = scheduler_for(service).create_task(
         service._close_http_bridge_session(session),
         name=f"http-bridge-close-{_hash_identifier(session.key.affinity_key)}",
     )
@@ -1745,6 +1750,7 @@ async def _close_http_bridge_session_bounded(
         await wait_on_shared_future(
             close_task,
             timeout=_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+            scheduler=scheduler_for(service),
         )
     except TimeoutError:
         track_after_interruption(interruption="timeout")
@@ -2671,10 +2677,11 @@ def _cancel_and_track_cancelled_task(
     label: str,
     cleanup_tasks: set[asyncio.Task[None]] | None,
     cancel_task: bool = True,
+    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> None:
     if cancel_task:
         task.cancel()
-    cleanup_task = asyncio.create_task(_drain_cancelled_task(task), name=f"cancelled-task-cleanup-{label}")
+    cleanup_task = scheduler.create_task(_drain_cancelled_task(task), name=f"cancelled-task-cleanup-{label}")
     if cleanup_tasks is not None:
         cleanup_tasks.add(cleanup_task)
         cleanup_task.add_done_callback(cleanup_tasks.discard)
@@ -2687,6 +2694,7 @@ async def _await_cancelled_task(
     label: str,
     cancel: bool = True,
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
+    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> bool:
     effective_timeout = max(float(timeout_seconds), 0.0)
     remaining_drain_timeout = shutdown_state.remaining_drain_timeout_seconds()
@@ -2699,19 +2707,31 @@ async def _await_cancelled_task(
         try:
             await asyncio.sleep(0)
         except asyncio.CancelledError:
-            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks)
+            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, scheduler=scheduler)
             raise
     if cancel:
         task.cancel()
     try:
-        done, _ = await asyncio.wait({task}, timeout=effective_timeout)
+        done, _ = await scheduler.wait({task}, timeout=effective_timeout)
     except asyncio.CancelledError:
         if not task.done():
-            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
+            _cancel_and_track_cancelled_task(
+                task,
+                label=label,
+                cleanup_tasks=cleanup_tasks,
+                cancel_task=False,
+                scheduler=scheduler,
+            )
         raise
     if task not in done:
         logger.warning("Timed out waiting for %s cancellation", label)
-        _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
+        _cancel_and_track_cancelled_task(
+            task,
+            label=label,
+            cleanup_tasks=cleanup_tasks,
+            cancel_task=False,
+            scheduler=scheduler,
+        )
         return False
     try:
         task.result()
@@ -2769,7 +2789,12 @@ async def _release_http_bridge_unanchored_handoffs_for_request(
         # cannot leave a fully drained predecessor owning a socket and cap slot.
         detached_sessions = tuple(service._http_bridge_detached_sessions.values())
     for session in detached_sessions:
-        await service._retire_http_bridge_after_drain_if_ready(session)
+        # Bounded: this sweep is on every request's path, so one detached
+        # session whose lock stays busy (or wedged) must not stall the fleet.
+        await service._retire_http_bridge_after_drain_if_ready(
+            session,
+            lock_wait_timeout_seconds=_HTTP_BRIDGE_DETACHED_RETIRE_LOCK_WAIT_SECONDS,
+        )
 
 
 def _track_alias_registration(session: _HTTPBridgeSession, alias: str, *, turn_state: bool) -> int:
@@ -3111,7 +3136,7 @@ async def _reconcile_durable_http_bridge_ownership(service: _HTTPBridgeServicePr
 
     current_instance = _service_get_settings().http_responses_session_bridge_instance_id
     lease_ttl_seconds = _http_bridge_durable_lease_ttl_seconds()
-    now = _service_time().monotonic()
+    now = clock_for(service).monotonic()
     async with service._http_bridge_lock:
         candidates = [
             (key, session)
@@ -3665,15 +3690,19 @@ def _http_bridge_admission_timeout_seconds(
     request_state: _WebSocketRequestState,
     admission_timeout_seconds: float,
     settings: object,
+    *,
+    now: float,
 ) -> float:
     # Bridged requests may retry response-create gate acquisition within one
     # bridge request budget, so every wait must be clamped to the remaining
     # time. Re-prepared retry states reset started_at but deliberately retain
     # the original deadline; using started_at alone would extend the budget.
+    # ``now`` comes from the owner's clock so the deadline (also owner-clock
+    # based) and the sample share one time domain.
     deadline = request_state.bridge_request_deadline
     if deadline is None:
         deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
-    remaining_budget_seconds = deadline - time.monotonic()
+    remaining_budget_seconds = deadline - now
     return max(0.0, min(admission_timeout_seconds, remaining_budget_seconds))
 
 

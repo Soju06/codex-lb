@@ -405,6 +405,8 @@ from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
 from app.modules.proxy.load_balancer import AccountSelection
+from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
+from app.modules.usage.updater import UsageUpdater
 
 
 def _facade() -> Any:
@@ -1019,6 +1021,23 @@ def _is_model_scoped_rejection(
     return is_model_scoped_upstream_rejection(message)
 
 
+def _request_usage_refresh(proxy: Any, account_id: str) -> None:
+    """Schedule a tracked, coalesced usage refresh after a streamed ``usage_limit_reached``.
+
+    ``mark_rate_limit`` persists status only, while the pool-exhaustion
+    predicate also needs a >= 100 % usage row that would otherwise wait for
+    the next scheduler tick. The refresh runs on its own background session
+    and never touches this request's ``Account``.
+    """
+    schedule = getattr(proxy, "_schedule_cancel_safe_cleanup", None)
+    if schedule is None:
+        return
+    refresh = UsageUpdater.request_refresh(account_id)
+    if refresh is None:
+        return
+    schedule(refresh, action="request_usage_refresh", request_id=get_request_id() or "unknown")
+
+
 async def _handle_stream_error(
     proxy: Any,
     account: Account,
@@ -1061,6 +1080,8 @@ async def _handle_stream_error(
         return classified
     if classified["failure_class"] == "rate_limit":
         await proxy._load_balancer.mark_rate_limit(account, error)
+        if code == USAGE_LIMIT_REACHED:
+            _request_usage_refresh(proxy, account.id)
     elif classified["failure_class"] == "quota":
         await proxy._load_balancer.mark_quota_exceeded(account, error)
     elif code in PERMANENT_FAILURE_CODES:

@@ -108,6 +108,7 @@ from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.proxy.work_admission import AdmissionLease
 from app.modules.request_logs.repository import PreviousResponseOwnerRecord, RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+from app.modules.usage.updater import UsageUpdater
 from tests.unit._proxy_test_helpers import runtime_basic_auth_url
 from tests.unit.hypothesis_strategies import json_objects, json_values
 
@@ -502,6 +503,173 @@ async def test_rate_limit_still_marks_rate_limit() -> None:
 
     load_balancer.mark_rate_limit.assert_awaited_once()
     load_balancer.record_error.assert_not_awaited()
+
+
+def _stream_error_load_balancer() -> SimpleNamespace:
+    return SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+
+
+async def _sentinel_usage_refresh() -> None:
+    return None
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_stream_error_requests_tracked_usage_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A streamed usage_limit_reached persists status via mark_rate_limit and also requests an
+    immediate usage refresh as a tracked background task, so the >= 100 % row that the pool
+    exhaustion predicate needs does not wait for the next scheduler tick."""
+    load_balancer = _stream_error_load_balancer()
+    schedule = MagicMock()
+    proxy = SimpleNamespace(_load_balancer=load_balancer, _schedule_cancel_safe_cleanup=schedule)
+    requested: list[str] = []
+    refresh = _sentinel_usage_refresh()
+
+    def fake_request_refresh(account_id: str):
+        requested.append(account_id)
+        return refresh
+
+    # ``raising=False`` keeps this a behavioural assertion on main, where the API does not exist.
+    monkeypatch.setattr(UsageUpdater, "request_refresh", staticmethod(fake_request_refresh), raising=False)
+    token = set_request_id("req_usage_limit_refresh")
+    try:
+        classified = await streaming_helpers_module._handle_stream_error(
+            proxy,
+            cast(Account, SimpleNamespace(id="acc-usage-limit")),
+            {"message": "usage limit reached"},
+            "usage_limit_reached",
+            429,
+        )
+    finally:
+        reset_request_id(token)
+        refresh.close()
+
+    assert classified["failure_class"] == "rate_limit"
+    load_balancer.mark_rate_limit.assert_awaited_once()
+    load_balancer.record_error.assert_not_awaited()
+    assert requested == ["acc-usage-limit"]
+    schedule.assert_called_once()
+    args, kwargs = schedule.call_args
+    assert args == (refresh,)
+    assert kwargs == {"action": "request_usage_refresh", "request_id": "req_usage_limit_refresh"}
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_stream_error_uses_unknown_request_id_outside_request_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schedule = MagicMock()
+    proxy = SimpleNamespace(_load_balancer=_stream_error_load_balancer(), _schedule_cancel_safe_cleanup=schedule)
+    refresh = _sentinel_usage_refresh()
+    monkeypatch.setattr(UsageUpdater, "request_refresh", staticmethod(lambda account_id: refresh))
+    assert get_request_id() is None
+
+    try:
+        await streaming_helpers_module._handle_stream_error(
+            proxy,
+            cast(Account, SimpleNamespace(id="acc-usage-limit")),
+            {"message": "usage limit reached"},
+            "usage_limit_reached",
+            429,
+        )
+    finally:
+        refresh.close()
+
+    assert schedule.call_args.kwargs["request_id"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_stream_error_skips_refresh_when_debounced(monkeypatch: pytest.MonkeyPatch) -> None:
+    load_balancer = _stream_error_load_balancer()
+    schedule = MagicMock()
+    proxy = SimpleNamespace(_load_balancer=load_balancer, _schedule_cancel_safe_cleanup=schedule)
+    monkeypatch.setattr(UsageUpdater, "request_refresh", staticmethod(lambda account_id: None))
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-usage-limit")),
+        {"message": "usage limit reached"},
+        "usage_limit_reached",
+        429,
+    )
+
+    load_balancer.mark_rate_limit.assert_awaited_once()
+    schedule.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_stream_error_tolerates_proxy_without_cleanup_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test doubles without ``_schedule_cancel_safe_cleanup`` keep working; no coroutine is minted."""
+    load_balancer = _stream_error_load_balancer()
+    proxy = SimpleNamespace(_load_balancer=load_balancer)
+    monkeypatch.setattr(
+        UsageUpdater,
+        "request_refresh",
+        staticmethod(lambda account_id: pytest.fail("no scheduler available: refresh must not be requested")),
+    )
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-usage-limit")),
+        {"message": "usage limit reached"},
+        "usage_limit_reached",
+        429,
+    )
+
+    assert classified["failure_class"] == "rate_limit"
+    load_balancer.mark_rate_limit.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("code", "http_status", "message"),
+    [
+        # Plain throttling is transient; only the pool-exhaustion signal triggers a fetch.
+        ("rate_limit_exceeded", 429, "Rate limit reached"),
+        # Quota codes already pin used_percent=100 in runtime state.
+        ("insufficient_quota", 429, "You exceeded your current quota"),
+        ("quota_exceeded", 429, "quota exceeded"),
+        # Account-neutral and model-scoped rejections never touch account health.
+        ("invalid_request_error", 400, "No tool output found for function call call_abc."),
+        (
+            "invalid_request_error",
+            400,
+            "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+        ),
+        # Transient and local failures.
+        ("upstream_error", 500, "Upstream request failed"),
+        ("stream_idle_timeout", None, "idle"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_non_usage_limit_stream_errors_do_not_request_usage_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    http_status: int | None,
+    message: str,
+) -> None:
+    schedule = MagicMock()
+    proxy = SimpleNamespace(_load_balancer=_stream_error_load_balancer(), _schedule_cancel_safe_cleanup=schedule)
+    monkeypatch.setattr(
+        UsageUpdater,
+        "request_refresh",
+        staticmethod(lambda account_id: pytest.fail(f"{code} must not request a usage refresh")),
+    )
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": message},
+        code,
+        http_status,
+    )
+
+    schedule.assert_not_called()
 
 
 @pytest.mark.asyncio

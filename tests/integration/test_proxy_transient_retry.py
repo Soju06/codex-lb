@@ -10,20 +10,27 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import time
 
 import aiohttp
 import pytest
 
+import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
+from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
+from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
+from app.modules.usage import updater as usage_updater_module
+from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -1317,3 +1324,93 @@ async def test_compact_sticky_503_unknown_code_excludes_failing_account_on_failo
     assert response.status_code == 200
     assert response.json()["object"] == "response.compaction"
     assert seen_account_ids[:2] == ["acc_sticky_503_a", "acc_sticky_503_b"]
+
+
+# ===========================================================================
+# Streaming — usage_limit_reached requests an immediate usage refresh (#2123 WP-F)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exhaustion(async_client, monkeypatch):
+    """A streamed usage_limit_reached marks the account rate limited *and* writes the >= 100 %
+    usage row seconds later without a scheduler tick, so the next selection reports the
+    structured pool exhaustion with the row's reset time instead of waiting for the next
+    refresh interval."""
+    usage_updater_module._clear_usage_refresh_state()
+    raw_account_id = "acc_usage_limit_refresh"
+    account_id = await _import_account(async_client, raw_account_id, "usage-limit-refresh@example.com")
+    reset_at = int(time.time()) + 1800
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        raise ProxyResponseError(
+            429,
+            openai_error("usage_limit_reached", "usage limit reached"),
+            failure_phase="status",
+        )
+        yield  # pragma: no cover - makes this an async generator
+
+    fetched: list[str | None] = []
+
+    async def fake_fetch_usage(*, access_token, account_id, route=None, allow_direct_egress=True):
+        fetched.append(account_id)
+        return UsagePayload(
+            plan_type="plus",
+            rate_limit=RateLimitPayload(
+                primary_window=UsageWindow(used_percent=100.0, reset_at=reset_at, limit_window_seconds=18000),
+                secondary_window=UsageWindow(
+                    used_percent=35.0,
+                    reset_at=reset_at + 6 * 86400,
+                    limit_window_seconds=604800,
+                ),
+            ),
+        )
+
+    # The suite disables background usage refresh globally; enable it for the updater only.
+    refresh_settings = get_settings().model_copy(update={"usage_refresh_enabled": True})
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
+    monkeypatch.setattr(proxy_api_module, "_STREAM_STARTUP_ERROR_PROBE_SECONDS", 30.0)
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", fake_fetch_usage)
+    monkeypatch.setattr(usage_updater_module, "get_settings", lambda: refresh_settings)
+
+    async def latest_primary_row():
+        async with SessionLocal() as session:
+            return await UsageRepository(session).latest_entry_for_account(account_id, window="primary")
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    try:
+        assert await latest_primary_row() is None
+        first = await async_client.post("/backend-api/codex/responses", json=payload)
+        assert first.status_code == 429
+        assert first.json()["error"]["code"] == "usage_limit_reached"
+
+        # The refresh is a tracked background task: poll briefly for its row instead of a
+        # scheduler tick (usage_refresh_interval_seconds).
+        latest = None
+        deadline = time.monotonic() + 5.0
+        while latest is None and time.monotonic() < deadline:
+            latest = await latest_primary_row()
+            if latest is None:
+                await asyncio.sleep(0.02)
+        assert latest is not None, "a streamed usage_limit_reached must request an immediate usage refresh"
+        assert latest.used_percent == 100.0
+        assert latest.reset_at == reset_at
+        assert fetched == [raw_account_id]
+
+        async with SessionLocal() as session:
+            account = await session.get(Account, account_id)
+            assert account is not None
+            assert account.status in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED)
+
+        # With the >= 100 % row written, the pool is usage-proven exhausted on the very next
+        # selection and surfaces the structured failure with the row's reset time.
+        second = await async_client.post("/backend-api/codex/responses", json=payload)
+        assert second.status_code == 429
+        error = second.json()["error"]
+        assert error["code"] == "usage_limit_reached"
+        assert error["type"] == "usage_limit_reached"
+        assert error["resets_at"] == reset_at
+        assert fetched == [raw_account_id], "the second selection failure must not fetch upstream again"
+    finally:
+        usage_updater_module._clear_usage_refresh_state()

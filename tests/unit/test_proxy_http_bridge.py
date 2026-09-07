@@ -5629,7 +5629,8 @@ async def test_http_bridge_accepted_capacity_error_waits_then_stages_single_life
     retry_precreated.assert_awaited_once_with(session, request_state=request_state)
     handle_stream_error.assert_awaited_once()
     assert handle_stream_error.await_args is not None
-    assert handle_stream_error.await_args.args[2] == "model_at_capacity"
+    # Reported as the transparent overload code, like the pre-created classifier.
+    assert handle_stream_error.await_args.args[2] == "server_is_overloaded"
     assert session.queued_request_count == 1
     assert request_state.account_capacity_waiting is False
     assert request_state.event_queue is not None

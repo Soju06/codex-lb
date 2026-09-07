@@ -53361,12 +53361,16 @@ def _accepted_capacity_error_payload(
             "server_is_overloaded",
         ),
         ("overloaded_error", "Our servers are currently overloaded. Please try again later.", None, "overloaded_error"),
+        # ``model_at_capacity`` is not a transparent replay code; the accepted
+        # classifier reports it as ``server_is_overloaded`` like the pre-created
+        # classifier does, with or without the selected-model capacity message.
         (
             "model_at_capacity",
             "Selected model is at capacity. Please try a different model.",
             "resp_accepted_visible",
-            "model_at_capacity",
+            "server_is_overloaded",
         ),
+        ("model_at_capacity", "The model is busy.", None, "server_is_overloaded"),
         (
             "invalid_request_error",
             "Selected model is at capacity. Please try a different model.",
@@ -54086,3 +54090,72 @@ async def test_transport_end_replay_of_an_account_bound_accepted_turn_stays_on_i
     assert request_state.request_text == _ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT
     assert request_state.excluded_account_ids == set()
     assert request_state.replay_required_account_id == account.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [
+        ("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
+        ("model_at_capacity", "Selected model is at capacity. Please try a different model."),
+    ],
+)
+async def test_process_upstream_websocket_text_replays_anchored_accepted_capacity_failure_with_the_fresh_body(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    error_message: str,
+):
+    """#2127 P2: an anchored accepted turn that fails output-free must take the
+    owner-switch path for every accepted capacity code. ``model_at_capacity``
+    was reported raw and is not a transparent replay code, so the capacity
+    branch staged a replay whose body still carried ``previous_response_id``
+    while the owner pin stayed on the state: the anchored body went to a
+    non-owner or the reconnect excluded the owner it required."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        request_id="ws_req_anchored_accepted_capacity",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_sent_at=1.0,
+        response_create_gate_acquired=True,
+    )
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(0),
+        )
+
+    await process({"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    await process({"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}})
+    assert request_state.response_event_count == 2
+
+    await process(_accepted_capacity_error_payload(code=error_code, message=error_message))
+
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.replay_request_state is request_state
+    assert pending_requests == deque()
+    assert request_state.replay_downstream_response_id == "resp_x"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_id is None
+    assert request_state.replay_count == 1
+    # The fresh body replaces the anchored one and the owner pin goes with the anchor.
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.replay_required_account_id is None
+    assert request_state.preferred_account_id is None
+    assert request_state.excluded_account_ids == {account.id}
+    assert request_state.affinity_policy.reallocate_sticky is True

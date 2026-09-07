@@ -32,6 +32,18 @@ from app.modules.proxy.helpers import is_upstream_model_capacity_error
 logger = logging.getLogger("app.modules.proxy.service")
 
 _ACCEPTED_CAPACITY_REPLAY_ERROR_CODES = frozenset({"server_is_overloaded", "overloaded_error", "model_at_capacity"})
+# The code handed back is what the transparent-replay branches (the websocket
+# owner-switch path, ``_WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES``) and the
+# account-health write consume. ``model_at_capacity`` is not a transparent
+# replay code on either surface, so it is reported as ``server_is_overloaded``
+# exactly as the pre-created classifier reports the selected-model capacity
+# message; the raw code would skip the owner-switch path and re-send an
+# anchored body to a non-owner or exclude the owner it still required.
+_ACCEPTED_CAPACITY_REPLAY_REPORTED_CODES = {
+    "server_is_overloaded": "server_is_overloaded",
+    "overloaded_error": "overloaded_error",
+    "model_at_capacity": "server_is_overloaded",
+}
 # Quota and rate-limit codes keep their stronger classification after
 # acceptance even when the message names the selected-model capacity: an
 # accepted turn that hit a quota wall may already be billed.
@@ -118,6 +130,8 @@ def _websocket_accepted_capacity_retry_error_code(
     to the client unchanged. Only capacity codes and the selected-model
     capacity message qualify; quota and rate-limit codes are refused before
     the message-only fallback so they can never be reclassified as overload.
+    The returned code is always a transparent replay code
+    (``model_at_capacity`` is reported as ``server_is_overloaded``).
     """
     if event_type not in _TERMINAL_EVENT_TYPES:
         return None
@@ -129,10 +143,8 @@ def _websocket_accepted_capacity_retry_error_code(
         return None
     if error_code in _ACCEPTED_REPLAY_FAIL_CLOSED_ERROR_CODES:
         return None
-    if is_upstream_model_capacity_error(error_message):
-        return error_code if error_code in _ACCEPTED_CAPACITY_REPLAY_ERROR_CODES else "server_is_overloaded"
-    if error_code in _ACCEPTED_CAPACITY_REPLAY_ERROR_CODES:
-        return error_code
+    if is_upstream_model_capacity_error(error_message) or error_code in _ACCEPTED_CAPACITY_REPLAY_ERROR_CODES:
+        return _ACCEPTED_CAPACITY_REPLAY_REPORTED_CODES.get(error_code or "", "server_is_overloaded")
     return None
 
 

@@ -13920,3 +13920,58 @@ def test_backend_responses_websocket_retries_anchored_accepted_abrupt_close_with
         recovered_upstream=recovered_upstream,
         anchor_response_id="resp_ws_anchor_turn_1",
     )
+
+
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [
+        ("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
+        ("model_at_capacity", "Selected model is at capacity. Please try a different model."),
+    ],
+)
+def test_backend_responses_websocket_retries_anchored_accepted_capacity_error_with_the_fresh_body(
+    app_instance,
+    monkeypatch,
+    error_code,
+    error_message,
+):
+    """#2127 P2: the accepted anchored follow-up fails output-free with a
+    capacity terminal. Both capacity codes must take the owner-switch path: the
+    retained full resend replaces the anchored body and the replay lands on
+    the other account. With ``model_at_capacity`` reported raw the replay kept
+    the anchored body and its owner pin, so the reconnect either had to reuse
+    the spent owner or was refused."""
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            _completed_first_turn_upstream_batch("resp_ws_anchor_capacity_turn_1"),
+            [
+                *_accepted_output_free_prelude("resp_ws_anchored_accepted_capacity_failed"),
+                _ws_event(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "service_unavailable_error",
+                            "code": error_code,
+                            "message": error_message,
+                        },
+                    }
+                ),
+            ],
+        ],
+    )
+    recovered_upstream = _recovered_upstream("resp_ws_anchored_capacity_recovered")
+    failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run_anchored_follow_up(app_instance)
+
+    created_id = _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    assert created_id == "resp_ws_anchored_accepted_capacity_failed"
+    _assert_anchored_follow_up_replayed_with_fresh_body(
+        failover,
+        first_upstream=first_upstream,
+        recovered_upstream=recovered_upstream,
+        anchor_response_id="resp_ws_anchor_capacity_turn_1",
+    )
+    assert (failover.FIRST_ACCOUNT_ID, "server_is_overloaded") in failover.stream_errors

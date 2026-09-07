@@ -125,6 +125,13 @@ The replay MUST capture the client-visible response id and arm prelude suppressi
 - **WHEN** another request is pending on the same upstream socket, or another `response.create` holds the bridge session response-create gate
 - **THEN** the proxy MUST forward the upstream terminal unchanged and MUST NOT modify the accepted request's identity
 
+#### Scenario: A transport close while another response shares the bridge socket replays nothing
+
+- **GIVEN** an HTTP bridge upstream socket carrying a response the client is already reading and an accepted, output-free request
+- **WHEN** the upstream socket closes abruptly
+- **THEN** the proxy MUST NOT reconnect the accepted request alone
+- **AND** both pending requests fail closed with `stream_incomplete`, exactly as before accepted replays existed
+
 #### Scenario: A binary frame does not replay an accepted turn
 
 - **WHEN** the bridge upstream socket yields a protocol-invalid binary frame while an accepted request is pending

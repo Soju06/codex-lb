@@ -3966,6 +3966,18 @@ class _HTTPBridgeRequestSubmitMixin:
                 if len(retryable_requests) != 1:
                     return False
                 request_state = retryable_requests[0]
+                # An accepted lifecycle is replayed only when it is the sole
+                # request on the socket (the terminal path's other-pending
+                # guard, ``_websocket_accepted_replay_candidate``). Reconnecting
+                # it would strand every sibling still bound to the dead
+                # upstream, so both fail closed with ``stream_incomplete`` as
+                # they did before accepted replays existed.
+                if (
+                    request_state.response_id is not None
+                    and not request_state.awaiting_response_created
+                    and any(pending_request is not request_state for pending_request in session.pending_requests)
+                ):
+                    return False
             # A request that already saw response.created released the session
             # create gate. Its replay must hold the gate again before it can
             # own the pre-created identity, and never waits for a contended one.

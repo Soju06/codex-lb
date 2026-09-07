@@ -6089,6 +6089,101 @@ async def test_retry_http_bridge_precreated_request_refuses_accepted_replay_whil
     assert request_state.response_create_gate_acquired is False
 
 
+def _visible_sibling_bridge_request_state() -> proxy_service._WebSocketRequestState:
+    """A second response multiplexed on the same upstream socket whose output
+    the client is already reading; it is never replayable."""
+    return _accepted_bridge_request_state(
+        request_id="req-visible-sibling",
+        response_id="resp-visible-sibling",
+        response_event_count=4,
+        downstream_visible=True,
+        upstream_model_output_seen=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_refuses_accepted_replay_while_another_response_shares_the_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2127 round 4 P2-A: the transport-close path picks the sole *retryable*
+    pending request, and a visible sibling is never retryable, so an accepted
+    request that shared the socket with it used to be staged and reconnected
+    alone -- leaving the visible response bound to the dead upstream. Mirror
+    the terminal path's other-pending guard: refuse before the gate claim and
+    leave both requests for the reader's failure funnel."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    visible_request_state = _visible_sibling_bridge_request_state()
+    accepted_request_state = _accepted_bridge_request_state(request_id="req-accepted-shared-socket")
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("request", "bridge-accepted-shared-socket", None),
+        key_value="bridge-accepted-shared-socket",
+        pending_requests=deque([visible_request_state, accepted_request_state]),
+        queued_request_count=2,
+    )
+    session.last_upstream_close_code = 1011
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is False
+
+    reconnect.assert_not_awaited()
+    assert list(session.pending_requests) == [visible_request_state, accepted_request_state]
+    assert accepted_request_state.response_id == "resp-accepted-visible"
+    assert accepted_request_state.awaiting_response_created is False
+    assert accepted_request_state.response_event_count == 2
+    assert accepted_request_state.replay_count == 0
+    assert accepted_request_state.replay_downstream_response_id is None
+    assert accepted_request_state.suppress_next_created_downstream is False
+    assert accepted_request_state.suppress_next_in_progress_downstream is False
+    assert accepted_request_state.response_create_gate_acquired is False
+    assert session.response_create_gate.locked() is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_transport_close_with_a_visible_sibling_fails_both_requests_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Relay-level twin of the guard above: an abrupt close while a visible
+    response and an accepted, output-free request share the socket replays
+    nothing and hands both to the reader's failure funnel as
+    ``stream_incomplete`` -- the outcome ``main`` produced for this shape."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    visible_request_state = _visible_sibling_bridge_request_state()
+    accepted_request_state = _accepted_bridge_request_state(request_id="req-accepted-shared-socket-relay")
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("request", "bridge-accepted-shared-socket-relay", None),
+        key_value="bridge-accepted-shared-socket-relay",
+        pending_requests=deque([visible_request_state, accepted_request_state]),
+        queued_request_count=2,
+    )
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(return_value=UpstreamWebSocketMessage(kind="close", close_code=1011)),
+            close=AsyncMock(),
+        ),
+    )
+    reconnect = AsyncMock()
+    fail_pending = AsyncMock(return_value=True)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_record_http_bridge_account_timeout_signal", AsyncMock())
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    reconnect.assert_not_awaited()
+    fail_pending.assert_awaited_once()
+    assert fail_pending.await_args is not None
+    assert fail_pending.await_args.kwargs["error_code"] == "stream_incomplete"
+    assert list(fail_pending.await_args.kwargs["pending_requests"]) == [visible_request_state, accepted_request_state]
+    assert accepted_request_state.replay_count == 0
+    assert accepted_request_state.replay_downstream_response_id is None
+    assert accepted_request_state.response_id == "resp-accepted-visible"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("message", "expect_retry"),

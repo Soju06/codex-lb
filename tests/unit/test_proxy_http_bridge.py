@@ -4396,6 +4396,61 @@ def test_http_bridge_account_capacity_wait_keeps_active_session_capacity_fail_fa
     assert http_bridge_streaming_module._http_bridge_account_capacity_wait_seconds(exc) is None
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        # Selector shape when the exhausted pool's earliest reset is known: the
+        # capped human-facing hint matches the recovery-wait regex.
+        "Rate limit exceeded. Try again in 300s",
+        # Selector shape when no reset timestamp is known.
+        "Usage limit reached",
+    ],
+)
+def test_http_bridge_account_capacity_wait_treats_usage_limit_as_terminal(message: str) -> None:
+    exc = ProxyResponseError(
+        429,
+        openai_error(
+            "usage_limit_reached",
+            message,
+            error_type="usage_limit_reached",
+            resets_at=1_700_003_600,
+        ),
+    )
+
+    assert http_bridge_streaming_module._http_bridge_account_capacity_wait_seconds(exc) is None
+
+
+def test_http_bridge_account_capacity_wait_keeps_rate_limit_hint_waitable_for_selector_message_shape() -> None:
+    # Negative control: the terminal branch keys on the structured code, not on
+    # the selector message, so a transient upstream throttle carrying the same
+    # capped hint still waits.
+    exc = ProxyResponseError(
+        429,
+        openai_error("rate_limit_exceeded", "Rate limit exceeded. Try again in 300s"),
+    )
+
+    assert http_bridge_streaming_module._http_bridge_account_capacity_wait_seconds(exc) == 300.0
+
+
+def test_http_bridge_capacity_wait_plan_is_none_for_usage_limit() -> None:
+    exc = ProxyResponseError(
+        429,
+        openai_error(
+            "usage_limit_reached",
+            "Rate limit exceeded. Try again in 300s",
+            error_type="usage_limit_reached",
+            resets_at=1_700_003_600,
+        ),
+    )
+
+    assert (
+        http_bridge_streaming_module._http_bridge_capacity_wait_plan(
+            exc, request_deadline=time.monotonic() + 120.0, now=time.monotonic()
+        )
+        is None
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("propagate_http_errors", "expected_event_types"),
@@ -9619,6 +9674,124 @@ async def test_stream_via_http_bridge_stops_session_creation_retry_after_budget_
     assert keepalive["type"] == "codex.keepalive"
     assert keepalive["status"] == "waiting_for_account_capacity"
     assert get_or_create.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_usage_limit_session_creation_failure_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    settings = SimpleNamespace(
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=1800,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+        http_responses_session_bridge_gateway_safe_mode=False,
+    )
+    # Pool-wide usage exhaustion with a known earliest reset: the selector
+    # attaches its capped retry hint, which matches the recovery-wait regex
+    # but must never become a bridge capacity wait.
+    get_or_create = AsyncMock(
+        side_effect=ProxyResponseError(
+            429,
+            openai_error(
+                "usage_limit_reached",
+                "Rate limit exceeded. Try again in 300s",
+                error_type="usage_limit_reached",
+                resets_at=1_700_003_600,
+            ),
+        )
+    )
+    now = 100.0
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-usage-limit-create-terminal",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=now,
+        transport="http",
+    )
+
+    def fake_prepare(
+        _prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip
+        return request_state, '{"type":"response.create"}'
+
+    clock = VirtualClock(monotonic_value=now)
+    service._clock = clock
+
+    async def fake_sleep(seconds: float) -> None:
+        clock.advance(seconds)
+
+    capacity_waits: list[dict[str, object]] = []
+    real_capacity_wait = http_bridge_streaming_module._iter_account_capacity_wait_sse
+
+    def recording_capacity_wait(**kwargs: Any) -> AsyncIterator[str]:
+        capacity_waits.append(dict(kwargs))
+        return real_capacity_wait(**kwargs)
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            proxy_request_budget_seconds=600.0,
+            http_responses_session_bridge_request_budget_seconds=600.0,
+        ),
+    )
+    service._scheduler = _SleepThroughScheduler(fake_sleep)
+    monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 120.0)
+    monkeypatch.setattr(http_bridge_streaming_module, "_iter_account_capacity_wait_sse", recording_capacity_wait)
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True}
+    )
+    chunks: list[str] = []
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"session_id": "sid-usage-limit-create-terminal"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        ):
+            chunks.append(chunk)
+
+    # Terminal: no waiting_for_account_capacity keepalives, no virtual time
+    # consumed, and exactly one session-creation attempt.
+    assert chunks == []
+    assert capacity_waits == []
+    assert clock.monotonic() == 100.0
+    assert get_or_create.await_count == 1
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.payload["error"]["code"] == "usage_limit_reached"
+    assert exc_info.value.payload["error"]["type"] == "usage_limit_reached"
+    assert exc_info.value.payload["error"]["resets_at"] == 1_700_003_600
+    assert exc_info.value.retry_after_seconds is None
+    assert exc_info.value.retry_after_header is None
 
 
 def test_http_bridge_session_key_infers_strength_from_affinity_kind() -> None:

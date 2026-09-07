@@ -53,6 +53,7 @@ from app.core.errors import (
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
+from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, upstream_reasoning_replay_400_total
 from app.core.openai.models import OpenAIError, OpenAIEvent, OpenAIResponsePayload, ResponseUsage
 from app.core.openai.parsing import classify_event_type, parse_sse_event
 from app.core.openai.requests import ResponsesRequest
@@ -1021,6 +1022,35 @@ def _is_model_scoped_rejection(
     return is_model_scoped_upstream_rejection(message)
 
 
+def _is_reasoning_replay_rejection(
+    *,
+    code: str,
+    http_status: int | None,
+    message: str | None,
+) -> bool:
+    """Return whether upstream rejected replayed reasoning items with a 400.
+
+    Observation only: a forked thread that replays reasoning ciphertext minted
+    for another account dies on ChatGPT's 400 and is undetectable from ids,
+    so this predicate feeds ``codex_lb_upstream_reasoning_replay_400_total``
+    to size that residual. It never alters classification, account health,
+    or failover. Without an HTTP status (websocket error frames) only the
+    ``invalid_request_error`` code qualifies.
+    """
+    if http_status is None:
+        if code != "invalid_request_error":
+            return False
+    elif http_status != 400:
+        return False
+    return "reasoning" in (message or "").lower()
+
+
+def _record_upstream_reasoning_replay_rejection() -> None:
+    if PROMETHEUS_AVAILABLE and upstream_reasoning_replay_400_total is not None:
+        upstream_reasoning_replay_400_total.inc()
+    _facade().logger.info("Counted upstream reasoning replay rejection request_id=%s", get_request_id())
+
+
 def _request_usage_refresh(proxy: Any, account_id: str) -> None:
     """Schedule a tracked, coalesced usage refresh after a streamed ``usage_limit_reached``.
 
@@ -1053,6 +1083,8 @@ async def _handle_stream_error(
         http_status=http_status,
         phase="first_event",
     )
+    if _is_reasoning_replay_rejection(code=code, http_status=http_status, message=error.get("message")):
+        _record_upstream_reasoning_replay_rejection()
     if _facade()._is_account_neutral_error_code(code):
         return classified
     if _is_account_neutral_request_rejection(

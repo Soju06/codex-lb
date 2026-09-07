@@ -11,8 +11,13 @@
 - [x] 2.1 Request the refresh from `_handle_stream_error` after `mark_rate_limit` when the code is `usage_limit_reached`, scheduled via `_schedule_cancel_safe_cleanup(action="request_usage_refresh")`.
 - [x] 2.2 Keep `rate_limit_exceeded`, quota codes, account-neutral, model-scoped and transient failures free of refresh requests.
 
-## 3. Verification
+## 3. Reasoning-replay observability
 
-- [x] 4.1 Unit coverage: storm -> single fetch, concurrent runs coalesce, joins the scheduler's in-flight refresh, debounce, fresh-row/ineligible rows, cancellation propagation, trigger and negative controls.
+- [x] 3.1 Define `codex_lb_upstream_reasoning_replay_400_total` with the tri-state fallback and `__all__` entry.
+- [x] 3.2 Count upstream 400 (or code-less `invalid_request_error`) rejections whose message references reasoning without changing classification or account health.
+
+## 4. Verification
+
+- [x] 4.1 Unit coverage: storm -> single fetch, concurrent runs coalesce, joins the scheduler's in-flight refresh, debounce, fresh-row/ineligible rows, cancellation propagation, trigger and negative controls, counter predicate and no-op paths.
 - [x] 4.2 Integration coverage: a streamed `usage_limit_reached` writes the >= 100 % row without a scheduler tick and the next selection reports `usage_limit_reached` with `resets_at`.
 - [x] 4.3 ruff format/check, ty, `scripts/check_proxy_architecture.py`, strict OpenSpec validation.

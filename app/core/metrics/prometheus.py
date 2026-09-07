@@ -73,6 +73,11 @@ if PROMETHEUS_AVAILABLE:
         "Upstream request duration",
         registry=REGISTRY,
     )
+    upstream_reasoning_replay_400_total = Counter(
+        "codex_lb_upstream_reasoning_replay_400_total",
+        "Total upstream HTTP 400 rejections whose message references reasoning items",
+        registry=REGISTRY,
+    )
     image_requests_total = Counter(
         "codex_lb_image_requests_total",
         "Total OpenAI-compatible image route requests",
@@ -388,6 +393,7 @@ else:
     upstream_requests_total: CounterLike | None = None
     upstream_transport_decisions_total: CounterLike | None = None
     upstream_request_duration_seconds: HistogramLike | None = None
+    upstream_reasoning_replay_400_total: CounterLike | None = None
     image_requests_total: CounterLike | None = None
     image_request_duration_seconds: HistogramLike | None = None
     active_connections: GaugeLike | None = None
@@ -499,6 +505,7 @@ __all__ = [
     "requests_total",
     "stream_pool_capacity",
     "stream_pool_inflight",
+    "upstream_reasoning_replay_400_total",
     "upstream_request_duration_seconds",
     "upstream_requests_total",
     "upstream_transport_decisions_total",

@@ -672,6 +672,119 @@ async def test_non_usage_limit_stream_errors_do_not_request_usage_refresh(
     schedule.assert_not_called()
 
 
+_REASONING_REPLAY_400_MESSAGE = (
+    "Item with id 'rs_0123456789abcdef' of type 'reasoning' was provided without its required following item."
+)
+
+
+@pytest.mark.parametrize(
+    ("code", "http_status", "message", "expected"),
+    [
+        ("invalid_request_error", 400, _REASONING_REPLAY_400_MESSAGE, True),
+        # Case-insensitive; the live streaming path normalizes code-less 400s to upstream_error.
+        ("upstream_error", 400, "Reasoning item rs_abc was not found in the conversation.", True),
+        # Without an HTTP status (websocket error frames) only invalid_request_error qualifies.
+        ("invalid_request_error", None, _REASONING_REPLAY_400_MESSAGE, True),
+        ("upstream_error", None, _REASONING_REPLAY_400_MESSAGE, False),
+        ("invalid_request_error", 400, "No tool output found for function call call_abc.", False),
+        ("invalid_request_error", 400, None, False),
+        ("invalid_request_error", 400, "", False),
+        ("rate_limit_exceeded", 429, "reasoning quota exhausted", False),
+        ("server_error", 500, _REASONING_REPLAY_400_MESSAGE, False),
+    ],
+)
+def test_is_reasoning_replay_rejection(code: str, http_status: int | None, message: str | None, expected: bool) -> None:
+    assert (
+        streaming_helpers_module._is_reasoning_replay_rejection(code=code, http_status=http_status, message=message)
+        is expected
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_replay_400_increments_counter_without_changing_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    counter = MagicMock()
+    monkeypatch.setattr(streaming_helpers_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(streaming_helpers_module, "upstream_reasoning_replay_400_total", counter)
+    load_balancer = _stream_error_load_balancer()
+    proxy = SimpleNamespace(_load_balancer=load_balancer, _schedule_cancel_safe_cleanup=MagicMock())
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": _REASONING_REPLAY_400_MESSAGE},
+        "invalid_request_error",
+        400,
+    )
+
+    counter.inc.assert_called_once_with()
+    # Observation only: classification and account health handling are exactly today's.
+    assert classified["failure_class"] == "non_retryable"
+    load_balancer.record_error.assert_awaited_once()
+    load_balancer.mark_rate_limit.assert_not_awaited()
+    proxy._schedule_cancel_safe_cleanup.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("code", "http_status", "message"),
+    [
+        ("invalid_request_error", 400, "No tool output found for function call call_abc."),
+        ("rate_limit_exceeded", 429, "reasoning quota exhausted"),
+        ("upstream_error", 500, _REASONING_REPLAY_400_MESSAGE),
+    ],
+)
+@pytest.mark.asyncio
+async def test_reasoning_replay_counter_ignores_non_matching_stream_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    http_status: int,
+    message: str,
+) -> None:
+    counter = MagicMock()
+    monkeypatch.setattr(streaming_helpers_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(streaming_helpers_module, "upstream_reasoning_replay_400_total", counter)
+    proxy = SimpleNamespace(_load_balancer=_stream_error_load_balancer())
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": message},
+        code,
+        http_status,
+    )
+
+    counter.inc.assert_not_called()
+
+
+@pytest.mark.parametrize("prometheus_available", [False, True])
+@pytest.mark.asyncio
+async def test_reasoning_replay_counter_is_noop_without_prometheus(
+    monkeypatch: pytest.MonkeyPatch,
+    prometheus_available: bool,
+) -> None:
+    counter = MagicMock()
+    monkeypatch.setattr(streaming_helpers_module, "PROMETHEUS_AVAILABLE", prometheus_available)
+    # Unavailable client: the counter object is absent; disabled flag: the object exists but is skipped.
+    monkeypatch.setattr(
+        streaming_helpers_module,
+        "upstream_reasoning_replay_400_total",
+        None if prometheus_available else counter,
+    )
+    proxy = SimpleNamespace(_load_balancer=_stream_error_load_balancer())
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": _REASONING_REPLAY_400_MESSAGE},
+        "invalid_request_error",
+        400,
+    )
+
+    counter.inc.assert_not_called()
+    assert classified["failure_class"] == "non_retryable"
+
+
 @pytest.mark.asyncio
 async def test_stream_idle_timeout_does_not_penalize_account() -> None:
     load_balancer = SimpleNamespace(

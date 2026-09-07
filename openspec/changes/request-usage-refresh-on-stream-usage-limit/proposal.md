@@ -18,6 +18,11 @@ from a streaming request: it waits for an in-flight refresh and then starts
 another (no coalescing under a 429 storm) and it mutates the caller's `Account`
 ORM instance, which belongs to the request session.
 
+Separately, a forked thread that replays reasoning ciphertext minted for another
+account dies on ChatGPT's HTTP 400 and is undetectable from ids; the residual has
+to be sized before overflow ships, so upstream 400 rejections that reference
+reasoning items are counted.
+
 ## What Changes
 
 - `UsageUpdater.request_refresh(account_id)` returns a background refresh
@@ -33,6 +38,10 @@ ORM instance, which belongs to the request session.
   `proxy-request_usage_refresh-<request_id>`). Plain `rate_limit_exceeded`
   throttling and quota codes are excluded: throttling is transient, and quota
   codes already pin `used_percent=100` in runtime state.
+- `codex_lb_upstream_reasoning_replay_400_total` counts upstream HTTP 400
+  rejections (or code-less `invalid_request_error` frames) whose message
+  references reasoning. Observation only: classification, account health and
+  failover are unchanged, and the counter is a no-op without `prometheus_client`.
 - No overflow behaviour is wired; the change is valuable stand-alone.
 
 ## Capabilities
@@ -45,6 +54,8 @@ None.
 
 - `usage-refresh-policy`: streamed usage-limit failures request an immediate,
   coalesced, debounced, fresh-row, tracked usage refresh.
+- `proxy-runtime-observability`: upstream reasoning-replay rejections are
+  counted.
 
 ## Impact
 

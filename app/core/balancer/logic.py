@@ -449,12 +449,15 @@ def _fallback_secondary_capacity_credits(plan_type: str | None) -> float:
     )
 
 
-def _known_expired_reauth(state: AccountState, current: float) -> bool:
-    """Return whether a warning-state account has crossed known token expiry."""
-    return (
-        state.status == AccountStatus.REAUTH_REQUIRED
-        and state.access_token_expires_at is not None
-        and state.access_token_expires_at <= current
+def reauth_reason_blocks_routing(deactivation_reason: str | None) -> bool:
+    return deactivation_reason == PERMANENT_FAILURE_CODES["account_auth_invalidated"]
+
+
+def _reauth_credentials_unavailable(state: AccountState, current: float) -> bool:
+    """Reject known-expired or proven-invalid access credentials."""
+    return state.status == AccountStatus.REAUTH_REQUIRED and (
+        reauth_reason_blocks_routing(state.deactivation_reason)
+        or (state.access_token_expires_at is not None and state.access_token_expires_at <= current)
     )
 
 
@@ -561,7 +564,7 @@ def select_account(
             continue
         if state.status == AccountStatus.PAUSED:
             continue
-        if _known_expired_reauth(state, current):
+        if _reauth_credentials_unavailable(state, current):
             continue
         if state.status == AccountStatus.RATE_LIMITED:
             if state.reset_at and current >= state.reset_at:
@@ -617,7 +620,7 @@ def select_account(
                     AccountStatus.RATE_LIMITED,
                     AccountStatus.QUOTA_EXCEEDED,
                 )
-                or _known_expired_reauth(state, current)
+                or _reauth_credentials_unavailable(state, current)
             )
             and state.account_id not in in_error_backoff_ids
             for state in all_states
@@ -644,7 +647,7 @@ def select_account(
                 )
                 if usage_exhaustion is not None:
                     return usage_exhaustion
-            expired_reauth = [state for state in all_states if _known_expired_reauth(state, current)]
+            expired_reauth = [state for state in all_states if _reauth_credentials_unavailable(state, current)]
             deactivated = [s for s in all_states if s.status == AccountStatus.DEACTIVATED]
             paused = [s for s in all_states if s.status == AccountStatus.PAUSED]
             rate_limited = [s for s in all_states if s.status == AccountStatus.RATE_LIMITED]
@@ -1286,10 +1289,11 @@ def handle_quota_exceeded(state: AccountState, error: UpstreamError) -> None:
 
 def handle_permanent_failure(state: AccountState, error_code: str) -> None:
     state.status = account_status_for_permanent_failure(error_code)
-    state.deactivation_reason = PERMANENT_FAILURE_CODES.get(
-        error_code,
-        f"Authentication failed: {error_code}",
-    )
+    if not (state.status == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(state.deactivation_reason)):
+        state.deactivation_reason = PERMANENT_FAILURE_CODES.get(
+            error_code,
+            f"Authentication failed: {error_code}",
+        )
     state.blocked_at = None
 
 

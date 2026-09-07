@@ -142,6 +142,7 @@ class StubAccountsRepository(AccountsRepository):
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_access_token_encrypted: bytes | None = None,
     ) -> bool:
         account = self._find_account(account_id)
         if account is None:
@@ -154,6 +155,10 @@ class StubAccountsRepository(AccountsRepository):
             or (
                 expected_refresh_token_encrypted is not None
                 and account.refresh_token_encrypted != expected_refresh_token_encrypted
+            )
+            or (
+                expected_access_token_encrypted is not None
+                and account.access_token_encrypted != expected_access_token_encrypted
             )
         ):
             return False

@@ -40,6 +40,7 @@ from app.core.utils.retry import backoff_seconds
 from app.core.utils.shared_future import _await_task_deferring_cancellation
 from app.core.utils.sse import format_sse_event
 from app.db.models import Account, StickySessionKind
+from app.db.snapshot import clone_row
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_shape,
@@ -87,7 +88,10 @@ from app.modules.proxy.helpers import (
     is_upstream_model_capacity_error,
 )
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
-from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
+from app.modules.proxy.replay_safety import (
+    project_responses_input_for_auth_recovery,
+    responses_payload_is_account_neutral_fresh_replay,
+)
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
 
 _REQUEST_TRANSPORT_HTTP = "http"
@@ -787,6 +791,55 @@ class _StreamingRetryMixin:
                 outcome,
                 account_id,
             )
+            return True
+
+        async def _recover_rejected_auth(
+            account: Account,
+            exc: ProxyResponseError,
+            *,
+            rejected_credentials: tuple[bytes, bytes] | None = None,
+        ) -> bool:
+            nonlocal payload, payload_replay_required_account_id, current_account_lease, last_transient_exc
+            nonlocal last_retryable_stream_error
+            last_transient_exc = exc
+            last_retryable_stream_error = None
+            excluded_account_ids.add(account.id)
+            rejected_account = clone_row(account)
+            if rejected_credentials is not None:
+                rejected_account.access_token_encrypted, rejected_account.refresh_token_encrypted = rejected_credentials
+            await _handle_or_defer_keyed_stream_health(
+                rejected_account,
+                _upstream_error_from_openai(_parse_openai_error(exc.payload)),
+                "account_auth_invalidated",
+                http_status=401,
+            )
+            await _release_tracked_stream_lease(current_account_lease)
+            current_account_lease = None
+            if (
+                settlement.downstream_visible
+                or require_preferred_account
+                or preferred_account_id is not None
+                or file_preferred_account_id is not None
+                or turn_state_owner_account_id is not None
+                or affinity.codex_session_source == "turn_state"
+                or routing_strategy == "single_account"
+                or attempt >= max_attempts - 1
+            ):
+                return False
+            replacement = payload
+            if not responses_payload_is_account_neutral_fresh_replay(replacement.to_replay_safety_payload()):
+                if not isinstance(payload.input, list):
+                    return False
+                projection = project_responses_input_for_auth_recovery(payload.input)
+                if projection is None:
+                    return False
+                replacement = payload.model_copy(update={"input": projection})
+                if not responses_payload_is_account_neutral_fresh_replay(replacement.to_replay_safety_payload()):
+                    return False
+            # A pre-output 401 proves rejection of this dispatch. Replace the
+            # whole body and its transient owner together; retain all affinity.
+            payload = replacement
+            payload_replay_required_account_id = None
             return True
 
         async def _stream_post_refresh_with_capacity_recovery(
@@ -1560,6 +1613,9 @@ class _StreamingRetryMixin:
                     await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                     if propagate_http_errors and last_transient_exc is not None:
                         raise last_transient_exc
+                    if last_transient_exc is not None and last_transient_exc.status_code == 401:
+                        yield _render_dispatch_transport_error(last_transient_exc)
+                        return
                     if last_retryable_stream_error is not None:
                         error_message = str(last_retryable_stream_error.error.get("message") or "Upstream error")
                         event = response_failed_event(
@@ -1706,6 +1762,8 @@ class _StreamingRetryMixin:
                     post_refresh_transient_replacement_selected = True
 
                 account_id_value = account.id
+                if last_transient_exc is not None and last_transient_exc.status_code == 401:
+                    last_transient_exc = None
                 if last_pre_dispatch_transport_error is not None:
                     # The preserved connect failure is only authoritative when
                     # replacement selection is empty. Once another account is
@@ -2251,6 +2309,10 @@ class _StreamingRetryMixin:
                                     )
                                 return
                             if isinstance(tex, ProxyResponseError) and tex.status_code != 500:
+                                if tex.status_code == 401:
+                                    # The outer handler owns refresh and its
+                                    # settlement-ordered authentication penalty.
+                                    raise
                                 error = _parse_openai_error(tex.payload)
                                 code = _normalize_error_code(
                                     error.code if error else None,
@@ -2455,12 +2517,13 @@ class _StreamingRetryMixin:
                                         outcome="owner_previsible_failure",
                                     )
                                     break
-                                await proxy._handle_stream_error(
-                                    account,
-                                    _upstream_error_from_openai(error),
-                                    code,
-                                    http_status=tex.status_code,
-                                )
+                                if await _drain_pending_post_refresh_penalty_on_terminal(settlement):
+                                    await proxy._handle_stream_error(
+                                        account,
+                                        _upstream_error_from_openai(error),
+                                        code,
+                                        http_status=tex.status_code,
+                                    )
                                 raise
                             error_code = tex.code if isinstance(tex, _TransientStreamError) else "server_error"
                             error_payload: UpstreamError = (
@@ -2650,7 +2713,7 @@ class _StreamingRetryMixin:
                             raise
                         yield await _render_account_model_rejection(exc, account_id=account.id)
                         return
-                    if exc.status_code == 401:
+                    if exc.status_code == 401 and not settlement.downstream_visible:
                         remaining_budget = proxy._remaining_budget_seconds(deadline)
                         if remaining_budget <= 0:
                             _facade().logger.warning(
@@ -2681,6 +2744,7 @@ class _StreamingRetryMixin:
                                 return
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
+                        rejected_credentials = (account.access_token_encrypted, account.refresh_token_encrypted)
                         try:
                             account = await proxy._ensure_fresh_with_budget(
                                 account,
@@ -2690,14 +2754,11 @@ class _StreamingRetryMixin:
                         except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as refresh_exc:
                             if isinstance(refresh_exc, RefreshError):
                                 if refresh_exc.is_permanent:
-                                    await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-                                    # Keep the warning account routable for later
-                                    # requests, but exclude it from this request's
-                                    # retry pool after upstream rejected its token.
-                                    await _release_tracked_stream_lease(current_account_lease)
-                                    current_account_lease = None
-                                    excluded_account_ids.add(account.id)
-                                    continue
+                                    if await _recover_rejected_auth(
+                                        account, exc, rejected_credentials=rejected_credentials
+                                    ):
+                                        continue
+                                    break
                                 if is_transient_refresh_contention(refresh_exc):
                                     # Transient CROSS-REPLICA refresh contention on
                                     # the post-401 forced refresh: benign claim
@@ -2963,6 +3024,10 @@ class _StreamingRetryMixin:
                                 error.code if error else None,
                                 error.type if error else None,
                             )
+                            if retry_exc.status_code == 401:
+                                if await _recover_rejected_auth(account, retry_exc):
+                                    continue
+                                break
                             if getattr(retry_exc, _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR, False):
                                 transient_error_payload = _stream_settlement_error_payload(settlement)
                                 last_transient_exc = retry_exc
@@ -3238,6 +3303,9 @@ class _StreamingRetryMixin:
                 return
             if propagate_http_errors and last_transient_exc is not None:
                 raise last_transient_exc
+            if last_transient_exc is not None and last_transient_exc.status_code == 401:
+                yield _render_dispatch_transport_error(last_transient_exc)
+                return
             if last_pre_dispatch_transport_error is not None:
                 # Attempt budget exhausted after confirmed pre-dispatch route
                 # failures: surface the original sanitized failure rather than

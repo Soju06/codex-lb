@@ -29,14 +29,240 @@ from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
 from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, StickySession, StickySessionKind
 from app.db.session import SessionLocal
+from app.db.snapshot import clone_row
+from app.dependencies import get_proxy_service_for_app
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy._service import observability as proxy_observability_module
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage import updater as usage_updater_module
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refresh_outcome", ["permanent", "rejected_again", "success"])
+async def test_stream_auth_recovery_does_not_repeat_rejected_account(async_client, monkeypatch, refresh_outcome):
+    account_a = await _import_account(async_client, "acc_auth_a", "auth-a@example.com")
+    await _import_account(async_client, "acc_auth_b", "auth-b@example.com")
+    cache_key = "auth-recovery-transcript"
+    async with SessionLocal() as session:
+        row = await session.get(Account, account_a)
+        assert row is not None
+        row.status = AccountStatus.REAUTH_REQUIRED
+        row.deactivation_reason = "Refresh token grant invalid - re-login required"
+        session.add(StickySession(key=cache_key, kind=StickySessionKind.PROMPT_CACHE, account_id=account_a))
+        await session.commit()
+
+    attempts = []
+    force_refreshes = []
+
+    async def ensure_fresh(self, account, *, force=False, **kwargs):
+        if force:
+            force_refreshes.append(account.id)
+            if refresh_outcome == "permanent":
+                raise proxy_module.RefreshError("invalid_grant", "Refresh token rejected", True)
+        return account
+
+    async def stream(payload, headers, access_token, account_id, **kwargs):
+        attempts.append((account_id, payload.model_dump()))
+        if account_id == "acc_auth_a" and (refresh_outcome != "success" or len(attempts) == 1):
+            raise ProxyResponseError(
+                401, openai_error("token_expired", "Provided authentication token is expired."), failure_phase="status"
+            )
+        yield _success_sse_event()
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", stream)
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "prompt_cache_key": cache_key,
+        "input": [
+            {"role": "user", "content": "First question"},
+            {"type": "reasoning", "id": "rs_old", "encrypted_content": "opaque", "summary": []},
+            {"type": "message", "role": "assistant", "id": "msg_old", "content": "Prior answer"},
+            {"type": "function_call", "id": "fc_old", "call_id": "call_old", "name": "read", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_old", "output": "Historical result"},
+            {"role": "user", "content": "Follow-up question"},
+        ],
+        "stream": True,
+    }
+    for _ in range(2):
+        response = await async_client.post("/backend-api/codex/responses", json=payload)
+        assert response.status_code == 200
+        events = _extract_events(response.text.splitlines())
+        assert events[-1]["type"] == "response.completed", events
+
+    assert force_refreshes == [account_a]
+    if refresh_outcome == "success":
+        assert [account_id for account_id, _ in attempts] == ["acc_auth_a"] * 3
+        assert all(body["input"] == attempts[0][1]["input"] for _, body in attempts)
+        assert attempts[0][1]["input"][1]["encrypted_content"] == "opaque"
+        assert attempts[0][1]["input"][2]["id"] == "msg_old"
+    else:
+        expected = ["acc_auth_a"] * (2 if refresh_outcome == "rejected_again" else 1)
+        assert [account_id for account_id, _ in attempts] == expected + ["acc_auth_b", "acc_auth_b"]
+        replay_input = attempts[len(expected)][1]["input"]
+        assert [item.get("type") for item in replay_input] == [
+            None,
+            "message",
+            "function_call",
+            "function_call_output",
+            None,
+        ]
+        assert all("id" not in item for item in replay_input)
+        async with SessionLocal() as session:
+            row = await session.get(Account, account_a)
+            assert row is not None
+            assert row.status == AccountStatus.REAUTH_REQUIRED
+            assert row.deactivation_reason == "Authentication failed after token refresh - re-login required"
+        peer_cache = account_cache_module.RoutingAvailabilityCache(SessionLocal)
+        await peer_cache.refresh_from_db()
+        assert peer_cache.is_unavailable(account_a)
+        async with SessionLocal() as session:
+            row = await session.get(Account, account_a)
+            assert row is not None
+            repaired = clone_row(row)
+            repaired.access_token_encrypted = proxy_module.TokenEncryptor().encrypt("repaired-access")
+            repaired.status = AccountStatus.ACTIVE
+            repaired.deactivation_reason = None
+            await AccountsRepository(session).replace_reauthorized(account_a, repaired)
+        await peer_cache.refresh_from_db()
+        assert not peer_cache.is_unavailable(account_a)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_invalidated", [False, True])
+async def test_auth_invalidation_does_not_overwrite_access_only_repair(async_client, already_invalidated):
+    account_id = await _import_account(async_client, "acc_auth_repaired", "auth-repaired@example.com")
+    async with SessionLocal() as session:
+        row = await session.get(Account, account_id)
+        assert row is not None
+        if already_invalidated:
+            row.status = AccountStatus.REAUTH_REQUIRED
+            row.deactivation_reason = "Authentication failed after token refresh - re-login required"
+        stale = clone_row(row)
+        row.access_token_encrypted = proxy_module.TokenEncryptor().encrypt("repaired-access")
+        row.status = AccountStatus.ACTIVE
+        row.deactivation_reason = None
+        await session.commit()
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    applied = await service._load_balancer.mark_permanent_failure(stale, "account_auth_invalidated")
+
+    assert not applied
+    assert not account_cache_module.is_account_routing_unavailable(account_id)
+    async with SessionLocal() as session:
+        row = await session.get(Account, account_id)
+        assert row is not None and row.status == AccountStatus.ACTIVE
+        assert row.deactivation_reason is None
+        assert row.access_token_encrypted != stale.access_token_encrypted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "compaction",
+        "unresolved_tool",
+        "unknown_field",
+        "unknown_reasoning",
+        "file",
+        "previous_response",
+        "turn_state",
+        "legacy",
+    ],
+)
+async def test_stream_auth_recovery_preserves_ownership(async_client, monkeypatch, boundary):
+    account_a = await _import_account(async_client, "acc_bound_a", "bound-a@example.com")
+    await _import_account(async_client, "acc_bound_b", "bound-b@example.com")
+    headers = {}
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hello"}]}
+    if boundary == "compaction":
+        payload["input"].insert(0, {"type": "compaction", "encrypted_content": "opaque"})
+    elif boundary == "unresolved_tool":
+        payload["input"].append({"type": "function_call_output", "call_id": "call_missing", "output": "result"})
+    elif boundary == "unknown_field":
+        payload["input"][0]["unknown_account_state"] = "opaque"
+    elif boundary == "unknown_reasoning":
+        payload["input"].insert(0, {"type": "reasoning", "unknown_account_state": "opaque"})
+    elif boundary == "file":
+
+        async def file_owner(*args, **kwargs):
+            return account_a
+
+        monkeypatch.setattr(proxy_module.ProxyService, "_resolve_file_account_for_responses", file_owner)
+    elif boundary == "previous_response":
+        payload["previous_response_id"] = "resp_owned"
+
+        async def response_owner(*args, **kwargs):
+            return account_a
+
+        monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", response_owner)
+    elif boundary in {"turn_state", "legacy"}:
+        key = "auth-hard-owner"
+        headers["x-codex-turn-state" if boundary == "turn_state" else "session_id"] = key
+        async with SessionLocal() as session:
+            session.add(StickySession(key=key, kind=StickySessionKind.CODEX_SESSION, account_id=account_a))
+            await session.commit()
+        if boundary == "turn_state":
+
+            async def turn_state_owner(*args, **kwargs):
+                return account_a
+
+            monkeypatch.setattr(proxy_module.ProxyService, "_resolve_compact_turn_state_owner", turn_state_owner)
+    attempts = []
+
+    async def ensure_fresh(self, account, *, force=False, **kwargs):
+        if force:
+            raise proxy_module.RefreshError("invalid_grant", "Refresh token rejected", True)
+        return account
+
+    async def stream(payload, headers, access_token, account_id, **kwargs):
+        attempts.append(account_id)
+        raise ProxyResponseError(401, openai_error("token_expired", "Expired access token"), failure_phase="status")
+        yield
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", stream)
+    response = await async_client.post("/backend-api/codex/responses", headers=headers, json=payload)
+    if boundary == "previous_response":
+        assert response.status_code == 200, response.text
+        events = _extract_events(response.text.splitlines())
+        assert events[-1]["response"]["error"]["code"] == "previous_response_owner_unavailable", events
+    else:
+        assert response.status_code == 401, response.text
+        assert response.json()["error"]["code"] == "token_expired"
+    assert len(attempts) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_auth_recovery_does_not_replay_after_output(async_client, monkeypatch):
+    await _import_account(async_client, "acc_visible_a", "visible-a@example.com")
+    await _import_account(async_client, "acc_visible_b", "visible-b@example.com")
+    attempts = []
+
+    async def ensure_fresh(self, account, *, force=False, **kwargs):
+        assert not force
+        return account
+
+    async def stream(payload, headers, access_token, account_id, **kwargs):
+        attempts.append(account_id)
+        yield _sse_event({"type": "response.output_text.delta", "response_id": "resp_visible", "delta": "hello"})
+        raise ProxyResponseError(401, openai_error("token_expired", "Expired token"))
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", stream)
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True},
+    )
+    events = _extract_events(response.text.splitlines())
+    assert events[-1]["response"]["error"]["code"] == "token_expired", events
+    assert len(attempts) == 1
 
 
 @pytest.fixture(autouse=True)

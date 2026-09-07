@@ -26,6 +26,7 @@ from app.core.auth.refresh import (
     should_refresh,
 )
 from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
+from app.core.balancer.logic import reauth_reason_blocks_routing
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
@@ -1020,7 +1021,6 @@ class AuthManager:
             != attempted_fingerprint
         ):
             return _adopt_account_row(account, latest)
-        reason = PERMANENT_FAILURE_CODES.get(exc.code, exc.message)
         status = account_status_for_permanent_failure(exc.code)
         for attempt in range(_TOKEN_CAS_MAX_ATTEMPTS):
             # The FIRST status CAS always runs so a genuine permanent failure is
@@ -1050,6 +1050,11 @@ class AuthManager:
                     False,
                     transport_error=True,
                 ) from exc
+            reason = (
+                latest.deactivation_reason
+                if status == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(latest.deactivation_reason)
+                else PERMANENT_FAILURE_CODES.get(exc.code, exc.message)
+            )
             applied = await self._repo.update_status_if_current(
                 account.id,
                 status,

@@ -37,6 +37,7 @@ from app.core.balancer import (
 from app.core.balancer import (
     select_account as select_account,
 )
+from app.core.balancer.logic import reauth_reason_blocks_routing
 from app.core.balancer.types import UpstreamError
 from app.core.clock import REAL_CLOCK, Clock
 from app.core.config import settings as config_settings
@@ -1748,9 +1749,9 @@ class LoadBalancer:
         effect). When the guarded status write MISSES because a peer replica
         concurrently re-authed/imported and rotated ``refresh_token_encrypted``
         (the DB row was repaired and left ACTIVE), the account keeps its
-        repaired state. A landed DEACTIVATED downgrade is excluded from local
-        routing; REAUTH_REQUIRED remains request-routable with its stored access
-        token while still blocking future refresh-token exchange.
+        repaired state. DEACTIVATED and proven access-authentication failure
+        are excluded from routing; refresh-only REAUTH_REQUIRED warnings may
+        continue using an unexpired access token.
         """
         lock = await self._get_account_lock(account.id)
         async with lock:
@@ -1758,29 +1759,20 @@ class LoadBalancer:
             handle_permanent_failure(state, error_code)
             self._sync_runtime_state(account, state)
             async with self._repo_factory() as repos:
-                # Guard the DB permanent-status downgrade on the refresh-token
-                # ciphertext this replica currently holds so a concurrent peer
-                # re-auth/import rotation (which changes the ciphertext) is never
-                # clobbered back to a permanent-failure status. On the refresh
-                # path AuthManager._handle_permanent_refresh_failure is the
-                # PRIMARY guarded authority: it has already CAS-written the
-                # downgrade and, in the single-caller case, mutated THIS object's
-                # status to the failure status, so the predicate inside
-                # _persist_state_if_current sees no status change and issues no
-                # redundant write (exactly one guarded downgrade total). This
-                # guarded write covers only the callers whose in-memory object
-                # did not go through that CAS -- an intra-process singleflight
-                # joiner sharing the winner's permanent error, and non-refresh
-                # permanent failures -- without reintroducing the unguarded
-                # update_status that would clobber a peer's ACTIVE/rotated repair
-                # and tear down its live sticky/bridge sessions.
+                # AuthManager already CAS-persists refresh-only failures and
+                # may update this object. This guarded fallback covers other
+                # failures and singleflight joiners without overwriting a peer's
+                # repaired credentials. Proven access rejection additionally
+                # guards the access token, even when status already matches.
                 downgraded = await self._persist_state_if_current(
                     repos.accounts,
                     account,
                     state,
                     expected_refresh_token_encrypted=account.refresh_token_encrypted,
                 )
-            if downgraded and state.status == AccountStatus.DEACTIVATED:
+            if downgraded and (
+                state.status == AccountStatus.DEACTIVATED or reauth_reason_blocks_routing(state.deactivation_reason)
+            ):
                 mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
             return downgraded
@@ -2066,7 +2058,15 @@ class LoadBalancer:
         reset_changed = account.reset_at != reset_at_int
         blocked_changed = account.blocked_at != blocked_at_int
 
-        if status_changed or reason_changed or reset_changed or blocked_changed:
+        if (
+            status_changed
+            or reason_changed
+            or reset_changed
+            or blocked_changed
+            or (
+                expected_refresh_token_encrypted is not None and reauth_reason_blocks_routing(state.deactivation_reason)
+            )
+        ):
             updated = await accounts_repo.update_status_if_current(
                 account.id,
                 state.status,
@@ -2078,6 +2078,11 @@ class LoadBalancer:
                 expected_reset_at=account.reset_at,
                 expected_blocked_at=account.blocked_at,
                 expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+                **(
+                    {"expected_access_token_encrypted": account.access_token_encrypted}
+                    if reauth_reason_blocks_routing(state.deactivation_reason)
+                    else {}
+                ),
             )
             if updated:
                 account.status = state.status

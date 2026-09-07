@@ -244,6 +244,19 @@ New client guides added to `docs/client-setup.md` should stay configuration-only
 examples of this contract; anything needing new proxy behavior requires its own
 OpenSpec change first.
 
+## Pre-Visible Authentication Recovery
+
+An HTTP 401 first gets the existing same-account refresh attempt. If authentication
+cannot be repaired, complete unanchored text/tool history can move to another
+account after known bookkeeping is projected out and the entire replacement passes
+the canonical replay predicate. Successful refresh keeps the original body. Files,
+turn state, previous responses, legacy ownership, opaque compaction, hosted results,
+and unresolved tool calls cannot be discarded for recovery. For example, expired
+access plus `invalid_grant` can move a complete transcript from A to B; a pinned
+file request stays on A and surfaces the authentication failure. Existing
+previous-response error mapping is unchanged. Reservations settle before deferred
+authentication health writes, including cancellation and replacement failure.
+
 ## Operational Notes
 
 - Pre-release: run unit/integration tests and optional OpenAI client compatibility tests.

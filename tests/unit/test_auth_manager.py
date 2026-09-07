@@ -1143,6 +1143,28 @@ async def test_ensure_fresh_does_not_reuse_failure_after_refresh_token_changes(m
 
 
 @pytest.mark.asyncio
+async def test_permanent_refresh_failure_preserves_proven_access_rejection():
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_auth_rejected",
+        status=AccountStatus.REAUTH_REQUIRED,
+        deactivation_reason=auth_manager_module.PERMANENT_FAILURE_CODES["account_auth_invalidated"],
+        access_token_encrypted=encryptor.encrypt("rejected-access"),
+        refresh_token_encrypted=encryptor.encrypt("rejected-refresh"),
+    )
+    repo = _DummyRepo()
+    repo.accounts_by_id[account.id] = account
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+    await manager._handle_permanent_refresh_failure(
+        account,
+        RefreshError("invalid_grant", "Rejected refresh", True),
+        auth_manager_module._refresh_token_material_fingerprint(encryptor, account.refresh_token_encrypted),
+    )
+    assert repo.status_payload is not None
+    assert account.deactivation_reason == auth_manager_module.PERMANENT_FAILURE_CODES["account_auth_invalidated"]
+
+
+@pytest.mark.asyncio
 async def test_refresh_account_does_not_deactivate_when_repo_has_newer_refresh_token(monkeypatch):
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
         raise RefreshError("invalid_grant", "refresh failed", True)

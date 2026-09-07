@@ -209,6 +209,40 @@ def project_responses_input_for_account_neutral_fresh_replay(
     )
 
 
+def project_responses_input_for_auth_recovery(input_items: list[JsonValue]) -> list[JsonValue] | None:
+    """Project known bookkeeping after a pre-visible authentication rejection.
+
+    Unlike durable-prefix recovery, this cannot omit hosted-tool results or
+    unknown reasoning fields. The caller must validate the entire replacement.
+    """
+    for item in input_items:
+        if not isinstance(item, dict):
+            return None
+        item_type = item.get("type")
+        if item_type == "reasoning":
+            if not set(item) <= {"type", "id", "encrypted_content", "summary", "status"}:
+                return None
+            if item.get("status") not in (None, "completed"):
+                return None
+            if any(item.get(key) is not None and not isinstance(item[key], str) for key in ("id", "encrypted_content")):
+                return None
+            summary = item.get("summary", [])
+            if not isinstance(summary, list) or any(
+                not isinstance(part, dict)
+                or set(part) != {"type", "text"}
+                or part.get("type") != "summary_text"
+                or not isinstance(part.get("text"), str)
+                for part in summary
+            ):
+                return None
+        elif item_type is not None and not isinstance(item_type, str):
+            return None
+        elif not _input_item_has_only_known_fields(item, item_type):
+            return None
+    projection = project_responses_input_for_account_neutral_fresh_replay(input_items, stored_count=len(input_items))
+    return projection.input_items if projection is not None else None
+
+
 def _is_canonical_lite_tool_bundle(item: JsonValue) -> bool:
     return (
         isinstance(item, dict)

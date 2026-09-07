@@ -96,3 +96,14 @@ short windows, or evaluated for a quota the plan does not have.
 Settlement is discarded if newer replica-local runtime activity arrives while
 that snapshot is loading, preventing an older probe success from clearing a
 later failure.
+
+## Rejected Access Credentials
+
+`reauth_required` alone is a refresh warning, not proof of access-token failure.
+The existing `account_auth_invalidated` reason records the stronger evidence of
+an HTTP 401 followed by permanent refresh failure or another post-refresh 401.
+Selection and bridge reuse honor that reason across replicas. Later refresh-only
+failures preserve it; repaired credentials clear it through reauthentication.
+Status writes compare both credential ciphertexts so stale failures cannot disable
+a repaired account. For example, after A rejects access and refresh, a subsequent
+independent request can select B even when A's JWT expiry is unknown.

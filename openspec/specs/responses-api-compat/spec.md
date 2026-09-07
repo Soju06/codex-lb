@@ -3,7 +3,9 @@
 ## Purpose
 
 Define Responses API compatibility contracts so Codex, OpenCode, and OpenAI-style clients preserve expected behavior.
+
 ## Requirements
+
 ### Requirement: Use prompt_cache_key as OpenAI cache affinity
 For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions requests mapped onto Responses, the service MUST treat a non-empty `prompt_cache_key` as the bounded upstream account affinity key for prompt-cache correctness even when a `session_id` header is present. OpenAI-style route wiring MUST NOT upgrade those requests to durable `CODEX_SESSION` affinity by default. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled, the service MUST continue forwarding the same `prompt_cache_key` upstream unchanged, and the stored affinity MUST expire after the configured freshness window so older keys can rebalance. The freshness window MUST come from dashboard settings so operators can adjust it without restart.
 
@@ -5536,6 +5538,7 @@ captured when the connection began.
 - **GIVEN** `prohibitFastMode` is enabled
 - **WHEN** an internal owner-forwarded payload carries a priority service tier
 - **THEN** the receiving preparation boundary omits `service_tier` before upstream forwarding
+
 ### Requirement: Native direct HTTP egress preserves Responses streaming semantics
 
 Direct Responses HTTP/SSE requests sent through native egress MUST preserve the existing normalized upstream payload and headers, rate-limit header ingestion, maximum SSE event size, idle and total request deadlines, terminal-event requirements, downstream event normalization, archives, and error envelope behavior. Downstream cancellation MUST cancel and await only the owned native request task, unregister its event stream, and leave unrelated multiplexed requests usable. Native transport selection MUST NOT change the public HTTP status or SSE framing contract.
@@ -5731,3 +5734,36 @@ rule. A missing or invalid value MUST remain absent.
 - **WHEN** an upstream retry hint contains a line break or exceeds the bounded
   field length
 - **THEN** codex-lb does not copy that value downstream
+
+### Requirement: Pre-visible HTTP authentication recovery preserves legal replay
+
+When a pre-visible HTTP Responses 401 reaches account-level retry, the proxy MUST retain its existing bounded same-account forced-refresh attempt. When that attempt cannot repair authentication, a movable request MUST try another eligible account within the existing attempt and time budget. The exact replacement body MUST pass the canonical account-neutral fresh-replay predicate; known response bookkeeping MAY be projected out only when that produces a complete self-contained replacement. Installing the replacement body and clearing its transient dispatch-owner binding MUST be atomic within the retry state transition.
+
+Independent file, previous-response, turn-state, conversation, single-account, and legacy hard-affinity ownership MUST NOT be weakened. Opaque compaction, hosted-tool results, unknown payload fields, and unresolved tool state MUST NOT be discarded to manufacture replay eligibility. Same-account successful refresh MUST retain the original body. A failure after downstream output or with ambiguous upstream execution MUST NOT authorize replay. When no legal replacement exists, the original authentication failure MUST be surfaced rather than `preferred_account_unavailable`; existing previous-response-specific error mapping MUST remain unchanged.
+
+The rejected account's stream lease MUST be released before replacement selection. API-key reservations MUST settle before deferred account-health writes, including failure and cancellation paths. Subsequent replacement failures MUST supersede earlier authentication errors.
+
+#### Scenario: Expired access plus failed refresh recovers a full transcript
+
+- **GIVEN** an unanchored complete text/tool transcript with response-owned IDs and reasoning bookkeeping
+- **WHEN** account A returns pre-visible 401 and forced refresh fails permanently
+- **THEN** the proxy validates a projected account-neutral body and completes on account B
+- **AND** another independent message does not repeat A's rejected authentication
+
+#### Scenario: Successful refresh retains the original body
+
+- **GIVEN** account A rejects the first attempt with 401
+- **WHEN** forced refresh succeeds and A accepts the retry
+- **THEN** both attempts use the original input and no account switch occurs
+
+#### Scenario: Hard ownership and opaque state fail closed
+
+- **GIVEN** the request contains a required file or previous-response owner, turn state, opaque compaction, or unresolved tool output
+- **WHEN** authentication cannot be repaired on A
+- **THEN** the request is not sent to B and returns the authentication failure or its existing previous-response-specific error
+
+#### Scenario: A post-output 401 cannot replay
+
+- **GIVEN** A has already emitted downstream-visible output
+- **WHEN** authentication subsequently fails
+- **THEN** the proxy does not replay the request on another account

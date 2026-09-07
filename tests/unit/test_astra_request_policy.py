@@ -208,6 +208,37 @@ def test_astra_rejects_adjacent_updates():
         _apply_subscription_policy(request, None)
 
 
+@pytest.mark.parametrize("effort", ["low", "ultra"])
+@pytest.mark.parametrize("removed_separator", [False, True], ids=["kept", "compact-fallback"])
+def test_astra_validates_serialized_order_without_rechecking_wire_effort_policy(effort, removed_separator):
+    text = (
+        "Local compact fallback preserved the latest encrypted reasoning state."
+        if removed_separator
+        else "Kept separator"
+    )
+    update = {"type": "configuration_update", "reasoning": {"effort": effort}}
+    request = _request(
+        input=[
+            {"role": "user", "content": "Start"},
+            update,
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]},
+            dict(update),
+        ]
+    )
+    key = _key(allowed=list({"low", effort}))
+    if removed_separator:
+        with pytest.raises(ProxyInvalidRequestError, match="Adjacent") as exc:
+            _apply_subscription_policy(request, key)
+        assert exc.value.param == "input.2"
+    else:
+        _apply_subscription_policy(request, key)
+        _apply_subscription_policy(request, key)
+        assert _configuration_effort(request.to_payload()["input"]) == ("max" if effort == "ultra" else effort)
+    assert _configuration_effort(request.input) == effort
+    assert isinstance(request.input, list)
+    assert len(request.input) == 4
+
+
 @pytest.mark.parametrize(
     "update",
     [

@@ -53,10 +53,10 @@ validated before upstream connection or send, using client-plane values.
 - **THEN** the current WebSocket request SHALL retain the source HTTP-transport fallback
 - **AND** a subsequent request SHALL resolve the published owner and apply subscription validation before forwarding
 
-#### Scenario: Replay deduplication cannot create invalid adjacent updates
+#### Scenario: Input normalization cannot create invalid adjacent updates
 
 - **GIVEN** an anchored subscription Astra history contains configuration updates separated by a repeated side-effect tool call
-- **WHEN** replay deduplication removes that call and leaves the updates adjacent
+- **WHEN** replay deduplication or subscription serialization removes the intervening items and leaves the updates adjacent
 - **THEN** HTTP-bridge and WebSocket preparation SHALL reject the resulting payload before upstream connection or send
 - **AND** a history whose updates remain separated after deduplication SHALL retain its supported ordering
 

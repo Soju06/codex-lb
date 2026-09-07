@@ -532,15 +532,10 @@ def validate_astra_request(
     if not is_json_list(payload.input):
         return
     has_updates = False
-    previous_update = False
     for index, item in enumerate(payload.input):
         if not is_json_mapping(item) or item.get("type") != "configuration_update":
-            previous_update = False
             continue
         param = f"input.{index}"
-        if previous_update:
-            raise ProxyInvalidRequestError("Adjacent configuration updates are not supported.", param=param)
-        previous_update = True
         if set(item) - {"type", "reasoning"}:
             raise ProxyInvalidRequestError("Configuration updates may change only reasoning effort.", param=param)
         reasoning = item.get("reasoning")
@@ -551,6 +546,18 @@ def validate_astra_request(
         has_updates = True
     if not has_updates or not isinstance(payload, ResponsesRequest):
         return
+    # Policy uses client efforts above; ordering uses the actual subscription
+    # input, whose serialization can remove obsolete history separators.
+    forwarded_input = payload.to_payload().get("input")
+    previous_update = False
+    if is_json_list(forwarded_input):
+        for index, item in enumerate(forwarded_input):
+            current_update = is_json_mapping(item) and item.get("type") == "configuration_update"
+            if current_update and previous_update:
+                raise ProxyInvalidRequestError(
+                    "Adjacent configuration updates are not supported.", param=f"input.{index}"
+                )
+            previous_update = current_update
     if payload.truncation == "auto":
         raise ProxyInvalidRequestError(
             "Configuration updates cannot be combined with automatic truncation.", param="truncation"

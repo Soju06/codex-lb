@@ -100,10 +100,11 @@ async def _reservation_statuses(app):
 
 
 @pytest.mark.parametrize("path", _PATHS)
-@pytest.mark.parametrize("keep_separator", [False, True], ids=["adjacent", "separated"])
+@pytest.mark.parametrize("separator", ["none", "kept", "compact-fallback"])
 def test_websocket_validates_updates_after_replay_deduplication(
-    app_instance, source_and_subscription_owner, monkeypatch, path, keep_separator
+    app_instance, source_and_subscription_owner, monkeypatch, path, separator
 ):
+    keep_separator = separator == "kept"
     client, key, _ = source_and_subscription_owner
     upstream = _SequencedUpstreamWebSocket([], deferred_message_batches=[_websocket_response_batch("resp_deduped")])
     connect = AsyncMock(return_value=upstream)
@@ -115,10 +116,22 @@ def test_websocket_validates_updates_after_replay_deduplication(
         "call_id": "call_replayed",
     }
     update = {"type": "configuration_update", "reasoning": {"effort": "low"}}
-    separator = {"role": "assistant", "content": "Kept separator"}
     items = [call, update, dict(call)]
     if keep_separator:
-        items.append(separator)
+        items.append({"role": "assistant", "content": "Kept separator"})
+    elif separator == "compact-fallback":
+        items.append(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Local compact fallback preserved the latest encrypted reasoning state.",
+                    }
+                ],
+            }
+        )
     items.extend([dict(update), {"role": "user", "content": "Continue"}])
     payload = _continuation({"input": items})
     headers = {"Authorization": "Bearer " + key["key"]}

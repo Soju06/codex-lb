@@ -34,10 +34,11 @@ pytestmark = pytest.mark.integration
     [("/v1/responses", False), ("/v1/responses", True), ("/backend-api/codex/responses", True)],
     ids=["v1-collect", "v1-stream", "backend-stream"],
 )
-@pytest.mark.parametrize("keep_separator", [False, True], ids=["adjacent", "separated"])
+@pytest.mark.parametrize("separator", ["none", "kept", "compact-fallback"])
 async def test_http_bridge_validates_updates_after_replay_deduplication(
-    async_client, monkeypatch, app_instance, path: str, stream: bool, keep_separator: bool
+    async_client, monkeypatch, app_instance, path: str, stream: bool, separator: str
 ) -> None:
+    keep_separator = separator == "kept"
     account_id = await _import_account(async_client, "astra-dedupe", "astra-dedupe@example.com")
     account = await _get_account(account_id)
     settings = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
@@ -99,6 +100,19 @@ async def test_http_bridge_validates_updates_after_replay_deduplication(
     items = [call, update, dict(call)]
     if keep_separator:
         items.append({"role": "assistant", "content": "Kept separator"})
+    elif separator == "compact-fallback":
+        items.append(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Local compact fallback preserved the latest encrypted reasoning state.",
+                    }
+                ],
+            }
+        )
     items.extend([dict(update), {"role": "user", "content": "Continue"}])
     with anyio.fail_after(5):
         response = await async_client.post(

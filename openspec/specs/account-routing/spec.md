@@ -1,7 +1,11 @@
 # account-routing Specification
 
 ## Purpose
+<<<<<<< HEAD
 Defines how the proxy chooses which account serves a request and how upstream feedback changes that choice. It covers the selection strategies operators can pick (relative availability, sequential and reset drain, single-account, manual and additional-quota policies, reset-window preference), how rate-limit, overload, and error signals scope penalties to the responsible account, and which of those signals must be shared across replicas versus kept replica-local. The goal is to spend pooled quota deliberately while never leaving a request routed to an account that cannot serve it.
+=======
+Define account eligibility, routing strategy, health recovery, and continuation ownership for proxy requests.
+>>>>>>> be8805a8 (fix(routing): retain cooldown while refreshed usage is exhausted)
 ## Requirements
 ### Requirement: Relative availability routing
 
@@ -563,6 +567,13 @@ The reset-confirmed exception SHALL apply only to a Free account with a still-fu
 
 This constraint applies to every recovery path that writes account status, including the usage-refresh reconcile path. A usage refresh that observes available quota for a `RATE_LIMITED` account with `blocked_at` set MUST NOT rewrite the account to `ACTIVE` or clear its markers while the effective persisted cooldown is running unless the strict reset-confirmed exception succeeds. The replica that observed the current 429 MAY still recover earlier through its runtime-cooldown-gated fresh-usage path only when its runtime block marker is at least as recent as the effective persisted `blocked_at`; leftover runtime state from an earlier 429 MUST NOT unlock early recovery of a newer block. `RATE_LIMITED` rows without `blocked_at` keep the existing fresh-usage recovery. Generic 429 and Retry-After cooldowns without matching reset evidence, reset timestamp jitter, exhausted post-reset windows, and non-Free account exhaustion MUST remain protected until their ordinary recovery condition is met.
 
+Early recovery MUST require that the applicable blocked window shows
+available quota after the existing window normalization. A newer sample
+that still reports exhaustion in an unexpired blocked window MUST NOT
+clear the upstream block merely because the observing replica's short
+runtime cooldown has elapsed. This requirement MUST NOT promote advisory
+usage exhaustion into a block on an otherwise active account.
+
 #### Scenario: Usage refresh does not clear a running Retry-After cooldown
 
 - **GIVEN** an account marked `RATE_LIMITED` by a 429 whose Retry-After hint persisted `reset_at` 20 minutes in the future and `blocked_at` set
@@ -570,6 +581,15 @@ This constraint applies to every recovery path that writes account status, inclu
 - **AND** no qualifying Free monthly reset transition matches the persisted deadline
 - **THEN** the persisted row keeps status `RATE_LIMITED` with its `reset_at` and `blocked_at` intact
 - **AND** once the deadline elapses, a later refresh may recover the account to `ACTIVE` through the compare-and-set path
+
+#### Scenario: Fresh exhausted primary usage does not reopen the pool
+
+- **GIVEN** the only account was marked `RATE_LIMITED` by an upstream 429
+- **AND** a post-block refresh reports 100% primary usage with an unexpired primary reset
+- **AND** the observing replica's short runtime cooldown has elapsed while its upstream block deadline remains in the future
+- **WHEN** a new HTTP response request selects an account
+- **THEN** the account remains `RATE_LIMITED` and no upstream attempt is made
+- **AND** the response reports HTTP 429 with error code and type `usage_limit_reached` and the exhausted window's reset
 
 #### Scenario: Confirmed blocked Free monthly reset permits peer recovery
 

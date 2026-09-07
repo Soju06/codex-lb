@@ -26,6 +26,16 @@ They deliberately stay in memory: a different replica may have observed a
 different network path, and persisted `status`, `reset_at`, and `blocked_at`
 remain the authoritative cross-replica gates.
 
+Early recovery of a real upstream rate-limit block needs evidence that the
+blocked window has capacity, as described in [the cooldown requirement](spec.md#requirement-rate-limit-cooldowns-are-enforced-across-replicas).
+A sample written after a 429 may still report 100% usage. Clearing the block
+just because that sample is newer can send another upstream request as soon as
+the observing replica's short cooldown expires. Recovery therefore uses the
+applicable window's normalized usage: an expired sample can still store 100%
+while its effective usage is zero. Ordinary active accounts keep treating
+snapshots as advisory, and credit handling and peer cooldown enforcement remain
+in their existing paths.
+
 An account moves from draining to probing only after the fixed quiet period.
 Probing is validation, not a permanent low-priority state. Health-tier-aware
 selection therefore gives the oldest due probing account one bounded admission

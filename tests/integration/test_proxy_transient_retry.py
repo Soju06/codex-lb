@@ -412,11 +412,7 @@ async def test_stream_body_read_client_error_surfaces_without_replay(async_clien
             yield ""
         raise aiohttp.ServerDisconnectedError("Server disconnected")
 
-    async def fake_sleep(delay: float, result: None = None) -> None:
-        pass
-
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
-    monkeypatch.setattr(proxy_module.asyncio, "sleep", fake_sleep)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
     async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
@@ -533,12 +529,8 @@ async def test_stream_pinned_previsible_close_exhaustion_surfaces_stream_incompl
             yield ""
         return
 
-    async def fake_sleep(delay: float, result: None = None) -> None:
-        pass
-
     monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
-    monkeypatch.setattr(proxy_module.asyncio, "sleep", fake_sleep)
 
     payload = {
         "model": "gpt-5.1",

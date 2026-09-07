@@ -39,6 +39,7 @@ from app.modules.proxy.load_balancer import (
     _state_above_sticky_budget_threshold,
     _state_from_account,
     _usage_entry_is_recent_enough,
+    _usage_refresh_interval_seconds,
     background_recovery_state_from_account,
 )
 from tests.simulation.virtual_time import VirtualClock
@@ -1700,8 +1701,9 @@ def test_apply_usage_quota_sets_fallback_reset_from_evaluation_time():
 
 def test_usage_recency_uses_injected_evaluation_time() -> None:
     clock = VirtualClock(epoch_value=2_000_000_000.0)
-    recent = datetime.fromtimestamp(clock.time() - 179.0, tz=timezone.utc)
-    stale = datetime.fromtimestamp(clock.time() - 181.0, tz=timezone.utc)
+    recent_window_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
+    recent = datetime.fromtimestamp(clock.time() - recent_window_seconds + 1.0, tz=timezone.utc)
+    stale = datetime.fromtimestamp(clock.time() - recent_window_seconds - 1.0, tz=timezone.utc)
 
     assert _usage_entry_is_recent_enough(recent, now=clock.time())
     assert not _usage_entry_is_recent_enough(stale, now=clock.time())

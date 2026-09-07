@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import delete, update
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -251,17 +251,19 @@ async def test_additional_quota_cannot_bypass_standard_usage_caps(db_setup):
     assert selection.account is not None
 
 
+@pytest.mark.parametrize("delete_primary", [False, True], ids=["expired", "missing"])
 @pytest.mark.asyncio
-async def test_missing_and_removed_short_window_does_not_block(db_setup):
+async def test_missing_or_expired_short_window_does_not_block(db_setup, delete_primary):
     await _seed(primary=80, weekly=49)
     async with SessionLocal() as session:
+        primary_row = (
+            delete(UsageHistory) if delete_primary else update(UsageHistory).values(reset_at=int(time.time()) - 1)
+        )
         await session.execute(
-            update(UsageHistory)
-            .where(
+            primary_row.where(
                 UsageHistory.account_id == "capped",
                 UsageHistory.window == "primary",
             )
-            .values(reset_at=int(time.time()) - 1)
         )
         await session.commit()
     selection = await LoadBalancer(_repos).select_account(required_account_id="capped")

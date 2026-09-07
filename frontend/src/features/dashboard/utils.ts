@@ -178,7 +178,9 @@ export function usableCapacityTotal(
   windowKey: "primary" | "secondary",
 ): number {
   const reserved = accounts.reduce((sum, account) => {
-    if (isMonthlyOnlyAccount(account) || (windowKey === "primary" && isWeeklyOnlyAccount(account))) return sum;
+    const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
+    const expectedMinutes = windowKey === "primary" ? 300 : 10_080;
+    if (windowMinutes !== expectedMinutes) return sum;
     return sum + cappedCredits(
       0, accountWindowCapacity(account, windowKey), accountUsageCap(account, windowKey), null,
     ).reserved;

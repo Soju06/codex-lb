@@ -303,7 +303,8 @@ describe("buildRemainingItems", () => {
   it("subtracts reserved credits from capped donut balances", () => {
     const capped = account({
       accountId: "capped", email: "capped@example.com", capacityCreditsPrimary: 100,
-      usageCap5HPercent: 80, usage: { primaryRemainingPercent: 40, secondaryRemainingPercent: null },
+      windowMinutesPrimary: 300, usageCap5HPercent: 80,
+      usage: { primaryRemainingPercent: 40, secondaryRemainingPercent: null },
     });
     const items = buildRemainingItems([capped], {
       windowKey: "primary", windowMinutes: 300,
@@ -311,6 +312,15 @@ describe("buildRemainingItems", () => {
     }, "primary");
     expect(items[0]).toMatchObject({ value: 20, remainingPercent: 25 });
     expect(usableCapacityTotal(100, [capped], "primary")).toBe(80);
+  });
+
+  it("does not subtract reserves for a missing usage window", () => {
+    const capped = account({
+      accountId: "capped", email: "capped@example.com",
+      capacityCreditsPrimary: 100, usageCap5HPercent: 80,
+      windowMinutesPrimary: null,
+    });
+    expect(usableCapacityTotal(100, [capped], "primary")).toBe(100);
   });
 });
 

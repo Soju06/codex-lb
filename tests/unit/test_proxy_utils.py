@@ -38596,6 +38596,7 @@ async def test_pop_replayable_created_generate_false_prewarm_accepts_initial_seq
     ("generate_false_prewarm", "response_event_count", "sequence_number"),
     [
         (False, 1, 0),
+        (False, 2, 1),
         (True, 2, 0),
         (True, 1, 1),
     ],
@@ -51212,13 +51213,17 @@ async def test_retry_http_bridge_precreated_request_replays_created_without_visi
         send_request_ids.append(get_request_id())
 
     send_text = AsyncMock(side_effect=capture_send_text)
+    # An accepted request released the session create gate and the shared work
+    # admission at ``response.created``; its replay re-enters admission within
+    # the request deadline, so the fixture models a live request and consumer.
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_created_no_output",
         model="gpt-5.1",
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=0.0,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
         transport="http",
         request_text='{"type":"response.create","model":"gpt-5.1","input":"retry"}',
         archive_request_id="archive_bridge_created_no_output",
@@ -51264,6 +51269,9 @@ async def test_retry_http_bridge_precreated_request_replays_created_without_visi
     assert request_state.awaiting_response_created is True
     assert request_state.response_id is None
     assert request_state.response_event_count == 0
+    assert request_state.response_create_gate_acquired is True
+    assert request_state.response_create_admission is not None
+    assert request_state.response_create_admission_reacquire_required is False
 
 
 @pytest.mark.asyncio
@@ -53419,3 +53427,1926 @@ async def test_stream_with_retry_reframes_data_only_delta_frames_after_ttft(monk
     assert chunks[2] == 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"b"}\n\n'
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
+
+
+# --- Accepted output-free capacity replay (#1384 takeover, narrowed scope) ---
+
+
+def _accepted_lifecycle_request_state(**overrides: Any) -> proxy_service._WebSocketRequestState:
+    """Upstream accepted the request (created + in_progress forwarded), no output yet."""
+    values: dict[str, Any] = {
+        "request_id": "req_accepted_lifecycle",
+        "model": "gpt-5.6-sol",
+        "service_tier": None,
+        "reasoning_effort": None,
+        "api_key_reservation": None,
+        "started_at": 0.0,
+        "response_create_sent_at": 0.0,
+        "awaiting_response_created": False,
+        "response_id": "resp_accepted_visible",
+        "response_event_count": 2,
+        "request_text": '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+    }
+    values.update(overrides)
+    return proxy_service._WebSocketRequestState(**values)
+
+
+def _accepted_capacity_error_payload(
+    *,
+    code: str = "server_is_overloaded",
+    message: str = "Our servers are currently overloaded. Please try again later.",
+    response_id: str | None = None,
+) -> dict[str, JsonValue]:
+    if response_id is None:
+        return {"type": "error", "error": {"type": "service_unavailable_error", "code": code, "message": message}}
+    return {
+        "type": "response.failed",
+        "response": {"id": response_id, "status": "failed", "error": {"code": code, "message": message}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "payload_response_id", "expected"),
+    [
+        (
+            "server_is_overloaded",
+            "Our servers are currently overloaded. Please try again later.",
+            None,
+            "server_is_overloaded",
+        ),
+        ("overloaded_error", "Our servers are currently overloaded. Please try again later.", None, "overloaded_error"),
+        # ``model_at_capacity`` is not a transparent replay code; the accepted
+        # classifier reports it as ``server_is_overloaded`` like the pre-created
+        # classifier does, with or without the selected-model capacity message.
+        (
+            "model_at_capacity",
+            "Selected model is at capacity. Please try a different model.",
+            "resp_accepted_visible",
+            "server_is_overloaded",
+        ),
+        ("model_at_capacity", "The model is busy.", None, "server_is_overloaded"),
+        (
+            "invalid_request_error",
+            "Selected model is at capacity. Please try a different model.",
+            "resp_accepted_visible",
+            "server_is_overloaded",
+        ),
+    ],
+)
+def test_websocket_precreated_retry_error_code_replays_accepted_output_free_capacity_failure(
+    code: str,
+    message: str,
+    payload_response_id: str | None,
+    expected: str,
+):
+    """An accepted response that failed before any output is classified for
+    replay when the terminal is a capacity code or the selected-model capacity
+    message, even when the payload names the accepted response id."""
+    payload = _accepted_capacity_error_payload(code=code, message=message, response_id=payload_response_id)
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type=cast(str, payload["type"]),
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"replay_count": 1},
+        {"upstream_model_output_seen": True},
+        {"downstream_visible": True},
+        {"response_event_count": 3},
+        {"pending_function_call_ids": ["call_pending"]},
+        {"pending_tool_call_types": {"call_pending": "function_call"}},
+        {"deferred_reasoning_downstream_texts": ["data: {}\n\n"]},
+        {"previous_response_id": "resp_anchor"},
+        {"last_downstream_sequence_number": 0},
+        {"last_downstream_sequence_number": 1},
+        {"request_text": None},
+        {"response_create_sent_at": None},
+    ],
+)
+def test_websocket_precreated_retry_error_code_refuses_unsafe_accepted_capacity_failure(overrides: dict[str, Any]):
+    payload = _accepted_capacity_error_payload()
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(**overrides),
+            event_type="error",
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
+def test_websocket_precreated_retry_error_code_refuses_accepted_capacity_failure_with_other_pending_requests():
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type="error",
+            payload=_accepted_capacity_error_payload(),
+            has_other_pending_requests=True,
+        )
+        is None
+    )
+
+
+def test_websocket_precreated_retry_error_code_refuses_accepted_terminal_naming_another_response():
+    payload = _accepted_capacity_error_payload(response_id="resp_someone_else")
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type="response.failed",
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["rate_limit_exceeded", "usage_limit_reached", "insufficient_quota", "usage_not_included", "quota_exceeded"],
+)
+def test_websocket_precreated_retry_error_code_keeps_quota_codes_fail_closed_after_acceptance(code: str):
+    """Quota and rate-limit codes keep their stronger classification: an
+    accepted turn that hit a quota wall may already be billed, so it is never
+    replayed even when the message names the selected-model capacity."""
+    payload = _accepted_capacity_error_payload(
+        code=code,
+        message="Selected model is at capacity. Please try a different model.",
+    )
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type="error",
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**_accepted_capacity_error_payload(), "usage": {"input_tokens": 12, "output_tokens": 1}},
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_accepted_visible",
+                "error": {"code": "server_is_overloaded", "message": "Our servers are currently overloaded."},
+                "usage": {"output_tokens": 0, "output_tokens_details": {"reasoning_tokens": 7}},
+            },
+        },
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_accepted_visible",
+                "error": {"code": "server_is_overloaded", "message": "Our servers are currently overloaded."},
+                "output": [{"type": "message", "role": "assistant", "content": []}],
+            },
+        },
+    ],
+)
+def test_websocket_precreated_retry_error_code_refuses_accepted_terminal_reporting_output(payload: dict[str, Any]):
+    """Credit: Darafei Praliaskouski (#1384) -- a terminal whose payload reports
+    output items or billed output/reasoning tokens proves the model ran."""
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type=cast(str, payload["type"]),
+            payload=cast(dict[str, JsonValue], payload),
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
+def test_precreated_only_classifiers_refuse_accepted_states():
+    """The account/model, auth, and owner-pinned quota classifiers stay
+    pre-created only: none of their replay branches can null an accepted
+    response id, so they can never leak a second lifecycle."""
+    model_unsupported_payload: dict[str, JsonValue] = {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+        },
+    }
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type="error",
+            payload=model_unsupported_payload,
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+    auth_payload: dict[str, JsonValue] = {
+        "type": "error",
+        "error": {"type": "invalid_request_error", "code": "invalid_api_key", "message": "Invalid API key"},
+    }
+    assert (
+        proxy_service._websocket_precreated_auth_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type="error",
+            payload=auth_payload,
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+    assert (
+        proxy_service._websocket_owner_pinned_quota_error_code(
+            _accepted_lifecycle_request_state(
+                previous_response_id="resp_anchor",
+                preferred_account_id="acc_owner",
+            ),
+            event_type="error",
+            payload=_accepted_capacity_error_payload(
+                message="Selected model is at capacity. Please try a different model."
+            ),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({}, True),
+        # A forwarded finite sequence_number keeps the request on its socket
+        # (openspec: "Direct WebSocket replay never mixes numeric response
+        # sequences"); the accepted lifecycle does not widen that, and only the
+        # created-only ``generate: false`` prewarm keeps its watermark-0 exception.
+        ({"last_downstream_sequence_number": 1}, False),
+        ({"last_downstream_sequence_number": 0}, False),
+        ({"response_event_count": 1, "last_downstream_sequence_number": 0}, False),
+        ({"response_event_count": 1, "last_downstream_sequence_number": 0, "generate_false_prewarm": True}, True),
+        ({"response_event_count": 2, "last_downstream_sequence_number": 1, "generate_false_prewarm": True}, False),
+        ({"upstream_model_output_seen": True}, False),
+        ({"pending_function_call_ids": ["call_pending"]}, False),
+        ({"deferred_reasoning_downstream_texts": ["data: {}\n\n"]}, False),
+        ({"response_event_count": 3}, False),
+        ({"previous_response_id": "resp_anchor"}, False),
+        (
+            {
+                "previous_response_id": "resp_anchor",
+                "fresh_upstream_request_is_retry_safe": True,
+                "fresh_upstream_request_text": '{"type":"response.create","model":"gpt-5.6-sol","input":"full"}',
+            },
+            True,
+        ),
+    ],
+)
+def test_websocket_request_can_replay_before_visible_output_accepts_lifecycle_only_prelude(
+    overrides: dict[str, Any],
+    expected: bool,
+):
+    """created + in_progress (two counted lifecycle events) is still pre-visible;
+    a sequenced watermark keeps refusing the replay exactly as on ``main``."""
+    request_state = _accepted_lifecycle_request_state(**overrides)
+
+    assert proxy_service._websocket_request_can_replay_before_visible_output(request_state) is expected
+
+
+@pytest.mark.parametrize(("response_event_count", "expect_in_progress_suppressed"), [(2, True), (1, False)])
+def test_prepare_visible_output_replay_arms_prelude_suppression_for_accepted_state(
+    response_event_count: int,
+    expect_in_progress_suppressed: bool,
+):
+    request_state = _accepted_lifecycle_request_state(response_event_count=response_event_count)
+
+    replay_text = proxy_service._prepare_websocket_request_state_for_visible_output_replay(request_state)
+
+    assert replay_text == request_state.request_text
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.suppress_next_in_progress_downstream is expect_in_progress_suppressed
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_id is None
+    assert request_state.response_event_count == 0
+    assert request_state.replay_count == 1
+
+
+def test_prepare_visible_output_replay_preserves_staged_identity_across_bounded_extra_replay():
+    """The bridge no longer grants an accepted lifecycle the bounded clean-close
+    extra replay (``_websocket_request_can_replay_before_visible_output`` gates
+    it on ``replay_downstream_response_id``), but the prepare step stays
+    identity-stable regardless: a captured identity must survive a second
+    prepare so no path can leak a second ``response.created``."""
+    request_state = _accepted_lifecycle_request_state(
+        response_id=None,
+        awaiting_response_created=True,
+        response_event_count=0,
+        replay_count=1,
+        replay_downstream_response_id="resp_accepted_visible",
+        suppress_next_created_downstream=True,
+        suppress_next_in_progress_downstream=True,
+    )
+
+    assert proxy_service._prepare_websocket_request_state_for_visible_output_replay(request_state) is not None
+
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.suppress_next_in_progress_downstream is True
+    assert request_state.replay_count == 2
+
+
+@pytest.mark.asyncio
+async def test_pop_replayable_refuses_sequenced_accepted_lifecycle_prelude():
+    """#2127 round 4 P2-B: created(0) + in_progress(1) forwarded with finite
+    ``sequence_number`` frames is exactly the shape the existing requirement
+    "Direct WebSocket replay never mixes numeric response sequences" fails
+    closed. The accepted-lifecycle replay must not widen it: the transport-end
+    path refuses the replay with the sequenced reason and leaves the request
+    untouched for the 1011 close, as on ``main``."""
+    pending_request = _accepted_lifecycle_request_state(last_downstream_sequence_number=1)
+    pending_requests = deque([pending_request])
+    replay_refusal_reasons: list[str] = []
+
+    replayed_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+        replay_refusal_reasons=replay_refusal_reasons,
+    )
+
+    assert replayed_request is None
+    assert pending_requests == deque([pending_request])
+    assert replay_refusal_reasons == ["sequenced_downstream_frame"]
+    assert pending_request.replay_count == 0
+    assert pending_request.response_id == "resp_accepted_visible"
+    assert pending_request.awaiting_response_created is False
+    assert pending_request.replay_downstream_response_id is None
+    assert pending_request.suppress_next_created_downstream is False
+    assert pending_request.suppress_next_in_progress_downstream is False
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_replays_accepted_capacity_error_within_one_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Direct websocket surface: created(X) and in_progress(X) are forwarded,
+    the output-free capacity error stages a replay on another account, and the
+    replay's created(Y)/in_progress(Y) are suppressed while its completion is
+    rewritten to X."""
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_accepted_replay")
+    pending_request = _accepted_lifecycle_request_state(
+        request_id="ws_req_accepted_capacity_replay",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_gate_acquired=True,
+    )
+    pending_requests = deque([pending_request])
+    response_create_gate = asyncio.Semaphore(0)
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=response_create_gate,
+        )
+
+    created_text = await process({"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    assert json.loads(created_text)["response"]["id"] == "resp_x"
+    assert upstream_control.suppress_downstream_event is False
+    in_progress_text = await process(
+        {"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}}
+    )
+    assert json.loads(in_progress_text)["response"]["id"] == "resp_x"
+    assert upstream_control.suppress_downstream_event is False
+    assert pending_request.response_event_count == 2
+
+    await process(_accepted_capacity_error_payload())
+
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.replay_request_state is pending_request
+    assert pending_requests == deque()
+    assert pending_request.replay_downstream_response_id == "resp_x"
+    assert pending_request.suppress_next_created_downstream is True
+    assert pending_request.suppress_next_in_progress_downstream is True
+    assert pending_request.awaiting_response_created is True
+    assert pending_request.response_id is None
+    assert pending_request.response_event_count == 0
+    assert pending_request.replay_count == 1
+    assert pending_request.excluded_account_ids == {account.id}
+    assert pending_request.affinity_policy.reallocate_sticky is True
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[2] == "server_is_overloaded"
+
+    # The relay loop re-registers the replay on a fresh socket.
+    pending_requests.append(pending_request)
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    response_create_gate = asyncio.Semaphore(0)
+    pending_request.response_create_gate_acquired = True
+
+    replay_created_text = await process(
+        {"type": "response.created", "response": {"id": "resp_y", "status": "in_progress"}}
+    )
+    assert upstream_control.suppress_downstream_event is True
+    assert json.loads(replay_created_text)["response"]["id"] == "resp_x"
+    assert pending_request.response_id == "resp_y"
+    upstream_control.suppress_downstream_event = False
+    await process({"type": "response.in_progress", "response": {"id": "resp_y", "status": "in_progress"}})
+    assert upstream_control.suppress_downstream_event is True
+    upstream_control.suppress_downstream_event = False
+    completed_text = await process(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_y",
+                "status": "completed",
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "OK"}]}
+                ],
+            },
+        }
+    )
+
+    assert upstream_control.suppress_downstream_event is False
+    assert json.loads(completed_text)["response"]["id"] == "resp_x"
+    assert pending_requests == deque()
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_forwards_sequenced_accepted_capacity_error_without_replay(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#2127 round 4 P2-B: the direct websocket surface forwarded created(0)
+    and in_progress(1) with finite ``sequence_number`` frames. The existing
+    requirement "Direct WebSocket replay never mixes numeric response
+    sequences" (scenario "Sequenced retryable terminal event is not replayed")
+    applies to the accepted capacity terminal too: it is finalized and
+    surfaced unchanged, with no reconnect and no replay staged."""
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_sequenced_accepted_capacity")
+    pending_request = _accepted_lifecycle_request_state(
+        request_id="ws_req_sequenced_accepted_capacity",
+        last_downstream_sequence_number=1,
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream_text = json.dumps({**_accepted_capacity_error_payload(), "sequence_number": 2}, separators=(",", ":"))
+
+    downstream_text = await service._process_upstream_websocket_text(
+        upstream_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert downstream_text == upstream_text
+    finalize_request_state.assert_awaited_once()
+    handle_stream_error.assert_not_awaited()
+    assert upstream_control.reconnect_requested is False
+    assert upstream_control.suppress_downstream_event is False
+    assert upstream_control.replay_request_state is None
+    assert pending_requests == deque()
+    assert pending_request.replay_count == 0
+    assert pending_request.replay_downstream_response_id is None
+    assert pending_request.suppress_next_created_downstream is False
+    assert pending_request.suppress_next_in_progress_downstream is False
+    assert pending_request.excluded_account_ids == set()
+
+
+class _YoungerTurnAdmittedDuringAffinityTouch:
+    """Sender/reader interleaving on one direct websocket upstream socket.
+
+    The accepted request released the session create gate at
+    ``response.created``. Its output-free capacity terminal pops it under the
+    pending lock, then the reader awaits the throttled thread-affinity write
+    (``sticky_sessions.upsert``). That write is the yield point where the
+    sender takes the free gate, registers a younger ``response.create`` and
+    sends it on the same socket.
+    """
+
+    def __init__(self) -> None:
+        self.repo_context = _RepoContext(_RequestLogsRecorder())
+        self.sticky_sessions = cast(AsyncMock, self.repo_context._repos.sticky_sessions)
+        self.sticky_sessions.upsert.side_effect = self._admit_younger_turn
+        self.pending_lock = anyio.Lock()
+        # Nothing holds the session gate once the accepted turn's created went out.
+        self.response_create_gate = asyncio.Semaphore(1)
+        self.accepted_request = _accepted_lifecycle_request_state(
+            request_id="ws_req_accepted_race_a",
+            response_id="resp_accepted_race_a",
+            response_create_gate_acquired=False,
+            affinity_policy=proxy_service._AffinityPolicy(
+                key="thread_accepted_race",
+                kind=StickySessionKind.PROMPT_CACHE,
+                max_age_seconds=600,
+                codex_session_source="thread_header",
+            ),
+            # The throttled touch (min(max_age / 2, 60s)) is due.
+            thread_affinity_last_touch_at=-1_000_000.0,
+        )
+        self.younger_request = _accepted_lifecycle_request_state(
+            request_id="ws_req_accepted_race_b",
+            awaiting_response_created=True,
+            response_id=None,
+            response_event_count=0,
+            response_create_sent_at=None,
+        )
+        self.pending_requests = deque([self.accepted_request])
+        self.upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    def repo_factory(self) -> _RepoContext:
+        return self.repo_context
+
+    async def _admit_younger_turn(self, *_args: object, **_kwargs: object) -> None:
+        await self.response_create_gate.acquire()
+        self.younger_request.response_create_gate = self.response_create_gate
+        self.younger_request.response_create_gate_acquired = True
+        async with self.pending_lock:
+            self.pending_requests.append(self.younger_request)
+        self.younger_request.response_create_sent_at = 5.0
+
+    def assert_accepted_replay_refused(self) -> None:
+        self.sticky_sessions.upsert.assert_awaited_once()
+        assert self.upstream_control.reconnect_requested is False
+        assert self.upstream_control.suppress_downstream_event is False
+        assert self.upstream_control.replay_request_state is None
+        # The younger turn keeps the socket and the gate it holds.
+        assert self.pending_requests == deque([self.younger_request])
+        assert self.response_create_gate.locked()
+        assert self.accepted_request.replay_count == 0
+        assert self.accepted_request.response_id == "resp_accepted_race_a"
+        assert self.accepted_request.awaiting_response_created is False
+        assert self.accepted_request.replay_downstream_response_id is None
+        assert self.accepted_request.suppress_next_created_downstream is False
+        assert self.accepted_request.suppress_next_in_progress_downstream is False
+        assert self.accepted_request.excluded_account_ids == set()
+        assert self.accepted_request.affinity_policy.reallocate_sticky is False
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_refuses_accepted_replay_after_a_turn_admitted_during_affinity_touch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#2127 round 5 P1: ``has_other_pending_requests`` was snapshotted under
+    the pending lock when the capacity terminal popped the accepted request,
+    but the thread-affinity refresh that follows awaits a sticky-session write,
+    and the accepted request no longer holds the session create gate. A younger
+    ``response.create`` admitted and sent on the same socket during that await
+    was invisible to the replay classifiers: the accepted request was staged,
+    the reader retired the shared socket under the younger turn (no terminal,
+    gate held) and the replay then blocked behind that gate. The guard must
+    observe the younger turn -- the terminal is finalized and forwarded
+    unchanged, exactly as when the sibling was pending before the terminal."""
+    race = _YoungerTurnAdmittedDuringAffinityTouch()
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, race.repo_factory))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_accepted_race_owner")
+    upstream_text = json.dumps(_accepted_capacity_error_payload(), separators=(",", ":"))
+
+    downstream_text = await service._process_upstream_websocket_text(
+        upstream_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=race.pending_requests,
+        pending_lock=race.pending_lock,
+        api_key=None,
+        upstream_control=race.upstream_control,
+        response_create_gate=race.response_create_gate,
+    )
+
+    assert downstream_text == upstream_text
+    race.assert_accepted_replay_refused()
+    finalize_request_state.assert_awaited_once()
+    assert finalize_request_state.await_args is not None
+    assert finalize_request_state.await_args.args[0] is race.accepted_request
+    assert finalize_request_state.await_args.kwargs["event_type"] == "error"
+    handle_stream_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_and_forward_upstream_websocket_text_keeps_the_socket_for_a_turn_admitted_during_affinity_touch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#2127 round 5 P1, relay level: the reader must not retire the shared
+    upstream socket (no ``upstream.close``, reader keeps running) under a
+    younger turn that was admitted while the accepted request's capacity
+    terminal awaited the thread-affinity write; the client reads that terminal
+    unchanged and the younger turn keeps its socket and gate."""
+    race = _YoungerTurnAdmittedDuringAffinityTouch()
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, race.repo_factory))
+    finalize_request_state = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_accepted_race_relay")
+    downstream = _ScriptedDownstreamWebSocket()
+    upstream_close = AsyncMock()
+    upstream = SimpleNamespace(archive_received=lambda _message: None, close=upstream_close)
+    text = json.dumps(_accepted_capacity_error_payload(), separators=(",", ":"))
+
+    should_stop_reader = await websocket_mixin_module._process_and_forward_upstream_websocket_text(
+        cast(Any, service),
+        cast(Any, downstream),
+        cast(Any, upstream),
+        message=SimpleNamespace(kind="text", text=text),
+        text=text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=race.pending_requests,
+        pending_lock=race.pending_lock,
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=race.upstream_control,
+        response_create_gate=race.response_create_gate,
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+        continuity_state=None,
+        codex_session_affinity=False,
+    )
+
+    assert should_stop_reader is False
+    upstream_close.assert_not_awaited()
+    assert downstream.sent_text == [text]
+    race.assert_accepted_replay_refused()
+    finalize_request_state.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_marks_model_output_and_refuses_accepted_replay_without_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Direct websocket surface without ``response.in_progress``: created(X)
+    followed by a forwarded ``response.output_item.added`` is two counted
+    events, the shape the lifecycle-only predicate accepts unless the relay
+    records model output. The relay must flip ``upstream_model_output_seen``
+    (bridge parity) so the capacity error that follows is forwarded unchanged;
+    replaying here would re-address a second generation to X after the client
+    already received the first tool call."""
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_accepted_output_no_in_progress")
+    pending_request = _accepted_lifecycle_request_state(
+        request_id="ws_req_accepted_output_no_in_progress",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_gate_acquired=True,
+    )
+    pending_requests = deque([pending_request])
+    response_create_gate = asyncio.Semaphore(0)
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=response_create_gate,
+        )
+
+    await process({"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    item_text = await process(
+        {
+            "type": "response.output_item.added",
+            "response_id": "resp_x",
+            "output_index": 0,
+            "item": {
+                "id": "fc_1",
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "shell",
+                "arguments": "",
+                "status": "in_progress",
+            },
+        }
+    )
+
+    assert json.loads(item_text)["item"]["id"] == "fc_1"
+    assert upstream_control.suppress_downstream_event is False
+    assert pending_request.response_event_count == 2
+    assert pending_request.upstream_model_output_seen is True
+    assert proxy_support._websocket_request_is_accepted_lifecycle_only(pending_request) is False
+    assert proxy_service._websocket_request_can_replay_before_visible_output(pending_request) is False
+
+    error_text = await process(_accepted_capacity_error_payload())
+
+    assert json.loads(error_text)["error"]["code"] == "server_is_overloaded"
+    assert upstream_control.suppress_downstream_event is False
+    assert upstream_control.replay_request_state is None
+    assert pending_requests == deque()
+    assert pending_request.replay_count == 0
+    assert pending_request.replay_downstream_response_id is None
+    assert pending_request.suppress_next_created_downstream is False
+
+
+@pytest.mark.asyncio
+async def test_emit_pending_websocket_keepalive_uses_the_visible_response_id_for_replayed_requests():
+    """Idle keepalives on the direct websocket surface must carry the id the
+    client already read: a replayed request whose upstream response now runs
+    under Y keeps X, a staged replay still waiting for its replacement
+    ``response.created`` keeps X as ``response.in_progress`` instead of a
+    pre-created ``codex.keepalive``, and a plain pre-created request is
+    unchanged."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    sent_text: list[str] = []
+
+    class _FakeDownstreamWebSocket:
+        async def send_text(self, text: str) -> None:
+            sent_text.append(text)
+
+    replayed = _accepted_lifecycle_request_state(
+        request_id="ws_req_keepalive_replayed",
+        response_id="resp_y_upstream_replay",
+        replay_downstream_response_id="resp_x_visible",
+    )
+    staged = _accepted_lifecycle_request_state(
+        request_id="ws_req_keepalive_staged",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        replay_downstream_response_id="resp_x_staged",
+    )
+    precreated = _accepted_lifecycle_request_state(
+        request_id="ws_req_keepalive_precreated",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+    )
+
+    emitted = await service._emit_pending_websocket_keepalive(
+        cast(WebSocket, _FakeDownstreamWebSocket()),
+        pending_requests=deque([replayed, staged, precreated]),
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+        codex_session_affinity=True,
+    )
+
+    assert emitted is True
+    assert [json.loads(text) for text in sent_text] == [
+        {"type": "response.in_progress", "response": {"id": "resp_x_visible", "status": "in_progress"}},
+        {"type": "response.in_progress", "response": {"id": "resp_x_staged", "status": "in_progress"}},
+        {"type": "codex.keepalive", "request_id": "ws_req_keepalive_precreated", "status": "pending_response_created"},
+    ]
+
+
+_ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT = json.dumps(
+    {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "first"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ],
+    },
+    separators=(",", ":"),
+)
+_ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT = json.dumps(
+    {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "input": [{"role": "user", "content": [{"type": "input_file", "file_id": "file_ws_anchor_owner"}]}],
+    },
+    separators=(",", ":"),
+)
+
+
+def _anchored_accepted_lifecycle_request_state(**overrides: Any) -> proxy_service._WebSocketRequestState:
+    """Accepted follow-up turn whose ``previous_response_id`` the proxy injected
+    (Lite continuity). Dispatch bound the anchored body to the anchor's owner;
+    the full resend is retained as a retry-safe, account-neutral fresh body."""
+    values: dict[str, Any] = {
+        "request_text": json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-5.6-sol",
+                "previous_response_id": "resp_ws_anchor",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+            },
+            separators=(",", ":"),
+        ),
+        "previous_response_id": "resp_ws_anchor",
+        "proxy_injected_previous_response_id": True,
+        "fresh_upstream_request_text": _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT,
+        "fresh_upstream_request_is_retry_safe": True,
+        "preferred_account_id": "acc_ws_anchor_owner",
+        "replay_required_account_id": "acc_ws_anchor_owner",
+    }
+    values.update(overrides)
+    return _accepted_lifecycle_request_state(**values)
+
+
+def test_prepare_visible_output_replay_releases_the_anchor_owner_with_an_account_neutral_fresh_body():
+    """#2127 P1: the anchored body bound the request to the anchor's owner at
+    dispatch. Swapping in the account-neutral fresh body must drop that pin the
+    way ``_install_verified_fresh_replay`` does; a pin that survives the swap
+    makes the transport-close replay exclude the account it still requires."""
+    request_state = _anchored_accepted_lifecycle_request_state()
+
+    replay_text = proxy_service._prepare_websocket_request_state_for_visible_output_replay(request_state)
+
+    assert replay_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.proxy_injected_previous_response_id is False
+    assert request_state.replay_required_account_id is None
+    assert request_state.preferred_account_id is None
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is True
+
+
+def test_prepare_visible_output_replay_keeps_the_owner_for_an_account_bound_fresh_body():
+    """Mutant guard: a fresh body that still names an account-scoped upload
+    cannot move, so the owner pin survives the swap and the accepted replay
+    reconnects to that account instead of excluding it."""
+    request_state = _anchored_accepted_lifecycle_request_state(
+        fresh_upstream_request_text=_ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT,
+        file_required_preferred_account=True,
+    )
+
+    replay_text = proxy_service._prepare_websocket_request_state_for_visible_output_replay(request_state)
+
+    assert replay_text == _ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.replay_required_account_id == "acc_ws_anchor_owner"
+    assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is False
+
+
+def test_prepare_visible_output_replay_keeps_the_owner_for_a_client_supplied_anchor():
+    """#2127 round 3 P2: the client anchored its follow-up itself and repeated
+    the history (proof-gated full resend). The fresh body still replaces the
+    anchored one on a transport close, but the anchor is the client's, not the
+    proxy's, so the owner pin stays (as on ``main``): the accepted replay
+    reconnects to the owner instead of excluding it and moving the client's
+    continuation to another account, matching the capacity path."""
+    request_state = _anchored_accepted_lifecycle_request_state(proxy_injected_previous_response_id=False)
+
+    replay_text = proxy_service._prepare_websocket_request_state_for_visible_output_replay(request_state)
+
+    assert replay_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.replay_required_account_id == "acc_ws_anchor_owner"
+    assert request_state.preferred_account_id == "acc_ws_anchor_owner"
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is False
+
+
+@pytest.mark.asyncio
+async def test_transport_end_replay_of_a_client_anchored_accepted_turn_stays_on_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#2127 round 3 P2 (direct websocket, transport close): the accepted
+    client-anchored turn is replayed with the fresh body on the owner that
+    accepted it -- no exclusion, owner pin kept -- rather than moved."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        response_create_sent_at=1.0,
+        proxy_injected_previous_response_id=False,
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    replayed = await websocket_mixin._process_upstream_websocket_transport_end(
+        service,
+        cast(WebSocket, SimpleNamespace(send_text=AsyncMock())),
+        cast(UpstreamWebSocket, _ClosableUpstream()),
+        message=SimpleNamespace(kind="close", text=None, data=None, close_code=1011, error=None, error_code=None),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    assert replayed is True
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert request_state.replay_required_account_id == account.id
+    assert request_state.preferred_account_id == account.id
+    assert request_state.excluded_account_ids == set()
+    assert request_state.affinity_policy.reallocate_sticky is False
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        pytest.param({}, True, id="unpinned"),
+        pytest.param({"preferred_account_id": "acc_ws_soft_preference"}, True, id="soft_preference"),
+        pytest.param({"replay_required_account_id": "acc_ws_bound_owner"}, False, id="bound_replay_owner"),
+        pytest.param({"file_required_preferred_account": True}, False, id="file_pin"),
+        pytest.param(
+            {"preferred_account_id": "acc_ws_anchor_owner", "previous_response_id": "resp_ws_anchor"},
+            False,
+            id="anchored_owner",
+        ),
+        pytest.param(
+            {
+                "preferred_account_id": "acc_ws_turn_state_owner",
+                "affinity_policy": proxy_service._AffinityPolicy(codex_session_source="turn_state"),
+            },
+            False,
+            id="turn_state_owner",
+        ),
+        # ``turn_state_owner_required`` needs a resolved owner: a turn-state
+        # session that has none is free to move (and the loop finds none again).
+        pytest.param(
+            {"affinity_policy": proxy_service._AffinityPolicy(codex_session_source="turn_state")},
+            True,
+            id="turn_state_without_owner",
+        ),
+    ],
+)
+def test_websocket_accepted_replay_can_switch_account_mirrors_the_connect_owner_requirements(
+    overrides: dict[str, Any],
+    expected: bool,
+):
+    """The exclusion predicate must agree with ``_connect_proxy_websocket``'s
+    ``require_preferred_account``: whatever pins the reconnect to one account
+    also forbids excluding it."""
+    request_state = _accepted_lifecycle_request_state(**overrides)
+
+    assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is expected
+
+
+_BARE_SESSION_HEADER_AFFINITY = proxy_service._AffinityPolicy(
+    key="legacy-process",
+    kind=StickySessionKind.CODEX_SESSION,
+    codex_session_source="session_header",
+)
+
+
+@pytest.mark.parametrize(
+    ("affinity_policy", "expected"),
+    [
+        pytest.param(proxy_service._AffinityPolicy(), False, id="no_affinity"),
+        pytest.param(
+            proxy_service._AffinityPolicy(key="cache-key", kind=StickySessionKind.PROMPT_CACHE, max_age_seconds=300),
+            False,
+            id="prompt_cache_without_legacy_lookup",
+        ),
+        pytest.param(
+            proxy_service._AffinityPolicy(
+                key="thread-key",
+                kind=StickySessionKind.STICKY_THREAD,
+                reallocate_sticky=True,
+            ),
+            False,
+            id="sticky_thread",
+        ),
+        pytest.param(_BARE_SESSION_HEADER_AFFINITY, True, id="bare_session_header_consults_the_raw_row"),
+        pytest.param(
+            proxy_service._AffinityPolicy(
+                key="turn_0123456789abcdef0123456789abcdef",
+                kind=StickySessionKind.CODEX_SESSION,
+                codex_session_source="turn_state",
+            ),
+            True,
+            id="turn_state",
+        ),
+        pytest.param(
+            proxy_service._AffinityPolicy(
+                key="thread-selection-key",
+                kind=StickySessionKind.PROMPT_CACHE,
+                max_age_seconds=300,
+                codex_session_source="thread_header",
+                legacy_codex_session_key="legacy-process",
+                legacy_continuity_source="session_header",
+            ),
+            True,
+            id="thread_header_with_legacy_process_lookup",
+        ),
+    ],
+)
+def test_websocket_affinity_may_resolve_hard_owner_covers_every_hard_sticky_lookup(
+    affinity_policy: proxy_service._AffinityPolicy,
+    expected: bool,
+):
+    """#2127 round 7 P2: ``hard_sticky`` in sticky selection is a resolved
+    ``CODEX_SESSION`` row -- turn-state ownership, or the raw compatibility row
+    an old replica persisted for a bare session/thread header
+    (``legacy_selection_key``). The request state never carries that owner, so
+    every policy that consults such a row must count as potentially owner-bound."""
+    assert websocket_helpers_module._websocket_affinity_may_resolve_hard_owner(affinity_policy) is expected
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        pytest.param({}, True, id="unpinned_without_affinity"),
+        pytest.param({"affinity_policy": _BARE_SESSION_HEADER_AFFINITY}, False, id="bare_session_header"),
+        pytest.param({"replay_required_account_id": "acc_ws_bound_owner"}, False, id="bound_replay_owner"),
+        pytest.param(
+            {"affinity_policy": proxy_service._AffinityPolicy(key="cache-key", kind=StickySessionKind.PROMPT_CACHE)},
+            True,
+            id="prompt_cache_stays_movable",
+        ),
+    ],
+)
+def test_websocket_accepted_replay_may_exclude_account_refuses_pins_and_hard_capable_affinity(
+    overrides: dict[str, Any],
+    expected: bool,
+):
+    """The accepted-replay exclusion needs both: no request-state pin
+    (``_websocket_accepted_replay_can_switch_account``) and an affinity that
+    cannot resolve to a hard sticky owner. A bare session header passed the
+    pin-only predicate and excluded the raw row's owner, which then failed
+    every re-selection with ``hard_affinity_saturated``."""
+    request_state = _accepted_lifecycle_request_state(**overrides)
+
+    assert websocket_helpers_module._websocket_accepted_replay_may_exclude_account(request_state) is expected
+    # The pin-only predicate is unchanged: the pre-created owner-switch branch
+    # keeps deciding its exclusion with it.
+    assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is (
+        "replay_required_account_id" not in overrides
+    )
+
+
+class _ClosableUpstream:
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_transport_end_replay_of_an_anchored_accepted_turn_releases_the_owner_it_excludes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#2127 P1 (direct websocket, transport close): the accepted anchored turn
+    is replayed with the fresh body on another account. The owner pin that the
+    anchored body carried must go with the anchor; otherwise the reconnect
+    requires ``acc_ws_anchor_owner`` while excluding it."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(response_create_sent_at=1.0)
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream = _ClosableUpstream()
+
+    replayed = await websocket_mixin._process_upstream_websocket_transport_end(
+        service,
+        cast(WebSocket, SimpleNamespace(send_text=AsyncMock())),
+        cast(UpstreamWebSocket, upstream),
+        message=SimpleNamespace(kind="close", text=None, data=None, close_code=1011, error=None, error_code=None),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    assert replayed is True
+    assert upstream_control.replay_request_state is request_state
+    assert pending_requests == deque()
+    assert upstream.close_calls == 1
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert request_state.excluded_account_ids == {account.id}
+    assert request_state.affinity_policy.reallocate_sticky is True
+    assert request_state.replay_required_account_id is None
+    assert request_state.preferred_account_id is None
+
+
+@pytest.mark.asyncio
+async def test_transport_end_replay_of_an_account_bound_accepted_turn_stays_on_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Mutant guard: when the fresh body is still account-bound (uploaded
+    file), the replay keeps the owner and must not exclude it."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        response_create_sent_at=1.0,
+        fresh_upstream_request_text=_ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT,
+        file_required_preferred_account=True,
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    replayed = await websocket_mixin._process_upstream_websocket_transport_end(
+        service,
+        cast(WebSocket, SimpleNamespace(send_text=AsyncMock())),
+        cast(UpstreamWebSocket, _ClosableUpstream()),
+        message=SimpleNamespace(kind="close", text=None, data=None, close_code=1011, error=None, error_code=None),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    assert replayed is True
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT
+    assert request_state.excluded_account_ids == set()
+    assert request_state.replay_required_account_id == account.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("affinity_policy", "expect_exclusion"),
+    [
+        pytest.param(_BARE_SESSION_HEADER_AFFINITY, False, id="bare_session_header_reconnects_to_owner"),
+        pytest.param(
+            proxy_service._AffinityPolicy(key="cache-key", kind=StickySessionKind.PROMPT_CACHE, max_age_seconds=300),
+            True,
+            id="prompt_cache_moves",
+        ),
+    ],
+)
+async def test_transport_end_replay_of_a_codex_session_accepted_turn_does_not_exclude_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    affinity_policy: proxy_service._AffinityPolicy,
+    expect_exclusion: bool,
+):
+    """#2127 round 7 P2 (transport close): an unanchored, account-neutral
+    accepted turn in a bare Codex session (``session_id`` header) carries no
+    pin on its state, yet sticky selection may resolve the raw compatibility
+    row (``{"legacy-process": owner}``) to a hard owner. Excluding that owner
+    left every re-selection at ``hard_affinity_saturated`` until the connect
+    budget ran out, where ``main`` reconnected the created-only replay to the
+    owner. The replay must keep the owner eligible; an affinity that cannot
+    resolve a hard owner still moves."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_legacy_hard_owner")
+    request_state = _accepted_lifecycle_request_state(response_create_sent_at=1.0, affinity_policy=affinity_policy)
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream = _ClosableUpstream()
+
+    replayed = await websocket_mixin._process_upstream_websocket_transport_end(
+        service,
+        cast(WebSocket, SimpleNamespace(send_text=AsyncMock())),
+        cast(UpstreamWebSocket, upstream),
+        message=SimpleNamespace(kind="close", text=None, data=None, close_code=1011, error=None, error_code=None),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    assert replayed is True
+    assert upstream_control.replay_request_state is request_state
+    assert pending_requests == deque()
+    assert upstream.close_calls == 1
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert request_state.replay_count == 1
+    assert request_state.replay_required_account_id is None
+    assert request_state.preferred_account_id is None
+    if expect_exclusion:
+        assert request_state.excluded_account_ids == {account.id}
+        assert request_state.affinity_policy.reallocate_sticky is True
+    else:
+        assert request_state.excluded_account_ids == set()
+        assert request_state.affinity_policy == affinity_policy
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [
+        ("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
+        ("model_at_capacity", "Selected model is at capacity. Please try a different model."),
+    ],
+)
+async def test_process_upstream_websocket_text_replays_a_codex_session_accepted_capacity_failure_on_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    error_message: str,
+):
+    """#2127 round 7 P2 (capacity path): the same bare-session accepted turn
+    fails output-free with a capacity terminal. The single-lifecycle replay is
+    still staged and the owner still takes the health penalty, but the owner is
+    not excluded and the sticky row is not reallocated: the session may resolve
+    to a hard owner, so the reconnect goes back through selection unexcluded as
+    the pre-created replay always did."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_legacy_hard_owner")
+    pending_request = _accepted_lifecycle_request_state(
+        request_id="ws_req_codex_session_accepted_capacity_replay",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_gate_acquired=True,
+        affinity_policy=_BARE_SESSION_HEADER_AFFINITY,
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(0),
+        )
+
+    await process({"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    await process({"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}})
+    assert pending_request.response_event_count == 2
+
+    await process(_accepted_capacity_error_payload(code=error_code, message=error_message))
+
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.replay_request_state is pending_request
+    assert pending_requests == deque()
+    assert pending_request.replay_downstream_response_id == "resp_x"
+    assert pending_request.suppress_next_created_downstream is True
+    assert pending_request.suppress_next_in_progress_downstream is True
+    assert pending_request.awaiting_response_created is True
+    assert pending_request.response_id is None
+    assert pending_request.replay_count == 1
+    assert pending_request.request_text == _accepted_lifecycle_request_state().request_text
+    assert pending_request.excluded_account_ids == set()
+    assert pending_request.affinity_policy == _BARE_SESSION_HEADER_AFFINITY
+    assert pending_request.affinity_policy.reallocate_sticky is False
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[0] is account
+    assert handle_stream_error.await_args.args[2] == "server_is_overloaded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [
+        ("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
+        ("model_at_capacity", "Selected model is at capacity. Please try a different model."),
+    ],
+)
+async def test_process_upstream_websocket_text_replays_anchored_accepted_capacity_failure_with_the_fresh_body(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    error_message: str,
+):
+    """#2127 P2: an anchored accepted turn that fails output-free must take the
+    owner-switch path for every accepted capacity code. ``model_at_capacity``
+    was reported raw and is not a transparent replay code, so the capacity
+    branch staged a replay whose body still carried ``previous_response_id``
+    while the owner pin stayed on the state: the anchored body went to a
+    non-owner or the reconnect excluded the owner it required."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        request_id="ws_req_anchored_accepted_capacity",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_sent_at=1.0,
+        response_create_gate_acquired=True,
+    )
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(0),
+        )
+
+    await process({"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    await process({"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}})
+    assert request_state.response_event_count == 2
+
+    await process(_accepted_capacity_error_payload(code=error_code, message=error_message))
+
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.replay_request_state is request_state
+    assert pending_requests == deque()
+    assert request_state.replay_downstream_response_id == "resp_x"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_id is None
+    assert request_state.replay_count == 1
+    # The fresh body replaces the anchored one and the owner pin goes with the anchor.
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.replay_required_account_id is None
+    assert request_state.preferred_account_id is None
+    assert request_state.excluded_account_ids == {account.id}
+    assert request_state.affinity_policy.reallocate_sticky is True
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_defers_accepted_replay_health_until_api_key_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#2127 P2 (settlement-before-health): an API-key-backed accepted request
+    keeps its reservation open across the replay. The capacity branch must not
+    write the failing account's health while that reservation is unsettled; it
+    queues the penalty, and terminal finalization applies it only after the
+    settlement commits (bridge parity with
+    ``_handle_or_defer_precreated_stream_health``)."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    calls: list[str] = []
+
+    async def settle_usage(*_args: object, **_kwargs: object) -> bool:
+        calls.append("settle")
+        return True
+
+    async def handle_stream_error(account: Account, _error: object, code: str, http_status: int | None = None) -> None:
+        del http_status
+        calls.append(f"health:{account.id}:{code}")
+
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    api_key = _make_api_key_data("key_ws_accepted_replay_settlement")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_ws_accepted_replay_settlement",
+        key_id=api_key.id,
+        model="gpt-5.6-sol",
+    )
+    failing_account = _make_account("acc_ws_accepted_keyed_failing")
+    request_state = _accepted_lifecycle_request_state(
+        request_id="ws_req_accepted_keyed_replay",
+        api_key_reservation=reservation,
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_gate_acquired=True,
+    )
+    request_state.api_key = api_key
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(account: Account, payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=api_key,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(0),
+        )
+
+    await process(failing_account, {"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    await process(
+        failing_account, {"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}}
+    )
+    await process(failing_account, _accepted_capacity_error_payload())
+
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.excluded_account_ids == {failing_account.id}
+    # The reservation is still open, so no health write happened yet.
+    assert calls == []
+    assert [(penalty.account.id, penalty.code) for penalty in request_state.deferred_keyed_stream_health] == [
+        (failing_account.id, "server_is_overloaded")
+    ]
+    assert request_state.api_key_reservation is reservation
+
+    # The replay completes on the replacement account; its terminal settles the
+    # reservation first and only then drains the deferred penalty.
+    replacement_account = _make_account("acc_ws_accepted_keyed_replacement")
+    pending_requests.append(request_state)
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    request_state.response_create_gate_acquired = True
+    await process(
+        replacement_account, {"type": "response.created", "response": {"id": "resp_y", "status": "in_progress"}}
+    )
+    completed_text = await process(
+        replacement_account,
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_y",
+                "status": "completed",
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "OK"}]}
+                ],
+                "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
+            },
+        },
+    )
+
+    assert json.loads(completed_text)["response"]["id"] == "resp_x"
+    assert pending_requests == deque()
+    assert calls == ["settle", f"health:{failing_account.id}:server_is_overloaded"]
+    assert request_state.deferred_keyed_stream_health == []
+    assert request_state.api_key_reservation is None
+
+
+@pytest.mark.parametrize(
+    ("replay_downstream_response_id", "expected"),
+    [
+        pytest.param(None, True, id="precreated_replay_keeps_bounded_clean_close_retry"),
+        pytest.param("resp_accepted_visible", False, id="accepted_lifecycle_replay_is_sent_exactly_once"),
+    ],
+)
+def test_replay_before_visible_output_clean_close_retry_is_refused_after_an_accepted_lifecycle_replay(
+    replay_downstream_response_id: str | None,
+    expected: bool,
+):
+    """#2127 P3: after an accepted replay (``replay_count == 1``, event count
+    reset) a clean close of the replacement socket qualified for the bounded
+    clean-close extra retry, a third send the spec forbids. The affordance
+    stays with pre-created requests."""
+    request_state = _accepted_lifecycle_request_state(
+        response_id=None,
+        awaiting_response_created=True,
+        response_event_count=0,
+        replay_count=1,
+        clean_close_replay_count=0,
+        replay_downstream_response_id=replay_downstream_response_id,
+    )
+
+    assert proxy_service._websocket_request_can_replay_before_visible_output(request_state) is False
+    assert (
+        proxy_service._websocket_request_can_replay_before_visible_output(
+            request_state,
+            allow_clean_close_retry=True,
+        )
+        is expected
+    )
+
+
+_OWNER_BOUND_ANCHORED_ACCEPTED_SHAPES = [
+    # The retained fresh body still names an account-scoped upload, so the
+    # owner-switch prep refuses to strip the proxy-injected anchor.
+    pytest.param(
+        {
+            "fresh_upstream_request_text": _ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT,
+            "file_required_preferred_account": True,
+        },
+        id="file_bound_fresh_body",
+    ),
+    # The client supplied ``previous_response_id`` itself; its proof-gated full
+    # resend is retry-safe for continuity but the owner-switch prep only strips
+    # proxy-injected anchors, so the turn stays with its owner.
+    pytest.param({"proxy_injected_previous_response_id": False}, id="client_supplied_anchor"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", _OWNER_BOUND_ANCHORED_ACCEPTED_SHAPES)
+async def test_process_upstream_websocket_text_replays_an_owner_bound_anchored_accepted_capacity_failure_on_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    shape: dict[str, Any],
+):
+    """#2127 round 2 P2: an accepted anchored turn the owner-switch prep cannot
+    move used to fall into the pre-created anchored branches, which failed it
+    closed as ``previous_response_owner_unavailable`` with an immediate health
+    write and no replay -- neither the owner reconnect the spec requires nor
+    main's unchanged terminal. The capacity path must re-send the anchored body
+    once to the account that accepted it, the way the transport-close path
+    already reconnects an account-bound accepted replay to its owner."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        request_id="ws_req_owner_bound_anchored_accepted_capacity",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_sent_at=1.0,
+        response_create_gate_acquired=True,
+        **shape,
+    )
+    anchored_request_text = request_state.request_text
+    fresh_request_text = request_state.fresh_upstream_request_text
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(0),
+        )
+
+    await process({"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    await process({"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}})
+    assert request_state.response_event_count == 2
+
+    terminal_text = await process(_accepted_capacity_error_payload())
+
+    # The replay is staged within the single lifecycle the client is reading.
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.replay_request_state is request_state
+    assert pending_requests == deque()
+    assert request_state.replay_downstream_response_id == "resp_x"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.suppress_next_in_progress_downstream is True
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_id is None
+    assert request_state.response_event_count == 0
+    assert request_state.replay_count == 1
+    # The anchored body goes back to its owner as-is: no swap, no exclusion.
+    assert request_state.request_text == anchored_request_text
+    assert request_state.previous_response_id == "resp_ws_anchor"
+    assert request_state.fresh_upstream_request_text == fresh_request_text
+    assert request_state.fresh_upstream_request_is_retry_safe is True
+    assert request_state.replay_required_account_id == account.id
+    assert request_state.preferred_account_id == account.id
+    assert request_state.excluded_account_ids == set()
+    assert request_state.affinity_policy.reallocate_sticky is False
+    assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is False
+    # The terminal is neither forwarded nor rewritten into an owner-unavailable failure.
+    assert "Previous response owner account is unavailable" not in terminal_text
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[0] is account
+    assert handle_stream_error.await_args.args[2] == "server_is_overloaded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", _OWNER_BOUND_ANCHORED_ACCEPTED_SHAPES)
+async def test_process_upstream_websocket_text_defers_owner_bound_accepted_replay_health_until_api_key_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+    shape: dict[str, Any],
+):
+    """#2127 round 2 P2 (settlement-before-health): the owner-bound accepted
+    replay keeps its API-key reservation open across the re-send, so the
+    owner's health write must queue behind the settlement exactly as it does
+    for the account-neutral replay; the pre-created anchored branch wrote it
+    immediately."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    calls: list[str] = []
+
+    async def settle_usage(*_args: object, **_kwargs: object) -> bool:
+        calls.append("settle")
+        return True
+
+    async def handle_stream_error(account: Account, _error: object, code: str, http_status: int | None = None) -> None:
+        del http_status
+        calls.append(f"health:{account.id}:{code}")
+
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    api_key = _make_api_key_data("key_ws_owner_bound_accepted_replay")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_ws_owner_bound_accepted_replay",
+        key_id=api_key.id,
+        model="gpt-5.6-sol",
+    )
+    owner = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        request_id="ws_req_owner_bound_accepted_keyed_replay",
+        api_key_reservation=reservation,
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_sent_at=1.0,
+        response_create_gate_acquired=True,
+        **shape,
+    )
+    request_state.api_key = api_key
+    anchored_request_text = request_state.request_text
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=owner,
+            account_id_value=owner.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=api_key,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(0),
+        )
+
+    await process({"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    await process({"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}})
+    await process(_accepted_capacity_error_payload())
+
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.request_text == anchored_request_text
+    assert request_state.excluded_account_ids == set()
+    assert request_state.replay_required_account_id == owner.id
+    # The reservation is still open, so no health write happened yet.
+    assert calls == []
+    assert [(penalty.account.id, penalty.code) for penalty in request_state.deferred_keyed_stream_health] == [
+        (owner.id, "server_is_overloaded")
+    ]
+    assert request_state.api_key_reservation is reservation
+
+    # The replay completes on the same owner; its terminal settles the
+    # reservation first and only then drains the deferred penalty.
+    pending_requests.append(request_state)
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    request_state.response_create_gate_acquired = True
+    replay_created_text = await process(
+        {"type": "response.created", "response": {"id": "resp_y", "status": "in_progress"}}
+    )
+    assert upstream_control.suppress_downstream_event is True
+    assert json.loads(replay_created_text)["response"]["id"] == "resp_x"
+    upstream_control.suppress_downstream_event = False
+    completed_text = await process(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_y",
+                "status": "completed",
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "OK"}]}
+                ],
+                "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
+            },
+        }
+    )
+
+    assert json.loads(completed_text)["response"]["id"] == "resp_x"
+    assert pending_requests == deque()
+    assert calls == ["settle", f"health:{owner.id}:server_is_overloaded"]
+    assert request_state.deferred_keyed_stream_health == []
+    assert request_state.api_key_reservation is None
+
+
+_TURN_STATE_SESSION_AFFINITY = proxy_service._AffinityPolicy(
+    key="turn_0123456789abcdef0123456789abcdef",
+    kind=StickySessionKind.CODEX_SESSION,
+    codex_session_source="turn_state",
+)
+
+
+@pytest.mark.parametrize(
+    "prepare",
+    [
+        pytest.param(
+            websocket_helpers_module._prepare_websocket_request_state_for_visible_output_replay,
+            id="transport_close_prep",
+        ),
+        pytest.param(
+            websocket_helpers_module._prepare_websocket_request_state_for_account_switch,
+            id="capacity_owner_switch_prep",
+        ),
+    ],
+)
+def test_fresh_replay_body_install_keeps_the_turn_state_owner_pin(prepare: Callable[[Any], str | None]):
+    """#2127 round 3 P1: a turn-state session (``x-codex-turn-state``) pins the
+    request to its owner independently of the body -- the session loop
+    re-resolves that owner before every reconnect and the connect hard-requires
+    it. Swapping the account-neutral fresh body in releases the anchor's
+    body-derived pin but must keep the turn-state owner, otherwise the
+    exclusion predicate sees no owner and excludes the account the reconnect is
+    about to require."""
+    request_state = _anchored_accepted_lifecycle_request_state(affinity_policy=_TURN_STATE_SESSION_AFFINITY)
+
+    replay_text = prepare(request_state)
+
+    assert replay_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.replay_required_account_id is None
+    assert request_state.preferred_account_id == "acc_ws_anchor_owner"
+    assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [
+        ("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
+        ("model_at_capacity", "Selected model is at capacity. Please try a different model."),
+    ],
+)
+async def test_process_upstream_websocket_text_re_sends_a_turn_state_accepted_capacity_failure_to_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    error_message: str,
+):
+    """#2127 round 3 P1 (capacity path): the accepted anchored follow-up of a
+    turn-state session fails output-free. The owner-switch prep swaps the
+    fresh body in; the replay must stay on the owner the session requires
+    (no exclusion, owner pin kept) instead of excluding the account the
+    reconnect then hard-requires, which failed the turn closed as
+    ``previous_response_owner_unavailable`` after the client had already read
+    ``response.created``."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        request_id="ws_req_turn_state_accepted_capacity",
+        affinity_policy=_TURN_STATE_SESSION_AFFINITY,
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_sent_at=1.0,
+        response_create_gate_acquired=True,
+    )
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(0),
+        )
+
+    await process({"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    await process({"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}})
+
+    terminal_text = await process(_accepted_capacity_error_payload(code=error_code, message=error_message))
+
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.replay_request_state is request_state
+    assert pending_requests == deque()
+    assert request_state.replay_downstream_response_id == "resp_x"
+    assert request_state.replay_count == 1
+    # The fresh body goes to the same owner on a fresh socket.
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id == account.id
+    assert request_state.excluded_account_ids == set()
+    assert request_state.affinity_policy.reallocate_sticky is False
+    assert request_state.affinity_policy.codex_session_source == "turn_state"
+    assert "Previous response owner account is unavailable" not in terminal_text
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[0] is account
+    assert handle_stream_error.await_args.args[2] == "server_is_overloaded"
+
+
+@pytest.mark.asyncio
+async def test_transport_end_replay_of_a_turn_state_accepted_turn_stays_on_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#2127 round 3 P1 (transport-close path): same session shape, upstream
+    drops the socket after accepting the turn. The replay swaps the fresh body
+    in and reconnects to the turn-state owner without excluding it."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        response_create_sent_at=1.0,
+        affinity_policy=_TURN_STATE_SESSION_AFFINITY,
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    replayed = await websocket_mixin._process_upstream_websocket_transport_end(
+        service,
+        cast(WebSocket, SimpleNamespace(send_text=AsyncMock())),
+        cast(UpstreamWebSocket, _ClosableUpstream()),
+        message=SimpleNamespace(kind="close", text=None, data=None, close_code=1011, error=None, error_code=None),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    assert replayed is True
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert request_state.preferred_account_id == account.id
+    assert request_state.excluded_account_ids == set()
+    assert request_state.affinity_policy.reallocate_sticky is False
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_precreated_owner_replay_in_a_turn_state_session_stays_on_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Same root cause on the pre-created ``retry_safe_owner_replay`` branch
+    (pre-existing on main): before ``response.created`` the anchored follow-up
+    of a turn-state session hits a transparent capacity code. The owner-switch
+    prep swaps the fresh body in and the branch excluded the owner
+    unconditionally, while the loop re-resolved the turn-state owner and the
+    connect hard-required it -- ``previous_response_owner_unavailable`` with no
+    replay. The replay must be re-sent to that owner on a fresh socket."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    release_lease = AsyncMock()
+    monkeypatch.setattr(service, "_release_request_state_account_response_create_lease", release_lease)
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        request_id="ws_req_turn_state_precreated_capacity",
+        affinity_policy=_TURN_STATE_SESSION_AFFINITY,
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_sent_at=1.0,
+        response_create_gate_acquired=True,
+    )
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    terminal_text = await service._process_upstream_websocket_text(
+        json.dumps(_accepted_capacity_error_payload(), separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+    )
+
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.replay_count == 1
+    assert request_state.replay_downstream_response_id is None
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id == account.id
+    assert request_state.excluded_account_ids == set()
+    assert request_state.affinity_policy.reallocate_sticky is False
+    assert "Previous response owner account is unavailable" not in terminal_text
+    release_lease.assert_awaited_once_with(request_state)
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[2] == "server_is_overloaded"

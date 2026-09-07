@@ -76,6 +76,9 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge.accepted_replay import (
+    _claim_websocket_replay_create_gate,
+)
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR,
     _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR,
@@ -3386,14 +3389,48 @@ class _HTTPBridgeRequestSubmitMixin:
         await self._maybe_release_idle_http_bridge_session_lease(session)
         return True
 
-    async def _retire_http_bridge_after_drain_if_ready(self: Any, session: "_HTTPBridgeSession") -> bool:
+    async def _retire_http_bridge_after_drain_if_ready(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        lock_wait_timeout_seconds: float | None = None,
+    ) -> bool:
+        """Retire a drained session flagged ``retire_after_drain``.
+
+        ``lock_wait_timeout_seconds`` bounds the ``pending_lock`` wait for
+        callers on a shared hot path (the per-request fail-safe sweep over
+        detached sessions). When the bound elapses the check is skipped for
+        this pass and ``False`` is returned; the session stays tracked and is
+        reconsidered by the next sweep or by its own drain/close paths.
+        ``None`` keeps the unbounded wait for owners of the session lifecycle.
+        """
         if not (session.upstream_control.reconnect_requested and session.upstream_control.retire_after_drain):
             return False
-        async with session.pending_lock:
-            should_reconnect = _http_bridge_session_unowned_locked(session)
-            if should_reconnect:
+
+        def decide_locked() -> bool:
+            unowned = _http_bridge_session_unowned_locked(session)
+            if unowned:
                 session.pending_requests.clear()
                 session.upstream_close_attempted = True
+            return unowned
+
+        if lock_wait_timeout_seconds is None:
+            async with session.pending_lock:
+                should_reconnect = decide_locked()
+        else:
+            try:
+                await scheduler_for(self).wait_for(session.pending_lock.acquire(), timeout=lock_wait_timeout_seconds)
+            except TimeoutError:
+                logger.warning(
+                    "Skipping detached HTTP bridge retire check: pending_lock busy for %.1fs session_key=%s",
+                    lock_wait_timeout_seconds,
+                    _hash_identifier(session.key.affinity_key),
+                )
+                return False
+            try:
+                should_reconnect = decide_locked()
+            finally:
+                session.pending_lock.release()
         if not should_reconnect:
             return False
 
@@ -3963,6 +4000,23 @@ class _HTTPBridgeRequestSubmitMixin:
                 if len(retryable_requests) != 1:
                     return False
                 request_state = retryable_requests[0]
+                # An accepted lifecycle is replayed only when it is the sole
+                # request on the socket (the terminal path's other-pending
+                # guard, ``_websocket_accepted_replay_candidate``). Reconnecting
+                # it would strand every sibling still bound to the dead
+                # upstream, so both fail closed with ``stream_incomplete`` as
+                # they did before accepted replays existed.
+                if (
+                    request_state.response_id is not None
+                    and not request_state.awaiting_response_created
+                    and any(pending_request is not request_state for pending_request in session.pending_requests)
+                ):
+                    return False
+            # A request that already saw response.created released the session
+            # create gate. Its replay must hold the gate again before it can
+            # own the pre-created identity, and never waits for a contended one.
+            if not await _claim_websocket_replay_create_gate(request_state, session.response_create_gate):
+                return False
             if retry_send_baselines is not None:
                 # The send-attempt baseline: a retried request already carries
                 # prior attempts, so the release keys on advancement past
@@ -4095,6 +4149,7 @@ class _HTTPBridgeRequestSubmitMixin:
             session.key,
             account_id=session.account.id,
             model=session.request_model,
+            detail="accepted_lifecycle_replay" if request_state.replay_downstream_response_id is not None else None,
             pending_count=1,
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,

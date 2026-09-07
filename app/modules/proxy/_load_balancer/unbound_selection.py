@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Generic, Protocol, TypeVar
 
 from app.core.balancer import (
+    AccountState,
     ResetPreferenceWindow,
     RoutingCostsByAccount,
     RoutingStrategy,
@@ -15,6 +16,7 @@ from app.core.balancer import (
     TrafficClass,
 )
 from app.db.models import Account, AccountStatus
+from app.modules.proxy._load_balancer.overload_backoff import filter_overload_backoff_candidates
 from app.modules.proxy._load_balancer.sticky_selection import (
     SelectionInputsProtocol,
     StickySelectionOwner,
@@ -203,21 +205,41 @@ async def run_unbound_selection_path(
             else:
                 selection_error_code = None
                 selection_resets_at = None
-                result = _select_account_preferring_budget_safe(
+
+                def _select_from(candidates: list[AccountState]) -> SelectionResult:
+                    return _select_account_preferring_budget_safe(
+                        candidates,
+                        prefer_earlier_reset=prefer_earlier_reset_accounts,
+                        prefer_earlier_reset_window=prefer_earlier_reset_window,
+                        routing_strategy=routing_strategy,
+                        relative_availability_power=relative_availability_power,
+                        relative_availability_top_k=relative_availability_top_k,
+                        budget_threshold_pct=budget_threshold_pct,
+                        secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                        traffic_class=traffic_class,
+                        ignore_standard_quota=False,
+                        routing_costs_by_account_id=effective_routing_costs,
+                        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                        usage_exhaustion_states=states,
+                    )
+
+                # Fresh admissions prefer accounts upstream is not currently
+                # rejecting as overloaded. The cap-filtered pool stays intact
+                # for cap-error detection below, and when the configured
+                # strategy rejects every overload-free candidate the full pool
+                # is selected from exactly as before. Sticky and continuity
+                # selection never reach this path, so warm sessions on those
+                # accounts keep flowing.
+                overload_free_states = filter_overload_backoff_candidates(
                     selection_states,
-                    prefer_earlier_reset=prefer_earlier_reset_accounts,
-                    prefer_earlier_reset_window=prefer_earlier_reset_window,
-                    routing_strategy=routing_strategy,
-                    relative_availability_power=relative_availability_power,
-                    relative_availability_top_k=relative_availability_top_k,
-                    budget_threshold_pct=budget_threshold_pct,
-                    secondary_budget_threshold_pct=secondary_budget_threshold_pct,
-                    traffic_class=traffic_class,
-                    ignore_standard_quota=False,
-                    routing_costs_by_account_id=effective_routing_costs,
-                    allow_usage_exhaustion_error=allow_usage_exhaustion_error,
-                    usage_exhaustion_states=states,
+                    owner._runtime,
+                    now=selection_now,
                 )
+                effective_states = overload_free_states
+                result = _select_from(overload_free_states)
+                if result.account is None and overload_free_states is not selection_states:
+                    effective_states = selection_states
+                    result = _select_from(selection_states)
                 if (
                     result.account is None
                     and result.error_code is None
@@ -235,8 +257,12 @@ async def run_unbound_selection_path(
                         _account_cap_error_message(lease_kind, caps),
                         error_code=selection_error_code,
                     )
+                # Probe reservation must see the pool the selection actually
+                # ran over: reserving from the wider pool could pick an older
+                # due probe the overload pass skipped and invalidate the
+                # selection on an identity mismatch.
                 probing_result_requires_reservation = _probing_result_requires_recovery_reservation(
-                    selection_states,
+                    effective_states,
                     result.account,
                     routing_strategy=routing_strategy,
                     traffic_class=traffic_class,
@@ -251,7 +277,7 @@ async def run_unbound_selection_path(
                     # both succeed; otherwise the failed request can
                     # consume minutes of recovery capacity.
                     probe_reservation = owner._reserve_due_probe_locked(
-                        selection_states,
+                        effective_states,
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
                         prefer_earlier_reset_window=prefer_earlier_reset_window,
                         routing_strategy=routing_strategy,

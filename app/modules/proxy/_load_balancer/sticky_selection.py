@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Collection, Iterable
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Generic, Literal, Protocol, TypeVar
@@ -27,12 +27,14 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy._load_balancer.overload_backoff import filter_overload_backoff_candidates
 from app.modules.proxy._load_balancer.types import (
     MAX_SELECTION_ATTEMPTS,
     AccountConcurrencyCaps,
     AccountLease,
     AccountLeaseKind,
     ProbeReservation,
+    RuntimeState,
 )
 from app.modules.proxy.affinity import _CodexSessionSource
 from app.modules.proxy.fair_share import (
@@ -264,6 +266,10 @@ class _StickyMutation:
 class _StickySelectionOutcome:
     selection: SelectionResult
     mutation: _StickyMutation | None = None
+    # The candidate pool the selection actually ran over when a NEW account
+    # was chosen for the key (overload-free first pass); ``None`` means the
+    # caller's full pool. Probe reservation must use the same pool.
+    effective_states: list[AccountState] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -731,8 +737,12 @@ async def run_sticky_selection_path(
                     or reallocate_sticky
                 )
             )
+            # A fresh binding may have been chosen from the overload-free
+            # subset; reserve the recovery probe from that same pool so an
+            # older due probe the pass skipped cannot invalidate the match.
+            probe_states = sticky_outcome.effective_states or selection_states
             probing_result_requires_reservation = _probing_result_requires_recovery_reservation(
-                selection_states,
+                probe_states,
                 result.account,
                 routing_strategy=routing_strategy,
                 traffic_class=traffic_class,
@@ -746,7 +756,7 @@ async def run_sticky_selection_path(
                 # can temporarily consume the only due probing slot and
                 # make concurrent unbound traffic miss recovery.
                 probe_reservation = owner._reserve_due_probe_locked(
-                    selection_states,
+                    probe_states,
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
                     prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,
@@ -1176,6 +1186,7 @@ async def _select_with_stickiness(
     allow_usage_exhaustion_error: bool = True,
     usage_exhaustion_states: Iterable[AccountState] | None = None,
     sticky_refresh_skip_deadline: datetime | None = None,
+    overload_backoff_runtime: Mapping[str, RuntimeState] | None = None,
     clock: Clock,
 ) -> _StickySelectionOutcome:
     if not sticky_key or not sticky_repo:
@@ -1205,6 +1216,7 @@ async def _select_with_stickiness(
         *,
         persist_account_id: str | None = None,
         refresh_skip_deadline: datetime | None = None,
+        effective_states: list[AccountState] | None = None,
     ) -> _StickySelectionOutcome:
         mutation = pending_mutation
         if persist_account_id is not None:
@@ -1212,7 +1224,7 @@ async def _select_with_stickiness(
                 account_id=persist_account_id,
                 refresh_skip_deadline=refresh_skip_deadline,
             )
-        return _StickySelectionOutcome(selection=selection, mutation=mutation)
+        return _StickySelectionOutcome(selection=selection, mutation=mutation, effective_states=effective_states)
 
     if sticky_existing_account_id is _STICKY_EXISTING_UNSET:
         existing = await sticky_repo.get_account_id(
@@ -1442,24 +1454,41 @@ async def _select_with_stickiness(
             if not preserve_existing_mapping_on_fallback:
                 pending_mutation = _StickyMutation(account_id=None)
 
-    chosen = _select_account_preferring_budget_safe(
-        states,
-        prefer_earlier_reset=prefer_earlier_reset_accounts,
-        prefer_earlier_reset_window=prefer_earlier_reset_window,
-        routing_strategy=routing_strategy,
-        relative_availability_power=relative_availability_power,
-        relative_availability_top_k=relative_availability_top_k,
-        budget_threshold_pct=budget_threshold_pct,
-        secondary_budget_threshold_pct=secondary_budget_threshold_pct,
-        apply_secondary_budget_threshold=apply_sticky_secondary_budget_threshold,
-        traffic_class=traffic_class,
-        ignore_standard_quota=ignore_standard_quota,
-        routing_costs_by_account_id=routing_costs_by_account_id,
-        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
-        usage_exhaustion_states=usage_exhaustion_states,
-    )
+    def _choose_from(candidates: list[AccountState]) -> SelectionResult:
+        return _select_account_preferring_budget_safe(
+            candidates,
+            prefer_earlier_reset=prefer_earlier_reset_accounts,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=routing_strategy,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
+            budget_threshold_pct=budget_threshold_pct,
+            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+            apply_secondary_budget_threshold=apply_sticky_secondary_budget_threshold,
+            traffic_class=traffic_class,
+            ignore_standard_quota=ignore_standard_quota,
+            routing_costs_by_account_id=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
+        )
+
+    # Reaching here means a NEW account is being chosen for this key (no
+    # owner, an unusable owner, or a reallocation): a fresh upstream
+    # admission, not warm-session reuse. Prefer accounts upstream is not
+    # currently rejecting as overloaded; fall back to the full pool when the
+    # strategy rejects every overload-free candidate. The pinned-owner paths
+    # above never consult the overload window, so an established owner keeps
+    # serving its session even while backed off.
+    fallback_candidates = states
+    if overload_backoff_runtime is not None:
+        fallback_candidates = filter_overload_backoff_candidates(states, overload_backoff_runtime, now=clock.time())
+    chosen = _choose_from(fallback_candidates)
+    if chosen.account is None and fallback_candidates is not states:
+        fallback_candidates = states
+        chosen = _choose_from(states)
+    chosen_pool = fallback_candidates if fallback_candidates is not states else None
     if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
-        return finish_selection(chosen, persist_account_id=chosen.account.account_id)
+        return finish_selection(chosen, persist_account_id=chosen.account.account_id, effective_states=chosen_pool)
     if preserve_existing_mapping_on_fallback and chosen.account is not None and existing is not None:
         # Spillover is deliberately request-local. The alternate may create
         # its own hard response/file/bridge owner, but local cap pressure
@@ -1470,7 +1499,7 @@ async def _select_with_stickiness(
             chosen.account.account_id,
             sticky_kind.value,
         )
-    return finish_selection(chosen)
+    return finish_selection(chosen, effective_states=chosen_pool)
 
 
 def _sticky_refresh_write_skippable(

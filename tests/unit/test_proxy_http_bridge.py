@@ -53,6 +53,7 @@ from app.modules.proxy import api as proxy_api
 from app.modules.proxy import http_bridge_forwarding as http_bridge_forwarding_module
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import support as proxy_support_module
+from app.modules.proxy._service.http_bridge import accepted_replay as http_bridge_accepted_replay_module
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
 from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
 from app.modules.proxy._service.http_bridge import owner_forwarding as http_bridge_owner_forwarding_module
@@ -2539,7 +2540,7 @@ async def test_release_handoffs_retires_ready_detached_generation(
     )
 
     assert session.unanchored_reservation_id is None
-    retire.assert_awaited_once_with(session)
+    retire.assert_awaited_once_with(session, lock_wait_timeout_seconds=5.0)
 
 
 @pytest.mark.asyncio
@@ -5527,6 +5528,1132 @@ async def test_http_bridge_model_capacity_waits_before_precreated_retry(
     assert request_state.account_capacity_waiting is False
 
 
+# --- Accepted output-free capacity replay (#1384 takeover, narrowed scope) ---
+
+
+def _accepted_bridge_request_state(**overrides: Any) -> proxy_service._WebSocketRequestState:
+    """Bridge request whose ``response.created`` and ``response.in_progress``
+    were already forwarded downstream and that has produced no output."""
+    values: dict[str, Any] = {
+        "request_id": "req-accepted-bridge",
+        "model": "gpt-5.6-sol",
+        "service_tier": None,
+        "reasoning_effort": None,
+        "api_key_reservation": None,
+        "started_at": time.monotonic(),
+        "bridge_request_deadline": time.monotonic() + 60.0,
+        "awaiting_response_created": False,
+        "response_id": "resp-accepted-visible",
+        "response_event_count": 2,
+        "event_queue": asyncio.Queue(),
+        "transport": "http",
+        # Native Codex bridge traffic relays upstream ``error`` frames verbatim;
+        # public SDK streams would normalize them into ``response.failed``.
+        "enforce_openai_sdk_contract": False,
+        "request_text": '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+    }
+    values.update(overrides)
+    return proxy_service._WebSocketRequestState(**values)
+
+
+def _capacity_error_text(*, code: str, message: str) -> str:
+    return json.dumps(
+        {"type": "error", "error": {"type": "service_unavailable_error", "code": code, "message": message}},
+        separators=(",", ":"),
+    )
+
+
+_CAPACITY_MESSAGE = "Selected model is at capacity. Please try a different model."
+_OVERLOADED_MESSAGE = "Our servers are currently overloaded. Please try again later."
+
+
+def _install_accepted_replay_harness(
+    service: proxy_service.ProxyService,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    retry_result: bool,
+) -> tuple[AsyncMock, AsyncMock]:
+    handle_stream_error = AsyncMock()
+    retry_precreated = AsyncMock(return_value=retry_result)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS", 0.001)
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
+    return handle_stream_error, retry_precreated
+
+
+def _assert_staged_for_single_lifecycle_replay(
+    request_state: proxy_service._WebSocketRequestState,
+    session: proxy_service._HTTPBridgeSession,
+) -> None:
+    assert request_state in session.pending_requests
+    assert request_state.replay_downstream_response_id == "resp-accepted-visible"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.suppress_next_in_progress_downstream is True
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_id is None
+    assert request_state.response_event_count == 0
+    assert request_state.response_create_gate_acquired is True
+    assert request_state.response_create_gate is session.response_create_gate
+    assert session.response_create_gate.locked() is True
+    assert request_state.response_create_admission_reacquire_required is True
+    # The terminal bookkeeping clears its settlement claim on its normal exit;
+    # staging itself must not (see the abort-settlement test below).
+    assert request_state.terminal_settlement_phase is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_accepted_capacity_error_waits_then_stages_single_lifecycle_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The selected-model capacity message on an accepted, output-free request
+    reserves the request, stages the single-lifecycle replay (identity captured
+    and prelude suppression armed before ``response_id`` is cleared, session
+    create gate re-claimed, admission marked for re-acquisition), waits, and
+    hands the request to the pre-created retry."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
+    request_state = _accepted_bridge_request_state()
+    session = _make_bridge_session(
+        key_value="bridge-accepted-capacity-wait",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        _capacity_error_text(code="model_at_capacity", message=_CAPACITY_MESSAGE),
+    )
+
+    _assert_staged_for_single_lifecycle_replay(request_state, session)
+    retry_precreated.assert_awaited_once_with(session, request_state=request_state)
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    # Reported as the transparent overload code, like the pre-created classifier.
+    assert handle_stream_error.await_args.args[2] == "server_is_overloaded"
+    assert session.queued_request_count == 1
+    assert request_state.account_capacity_waiting is False
+    assert request_state.event_queue is not None
+    keepalive_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert keepalive_block is not None
+    keepalive = proxy_service.parse_sse_data_json(keepalive_block)
+    assert isinstance(keepalive, dict)
+    assert keepalive["type"] == "codex.keepalive"
+    assert keepalive["status"] == "waiting_for_account_capacity"
+    assert request_state.event_queue.empty(), "the upstream terminal must not reach the client during a replay"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_accepted_propagated_error_stream_capacity_replay_does_not_resignal_the_startup_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2127 round 4 P3-C (mutant M18). A propagated-error (public) bridge
+    stream signals the pre-response startup wait when a capacity message
+    arrives *before* ``response.created`` so its startup probe keeps waiting.
+    An accepted request already committed its response start -- the probe is
+    ready and the client is reading the stream -- so neither the wait branch
+    nor the capacity sleep may re-arm that wait: the per-request and the
+    propagated startup events stay ready, the replay is staged, and no
+    keepalive or terminal reaches the client (spec: "Accepted public streams
+    are replayed without keepalives")."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
+    request_wait_event = asyncio.Event()
+    request_ready_event = asyncio.Event()
+    request_ready_event.set()
+    propagated_wait_event = asyncio.Event()
+    propagated_ready_event = asyncio.Event()
+    propagated_ready_event.set()
+    wait_token = proxy_support_module._bind_propagated_capacity_startup_wait(propagated_wait_event)
+    ready_token = proxy_support_module._bind_propagated_capacity_startup_ready(propagated_ready_event)
+    request_state = _accepted_bridge_request_state(
+        request_id="req-accepted-propagated-startup-wait",
+        propagate_http_errors=True,
+        capacity_startup_wait_event=request_wait_event,
+        capacity_startup_ready_event=request_ready_event,
+    )
+    session = _make_bridge_session(
+        key_value="bridge-accepted-propagated-startup-wait",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    try:
+        await service._process_http_bridge_upstream_text(
+            session,
+            _capacity_error_text(code="model_at_capacity", message=_CAPACITY_MESSAGE),
+        )
+    finally:
+        proxy_support_module._reset_propagated_capacity_startup_ready(ready_token)
+        proxy_support_module._reset_propagated_capacity_startup_wait(wait_token)
+
+    _assert_staged_for_single_lifecycle_replay(request_state, session)
+    retry_precreated.assert_awaited_once_with(session, request_state=request_state)
+    assert request_wait_event.is_set() is False, "the accepted replay re-armed the request's startup wait"
+    assert request_ready_event.is_set() is True
+    assert propagated_wait_event.is_set() is False, "the accepted replay re-armed the propagated startup wait"
+    assert propagated_ready_event.is_set() is True
+    assert request_state.account_capacity_waiting is False
+    assert request_state.account_capacity_wait_suppress_keepalive is False
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty(), "a public stream must not receive keepalives or the terminal"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_accepted_overload_code_stages_single_lifecycle_replay_without_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transparent overload code without the capacity message takes the
+    immediate retry branch and stages the same single-lifecycle replay."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
+    request_state = _accepted_bridge_request_state()
+    session = _make_bridge_session(
+        key_value="bridge-accepted-overload",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        _capacity_error_text(code="server_is_overloaded", message=_OVERLOADED_MESSAGE),
+    )
+
+    _assert_staged_for_single_lifecycle_replay(request_state, session)
+    retry_precreated.assert_awaited_once_with(session)
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[2] == "server_is_overloaded"
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty()
+
+
+_ACCEPTED_BRIDGE_ANCHORED_REQUEST_TEXT = json.dumps(
+    {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "previous_response_id": "resp-bridge-anchor",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+    },
+    separators=(",", ":"),
+)
+_ACCEPTED_BRIDGE_FRESH_REPLAY_TEXT = json.dumps(
+    {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "first"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ],
+    },
+    separators=(",", ":"),
+)
+
+
+def _accepted_anchored_bridge_request_state(**overrides: Any) -> proxy_service._WebSocketRequestState:
+    """Accepted bridge follow-up whose ``previous_response_id`` the proxy injected
+    (continuity anchor) with the full resend retained as a retry-safe fresh body."""
+    values: dict[str, Any] = {
+        "request_text": _ACCEPTED_BRIDGE_ANCHORED_REQUEST_TEXT,
+        "previous_response_id": "resp-bridge-anchor",
+        "proxy_injected_previous_response_id": True,
+        "preferred_account_id": "acc-bridge",
+        "fresh_upstream_request_text": _ACCEPTED_BRIDGE_FRESH_REPLAY_TEXT,
+        "fresh_upstream_request_is_retry_safe": True,
+    }
+    values.update(overrides)
+    return _accepted_bridge_request_state(**values)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["server_is_overloaded", "overloaded_error"])
+async def test_http_bridge_accepted_anchored_overload_code_stages_single_lifecycle_replay_without_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+) -> None:
+    """#2127 round 3 P2: an accepted anchored follow-up (proxy-injected
+    anchor, retry-safe fresh body) that fails with a bare transparent overload
+    code -- no selected-model capacity message -- must take the same
+    single-lifecycle replay the capacity-message wait branch gives it. The
+    branch used to stage unanchored requests only and forwarded this terminal
+    unchanged."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
+    request_state = _accepted_anchored_bridge_request_state()
+    session = _make_bridge_session(
+        key_value="bridge-accepted-anchored-overload",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        _capacity_error_text(code=code, message=_OVERLOADED_MESSAGE),
+    )
+
+    _assert_staged_for_single_lifecycle_replay(request_state, session)
+    # The anchor is handed to the retry untouched; the retry's owner-switch
+    # prep decides between the fresh body on another account and the anchored
+    # body on its owner.
+    assert request_state.previous_response_id == "resp-bridge-anchor"
+    assert request_state.request_text == _ACCEPTED_BRIDGE_ANCHORED_REQUEST_TEXT
+    retry_precreated.assert_awaited_once_with(session)
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[2] == code
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty(), "the upstream terminal must not reach the client during a replay"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_accepted_client_anchored_overload_code_forwards_the_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client-supplied anchor is replayed only by the bridge's transport-
+    failure path (its full resend is transport-only), so the pre-created retry
+    would refuse it. Staging it would only rewrite the upstream terminal into
+    ``stream_incomplete``; the terminal is forwarded unchanged instead."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
+    request_state = _accepted_anchored_bridge_request_state(proxy_injected_previous_response_id=False)
+    session = _make_bridge_session(
+        key_value="bridge-accepted-client-anchored-overload",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        _capacity_error_text(code="server_is_overloaded", message=_OVERLOADED_MESSAGE),
+    )
+
+    retry_precreated.assert_not_awaited()
+    assert request_state not in session.pending_requests
+    assert request_state.replay_downstream_response_id is None
+    assert request_state.suppress_next_created_downstream is False
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.event_queue is not None
+    terminal_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert terminal_block is not None
+    terminal = proxy_service.parse_sse_data_json(terminal_block)
+    assert isinstance(terminal, dict)
+    assert terminal["type"] == "error"
+    assert cast(dict[str, Any], terminal["error"])["code"] == "server_is_overloaded"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_accepted_client_anchored_capacity_message_forwards_the_terminal_without_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2127 round 4 P3-A, capacity-message twin of the test above: the wait
+    branch used to reserve and stage an accepted request whose anchor the
+    CLIENT supplied (retry-safe fresh body retained), penalize the owner, sleep,
+    and then hand it to a pre-created retry that refuses transport-only full
+    resends -- so the raw ``model_at_capacity`` terminal came back as a
+    synthetic ``stream_incomplete`` (502). The same client-anchor exclusion the
+    transparent-code branch applies must run before waiting or staging, and the
+    upstream terminal is forwarded unchanged without sleeping."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
+    wait_before_retry = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module, "_wait_before_http_bridge_model_capacity_retry", wait_before_retry
+    )
+    request_state = _accepted_anchored_bridge_request_state(proxy_injected_previous_response_id=False)
+    session = _make_bridge_session(
+        key_value="bridge-accepted-client-anchored-capacity-message",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        _capacity_error_text(code="model_at_capacity", message=_CAPACITY_MESSAGE),
+    )
+
+    wait_before_retry.assert_not_awaited()
+    retry_precreated.assert_not_awaited()
+    assert request_state not in session.pending_requests
+    assert session.queued_request_count == 0
+    assert request_state.account_capacity_waiting is False
+    assert request_state.replay_downstream_response_id is None
+    assert request_state.suppress_next_created_downstream is False
+    assert request_state.suppress_next_in_progress_downstream is False
+    assert request_state.response_create_gate_acquired is False
+    assert session.response_create_gate.locked() is False
+    assert request_state.error_http_status_override is None
+    assert request_state.previous_response_id == "resp-bridge-anchor"
+    assert request_state.event_queue is not None
+    terminal_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert terminal_block is not None
+    terminal = proxy_service.parse_sse_data_json(terminal_block)
+    assert isinstance(terminal, dict)
+    assert terminal["type"] == "error"
+    assert cast(dict[str, Any], terminal["error"])["code"] == "model_at_capacity"
+    assert await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0) is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_accepted_proxy_anchored_capacity_message_waits_then_stages_single_lifecycle_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard on the exclusion above: a proxy-injected anchor with a retry-safe
+    fresh body is what the pre-created retry can re-send, so the capacity
+    message keeps reserving, staging and waiting for it (spec: "Retry-safe
+    injected anchors still wait")."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
+    request_state = _accepted_anchored_bridge_request_state()
+    session = _make_bridge_session(
+        key_value="bridge-accepted-proxy-anchored-capacity-message",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        _capacity_error_text(code="model_at_capacity", message=_CAPACITY_MESSAGE),
+    )
+
+    _assert_staged_for_single_lifecycle_replay(request_state, session)
+    assert request_state.previous_response_id == "resp-bridge-anchor"
+    retry_precreated.assert_awaited_once_with(session, request_state=request_state)
+    assert session.queued_request_count == 1
+    assert request_state.event_queue is not None
+    keepalive_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert keepalive_block is not None
+    keepalive = proxy_service.parse_sse_data_json(keepalive_block)
+    assert isinstance(keepalive, dict)
+    assert keepalive["status"] == "waiting_for_account_capacity"
+    assert request_state.event_queue.empty(), "the upstream terminal must not reach the client during a replay"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [("model_at_capacity", _CAPACITY_MESSAGE), ("server_is_overloaded", _OVERLOADED_MESSAGE)],
+)
+async def test_http_bridge_accepted_capacity_replay_is_refused_while_another_create_holds_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    message: str,
+) -> None:
+    """Mutant: after ``response.created`` the session create gate is free and a
+    younger ``response.create`` may hold it. Staging must not touch the
+    accepted request then; the upstream terminal is forwarded unchanged and
+    the other holder keeps the gate."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
+    request_state = _accepted_bridge_request_state()
+    session = _make_bridge_session(
+        key_value="bridge-accepted-gate-busy",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    await session.response_create_gate.acquire()
+
+    await service._process_http_bridge_upstream_text(session, _capacity_error_text(code=code, message=message))
+
+    retry_precreated.assert_not_awaited()
+    assert request_state not in session.pending_requests
+    assert request_state.response_create_gate_acquired is False
+    assert session.response_create_gate.locked() is True
+    assert request_state.replay_downstream_response_id is None
+    assert request_state.suppress_next_created_downstream is False
+    assert request_state.event_queue is not None
+    terminal_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert terminal_block is not None
+    terminal = proxy_service.parse_sse_data_json(terminal_block)
+    assert isinstance(terminal, dict)
+    assert terminal["type"] == "error"
+    assert cast(dict[str, Any], terminal["error"])["code"] == code
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_accepted_capacity_replay_failure_releases_gate_and_keeps_visible_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the staged replay cannot be sent, the request fails closed with a
+    terminal addressed to the id the client is reading, and the re-claimed
+    session create gate is released with the request."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _install_accepted_replay_harness(service, monkeypatch, retry_result=False)
+    request_state = _accepted_bridge_request_state()
+    session = _make_bridge_session(
+        key_value="bridge-accepted-replay-failed",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        _capacity_error_text(code="server_is_overloaded", message=_OVERLOADED_MESSAGE),
+    )
+
+    assert request_state not in session.pending_requests
+    assert session.response_create_gate.locked() is False
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.event_queue is not None
+    terminal_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert terminal_block is not None
+    terminal = proxy_service.parse_sse_data_json(terminal_block)
+    assert isinstance(terminal, dict)
+    assert terminal["type"] == "response.failed"
+    assert cast(dict[str, Any], terminal["response"])["id"] == "resp-accepted-visible"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_accepted_replay_failure_keeps_settlement_claim_for_abort_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #1594 parity: the terminal pop marked the request "claimed" before
+    staging re-appended it to pending. When the staged replay fails, the request
+    leaves pending ownership again, so the claim must survive staging; an abort
+    on any of the awaits before ``_finalize_terminal_settlement`` then settles
+    the API-key reservation through the shielded abort path instead of leaking
+    the reservation and its heartbeat."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _install_accepted_replay_harness(service, monkeypatch, retry_result=False)
+    release_reservation = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_pending_count",
+        AsyncMock(side_effect=RuntimeError("terminal bookkeeping aborted")),
+    )
+    reservation = SimpleNamespace(reservation_id="res-accepted-replay-failed", status="reserved")
+    request_state = _accepted_bridge_request_state(api_key_reservation=cast(Any, reservation))
+    session = _make_bridge_session(
+        key_value="bridge-accepted-replay-failed-abort",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    with pytest.raises(RuntimeError, match="terminal bookkeeping aborted"):
+        await service._process_http_bridge_upstream_text(
+            session,
+            _capacity_error_text(code="server_is_overloaded", message=_OVERLOADED_MESSAGE),
+        )
+
+    assert request_state not in session.pending_requests
+    release_reservation.assert_awaited_once_with(request_state)
+    assert request_state.api_key_reservation is None
+    assert request_state.terminal_settlement_phase is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate_busy", [False, True], ids=["replay_failed", "gate_busy"])
+async def test_http_bridge_accepted_capacity_wait_branch_claims_settlement_when_it_leaves_pending(
+    monkeypatch: pytest.MonkeyPatch,
+    gate_busy: bool,
+) -> None:
+    """#2127 round 4 P3-B: the selected-model capacity wait branch reserves the
+    accepted request *in* pending ownership, so the terminal pop never recorded
+    a settlement claim for it. When the branch then gives that ownership up --
+    the staged replay failed, or a busy create gate refused the staging -- an
+    abort between the pending removal and ``_finalize_terminal_settlement``
+    used to find ``claimed_terminal_request_states`` empty and leak the keyed
+    request's reservation, its heartbeat, and the re-claimed create gate. The
+    wait branch must record the claim when it relinquishes pending ownership so
+    the shielded abort settlement (#1594) releases the reservation."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _install_accepted_replay_harness(service, monkeypatch, retry_result=False)
+    release_reservation = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_pending_count",
+        AsyncMock(side_effect=RuntimeError("terminal bookkeeping aborted")),
+    )
+    reservation = SimpleNamespace(reservation_id="res-accepted-capacity-wait-abort", status="reserved")
+    request_state = _accepted_bridge_request_state(api_key_reservation=cast(Any, reservation))
+    session = _make_bridge_session(
+        key_value="bridge-accepted-capacity-wait-abort",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    if gate_busy:
+        await session.response_create_gate.acquire()
+
+    with pytest.raises(RuntimeError, match="terminal bookkeeping aborted"):
+        await service._process_http_bridge_upstream_text(
+            session,
+            _capacity_error_text(code="model_at_capacity", message=_CAPACITY_MESSAGE),
+        )
+
+    assert request_state not in session.pending_requests
+    assert session.queued_request_count == 0
+    release_reservation.assert_awaited_once_with(request_state)
+    assert request_state.api_key_reservation is None
+    assert request_state.terminal_settlement_phase is None
+    assert request_state.event_queue is not None
+    # The abort settlement unblocks the downstream waiter with end-of-stream.
+    queued: list[str | None] = []
+    while not request_state.event_queue.empty():
+        queued.append(request_state.event_queue.get_nowait())
+    assert queued and queued[-1] is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_accepted_capacity_replay_keeps_the_response_identity_the_client_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Credit: Darafei Praliaskouski (#1384). The client is offered exactly one
+    response lifecycle: the replay's own ``response.created`` and
+    ``response.in_progress`` are dropped and its later frames are readdressed
+    to the identifier the client has been reading since before the overload."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
+    request_state = _accepted_bridge_request_state()
+    session = _make_bridge_session(
+        key_value="bridge-accepted-identity",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        _capacity_error_text(code="server_is_overloaded", message=_OVERLOADED_MESSAGE),
+    )
+    _assert_staged_for_single_lifecycle_replay(request_state, session)
+
+    for replay_event in (
+        {"type": "response.created", "response": {"id": "resp-replay", "object": "response", "status": "in_progress"}},
+        {
+            "type": "response.in_progress",
+            "response": {"id": "resp-replay", "object": "response", "status": "in_progress"},
+        },
+        {"type": "response.output_text.delta", "response_id": "resp-replay", "item_id": "msg_1", "delta": "OK"},
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp-replay",
+                "object": "response",
+                "status": "completed",
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "OK"}]}
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            },
+        },
+    ):
+        await service._process_http_bridge_upstream_text(session, json.dumps(replay_event, separators=(",", ":")))
+
+    delivered: list[dict[str, Any]] = []
+    while not event_queue.empty():
+        block = event_queue.get_nowait()
+        if block is None:
+            break
+        parsed = proxy_service.parse_sse_data_json(block)
+        assert isinstance(parsed, dict)
+        delivered.append(cast(dict[str, Any], parsed))
+    assert [event["type"] for event in delivered] == ["response.output_text.delta", "response.completed"], (
+        "the client was handed a second response lifecycle"
+    )
+    assert delivered[0]["response_id"] == "resp-accepted-visible"
+    assert delivered[1]["response"]["id"] == "resp-accepted-visible"
+    assert request_state.response_id == "resp-replay"
+    assert session.response_create_gate.locked() is False
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_replays_accepted_lifecycle_after_transport_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transport-close path: an accepted request whose socket dropped after
+    created + in_progress re-claims the session create gate, arms the prelude
+    suppression, and is re-sent on another account."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _accepted_bridge_request_state(
+        request_id="req-accepted-close",
+        account_response_create_lease=cast(Any, object()),
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("request", "bridge-accepted-close", None),
+        key_value="bridge-accepted-close",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.last_upstream_close_code = 1011
+    send_text = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is True
+
+    assert request_state.replay_downstream_response_id == "resp-accepted-visible"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.suppress_next_in_progress_downstream is True
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_id is None
+    assert request_state.response_event_count == 0
+    assert request_state.replay_count == 1
+    assert request_state.response_create_gate_acquired is True
+    assert session.response_create_gate.locked() is True
+    # ``response.created`` released the shared work admission with the gate;
+    # the replacement ``response.create`` must hold a fresh admission lease.
+    assert request_state.response_create_admission is not None
+    assert request_state.response_create_admission_reacquire_required is False
+    assert request_state.preferred_account_id is None
+    assert request_state.excluded_account_ids == {session.account.id}
+    reconnect.assert_awaited_once()
+    reconnect_call = reconnect.await_args
+    assert reconnect_call is not None
+    assert reconnect_call.kwargs["request_state"] is request_state
+    assert "require_same_account" not in reconnect_call.kwargs
+    send_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_replays_an_accepted_anchored_follow_up_with_the_fresh_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retry the transparent-code branch now hands an accepted anchored
+    follow-up to (#2127 round 3 P2): the owner-switch prep strips the
+    proxy-injected anchor, swaps the retained full resend in, releases the
+    anchor owner's pin and excludes the failing account, and the replay is
+    sent within the single lifecycle the client is reading."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _accepted_anchored_bridge_request_state(
+        request_id="req-accepted-anchored-retry",
+        account_response_create_lease=cast(Any, object()),
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("request", "bridge-accepted-anchored-retry", None),
+        key_value="bridge-accepted-anchored-retry",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    send_text = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is True
+
+    assert request_state.replay_downstream_response_id == "resp-accepted-visible"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_id is None
+    assert request_state.replay_count == 1
+    assert request_state.request_text == _ACCEPTED_BRIDGE_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.proxy_injected_previous_response_id is False
+    assert request_state.preferred_account_id is None
+    assert request_state.replay_required_account_id is None
+    assert request_state.excluded_account_ids == {session.account.id}
+    reconnect.assert_awaited_once()
+    send_text.assert_awaited_once()
+    sent_payload = json.loads(send_text.await_args.args[0]) if send_text.await_args is not None else None
+    assert isinstance(sent_payload, dict)
+    assert "previous_response_id" not in sent_payload
+    assert sent_payload["input"] == json.loads(_ACCEPTED_BRIDGE_FRESH_REPLAY_TEXT)["input"]
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_refuses_accepted_replay_while_gate_is_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutant of the transport-close path: a create gate held by another
+    request means a younger ``response.create`` may already own this socket's
+    pre-created identity, so the accepted replay fails closed untouched."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _accepted_bridge_request_state(request_id="req-accepted-close-gate-busy")
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("request", "bridge-accepted-close-gate", None),
+        key_value="bridge-accepted-close-gate",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.last_upstream_close_code = 1011
+    await session.response_create_gate.acquire()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is False
+
+    reconnect.assert_not_awaited()
+    assert request_state.response_id == "resp-accepted-visible"
+    assert request_state.awaiting_response_created is False
+    assert request_state.replay_count == 0
+    assert request_state.response_create_gate_acquired is False
+
+
+def _visible_sibling_bridge_request_state() -> proxy_service._WebSocketRequestState:
+    """A second response multiplexed on the same upstream socket whose output
+    the client is already reading; it is never replayable."""
+    return _accepted_bridge_request_state(
+        request_id="req-visible-sibling",
+        response_id="resp-visible-sibling",
+        response_event_count=4,
+        downstream_visible=True,
+        upstream_model_output_seen=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_refuses_accepted_replay_while_another_response_shares_the_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2127 round 4 P2-A: the transport-close path picks the sole *retryable*
+    pending request, and a visible sibling is never retryable, so an accepted
+    request that shared the socket with it used to be staged and reconnected
+    alone -- leaving the visible response bound to the dead upstream. Mirror
+    the terminal path's other-pending guard: refuse before the gate claim and
+    leave both requests for the reader's failure funnel."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    visible_request_state = _visible_sibling_bridge_request_state()
+    accepted_request_state = _accepted_bridge_request_state(request_id="req-accepted-shared-socket")
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("request", "bridge-accepted-shared-socket", None),
+        key_value="bridge-accepted-shared-socket",
+        pending_requests=deque([visible_request_state, accepted_request_state]),
+        queued_request_count=2,
+    )
+    session.last_upstream_close_code = 1011
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is False
+
+    reconnect.assert_not_awaited()
+    assert list(session.pending_requests) == [visible_request_state, accepted_request_state]
+    assert accepted_request_state.response_id == "resp-accepted-visible"
+    assert accepted_request_state.awaiting_response_created is False
+    assert accepted_request_state.response_event_count == 2
+    assert accepted_request_state.replay_count == 0
+    assert accepted_request_state.replay_downstream_response_id is None
+    assert accepted_request_state.suppress_next_created_downstream is False
+    assert accepted_request_state.suppress_next_in_progress_downstream is False
+    assert accepted_request_state.response_create_gate_acquired is False
+    assert session.response_create_gate.locked() is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_transport_close_with_a_visible_sibling_fails_both_requests_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Relay-level twin of the guard above: an abrupt close while a visible
+    response and an accepted, output-free request share the socket replays
+    nothing and hands both to the reader's failure funnel as
+    ``stream_incomplete`` -- the outcome ``main`` produced for this shape."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    visible_request_state = _visible_sibling_bridge_request_state()
+    accepted_request_state = _accepted_bridge_request_state(request_id="req-accepted-shared-socket-relay")
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("request", "bridge-accepted-shared-socket-relay", None),
+        key_value="bridge-accepted-shared-socket-relay",
+        pending_requests=deque([visible_request_state, accepted_request_state]),
+        queued_request_count=2,
+    )
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(return_value=UpstreamWebSocketMessage(kind="close", close_code=1011)),
+            close=AsyncMock(),
+        ),
+    )
+    reconnect = AsyncMock()
+    fail_pending = AsyncMock(return_value=True)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_record_http_bridge_account_timeout_signal", AsyncMock())
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    reconnect.assert_not_awaited()
+    fail_pending.assert_awaited_once()
+    assert fail_pending.await_args is not None
+    assert fail_pending.await_args.kwargs["error_code"] == "stream_incomplete"
+    assert list(fail_pending.await_args.kwargs["pending_requests"]) == [visible_request_state, accepted_request_state]
+    assert accepted_request_state.replay_count == 0
+    assert accepted_request_state.replay_downstream_response_id is None
+    assert accepted_request_state.response_id == "resp-accepted-visible"
+
+
+def _precreated_gate_holder_sibling_bridge_request_state() -> proxy_service._WebSocketRequestState:
+    """A younger ``response.create`` multiplexed on the same upstream socket
+    that has not seen its ``response.created`` yet and therefore still holds the
+    session response-create gate."""
+    return _accepted_bridge_request_state(
+        request_id="req-precreated-sibling",
+        response_id=None,
+        awaiting_response_created=True,
+        response_event_count=0,
+        response_create_gate_acquired=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_refuses_both_when_a_precreated_sibling_holds_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2127 round 7 P3 (pinned divergence from ``main``): an abrupt close
+    while an accepted, output-free request A and a pre-created sibling P (the
+    gate holder) share the socket. ``main`` never considered A retryable, so it
+    retried P alone and left A bound to the dead upstream until the stale
+    pending sweep; now both are retryable, the sole-retryable rule refuses, and
+    both fail closed promptly through the reader's failure funnel. Neither
+    request is staged or reconnected alone (openspec scenario "A transport close
+    while another response shares the bridge socket replays nothing")."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    accepted_request_state = _accepted_bridge_request_state(request_id="req-accepted-with-precreated-sibling")
+    precreated_request_state = _precreated_gate_holder_sibling_bridge_request_state()
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("request", "bridge-accepted-precreated-sibling", None),
+        key_value="bridge-accepted-precreated-sibling",
+        pending_requests=deque([accepted_request_state, precreated_request_state]),
+        queued_request_count=2,
+    )
+    session.last_upstream_close_code = 1011
+    await session.response_create_gate.acquire()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is False
+
+    reconnect.assert_not_awaited()
+    assert list(session.pending_requests) == [accepted_request_state, precreated_request_state]
+    assert accepted_request_state.response_id == "resp-accepted-visible"
+    assert accepted_request_state.awaiting_response_created is False
+    assert accepted_request_state.replay_count == 0
+    assert accepted_request_state.replay_downstream_response_id is None
+    assert accepted_request_state.suppress_next_created_downstream is False
+    assert accepted_request_state.response_create_gate_acquired is False
+    assert precreated_request_state.replay_count == 0
+    assert precreated_request_state.awaiting_response_created is True
+    assert precreated_request_state.response_create_gate_acquired is True
+    assert session.response_create_gate.locked() is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_transport_close_with_a_precreated_sibling_fails_both_requests_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Relay-level twin of the pin above: the abrupt close hands the accepted
+    request and its pre-created sibling to the failure funnel together as
+    ``stream_incomplete``; no replay is staged for either."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    accepted_request_state = _accepted_bridge_request_state(request_id="req-accepted-with-precreated-sibling-relay")
+    precreated_request_state = _precreated_gate_holder_sibling_bridge_request_state()
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("request", "bridge-accepted-precreated-sibling-relay", None),
+        key_value="bridge-accepted-precreated-sibling-relay",
+        pending_requests=deque([accepted_request_state, precreated_request_state]),
+        queued_request_count=2,
+    )
+    await session.response_create_gate.acquire()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(return_value=UpstreamWebSocketMessage(kind="close", close_code=1011)),
+            close=AsyncMock(),
+        ),
+    )
+    reconnect = AsyncMock()
+    fail_pending = AsyncMock(return_value=True)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_record_http_bridge_account_timeout_signal", AsyncMock())
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    reconnect.assert_not_awaited()
+    fail_pending.assert_awaited_once()
+    assert fail_pending.await_args is not None
+    assert fail_pending.await_args.kwargs["error_code"] == "stream_incomplete"
+    assert list(fail_pending.await_args.kwargs["pending_requests"]) == [
+        accepted_request_state,
+        precreated_request_state,
+    ]
+    assert accepted_request_state.replay_count == 0
+    assert accepted_request_state.replay_downstream_response_id is None
+    assert accepted_request_state.response_id == "resp-accepted-visible"
+    assert precreated_request_state.replay_count == 0
+    assert precreated_request_state.awaiting_response_created is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "expect_retry"),
+    [
+        (UpstreamWebSocketMessage(kind="binary", data=b"\x00\x01"), False),
+        (UpstreamWebSocketMessage(kind="close", close_code=1011), True),
+    ],
+)
+async def test_http_bridge_accepted_replay_requires_a_terminal_transport_message(
+    monkeypatch: pytest.MonkeyPatch,
+    message: UpstreamWebSocketMessage,
+    expect_retry: bool,
+) -> None:
+    """A protocol-invalid binary frame carries no close code but did not end
+    the socket: it must never replay an accepted turn, while a real close does."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _accepted_bridge_request_state(request_id="req-accepted-binary")
+    session = _make_bridge_session(
+        key_value="bridge-accepted-binary",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(receive=AsyncMock(return_value=message), close=AsyncMock()),
+    )
+    retry_precreated = AsyncMock(return_value=False)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_record_http_bridge_account_timeout_signal", AsyncMock())
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    assert retry_precreated.await_count == (1 if expect_retry else 0)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"type": "error", "error": {"code": "server_is_overloaded"}}, False),
+        ({"type": "error", "error": {"code": "server_is_overloaded"}, "usage": {"output_tokens": 0}}, False),
+        ({"type": "error", "error": {"code": "server_is_overloaded"}, "usage": {"output_tokens": 2}}, True),
+        ({"type": "error", "usage": {"output_tokens": True}}, False),
+        ({"type": "response.failed", "response": {"output": []}}, False),
+        ({"type": "response.failed", "response": {"output": [{"type": "message"}]}}, True),
+        ({"type": "response.failed", "response": {"usage": {"output_tokens_details": {"reasoning_tokens": 1}}}}, True),
+        (None, False),
+    ],
+)
+def test_terminal_payload_reports_output(payload: dict[str, Any] | None, expected: bool) -> None:
+    assert http_bridge_accepted_replay_module._terminal_payload_reports_output(cast(Any, payload)) is expected
+
+
+@pytest.mark.asyncio
+async def test_stage_websocket_request_state_for_replay_is_a_no_op_reset_for_precreated_states() -> None:
+    """Pre-created requests keep today's two-line reset: no identity is
+    captured, nothing is suppressed, and the gate they already hold is kept."""
+    gate = asyncio.Semaphore(1)
+    await gate.acquire()
+    request_state = _accepted_bridge_request_state(
+        response_id=None,
+        awaiting_response_created=True,
+        response_event_count=0,
+        response_create_gate=gate,
+        response_create_gate_acquired=True,
+    )
+
+    assert (
+        await http_bridge_accepted_replay_module._stage_websocket_request_state_for_replay(
+            request_state,
+            create_gate=gate,
+            surface="http_bridge",
+            trigger="capacity_error",
+        )
+        is True
+    )
+
+    assert request_state.replay_downstream_response_id is None
+    assert request_state.suppress_next_created_downstream is False
+    assert request_state.suppress_next_in_progress_downstream is False
+    assert request_state.response_create_admission_reacquire_required is False
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_id is None
+    assert gate.locked() is True
+
+
+@pytest.mark.asyncio
+async def test_stage_websocket_request_state_for_replay_keeps_the_terminal_settlement_claim() -> None:
+    """The bridge terminal bookkeeping owns the "claimed" marker it recorded
+    when it popped the request; staging a replay must leave it in place so a
+    failed replay followed by an abort still settles the reservation (#1594)."""
+    request_state = _accepted_bridge_request_state(terminal_settlement_phase="claimed")
+
+    assert (
+        await http_bridge_accepted_replay_module._stage_websocket_request_state_for_replay(
+            request_state,
+            create_gate=asyncio.Semaphore(1),
+            surface="http_bridge",
+            trigger="capacity_error",
+        )
+        is True
+    )
+
+    assert request_state.terminal_settlement_phase == "claimed"
+    assert request_state.replay_downstream_response_id == "resp-accepted-visible"
+    assert request_state.awaiting_response_created is True
+
+
+@pytest.mark.asyncio
+async def test_claim_websocket_replay_create_gate_marks_shared_admission_for_reacquisition() -> None:
+    """An accepted request released the session create gate and the shared
+    work admission together at ``response.created``; re-claiming the gate for
+    its replay must therefore flag the admission for re-acquisition. A
+    pre-created request that still holds both keeps its state."""
+    gate = asyncio.Semaphore(1)
+    accepted = _accepted_bridge_request_state(request_id="req-accepted-claim-gate")
+
+    assert await http_bridge_accepted_replay_module._claim_websocket_replay_create_gate(accepted, gate) is True
+
+    assert gate.locked() is True
+    assert accepted.response_create_gate is gate
+    assert accepted.response_create_gate_acquired is True
+    assert accepted.response_create_admission_reacquire_required is True
+
+    held_gate = asyncio.Semaphore(1)
+    await held_gate.acquire()
+    precreated = _accepted_bridge_request_state(
+        request_id="req-precreated-claim-gate",
+        response_id=None,
+        awaiting_response_created=True,
+        response_event_count=0,
+        response_create_gate=held_gate,
+        response_create_gate_acquired=True,
+        response_create_admission=cast(Any, object()),
+    )
+
+    assert await http_bridge_accepted_replay_module._claim_websocket_replay_create_gate(precreated, held_gate) is True
+
+    assert precreated.response_create_admission_reacquire_required is False
+
+
+@pytest.mark.asyncio
+async def test_stage_websocket_request_state_for_replay_without_gate_only_marks_created_only_prelude() -> None:
+    """Websocket surface (no gate supplied): a created-only accepted request
+    suppresses just the replay's ``response.created``; the client never saw an
+    ``in_progress`` so the replay's own one is forwarded."""
+    request_state = _accepted_bridge_request_state(response_event_count=1, transport="websocket")
+
+    assert (
+        await http_bridge_accepted_replay_module._stage_websocket_request_state_for_replay(
+            request_state,
+            create_gate=None,
+            surface="websocket",
+            trigger="capacity_error",
+        )
+        is True
+    )
+
+    assert request_state.replay_downstream_response_id == "resp-accepted-visible"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.suppress_next_in_progress_downstream is False
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_id is None
+    assert request_state.response_event_count == 0
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_model_capacity_waits_before_retrying_safe_injected_anchor(
     monkeypatch: pytest.MonkeyPatch,
@@ -5568,6 +6695,9 @@ async def test_http_bridge_model_capacity_waits_before_retrying_safe_injected_an
             "emit_keepalives": True,
             "error_message": capacity_message,
             "cancel_when_detached": True,
+            # A pre-created request still owns the startup wait; only an
+            # accepted lifecycle passes ``signal_startup_wait=False``.
+            "signal_startup_wait": True,
             "scheduler": service._scheduler,
             "clock": service._clock,
         }
@@ -46277,3 +47407,48 @@ async def test_forward_http_bridge_request_to_owner_passes_owner_scheduler_and_c
     assert chunks == []
     assert captured["scheduler"] is scheduler
     assert captured["clock"] is clock
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_refuses_a_third_send_after_an_accepted_replay_clean_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2127 P3: the accepted replay was re-sent once and its replacement socket
+    closed cleanly before ``response.created``. The bounded clean-close retry
+    must not turn that into a third send; the request fails closed under the
+    visible id instead."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _accepted_bridge_request_state(
+        request_id="req-accepted-clean-close-third-send",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        replay_count=1,
+        replay_downstream_response_id="resp-accepted-visible",
+        suppress_next_created_downstream=True,
+        response_create_gate_acquired=True,
+        account_response_create_lease=cast(Any, object()),
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-accepted-clean-close", None),
+        key_value="bridge-accepted-clean-close",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    await session.response_create_gate.acquire()
+    session.last_upstream_close_code = 1000
+    session.last_upstream_close_generation = 3
+    send_text = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(service, "_release_request_state_account_response_create_lease", AsyncMock())
+
+    assert await service._retry_http_bridge_precreated_request(session) is False
+
+    reconnect.assert_not_awaited()
+    send_text.assert_not_awaited()
+    assert request_state.replay_count == 1
+    assert request_state.clean_close_replay_count == 0
+    assert request_state.replay_downstream_response_id == "resp-accepted-visible"

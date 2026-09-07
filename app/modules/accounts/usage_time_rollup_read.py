@@ -43,11 +43,14 @@ the epoch (or the state row is missing, via the raw branch's OUTER join).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 from sqlalchemy import BigInteger, ColumnElement, Integer, Select, and_, cast, func, literal, or_, select, union_all
 from sqlalchemy import cast as sa_cast
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import ColumnExpressionArgument
 from sqlalchemy.sql.selectable import CompoundSelect
 
 from app.db.models import (
@@ -69,6 +72,13 @@ from app.modules.accounts.usage_time_rollup import (
     _requested_at_epoch_bucket_expr,
     conversation_id_expr,
     epoch_seconds,
+)
+from app.modules.quota_planner.logic import (
+    DEMAND_CACHED_INPUT_TOKEN_WEIGHT,
+    DEMAND_OUTPUT_TOKEN_WEIGHT,
+    DEMAND_TOKENS_PER_UNIT,
+    DEMAND_UNITS_PER_COST_USD,
+    DEMAND_UNITS_PER_REQUEST,
 )
 
 _EPOCH = datetime(1970, 1, 1)
@@ -210,6 +220,114 @@ async def sum_demand_window(
     if folded_until_epoch is None:
         return 0, raw_windows
     return folded_total, raw_windows
+
+
+@dataclass(frozen=True, slots=True)
+class DemandSlotUnitsRow:
+    """Demand units already summed per ``(slot_epoch, request_kind)``."""
+
+    slot_epoch: int
+    request_kind: str
+    demand_units: float
+
+
+def demand_units_sql_expr(
+    *,
+    dialect: str,
+    input_tokens: ColumnExpressionArgument[Any],
+    cached_input_tokens: ColumnExpressionArgument[Any],
+    output_tokens: ColumnExpressionArgument[Any],
+    cost_usd: ColumnExpressionArgument[Any],
+    request_count: ColumnExpressionArgument[Any],
+) -> ColumnElement[Any]:
+    """``_bin_demand_units`` compiled to SQL for ONE legacy-grain row.
+
+    ``max(token_units, cost_units, request_units)`` per row, with the same
+    ``max(0, ·)`` clamps; callers SUM this over the rows of a slot. Postgres
+    spells the scalar maximum ``GREATEST``; SQLite's multi-argument ``MAX``
+    is the scalar form.
+    """
+    scalar_max = func.greatest if dialect == "postgresql" else func.max
+    zero = literal(0)
+    token_units = (
+        scalar_max(input_tokens, zero)
+        + DEMAND_CACHED_INPUT_TOKEN_WEIGHT * scalar_max(cached_input_tokens, zero)
+        + DEMAND_OUTPUT_TOKEN_WEIGHT * scalar_max(output_tokens, zero)
+    ) / DEMAND_TOKENS_PER_UNIT
+    cost_units = scalar_max(cost_usd, literal(0.0)) * DEMAND_UNITS_PER_COST_USD
+    request_units = scalar_max(request_count, zero) * DEMAND_UNITS_PER_REQUEST
+    return scalar_max(token_units, cost_units, request_units)
+
+
+async def read_demand_slot_units_window(
+    session: AsyncSession,
+    since: datetime,
+    until: datetime | None = None,
+    *,
+    filters: Sequence[ColumnElement[bool]] = (),
+) -> tuple[list[DemandSlotUnitsRow], list[RawWindow]]:
+    """Watermark-consistent per-slot demand units over the demand rollup.
+
+    Same partitioning rule as ``read_demand_window`` but reduced in SQL: the
+    per-row ``_bin_demand_units`` max is applied at the rollup's legacy grain
+    and summed per ``(slot_epoch, request_kind)`` before crossing the wire,
+    so a 28-day planning window returns a few thousand rows instead of one
+    row per (account, key, model, effort, kind, status) grain. Watermark and
+    folded rows come from ONE statement (state LEFT JOIN demand bounded by
+    the state row's own watermark epoch), exactly like ``sum_demand_window``.
+    """
+    lo_epoch = epoch_seconds(ceil_to_grid(since, QUARTER_SLOT_SECONDS))
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        watermark_epoch = sa_cast(func.extract("epoch", AccountUsageRollupState.hourly_folded_through), BigInteger)
+    else:
+        watermark_epoch = sa_cast(func.strftime("%s", AccountUsageRollupState.hourly_folded_through), Integer)
+    join_conditions = [
+        *filters,
+        RequestDemandQuarterRollup.slot_epoch >= lo_epoch,
+        RequestDemandQuarterRollup.slot_epoch < watermark_epoch,
+    ]
+    if until is not None:
+        join_conditions.append(
+            RequestDemandQuarterRollup.slot_epoch < epoch_seconds(floor_to_grid(until, QUARTER_SLOT_SECONDS))
+        )
+    units_expr = demand_units_sql_expr(
+        dialect=dialect,
+        input_tokens=RequestDemandQuarterRollup.input_tokens,
+        cached_input_tokens=RequestDemandQuarterRollup.cached_input_tokens,
+        output_tokens=RequestDemandQuarterRollup.output_or_reasoning_tokens,
+        cost_usd=RequestDemandQuarterRollup.cost_usd,
+        request_count=RequestDemandQuarterRollup.request_count,
+    )
+    stmt = (
+        select(
+            AccountUsageRollupState.hourly_folded_through,
+            RequestDemandQuarterRollup.slot_epoch,
+            RequestDemandQuarterRollup.request_kind,
+            func.sum(units_expr),
+        )
+        .select_from(AccountUsageRollupState)
+        .outerjoin(RequestDemandQuarterRollup, and_(*join_conditions))
+        .where(AccountUsageRollupState.id == _STATE_ROW_ID)
+        .group_by(
+            AccountUsageRollupState.hourly_folded_through,
+            RequestDemandQuarterRollup.slot_epoch,
+            RequestDemandQuarterRollup.request_kind,
+        )
+        .order_by(RequestDemandQuarterRollup.slot_epoch)
+    )
+    rows = (await session.execute(stmt)).all()
+    if not rows:
+        return [], [(since, until)]
+    watermark = rows[0][0]
+    folded_until_epoch, raw_windows = _partition_raw_windows(since, until, watermark, QUARTER_SLOT_SECONDS)
+    if folded_until_epoch is None:
+        return [], raw_windows
+    return [
+        DemandSlotUnitsRow(slot_epoch=int(row[1]), request_kind=row[2], demand_units=float(row[3] or 0.0))
+        for row in rows
+        if row[1] is not None
+    ], raw_windows
 
 
 def raw_windows_clause(windows: Sequence[RawWindow]) -> ColumnElement[bool]:

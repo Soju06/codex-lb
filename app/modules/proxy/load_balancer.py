@@ -60,7 +60,7 @@ from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
 from app.core.usage.quota import apply_usage_quota
-from app.core.utils.time import utcnow
+from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
 from app.modules.proxy._load_balancer.model_eligibility import (
@@ -1489,7 +1489,7 @@ class LoadBalancer:
         if not accounts:
             return _AdditionalLimitFilterResult(accounts=[], latest_primary={}, latest_secondary={})
 
-        fresh_since = _additional_usage_fresh_since()
+        fresh_since = _additional_usage_fresh_since(to_utc_naive(self._clock.now()))
         account_ids = [account.id for account in accounts]
         latest_primary = await _latest_additional_by_key(
             repos.additional_usage,

@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -98,8 +98,14 @@ async def test_additional_limit_filter_evaluates_quota_resets_on_the_injected_cl
     entries = {exhausted.id: _additional_usage(exhausted.id, used_percent=100.0, reset_at=reset_at)}
     _forbid_wall_clock(monkeypatch)
 
-    async def latest_by_quota_key(quota_key: str, window: str, **_kwargs: object) -> dict[str, AdditionalUsageHistory]:
+    fresh_since_cutoffs: list[datetime] = []
+
+    async def latest_by_quota_key(
+        quota_key: str, window: str, *, since: datetime | None = None, **_kwargs: object
+    ) -> dict[str, AdditionalUsageHistory]:
         assert quota_key == "codex_spark"
+        if since is not None:
+            fresh_since_cutoffs.append(since)
         return dict(entries) if window == "primary" else {}
 
     repos = SimpleNamespace(additional_usage=SimpleNamespace(latest_by_quota_key=latest_by_quota_key))
@@ -124,3 +130,10 @@ async def test_additional_limit_filter_evaluates_quota_resets_on_the_injected_cl
     assert before_reset.error_code == "quota_exhausted"
     assert [account.id for account in at_reset.accounts] == ["exhausted"]
     assert at_reset.error_code is None
+    # The freshness cutoff shares the injected clock with the exhaustion check:
+    # both calls sample it once per call, and it moves with the virtual clock.
+    assert len(fresh_since_cutoffs) == 4
+    assert fresh_since_cutoffs[0] == fresh_since_cutoffs[1]
+    assert fresh_since_cutoffs[2] == fresh_since_cutoffs[3]
+    assert fresh_since_cutoffs[2] - fresh_since_cutoffs[0] == timedelta(seconds=600)
+    assert fresh_since_cutoffs[2] < datetime.fromtimestamp(clock.time(), timezone.utc).replace(tzinfo=None)

@@ -5750,6 +5750,28 @@ class _WebSocketMixin:
                 surface="websocket",
             )
 
+        if (
+            event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
+            and not has_other_pending_requests
+        ):
+            # ``has_other_pending_requests`` was snapshotted under the lock when
+            # the terminal popped this request, but the thread-affinity refresh
+            # above awaits a sticky-session write, and an accepted request no
+            # longer holds the session create gate (released at
+            # ``response.created``): the sender may have admitted and sent a
+            # younger ``response.create`` on this socket meanwhile. A replay
+            # decided on the stale snapshot would retire the shared socket under
+            # that turn with no terminal and wedge the gate behind it. Re-read
+            # the pending set under the lock right before the replay classifiers
+            # consume it; the accepted path sets the reconnect latch without
+            # awaiting after this point, and the sender re-checks that latch at
+            # its send boundary, so a turn admitted later is transferred instead.
+            async with pending_lock:
+                has_other_pending_requests = _websocket_owner_switch_has_other_pending_requests(
+                    request_state,
+                    pending_requests,
+                )
+
         retry_is_previous_response_not_found = is_previous_response_not_found_event
         retry_error_code = _websocket_precreated_retry_error_code(
             request_state,

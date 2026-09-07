@@ -53828,6 +53828,165 @@ async def test_process_upstream_websocket_text_forwards_sequenced_accepted_capac
     assert pending_request.excluded_account_ids == set()
 
 
+class _YoungerTurnAdmittedDuringAffinityTouch:
+    """Sender/reader interleaving on one direct websocket upstream socket.
+
+    The accepted request released the session create gate at
+    ``response.created``. Its output-free capacity terminal pops it under the
+    pending lock, then the reader awaits the throttled thread-affinity write
+    (``sticky_sessions.upsert``). That write is the yield point where the
+    sender takes the free gate, registers a younger ``response.create`` and
+    sends it on the same socket.
+    """
+
+    def __init__(self) -> None:
+        self.repo_context = _RepoContext(_RequestLogsRecorder())
+        self.sticky_sessions = cast(AsyncMock, self.repo_context._repos.sticky_sessions)
+        self.sticky_sessions.upsert.side_effect = self._admit_younger_turn
+        self.pending_lock = anyio.Lock()
+        # Nothing holds the session gate once the accepted turn's created went out.
+        self.response_create_gate = asyncio.Semaphore(1)
+        self.accepted_request = _accepted_lifecycle_request_state(
+            request_id="ws_req_accepted_race_a",
+            response_id="resp_accepted_race_a",
+            response_create_gate_acquired=False,
+            affinity_policy=proxy_service._AffinityPolicy(
+                key="thread_accepted_race",
+                kind=StickySessionKind.PROMPT_CACHE,
+                max_age_seconds=600,
+                codex_session_source="thread_header",
+            ),
+            # The throttled touch (min(max_age / 2, 60s)) is due.
+            thread_affinity_last_touch_at=-1_000_000.0,
+        )
+        self.younger_request = _accepted_lifecycle_request_state(
+            request_id="ws_req_accepted_race_b",
+            awaiting_response_created=True,
+            response_id=None,
+            response_event_count=0,
+            response_create_sent_at=None,
+        )
+        self.pending_requests = deque([self.accepted_request])
+        self.upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    def repo_factory(self) -> _RepoContext:
+        return self.repo_context
+
+    async def _admit_younger_turn(self, *_args: object, **_kwargs: object) -> None:
+        await self.response_create_gate.acquire()
+        self.younger_request.response_create_gate = self.response_create_gate
+        self.younger_request.response_create_gate_acquired = True
+        async with self.pending_lock:
+            self.pending_requests.append(self.younger_request)
+        self.younger_request.response_create_sent_at = 5.0
+
+    def assert_accepted_replay_refused(self) -> None:
+        self.sticky_sessions.upsert.assert_awaited_once()
+        assert self.upstream_control.reconnect_requested is False
+        assert self.upstream_control.suppress_downstream_event is False
+        assert self.upstream_control.replay_request_state is None
+        # The younger turn keeps the socket and the gate it holds.
+        assert self.pending_requests == deque([self.younger_request])
+        assert self.response_create_gate.locked()
+        assert self.accepted_request.replay_count == 0
+        assert self.accepted_request.response_id == "resp_accepted_race_a"
+        assert self.accepted_request.awaiting_response_created is False
+        assert self.accepted_request.replay_downstream_response_id is None
+        assert self.accepted_request.suppress_next_created_downstream is False
+        assert self.accepted_request.suppress_next_in_progress_downstream is False
+        assert self.accepted_request.excluded_account_ids == set()
+        assert self.accepted_request.affinity_policy.reallocate_sticky is False
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_refuses_accepted_replay_after_a_turn_admitted_during_affinity_touch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#2127 round 5 P1: ``has_other_pending_requests`` was snapshotted under
+    the pending lock when the capacity terminal popped the accepted request,
+    but the thread-affinity refresh that follows awaits a sticky-session write,
+    and the accepted request no longer holds the session create gate. A younger
+    ``response.create`` admitted and sent on the same socket during that await
+    was invisible to the replay classifiers: the accepted request was staged,
+    the reader retired the shared socket under the younger turn (no terminal,
+    gate held) and the replay then blocked behind that gate. The guard must
+    observe the younger turn -- the terminal is finalized and forwarded
+    unchanged, exactly as when the sibling was pending before the terminal."""
+    race = _YoungerTurnAdmittedDuringAffinityTouch()
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, race.repo_factory))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_accepted_race_owner")
+    upstream_text = json.dumps(_accepted_capacity_error_payload(), separators=(",", ":"))
+
+    downstream_text = await service._process_upstream_websocket_text(
+        upstream_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=race.pending_requests,
+        pending_lock=race.pending_lock,
+        api_key=None,
+        upstream_control=race.upstream_control,
+        response_create_gate=race.response_create_gate,
+    )
+
+    assert downstream_text == upstream_text
+    race.assert_accepted_replay_refused()
+    finalize_request_state.assert_awaited_once()
+    assert finalize_request_state.await_args is not None
+    assert finalize_request_state.await_args.args[0] is race.accepted_request
+    assert finalize_request_state.await_args.kwargs["event_type"] == "error"
+    handle_stream_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_and_forward_upstream_websocket_text_keeps_the_socket_for_a_turn_admitted_during_affinity_touch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#2127 round 5 P1, relay level: the reader must not retire the shared
+    upstream socket (no ``upstream.close``, reader keeps running) under a
+    younger turn that was admitted while the accepted request's capacity
+    terminal awaited the thread-affinity write; the client reads that terminal
+    unchanged and the younger turn keeps its socket and gate."""
+    race = _YoungerTurnAdmittedDuringAffinityTouch()
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, race.repo_factory))
+    finalize_request_state = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_accepted_race_relay")
+    downstream = _ScriptedDownstreamWebSocket()
+    upstream_close = AsyncMock()
+    upstream = SimpleNamespace(archive_received=lambda _message: None, close=upstream_close)
+    text = json.dumps(_accepted_capacity_error_payload(), separators=(",", ":"))
+
+    should_stop_reader = await websocket_mixin_module._process_and_forward_upstream_websocket_text(
+        cast(Any, service),
+        cast(Any, downstream),
+        cast(Any, upstream),
+        message=SimpleNamespace(kind="text", text=text),
+        text=text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=race.pending_requests,
+        pending_lock=race.pending_lock,
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=race.upstream_control,
+        response_create_gate=race.response_create_gate,
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+        continuity_state=None,
+        codex_session_affinity=False,
+    )
+
+    assert should_stop_reader is False
+    upstream_close.assert_not_awaited()
+    assert downstream.sent_text == [text]
+    race.assert_accepted_replay_refused()
+    finalize_request_state.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_process_upstream_websocket_text_marks_model_output_and_refuses_accepted_replay_without_in_progress(
     monkeypatch: pytest.MonkeyPatch,

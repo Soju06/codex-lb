@@ -207,7 +207,6 @@ class RoutingAvailabilityCache:
                 await close_session(session)
             self._usage_caps = snapshot
 
-
     def reset(self) -> None:
         """Drop all state (snapshot back to unseeded). Test isolation helper."""
         self._snapshot = None

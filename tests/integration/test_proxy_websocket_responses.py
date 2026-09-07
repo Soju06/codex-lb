@@ -14398,11 +14398,16 @@ def test_backend_responses_websocket_re_sends_an_anchored_accepted_failure_in_a_
     assert "previous_response_id" not in replayed_payload
     assert replayed_payload["input"] == [failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]
     assert other_account_upstream.sent_text == []
+
+
 def test_reused_websocket_usage_cap_blocks_new_turn_and_recovers(app_instance, monkeypatch):
-    upstream = _SequencedUpstreamWebSocket([], deferred_message_batches=[
-        _websocket_response_batch("resp_before_cap"),
-        _websocket_response_batch("resp_after_cap"),
-    ])
+    upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            _websocket_response_batch("resp_before_cap"),
+            _websocket_response_batch("resp_after_cap"),
+        ],
+    )
     capped = False
 
     class SettingsCache:
@@ -14427,12 +14432,13 @@ def test_reused_websocket_usage_cap_blocks_new_turn_and_recovers(app_instance, m
             websocket.send_json(_websocket_response_create("first"))
             assert websocket.receive_json()["type"] == "response.created"
             assert websocket.receive_json()["type"] == "response.completed"
+            release.reset_mock()
             capped = True
             websocket.send_json(_websocket_response_create("blocked"))
             event = websocket.receive_json()
             assert event["response"]["error"]["code"] == "account_usage_cap_reached"
             assert len(upstream.sent_text) == 1
-            release.assert_awaited()
+            release.assert_awaited_once()
             capped = False
             websocket.send_json(_websocket_response_create("resumed"))
             assert websocket.receive_json()["type"] == "response.created"

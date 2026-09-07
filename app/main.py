@@ -543,9 +543,7 @@ async def lifespan(app: FastAPI):
         NAMESPACE_ACCOUNT_SELECTION,
         lambda: get_account_selection_cache().invalidate(propagate=False),
     )
-    cache_poller.on_invalidation(
-        NAMESPACE_ACCOUNT_SELECTION, routing_availability_cache.refresh_usage_caps_from_db
-    )
+    cache_poller.on_invalidation(NAMESPACE_ACCOUNT_SELECTION, routing_availability_cache.refresh_usage_caps_from_db)
     cache_poller.on_invalidation(
         NAMESPACE_SETTINGS,
         lambda: get_settings_cache().invalidate(propagate=False),
@@ -594,11 +592,16 @@ async def lifespan(app: FastAPI):
         logger.warning("cache invalidation baseline prime failed", exc_info=True)
     try:
         await routing_availability_cache.refresh_from_db()
-        await routing_availability_cache.refresh_usage_caps_from_db()
     except Exception:
         # Unseeded snapshot degrades to local-mark semantics; the next
         # account_routing bump retries the refresh via the poller callback.
         logger.warning("initial routing availability snapshot refresh failed", exc_info=True)
+    try:
+        await routing_availability_cache.refresh_usage_caps_from_db()
+    except Exception:
+        # Cap admission has its own snapshot and can recover independently of
+        # the status refresh above on the next account_routing bump.
+        logger.warning("initial account usage cap snapshot refresh failed", exc_info=True)
 
     if settings.model_registry_enabled:
         from app.core.openai.model_registry_store import reconcile_model_registry_from_store

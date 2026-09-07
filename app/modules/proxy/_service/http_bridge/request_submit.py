@@ -1130,7 +1130,8 @@ class _HTTPBridgeRequestSubmitMixin:
     ) -> None:
         if is_account_usage_capped(session.account.id):
             raise ProxyResponseError(
-                429, openai_error("account_usage_cap_reached", "Account usage cap reached"),
+                429,
+                openai_error("account_usage_cap_reached", "Account usage cap reached"),
             )
         clock = clock_for(self)
         # Own admission from submit entry, not from the dispatch registration:

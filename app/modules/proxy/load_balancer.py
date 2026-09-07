@@ -1323,14 +1323,8 @@ class LoadBalancer:
                     _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
                 )
                 return selection_inputs
-
-            # These share one AsyncSession: concurrent execution on a single
-            # session is unsafe (asyncpg) and gains nothing — the driver
-            # serializes statements per connection anyway.
             standard_latest_primary = await repos.usage.latest_by_account()
             standard_latest_secondary = await repos.usage.latest_by_account(window="secondary")
-            # Keep ownership candidates intact; operator caps are availability,
-            # not permission to move account-local state to another account.
             accounts = [
                 account
                 for account in accounts

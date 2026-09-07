@@ -459,7 +459,6 @@ async def update_account_usage_caps(
     return payload
 
 
-
 @router.delete("/{account_id}", response_model=AccountDeleteResponse)
 async def delete_account(
     request: Request,

@@ -678,15 +678,12 @@ class AccountsService:
             get_account_selection_cache().invalidate()
         return result
 
-    async def set_usage_caps(
-        self, account_id: str, *, cap_5h: float | None, cap_weekly: float | None
-    ) -> bool:
+    async def set_usage_caps(self, account_id: str, *, cap_5h: float | None, cap_weekly: float | None) -> bool:
         result = await self._repo.update_usage_caps(account_id, cap_5h=cap_5h, cap_weekly=cap_weekly)
         if result:
             get_account_selection_cache().invalidate()
             await get_routing_availability_cache().refresh_usage_caps_from_db()
         return result
-
 
     async def delete_account(self, account_id: str, *, delete_history: bool = False) -> bool:
         # Fast path: stamp the pending-deletion marker (terminal status, hidden

@@ -5672,6 +5672,119 @@ async def test_http_bridge_accepted_overload_code_stages_single_lifecycle_replay
     assert request_state.event_queue.empty()
 
 
+_ACCEPTED_BRIDGE_ANCHORED_REQUEST_TEXT = json.dumps(
+    {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "previous_response_id": "resp-bridge-anchor",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+    },
+    separators=(",", ":"),
+)
+_ACCEPTED_BRIDGE_FRESH_REPLAY_TEXT = json.dumps(
+    {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "first"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ],
+    },
+    separators=(",", ":"),
+)
+
+
+def _accepted_anchored_bridge_request_state(**overrides: Any) -> proxy_service._WebSocketRequestState:
+    """Accepted bridge follow-up whose ``previous_response_id`` the proxy injected
+    (continuity anchor) with the full resend retained as a retry-safe fresh body."""
+    values: dict[str, Any] = {
+        "request_text": _ACCEPTED_BRIDGE_ANCHORED_REQUEST_TEXT,
+        "previous_response_id": "resp-bridge-anchor",
+        "proxy_injected_previous_response_id": True,
+        "preferred_account_id": "acc-bridge",
+        "fresh_upstream_request_text": _ACCEPTED_BRIDGE_FRESH_REPLAY_TEXT,
+        "fresh_upstream_request_is_retry_safe": True,
+    }
+    values.update(overrides)
+    return _accepted_bridge_request_state(**values)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["server_is_overloaded", "overloaded_error"])
+async def test_http_bridge_accepted_anchored_overload_code_stages_single_lifecycle_replay_without_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+) -> None:
+    """#2127 round 3 P2: an accepted anchored follow-up (proxy-injected
+    anchor, retry-safe fresh body) that fails with a bare transparent overload
+    code -- no selected-model capacity message -- must take the same
+    single-lifecycle replay the capacity-message wait branch gives it. The
+    branch used to stage unanchored requests only and forwarded this terminal
+    unchanged."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
+    request_state = _accepted_anchored_bridge_request_state()
+    session = _make_bridge_session(
+        key_value="bridge-accepted-anchored-overload",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        _capacity_error_text(code=code, message=_OVERLOADED_MESSAGE),
+    )
+
+    _assert_staged_for_single_lifecycle_replay(request_state, session)
+    # The anchor is handed to the retry untouched; the retry's owner-switch
+    # prep decides between the fresh body on another account and the anchored
+    # body on its owner.
+    assert request_state.previous_response_id == "resp-bridge-anchor"
+    assert request_state.request_text == _ACCEPTED_BRIDGE_ANCHORED_REQUEST_TEXT
+    retry_precreated.assert_awaited_once_with(session)
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[2] == code
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty(), "the upstream terminal must not reach the client during a replay"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_accepted_client_anchored_overload_code_forwards_the_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client-supplied anchor is replayed only by the bridge's transport-
+    failure path (its full resend is transport-only), so the pre-created retry
+    would refuse it. Staging it would only rewrite the upstream terminal into
+    ``stream_incomplete``; the terminal is forwarded unchanged instead."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
+    request_state = _accepted_anchored_bridge_request_state(proxy_injected_previous_response_id=False)
+    session = _make_bridge_session(
+        key_value="bridge-accepted-client-anchored-overload",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        _capacity_error_text(code="server_is_overloaded", message=_OVERLOADED_MESSAGE),
+    )
+
+    retry_precreated.assert_not_awaited()
+    assert request_state not in session.pending_requests
+    assert request_state.replay_downstream_response_id is None
+    assert request_state.suppress_next_created_downstream is False
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.event_queue is not None
+    terminal_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert terminal_block is not None
+    terminal = proxy_service.parse_sse_data_json(terminal_block)
+    assert isinstance(terminal, dict)
+    assert terminal["type"] == "error"
+    assert cast(dict[str, Any], terminal["error"])["code"] == "server_is_overloaded"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("code", "message"),
@@ -5897,6 +6010,53 @@ async def test_retry_http_bridge_precreated_request_replays_accepted_lifecycle_a
     assert reconnect_call.kwargs["request_state"] is request_state
     assert "require_same_account" not in reconnect_call.kwargs
     send_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_replays_an_accepted_anchored_follow_up_with_the_fresh_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retry the transparent-code branch now hands an accepted anchored
+    follow-up to (#2127 round 3 P2): the owner-switch prep strips the
+    proxy-injected anchor, swaps the retained full resend in, releases the
+    anchor owner's pin and excludes the failing account, and the replay is
+    sent within the single lifecycle the client is reading."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _accepted_anchored_bridge_request_state(
+        request_id="req-accepted-anchored-retry",
+        account_response_create_lease=cast(Any, object()),
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("request", "bridge-accepted-anchored-retry", None),
+        key_value="bridge-accepted-anchored-retry",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    send_text = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is True
+
+    assert request_state.replay_downstream_response_id == "resp-accepted-visible"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_id is None
+    assert request_state.replay_count == 1
+    assert request_state.request_text == _ACCEPTED_BRIDGE_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.proxy_injected_previous_response_id is False
+    assert request_state.preferred_account_id is None
+    assert request_state.replay_required_account_id is None
+    assert request_state.excluded_account_ids == {session.account.id}
+    reconnect.assert_awaited_once()
+    send_text.assert_awaited_once()
+    sent_payload = json.loads(send_text.await_args.args[0]) if send_text.await_args is not None else None
+    assert isinstance(sent_payload, dict)
+    assert "previous_response_id" not in sent_payload
+    assert sent_payload["input"] == json.loads(_ACCEPTED_BRIDGE_FRESH_REPLAY_TEXT)["input"]
 
 
 @pytest.mark.asyncio

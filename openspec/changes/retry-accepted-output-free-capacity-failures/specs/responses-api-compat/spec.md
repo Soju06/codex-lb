@@ -19,6 +19,14 @@ The replay MUST capture the client-visible response id and arm prelude suppressi
 - **AND** the client observes exactly one `response.created`
 - **AND** the `response.completed` the client receives carries that `response.created` id
 
+#### Scenario: Bridge bare overload code after an accepted anchored follow-up is replayed
+
+- **GIVEN** an HTTP bridge follow-up turn whose `previous_response_id` the proxy injected and whose full resend is retained as a retry-safe fresh body
+- **AND** upstream accepted it (`response.created` forwarded) and produced no output
+- **WHEN** upstream then emits an `error` with code `server_is_overloaded` or `overloaded_error` whose message does not name the selected-model capacity
+- **THEN** the bridge stages the single-lifecycle replay and hands the request to the pre-created retry exactly as it does after the selected-model capacity message (owner-switch prep with the fresh body, or the anchored body to its owner)
+- **AND** a client-supplied anchor is forwarded unchanged, because the bridge's pre-created retry only re-sends proxy-injected anchors
+
 #### Scenario: Bridge abrupt close after acceptance is retried on another account
 
 - **GIVEN** an unanchored native Codex bridge request whose `response.created` and `response.in_progress` were forwarded

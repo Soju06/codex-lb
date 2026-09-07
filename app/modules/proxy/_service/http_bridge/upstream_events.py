@@ -62,6 +62,7 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.accepted_replay import (
+    _http_bridge_accepted_anchored_replay_candidate,
     _stage_websocket_request_state_for_replay,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -3613,7 +3614,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                 {"message": retry_error_message or "Upstream error"},
                 retry_error_code,
             )
-            if status_request_state is not None and status_request_state.previous_response_id is None:
+            # Pre-created anchored requests belong to the owner-pinned branch
+            # above; an accepted anchored follow-up with a proxy-injected
+            # anchor and a retry-safe fresh body is replayed here exactly as
+            # the capacity-message wait branch replays it.
+            if status_request_state is not None and (
+                status_request_state.previous_response_id is None
+                or _http_bridge_accepted_anchored_replay_candidate(status_request_state)
+            ):
                 async with session.pending_lock:
                     if status_request_state not in session.pending_requests:
                         session.pending_requests.appendleft(status_request_state)

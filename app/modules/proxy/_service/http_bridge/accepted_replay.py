@@ -84,6 +84,32 @@ def _websocket_accepted_replay_candidate(
     return True
 
 
+def _http_bridge_accepted_anchored_replay_candidate(request_state: _WebSocketRequestState) -> bool:
+    """Return whether an accepted anchored bridge request may be staged for the pre-created retry.
+
+    The bridge's transparent-code branch used to stage only unanchored
+    requests, so an accepted follow-up whose anchor the proxy injected was
+    replayed after the selected-model capacity *message* (the wait branch) but
+    forwarded unchanged after a bare ``server_is_overloaded`` /
+    ``overloaded_error`` code. ``_retry_http_bridge_precreated_request``
+    re-sends a proxy-injected anchor through the owner-switch prep (fresh body
+    on another account) or, when the fresh body is account-bound, the anchored
+    body to its owner, so those requests qualify. A client-supplied anchor is
+    replayed only by the transport-failure path (its proof-gated full resend
+    is transport-only, see ``request_is_retryable``), so its capacity terminal
+    keeps being forwarded rather than staged into a retry that would refuse
+    it and rewrite the terminal.
+    """
+    return bool(
+        request_state.response_id is not None
+        and not request_state.awaiting_response_created
+        and request_state.previous_response_id is not None
+        and request_state.proxy_injected_previous_response_id
+        and request_state.fresh_upstream_request_is_retry_safe
+        and request_state.fresh_upstream_request_text
+    )
+
+
 def _positive_token_count(value: JsonValue | None) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
 

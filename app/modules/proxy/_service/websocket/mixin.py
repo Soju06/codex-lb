@@ -415,6 +415,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _pop_terminal_websocket_request_state,
     _prepare_websocket_request_state_for_account_switch,
     _prepare_websocket_request_state_for_auth_replay,
+    _record_or_defer_websocket_accepted_replay_health,
     _record_websocket_continuity_completion,
     _record_websocket_responses_lite_acceptance,
     _record_websocket_stale_anchor_failure,
@@ -5945,11 +5946,25 @@ class _WebSocketMixin:
                     request_state.affinity_policy = replace(request_state.affinity_policy, reallocate_sticky=True)
                 upstream_control.suppress_downstream_event = True
                 upstream_control.replay_request_state = request_state
-                await proxy._handle_stream_error(
-                    account,
-                    {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
-                    retry_error_code,
-                )
+                if accepted_lifecycle_replay:
+                    # The accepted request still holds its API-key reservation:
+                    # the health write waits for its settlement (bridge parity).
+                    # Pre-created replays keep the immediate write; they are not
+                    # excluded from the reconnect and rely on the penalty to
+                    # steer selection away from this account.
+                    await _record_or_defer_websocket_accepted_replay_health(
+                        proxy,
+                        request_state,
+                        account=account,
+                        error_message=_websocket_event_error_message(event_type, payload),
+                        error_code=retry_error_code,
+                    )
+                else:
+                    await proxy._handle_stream_error(
+                        account,
+                        {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
+                        retry_error_code,
+                    )
             if retry_error_code is not None:
                 return downstream_text
 

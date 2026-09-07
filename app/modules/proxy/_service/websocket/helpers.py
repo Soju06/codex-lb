@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import anyio
 
+from app.core.balancer.types import UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
@@ -68,6 +69,7 @@ from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  #
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
+    Account,
     AccountStatus,  # noqa: F401
 )
 from app.modules.proxy._service.api_key_usage import (
@@ -289,6 +291,7 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _clear_websocket_request_error_overrides,
+    _DeferredKeyedStreamHealthPenalty,
     _event_type_from_payload,
     _websocket_request_can_replay_before_visible_output,
     _WebSocketContinuityAnchor,
@@ -584,6 +587,36 @@ def _websocket_accepted_replay_can_switch_account(request_state: "_WebSocketRequ
     ):
         return False
     return _websocket_auth_request_can_switch_account(request_state)
+
+
+async def _record_or_defer_websocket_accepted_replay_health(
+    proxy: Any,
+    request_state: "_WebSocketRequestState",
+    *,
+    account: Account,
+    error_message: str | None,
+    error_code: str,
+) -> None:
+    """Penalize the account an accepted replay leaves, now or after settlement.
+
+    The accepted request keeps its API-key reservation open across the
+    re-send, and account health must not be written while a reservation is
+    unsettled (api-keys spec settlement-ordering invariant; bridge parity with
+    ``_handle_or_defer_precreated_stream_health``). A keyed request queues the
+    classified penalty on its state; ``_finalize_websocket_request_state`` and
+    ``_release_websocket_request_state_reservation`` drain it once the
+    reservation settles or is released. Unkeyed requests write immediately.
+    ``account_health_error_handled`` is deliberately not set: the staged
+    terminal is never finalized on this surface, so a later terminal belongs to
+    the replacement attempt and earns its own penalty.
+    """
+    error: UpstreamError = {"message": error_message or "Upstream error"}
+    if request_state.api_key_reservation is not None:
+        request_state.deferred_keyed_stream_health.append(
+            _DeferredKeyedStreamHealthPenalty(account=account, error=error, code=error_code)
+        )
+        return
+    await proxy._handle_stream_error(account, error, error_code)
 
 
 def _prepare_websocket_request_state_for_account_switch(

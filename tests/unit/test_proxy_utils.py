@@ -54159,3 +54159,105 @@ async def test_process_upstream_websocket_text_replays_anchored_accepted_capacit
     assert request_state.preferred_account_id is None
     assert request_state.excluded_account_ids == {account.id}
     assert request_state.affinity_policy.reallocate_sticky is True
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_defers_accepted_replay_health_until_api_key_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#2127 P2 (settlement-before-health): an API-key-backed accepted request
+    keeps its reservation open across the replay. The capacity branch must not
+    write the failing account's health while that reservation is unsettled; it
+    queues the penalty, and terminal finalization applies it only after the
+    settlement commits (bridge parity with
+    ``_handle_or_defer_precreated_stream_health``)."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    calls: list[str] = []
+
+    async def settle_usage(*_args: object, **_kwargs: object) -> bool:
+        calls.append("settle")
+        return True
+
+    async def handle_stream_error(account: Account, _error: object, code: str, http_status: int | None = None) -> None:
+        del http_status
+        calls.append(f"health:{account.id}:{code}")
+
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    api_key = _make_api_key_data("key_ws_accepted_replay_settlement")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_ws_accepted_replay_settlement",
+        key_id=api_key.id,
+        model="gpt-5.6-sol",
+    )
+    failing_account = _make_account("acc_ws_accepted_keyed_failing")
+    request_state = _accepted_lifecycle_request_state(
+        request_id="ws_req_accepted_keyed_replay",
+        api_key_reservation=reservation,
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_gate_acquired=True,
+    )
+    request_state.api_key = api_key
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(account: Account, payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=api_key,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(0),
+        )
+
+    await process(failing_account, {"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    await process(
+        failing_account, {"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}}
+    )
+    await process(failing_account, _accepted_capacity_error_payload())
+
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.excluded_account_ids == {failing_account.id}
+    # The reservation is still open, so no health write happened yet.
+    assert calls == []
+    assert [(penalty.account.id, penalty.code) for penalty in request_state.deferred_keyed_stream_health] == [
+        (failing_account.id, "server_is_overloaded")
+    ]
+    assert request_state.api_key_reservation is reservation
+
+    # The replay completes on the replacement account; its terminal settles the
+    # reservation first and only then drains the deferred penalty.
+    replacement_account = _make_account("acc_ws_accepted_keyed_replacement")
+    pending_requests.append(request_state)
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    request_state.response_create_gate_acquired = True
+    await process(
+        replacement_account, {"type": "response.created", "response": {"id": "resp_y", "status": "in_progress"}}
+    )
+    completed_text = await process(
+        replacement_account,
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_y",
+                "status": "completed",
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "OK"}]}
+                ],
+                "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
+            },
+        },
+    )
+
+    assert json.loads(completed_text)["response"]["id"] == "resp_x"
+    assert pending_requests == deque()
+    assert calls == ["settle", f"health:{failing_account.id}:server_is_overloaded"]
+    assert request_state.deferred_keyed_stream_health == []
+    assert request_state.api_key_reservation is None

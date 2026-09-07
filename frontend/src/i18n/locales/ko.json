@@ -1453,6 +1453,7 @@
   "upstreamProxy.endpoints.connectionFailed": "연결 실패",
   "upstreamProxy.endpoints.connectionOk": "연결 정상",
   "upstreamProxy.endpoints.empty": "항목 없음",
+  "upstreamProxy.endpoints.plaintextCredentials": "이 프록시로 자격증명이 {{scheme}}를 통해 암호화 없이 전송됩니다. https:// 프록시나 자격증명 없는 IP 허용목록 사용을 권장합니다.",
   "upstreamProxy.endpoints.title": "Endpoints",
   "upstreamProxy.memberDialog.alreadyPresent": "Endpoint가 이미 {{pool}}에 있습니다.",
   "upstreamProxy.memberDialog.description": "proxy pool에 endpoint를 추가합니다.",

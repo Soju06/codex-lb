@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Protocol, TypeVar, cast
@@ -74,14 +75,22 @@ class QuotaPlannerScheduler:
                 pass
 
     async def run_once(self) -> None:
-        await _get_leader_election().run_if_leader(self._run_once_as_leader)
+        started = time.monotonic()
+        ran = await _get_leader_election().run_if_leader(self._run_once_as_leader)
+        if ran is not None:
+            # Tick cost surfaced next to the event-loop lag monitor: the body
+            # runs on the serving loop, so a slow tick is a serving stall.
+            logger.info(
+                "Quota planner tick completed duration_ms=%d",
+                int((time.monotonic() - started) * 1000),
+            )
 
-    async def _run_once_as_leader(self) -> None:
+    async def _run_once_as_leader(self) -> bool:
         async with get_background_session() as session:
             planner_repo = QuotaPlannerRepository(session)
             settings = await planner_repo.get_settings()
             if settings.mode == "off":
-                return
+                return False
             warmup_service = QuotaWarmupService(session)
             await self._reconcile_expired_warmup_claims(planner_repo=planner_repo, warmup_service=warmup_service)
             accounts_repo = AccountsRepository(session)
@@ -98,8 +107,8 @@ class QuotaPlannerScheduler:
                 runtime={},
             )
             now = datetime.now(timezone.utc)
-            demand_bins = await planner_repo.aggregate_demand_bins()
-            forecast = build_demand_forecast(settings=settings, bins=demand_bins, now=now)
+            demand_slots = await planner_repo.aggregate_demand_slot_units()
+            forecast = build_demand_forecast(settings=settings, slot_units=demand_slots, now=now)
             base_simulation = simulate_pool(settings=settings, states=states, demand_forecast=forecast, now=now)
             actions = plan_shadow_actions(settings=settings, states=states, demand_forecast=forecast, now=now)
             if not actions:
@@ -127,7 +136,7 @@ class QuotaPlannerScheduler:
                         separators=(",", ":"),
                     ),
                 )
-                return
+                return True
             scenario = simulate_pool(
                 settings=settings,
                 states=states,
@@ -178,6 +187,7 @@ class QuotaPlannerScheduler:
                     # An expired executing row is reclaimed inside warm_now;
                     # a still-live executing row is read back and left alone.
                     await warmup_service.warm_now(account_id=action.account_id, decision_id=decision.id)
+            return True
 
     async def _reconcile_expired_warmup_claims(
         self,

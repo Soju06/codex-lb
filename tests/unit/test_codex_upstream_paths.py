@@ -435,8 +435,22 @@ async def test_codex_control_request_uses_codex_client_when_route_is_resolved(ro
 @pytest.mark.parametrize("header_name", ["content-type", "Content-Type", "cOnTeNt-TyPe"])
 @pytest.mark.parametrize("media_type", ["application/json", "application/sdp"])
 @pytest.mark.parametrize("transport", ["direct", "routed"])
+@pytest.mark.parametrize(
+    "encoding_headers",
+    [
+        {},
+        {"accept-encoding": "gzip, br"},
+        {"Accept-Encoding": "zstd"},
+        {"aCcEpT-eNcOdInG": "gzip", "Accept-Encoding": "br"},
+    ],
+)
 async def test_codex_control_request_preserves_single_media_type(
-    route: ResolvedUpstreamRoute, user_agent: str, header_name: str, media_type: str, transport: str
+    route: ResolvedUpstreamRoute,
+    user_agent: str,
+    header_name: str,
+    media_type: str,
+    transport: str,
+    encoding_headers: dict[str, str],
 ) -> None:
     client = _CodexClient()
     payload = b"opaque request bytes"
@@ -459,7 +473,12 @@ async def test_codex_control_request_preserves_single_media_type(
         method="POST",
         payload=payload,
         query_params={},
-        headers={"user-agent": user_agent, header_name: media_type, "x-request-id": "media-type-test"},
+        headers={
+            "user-agent": user_agent,
+            header_name: media_type,
+            "x-request-id": "media-type-test",
+            **encoding_headers,
+        },
         access_token="access",
         account_id="chatgpt_account",
         base_url="https://chatgpt.test",
@@ -471,8 +490,11 @@ async def test_codex_control_request_preserves_single_media_type(
     headers = client.calls[0]["headers"]
     assert [value for name, value in headers.items() if name.lower() == "content-type"] == [media_type]
     assert client.calls[0]["data"] == payload
+    assert [value for name, value in headers.items() if name.lower() == "accept-encoding"] == ["identity"]
     if user_agent.startswith("Codex Desktop"):
         assert list(headers).index(header_name) == 1
+        if encoding_headers:
+            assert list(headers).index(next(iter(encoding_headers))) == 3
 
 
 @pytest.mark.asyncio

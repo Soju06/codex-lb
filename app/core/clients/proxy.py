@@ -5427,6 +5427,10 @@ async def codex_control_request(
         for name in list(upstream_headers):
             if name.lower() == "content-type":
                 del upstream_headers[name]
+    # Control responses keep opaque bytes and do not expose Content-Encoding.
+    _replace_header_preserving_position(
+        upstream_headers, "accept-encoding", "identity", fallback_name="Accept-Encoding"
+    )
     total_timeout = (
         max(0.001, timeout_seconds)
         if timeout_seconds is not None

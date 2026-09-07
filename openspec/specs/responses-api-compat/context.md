@@ -62,6 +62,16 @@ Codex Desktop native control requests preserve exactly one case-insensitive
 this prevents duplicate `content-type`/`Content-Type` fields from being appended
 by the native transport and rejected upstream as `Unsupported content type`.
 
+Unary control requests negotiate `Accept-Encoding: identity`. Native egress
+returns raw compressed bytes, while the control response allowlist deliberately
+omits `Content-Encoding`. Passing a client's gzip preferences upstream previously
+returned a 200 body that Codex could not decode. Identity negotiation keeps the
+body usable by both native and Python transports without changing the search
+schema. For example, a client sending `accept-encoding: gzip, br` now receives
+ordinary JSON after upstream sees `accept-encoding: identity`. The cost is extra
+upstream bandwidth; successful verification includes decoding the complete JSON
+and checking its output and results, rather than relying on status alone.
+
 ## Fast Mode and Service Tiers
 
 codex-lb accepts the OpenAI/Codex `service_tier` field on Responses and Chat

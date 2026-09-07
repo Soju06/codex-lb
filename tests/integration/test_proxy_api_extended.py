@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import json
 import logging
 from collections import Counter
@@ -9,12 +10,16 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import aiohttp
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from starlette.requests import Request
 
 import app.core.auth.dependencies as auth_dependencies
+import app.core.clients.codex as codex_client_module
 import app.core.resilience.network_recovery as network_recovery_module
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
@@ -22,6 +27,7 @@ from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
 from app.core.clients import proxy as core_proxy
 from app.core.clients.codex import CodexClient, CodexRequestResult
+from app.core.clients.native_egress import NativeEgressRequest
 from app.core.clients.proxy import ProxyResponseError
 from app.core.upstream_proxy import (
     ResolvedProxyEndpoint,
@@ -897,6 +903,84 @@ async def test_native_codex_alpha_search_sends_one_content_type_to_transport(asy
     assert url.endswith("/backend-api/codex/alpha/search")
     assert kwargs["data"] == payload
     assert kwargs["route"] is route
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", _CODEX_SEARCH_PATHS)
+@pytest.mark.parametrize("transport", ["native", "python"])
+@pytest.mark.parametrize("status_code", [200, 429])
+async def test_codex_alpha_search_json_survives_client_compression_preferences(
+    async_client, monkeypatch, path, transport, status_code
+):
+    await _import_account(async_client, "acc_search_encoding", "search-encoding@example.com")
+    expected = (
+        {"encrypted_output": None, "output": "Search result", "results": [{"type": "text_result", "ref_id": "search0"}]}
+        if status_code == 200
+        else {"error": {"code": "rate_limit_exceeded", "message": "Search limit", "type": "rate_limit_error"}}
+    )
+    response_body = json.dumps(expected).encode()
+    request_body = b'{ "id": "search-session", "model": "gpt-test", "commands": {"search_query": [{"q": "test"}]} }'
+    seen = []
+
+    async def origin(request: web.Request) -> web.Response:
+        encodings = request.headers.getall("accept-encoding", [])
+        seen.append((request.method, request.path, encodings, await request.read()))
+        body = response_body
+        headers = {"content-type": "application/json", "set-cookie": "private=1"}
+        if any("gzip" in value for value in encodings):
+            body = gzip.compress(body)
+            headers["content-encoding"] = "gzip"
+        return web.Response(status=status_code, body=body, headers=headers)
+
+    class RawNativeHttp:
+        async def request(self, request: NativeEgressRequest):
+            # The native worker returns encoded bytes, unlike aiohttp's default.
+            async with aiohttp.ClientSession(auto_decompress=False) as session:
+                async with session.request(
+                    request.method,
+                    request.url,
+                    data=request.body,
+                    headers=request.headers,
+                    proxy=request.proxy_url,
+                ) as response:
+                    return SimpleNamespace(
+                        status=response.status, headers=dict(response.headers), content=await response.read()
+                    )
+
+    origin_app = web.Application()
+    origin_app.router.add_route("*", "/{path:.*}", origin)
+    async with TestServer(origin_app) as server:
+        route = ResolvedUpstreamRoute(
+            mode="account_bound",
+            pool_id="search-encoding-pool",
+            endpoint=ResolvedProxyEndpoint("search-encoding-endpoint", "http", "127.0.0.1", server.port),
+        )
+
+        async def resolve_route(*_args, **_kwargs):
+            return route
+
+        settings = core_proxy.get_settings().model_copy(update={"upstream_base_url": "http://search.test/backend-api"})
+        monkeypatch.setattr(core_proxy, "get_settings", lambda: settings)
+        monkeypatch.setattr(proxy_module.ProxyService, "_resolve_upstream_route_for_account", resolve_route)
+        native = RawNativeHttp() if transport == "native" else None
+        monkeypatch.setattr(codex_client_module, "discover_native_egress_client", lambda: native)
+        response = await async_client.post(
+            path,
+            content=request_body,
+            headers={
+                "user-agent": "Codex Desktop/0.153.4",
+                "content-type": "application/json",
+                "accept-encoding": "gzip, deflate, br, zstd",
+            },
+        )
+
+    assert response.status_code == status_code
+    assert response.json() == expected
+    if status_code == 200:
+        assert response.content == response_body
+    assert "content-encoding" not in response.headers
+    assert "set-cookie" not in response.headers
+    assert seen == [("POST", "/backend-api/codex/alpha/search", ["identity"], request_body)]
 
 
 @pytest.mark.asyncio

@@ -580,3 +580,151 @@ async def prepend(first_task: asyncio.Task[str]):
 
     assert checker.main() == 1
     assert capsys.readouterr().err == f"cancellation safety check failed: app/unsafe.py:3: {_DIRECT_AWAIT_REASON}\n"
+
+
+_UNSAFE_UNPROVEN_SETTLEMENT_CASES = [
+    pytest.param(
+        """
+import asyncio
+async def _next_chunk(it):
+    return await it.__anext__()
+
+async def read(iterator):
+    task = asyncio.create_task(_next_chunk(iterator))
+    done, _ = await asyncio.wait({task}, timeout=1.0)
+    return await task
+""",
+        9,
+        id="timeout-without-done-guard",
+    ),
+    pytest.param(
+        """
+import asyncio
+async def _next_chunk(it):
+    return await it.__anext__()
+
+async def read(iterator, other):
+    task = asyncio.create_task(_next_chunk(iterator))
+    done, _ = await asyncio.wait({task, other}, return_when=asyncio.FIRST_COMPLETED)
+    return await task
+""",
+        9,
+        id="first-completed-without-membership-proof",
+    ),
+    pytest.param(
+        """
+import asyncio
+async def _next_chunk(it):
+    return await it.__anext__()
+
+async def read(owner, iterator):
+    task = asyncio.create_task(_next_chunk(iterator))
+    done, _ = await owner.wait({task})
+    if not done:
+        raise TimeoutError
+    return await task
+""",
+        11,
+        id="non-asyncio-wait-is-not-a-proof",
+    ),
+    pytest.param(
+        """
+import asyncio
+async def _next_chunk(it):
+    return await it.__anext__()
+
+async def read(iterator):
+    task = asyncio.create_task(_next_chunk(iterator))
+    first = await task
+    done, _ = await asyncio.wait({task})
+    return first
+""",
+        8,
+        id="await-before-the-wait",
+    ),
+    pytest.param(
+        """
+import asyncio
+from app.core.utils.shared_future import _await_task_deferring_cancellation
+
+async def worker(inner):
+    await _await_task_deferring_cancellation(inner)
+
+async def caller(inner):
+    task = asyncio.create_task(worker(inner))
+    await task
+""",
+        10,
+        id="module-level-deferring-worker",
+    ),
+]
+
+
+@pytest.mark.parametrize(("source", "expected_line"), _UNSAFE_UNPROVEN_SETTLEMENT_CASES)
+def test_rejects_direct_await_without_settlement_proof(tmp_path: Path, source: str, expected_line: int) -> None:
+    checker = _load_checker_module()
+    path = _write_fixture(tmp_path / "unproven.py", source)
+
+    assert [(item.line, item.reason) for item in checker.find_violations(path)] == [
+        (expected_line, _DIRECT_AWAIT_REASON)
+    ]
+
+
+_SAFE_PROVEN_SETTLEMENT_CASES = [
+    pytest.param(
+        """
+import asyncio
+async def _next_chunk(it):
+    return await it.__anext__()
+
+async def read(iterator):
+    task = asyncio.create_task(_next_chunk(iterator))
+    done, _ = await asyncio.wait({task}, timeout=1.0)
+    if task in done:
+        return await task
+    task.cancel()
+""",
+        id="membership-guard",
+    ),
+    pytest.param(
+        """
+from asyncio import create_task, wait, FIRST_COMPLETED
+async def consume(source):
+    async for item in source:
+        return item
+
+async def drain(sources):
+    pending = {create_task(consume(source)) for source in sources}
+    while pending:
+        completed, pending = await wait(pending, return_when=FIRST_COMPLETED)
+        for task in completed:
+            await task
+""",
+        id="iteration-over-done-set",
+    ),
+    pytest.param(
+        """
+import asyncio
+from app.core.utils.shared_future import _await_task_deferring_cancellation
+
+async def worker(inner):
+    await _await_task_deferring_cancellation(inner)
+
+async def caller(inner):
+    async def worker(inner):
+        await inner
+
+    task = asyncio.create_task(worker(inner))
+    await task
+""",
+        id="local-non-deferring-worker-shadows-module-worker",
+    ),
+]
+
+
+@pytest.mark.parametrize("source", _SAFE_PROVEN_SETTLEMENT_CASES)
+def test_allows_proven_settlement_and_lexical_shadowing(tmp_path: Path, source: str) -> None:
+    checker = _load_checker_module()
+    path = _write_fixture(tmp_path / "proven.py", source)
+
+    assert checker.find_violations(path) == []

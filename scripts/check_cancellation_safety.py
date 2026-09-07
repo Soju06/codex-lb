@@ -54,6 +54,7 @@ _DIRECT_AWAIT_REASON = (
 class _ImportAliases:
     asyncio_modules: frozenset[str]
     asyncio_shields: frozenset[str]
+    asyncio_waits: frozenset[str]
     cancellation_exceptions: frozenset[str]
 
 
@@ -72,6 +73,7 @@ def _qualified_name(node: ast.expr) -> tuple[str, ...]:
 def _import_aliases(module: ast.Module) -> _ImportAliases:
     asyncio_modules: set[str] = set()
     asyncio_shields: set[str] = set()
+    asyncio_waits: set[str] = set()
     cancellation_exceptions = {"BaseException"}
     # Application imports are module-level by convention. Restrict discovery to
     # that scope so an unrelated nested import cannot redefine aliases for the
@@ -85,11 +87,14 @@ def _import_aliases(module: ast.Module) -> _ImportAliases:
             for imported in node.names:
                 if imported.name == "shield":
                     asyncio_shields.add(imported.asname or imported.name)
+                elif imported.name == "wait":
+                    asyncio_waits.add(imported.asname or imported.name)
                 elif imported.name == "CancelledError":
                     cancellation_exceptions.add(imported.asname or imported.name)
     return _ImportAliases(
         asyncio_modules=frozenset(asyncio_modules),
         asyncio_shields=frozenset(asyncio_shields),
+        asyncio_waits=frozenset(asyncio_waits),
         cancellation_exceptions=frozenset(cancellation_exceptions),
     )
 
@@ -306,16 +311,74 @@ def _function_defers_cancellation(
     return False
 
 
-def _deferring_function_names(module: ast.Module, helper_names: frozenset[str]) -> frozenset[str]:
-    return frozenset(
-        node.name
-        for node in ast.walk(module)
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
-        and _function_defers_cancellation(node, helper_names)
-    )
+def _scope_chain(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> list[ast.AST]:
+    """Enclosing function scopes of ``node`` (innermost first), then the module."""
+
+    chain: list[ast.AST] = []
+    current = parents.get(node)
+    while current is not None:
+        if isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef | ast.Module):
+            chain.append(current)
+        current = parents.get(current)
+    return chain
 
 
-def _task_creation_defers(call: ast.Call, deferring_functions: frozenset[str]) -> bool:
+def _local_definitions(scope: ast.AST) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Function definitions bound directly in ``scope`` (not inside nested scopes)."""
+
+    definitions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    body = scope.body if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef | ast.Module) else []
+    for statement in body:
+        if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef):
+            definitions.setdefault(statement.name, statement)
+            continue
+        for child in _walk_same_scope(statement):
+            for node in ast.iter_child_nodes(child):
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                    definitions.setdefault(node.name, node)
+    return definitions
+
+
+def _method_definitions(module: ast.Module) -> dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]]:
+    methods: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
+    for node in ast.walk(module):
+        if isinstance(node, ast.ClassDef):
+            for statement in node.body:
+                if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef):
+                    methods.setdefault(statement.name, []).append(statement)
+    return methods
+
+
+def _resolve_coroutine_function(
+    call: ast.Call,
+    parents: dict[ast.AST, ast.AST],
+    methods: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]],
+) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Resolve ``f(...)`` / ``self.f(...)`` to the definitions it can bind to.
+
+    Plain names resolve lexically: the innermost enclosing scope that defines
+    the name wins, so a local ``worker`` shadows a module-level ``worker``.
+    Attribute calls (``self.f``) cannot be resolved lexically; every method of
+    that name in the module is considered so a deferring method is not missed.
+    """
+
+    if isinstance(call.func, ast.Name):
+        for scope in _scope_chain(call, parents):
+            definition = _local_definitions(scope).get(call.func.id)
+            if definition is not None:
+                return [definition]
+        return []
+    if isinstance(call.func, ast.Attribute):
+        return methods.get(call.func.attr, [])
+    return []
+
+
+def _task_creation_defers(
+    call: ast.Call,
+    parents: dict[ast.AST, ast.AST],
+    methods: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]],
+    helper_names: frozenset[str],
+) -> bool:
     if _callee_name(call) in _PROBE_TASK_FACTORIES:
         return True
     if not call.args:
@@ -325,7 +388,10 @@ def _task_creation_defers(call: ast.Call, deferring_functions: frozenset[str]) -
         return False
     if _is_iterator_step(coroutine):
         return True
-    return _callee_name(coroutine) in deferring_functions
+    return any(
+        _function_defers_cancellation(definition, helper_names)
+        for definition in _resolve_coroutine_function(coroutine, parents, methods)
+    )
 
 
 def _is_task_annotation(annotation: ast.expr | None) -> bool:
@@ -352,25 +418,122 @@ def _task_parameters(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[st
     }
 
 
-def _settled_through_asyncio_wait(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
-    """Names passed to ``asyncio.wait(...)``: a later bare await only reads a settled result."""
+def _is_asyncio_wait(call: ast.Call, aliases: _ImportAliases, parents: dict[ast.AST, ast.AST]) -> bool:
+    name = _qualified_name(call.func)
+    return (
+        len(name) == 2
+        and name[0] in aliases.asyncio_modules
+        and name[1] == "wait"
+        and not _shadowed_by_parameter(call, name[0], parents)
+    ) or (len(name) == 1 and name[0] in aliases.asyncio_waits and not _shadowed_by_parameter(call, name[0], parents))
 
-    settled: set[str] = set()
+
+@dataclass(frozen=True, slots=True)
+class _WaitSettlement:
+    line: int
+    done_name: str
+    # Names waited on by ``asyncio.wait``; ``None`` when passed as a collection variable.
+    waited: frozenset[str] | None
+
+
+def _wait_settlements(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    aliases: _ImportAliases,
+    parents: dict[ast.AST, ast.AST],
+) -> list[_WaitSettlement]:
+    """``done, _ = await asyncio.wait(...)`` bindings in ``function``."""
+
+    settlements: list[_WaitSettlement] = []
     for statement in function.body:
         for child in _walk_same_scope(statement):
-            if not (isinstance(child, ast.Call) and _callee_name(child) == "wait" and child.args):
+            if not isinstance(child, ast.Assign) or not isinstance(child.value, ast.Await):
                 continue
-            waited = child.args[0]
-            members = waited.elts if isinstance(waited, ast.Set | ast.List | ast.Tuple) else (waited,)
-            settled.update(member.id for member in members if isinstance(member, ast.Name))
-    return settled
+            call = child.value.value
+            if not (isinstance(call, ast.Call) and _is_asyncio_wait(call, aliases, parents) and call.args):
+                continue
+            target = child.targets[0] if len(child.targets) == 1 else None
+            if not isinstance(target, ast.Tuple) or not target.elts or not isinstance(target.elts[0], ast.Name):
+                continue
+            waited = call.args[0]
+            names: frozenset[str] | None = None
+            if isinstance(waited, ast.Set | ast.List | ast.Tuple):
+                names = frozenset(member.id for member in waited.elts if isinstance(member, ast.Name))
+            settlements.append(_WaitSettlement(line=child.lineno, done_name=target.elts[0].id, waited=names))
+    return settlements
+
+
+def _node_within(node: ast.AST, statements: list[ast.stmt]) -> bool:
+    return any(node is descendant for statement in statements for descendant in ast.walk(statement))
+
+
+def _await_is_proven_settled(
+    awaited: ast.Await,
+    name: str,
+    settlements: list[_WaitSettlement],
+    parents: dict[ast.AST, ast.AST],
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    """The await is dominated by an ``asyncio.wait`` proof that ``name`` is done.
+
+    Accepted proofs, each requiring the ``asyncio.wait`` to precede the await:
+    the await sits inside ``if name in done:``; the await is inside
+    ``for name in done:``; or ``asyncio.wait`` waited exactly ``{name}`` and an
+    earlier ``if not done:`` guard between the two raises or returns. A
+    ``timeout`` or ``return_when`` argument never proves completion by itself.
+    """
+
+    prior = [settlement for settlement in settlements if settlement.line < awaited.lineno]
+    if not prior:
+        return False
+    done_names = {settlement.done_name for settlement in prior}
+    for ancestor in _ancestors(awaited, parents):
+        if isinstance(ancestor, ast.If) and _node_within(awaited, ancestor.body):
+            test = ancestor.test
+            if (
+                isinstance(test, ast.Compare)
+                and isinstance(test.left, ast.Name)
+                and test.left.id == name
+                and len(test.ops) == 1
+                and isinstance(test.ops[0], ast.In)
+                and isinstance(test.comparators[0], ast.Name)
+                and test.comparators[0].id in done_names
+            ):
+                return True
+        if (
+            isinstance(ancestor, ast.For)
+            and isinstance(ancestor.target, ast.Name)
+            and ancestor.target.id == name
+            and isinstance(ancestor.iter, ast.Name)
+            and ancestor.iter.id in done_names
+            and _node_within(awaited, ancestor.body)
+        ):
+            return True
+    for settlement in prior:
+        if settlement.waited != frozenset({name}):
+            continue
+        for statement in function.body:
+            for child in _walk_same_scope(statement):
+                if (
+                    isinstance(child, ast.If)
+                    and settlement.line < child.lineno < awaited.lineno
+                    and isinstance(child.test, ast.UnaryOp)
+                    and isinstance(child.test.op, ast.Not)
+                    and isinstance(child.test.operand, ast.Name)
+                    and child.test.operand.id == settlement.done_name
+                    and not _sequence_outcome(child.body)[0]
+                ):
+                    return True
+    return False
 
 
 def _direct_await_violations(
     path: Path,
     module: ast.Module,
-    deferring_functions: frozenset[str],
+    aliases: _ImportAliases,
+    parents: dict[ast.AST, ast.AST],
+    helper_names: frozenset[str],
 ) -> list[Violation]:
+    methods = _method_definitions(module)
     violations: list[Violation] = []
     for function in ast.walk(module):
         if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -387,20 +550,23 @@ def _direct_await_violations(
                 if (
                     isinstance(value, ast.Call)
                     and _is_task_factory(value)
-                    and _task_creation_defers(value, deferring_functions)
+                    and _task_creation_defers(value, parents, methods, helper_names)
                 ):
                     deferring_tasks.update(target.id for target in targets if isinstance(target, ast.Name))
-        deferring_tasks -= _settled_through_asyncio_wait(function)
         if not deferring_tasks:
             continue
+        settlements = _wait_settlements(function, aliases, parents)
         for statement in function.body:
             for child in _walk_same_scope(statement):
-                if (
+                if not (
                     isinstance(child, ast.Await)
                     and isinstance(child.value, ast.Name)
                     and child.value.id in deferring_tasks
                 ):
-                    violations.append(Violation(path=path, line=child.lineno, reason=_DIRECT_AWAIT_REASON))
+                    continue
+                if _await_is_proven_settled(child, child.value.id, settlements, parents, function):
+                    continue
+                violations.append(Violation(path=path, line=child.lineno, reason=_DIRECT_AWAIT_REASON))
     return violations
 
 
@@ -438,7 +604,7 @@ def find_violations(path: Path) -> list[Violation]:
         if shield_calls:
             violations.append(Violation(path=path, line=shield_calls[0].lineno))
     helper_names = _deferring_helper_aliases(module)
-    violations.extend(_direct_await_violations(path, module, _deferring_function_names(module, helper_names)))
+    violations.extend(_direct_await_violations(path, module, aliases, parents, helper_names))
     return sorted(violations, key=lambda violation: violation.line)
 
 

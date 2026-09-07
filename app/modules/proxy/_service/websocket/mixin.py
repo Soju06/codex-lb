@@ -331,6 +331,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _MODEL_OUTPUT_EVENT_TYPES,
     _REQUEST_TRANSPORT_HTTP,
     _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
@@ -5502,6 +5503,14 @@ class _WebSocketMixin:
                     return text
                 if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                     request_state.downstream_visible = True
+                if event_type in _MODEL_OUTPUT_EVENT_TYPES:
+                    # Parity with the bridge relay: the first model-output
+                    # event ends the accepted output-free window, so a later
+                    # capacity terminal or transport close is never replayed
+                    # under the id the client already read -- also when
+                    # upstream skipped ``response.in_progress`` and the count
+                    # alone still looks like a bare lifecycle prelude.
+                    request_state.upstream_model_output_seen = True
                 if event_type == "response.created" and request_state.suppress_next_created_downstream:
                     request_state.suppress_next_created_downstream = False
                     upstream_control.suppress_downstream_event = True

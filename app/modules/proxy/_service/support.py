@@ -81,6 +81,22 @@ _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE = {
 _PENDING_TOOL_CALL_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE)
 _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE.values())
 _TTFT_OUTPUT_ITEM_TYPES = _PENDING_TOOL_CALL_ITEM_TYPES - {"function_call"}
+# Upstream ``response.*`` events that prove the model already ran for a turn.
+# Both relay surfaces flip ``upstream_model_output_seen`` on them; in the
+# Responses protocol the first one is always ``response.output_item.added``.
+_MODEL_OUTPUT_EVENT_TYPES = frozenset(
+    {
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.output_text.delta",
+        "response.refusal.delta",
+        "response.reasoning_text.delta",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.function_call_arguments.delta",
+        "response.output_tool_call.delta",
+    }
+)
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
 _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
@@ -1709,9 +1725,11 @@ def _websocket_request_is_accepted_lifecycle_only(request_state: _WebSocketReque
     True only while the accepted response consists of its lifecycle prelude:
     ``response.created`` and optionally ``response.in_progress``. In the
     Responses protocol every other counted ``response.*`` event follows
-    ``response.output_item.added``, which is a model-output event and flips
-    ``upstream_model_output_seen``, so "at most two counted events and no
-    output marker" is equivalent to "lifecycle only". A buffered reasoning
+    ``response.output_item.added``, which is a model-output event
+    (``_MODEL_OUTPUT_EVENT_TYPES``) that both the HTTP bridge and the direct
+    websocket relay record in ``upstream_model_output_seen``, so "at most two
+    counted events and no output marker" is equivalent to "lifecycle only"
+    even when upstream skips ``response.in_progress``. A buffered reasoning
     prelude, a pending tool call, or a downstream sequence watermark that does
     not cover exactly that prelude (frames ``0 .. count - 1``) disqualify the
     request. Such a turn has no client-observable or conversational side

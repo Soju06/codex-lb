@@ -156,6 +156,7 @@ from app.modules.proxy._service.support import (
     _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS,
     _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _MODEL_OUTPUT_EVENT_TYPES,
     _PENDING_TOOL_CALL_ITEM_TYPES,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _account_capacity_wait_payload,
@@ -891,19 +892,6 @@ def _schedule_denied_http_bridge_anchor_clear_retry(
 
 T = TypeVar("T")
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
-_MODEL_OUTPUT_EVENT_TYPES = frozenset(
-    {
-        "response.output_item.added",
-        "response.output_item.done",
-        "response.output_text.delta",
-        "response.refusal.delta",
-        "response.reasoning_text.delta",
-        "response.reasoning_summary_text.delta",
-        "response.reasoning_summary_text.done",
-        "response.function_call_arguments.delta",
-        "response.output_tool_call.delta",
-    }
-)
 _UNSUPPORTED_DURABLE_TOOL_CALL_ITEM_TYPES = frozenset(
     {
         "computer_call",

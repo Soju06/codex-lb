@@ -53418,3 +53418,76 @@ async def test_process_upstream_websocket_text_replays_accepted_capacity_error_w
     assert upstream_control.suppress_downstream_event is False
     assert json.loads(completed_text)["response"]["id"] == "resp_x"
     assert pending_requests == deque()
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_marks_model_output_and_refuses_accepted_replay_without_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Direct websocket surface without ``response.in_progress``: created(X)
+    followed by a forwarded ``response.output_item.added`` is two counted
+    events, the shape the lifecycle-only predicate accepts unless the relay
+    records model output. The relay must flip ``upstream_model_output_seen``
+    (bridge parity) so the capacity error that follows is forwarded unchanged;
+    replaying here would re-address a second generation to X after the client
+    already received the first tool call."""
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_accepted_output_no_in_progress")
+    pending_request = _accepted_lifecycle_request_state(
+        request_id="ws_req_accepted_output_no_in_progress",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_gate_acquired=True,
+    )
+    pending_requests = deque([pending_request])
+    response_create_gate = asyncio.Semaphore(0)
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=response_create_gate,
+        )
+
+    await process({"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    item_text = await process(
+        {
+            "type": "response.output_item.added",
+            "response_id": "resp_x",
+            "output_index": 0,
+            "item": {
+                "id": "fc_1",
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "shell",
+                "arguments": "",
+                "status": "in_progress",
+            },
+        }
+    )
+
+    assert json.loads(item_text)["item"]["id"] == "fc_1"
+    assert upstream_control.suppress_downstream_event is False
+    assert pending_request.response_event_count == 2
+    assert pending_request.upstream_model_output_seen is True
+    assert proxy_support._websocket_request_is_accepted_lifecycle_only(pending_request) is False
+    assert proxy_service._websocket_request_can_replay_before_visible_output(pending_request) is False
+
+    error_text = await process(_accepted_capacity_error_payload())
+
+    assert json.loads(error_text)["error"]["code"] == "server_is_overloaded"
+    assert upstream_control.suppress_downstream_event is False
+    assert upstream_control.replay_request_state is None
+    assert pending_requests == deque()
+    assert pending_request.replay_count == 0
+    assert pending_request.replay_downstream_response_id is None
+    assert pending_request.suppress_next_created_downstream is False

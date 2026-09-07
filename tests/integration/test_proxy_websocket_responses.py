@@ -13666,3 +13666,80 @@ def test_backend_responses_websocket_does_not_replay_accepted_capacity_error_aft
     assert events[-1]["error"]["code"] == "server_is_overloaded"
     assert failover.connect_accounts == ["acct_ws_accepted_a"]
     assert recovered_upstream.sent_text == []
+
+
+@pytest.mark.parametrize(
+    ("terminal", "expected_terminal_type"),
+    [
+        pytest.param(
+            _ws_event(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "service_unavailable_error",
+                        "code": "server_is_overloaded",
+                        "message": "Our servers are currently overloaded. Please try again later.",
+                    },
+                }
+            ),
+            "error",
+            id="capacity_error",
+        ),
+        pytest.param(_FakeUpstreamMessage("close", close_code=1011), "response.failed", id="abrupt_close"),
+    ],
+)
+def test_backend_responses_websocket_does_not_replay_output_item_when_upstream_skips_in_progress(
+    app_instance,
+    monkeypatch,
+    terminal,
+    expected_terminal_type,
+):
+    """Mutant: upstream skips ``response.in_progress``, so ``response.created``
+    + ``response.output_item.added`` is two counted events -- the shape the
+    lifecycle-only predicate accepts unless the relay records model output.
+    The forwarded tool call makes the turn non-replayable on both the capacity
+    error and the abrupt-close path: one connect, the failure surfaces, and the
+    recovery upstream is never used."""
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _ws_event(
+                    {"type": "response.created", "response": {"id": "resp_ws_no_in_progress", "status": "in_progress"}}
+                ),
+                _ws_event(
+                    {
+                        "type": "response.output_item.added",
+                        "response_id": "resp_ws_no_in_progress",
+                        "output_index": 0,
+                        "item": {
+                            "id": "fc_ws_no_in_progress",
+                            "type": "function_call",
+                            "call_id": "call_ws_no_in_progress",
+                            "name": "shell",
+                            "arguments": "",
+                            "status": "in_progress",
+                        },
+                    }
+                ),
+                terminal,
+            ]
+        ],
+    )
+    recovered_upstream = _recovered_upstream("resp_ws_no_in_progress_unused")
+    failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run(app_instance)
+
+    types = [event["type"] for event in events]
+    assert disconnect is None, f"unexpected disconnect code={disconnect.code} after {types}"
+    assert types == ["response.created", "response.output_item.added", expected_terminal_type]
+    assert events[1]["item"]["id"] == "fc_ws_no_in_progress"
+    if expected_terminal_type == "error":
+        assert events[-1]["error"]["code"] == "server_is_overloaded"
+    else:
+        # The abrupt close fails the visible response closed under its own id.
+        assert events[-1]["response"]["id"] == "resp_ws_no_in_progress"
+    assert failover.connect_accounts == ["acct_ws_accepted_a"]
+    assert recovered_upstream.sent_text == []

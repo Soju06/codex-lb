@@ -21,3 +21,7 @@
 
 - [x] 4.1 Unit tests for the classifier, eligibility predicate, replay preparation, staging, gate re-claim, binary-frame guard, and mutants (output seen, billed output, other pending request, busy gate, second failure, quota codes, foreign response id).
 - [x] 4.2 Run ruff, the proxy architecture check, the touched bridge/websocket unit and integration suites, and strict OpenSpec validation for this change.
+
+## 5. Review Follow-ups
+
+- [x] 5.1 Record model output on the direct websocket relay (`upstream_model_output_seen` for the shared `_MODEL_OUTPUT_EVENT_TYPES`) so an accepted turn whose upstream skipped `response.in_progress` is never replayed after a forwarded output item; mutant tests cover the capacity-error and abrupt-close paths.

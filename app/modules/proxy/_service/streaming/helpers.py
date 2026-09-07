@@ -70,6 +70,7 @@ from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
 )
+from app.modules.proxy._load_balancer.overload_backoff import UPSTREAM_OVERLOAD_CODES, record_upstream_overload
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -1128,6 +1129,15 @@ async def _handle_stream_error(
             get_request_id(),
             code,
         )
+        if code in UPSTREAM_OVERLOAD_CODES:
+            # Overload is an admission rejection that successes on the same
+            # account's warm sessions keep masking from ``error_count``; feed
+            # the dedicated sliding window so fresh selection can deprioritize.
+            await record_upstream_overload(
+                proxy._load_balancer,
+                account,
+                redact_account_id=privacy_policy.redacts_sensitive_details,
+            )
     return classified
 
 

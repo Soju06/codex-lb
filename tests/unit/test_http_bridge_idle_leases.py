@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -1177,3 +1178,123 @@ async def test_grouped_terminal_error_releases_abandoned_session_lease(
     assert session.upstream_control.reconnect_requested is True
     assert session.account_lease is None
     release_account_lease.assert_awaited_once_with(lease)
+
+
+def _make_sweep_service(session: proxy_service._HTTPBridgeSession, close_bounded: AsyncMock) -> SimpleNamespace:
+    mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
+    service = SimpleNamespace(
+        _http_bridge_lock=anyio.Lock(),
+        _http_bridge_sessions={},
+        _http_bridge_detached_sessions={id(session): session},
+        _close_http_bridge_session_bounded=close_bounded,
+    )
+
+    async def retire(target: proxy_service._HTTPBridgeSession, **kwargs: Any) -> bool:
+        return await mixin._retire_http_bridge_after_drain_if_ready(service, target, **kwargs)
+
+    service._retire_http_bridge_after_drain_if_ready = retire
+    return service
+
+
+@pytest.mark.asyncio
+async def test_detached_retire_sweep_is_bounded_by_pending_lock_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The per-request fail-safe sweep must not park behind one detached
+    session whose ``pending_lock`` never frees (2026-09-07: an anyio 4.13
+    lost-wakeup queued ~100 live request tasks behind a single detached
+    generation). It skips that session for this pass and returns."""
+
+    from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers
+
+    monkeypatch.setattr(http_bridge_helpers, "_HTTP_BRIDGE_DETACHED_RETIRE_LOCK_WAIT_SECONDS", 0.05)
+    session = _make_bridge_session()
+    session.upstream_control.reconnect_requested = True
+    session.upstream_control.retire_after_drain = True
+    close_bounded = AsyncMock()
+    service = _make_sweep_service(session, close_bounded)
+
+    release = asyncio.Event()
+
+    async def hold_lock_forever() -> None:
+        async with session.pending_lock:
+            await release.wait()
+
+    holder = asyncio.create_task(hold_lock_forever())
+    await asyncio.sleep(0)
+    assert session.pending_lock.locked()
+
+    started = time.perf_counter()
+    with caplog.at_level("WARNING", logger="app.modules.proxy.service"):
+        await asyncio.wait_for(
+            http_bridge_helpers._release_http_bridge_unanchored_handoffs_for_request(
+                cast(Any, service), request_scope_id="req-sweep"
+            ),
+            timeout=1,
+        )
+    elapsed = time.perf_counter() - started
+    # Returned at the configured bound (0.05s) plus scheduling margin, not
+    # merely "eventually": a regression to a longer or unbounded wait fails here.
+    assert 0.04 <= elapsed < 0.5, elapsed
+
+    close_bounded.assert_not_awaited()
+    assert not session.upstream_close_attempted
+    assert any("Skipping detached HTTP bridge retire check" in record.getMessage() for record in caplog.records)
+    # The lock is still owned by the holder: the sweep neither stole nor broke it.
+    assert session.pending_lock.locked()
+    assert session.pending_lock.statistics().tasks_waiting == 0
+
+    release.set()
+    await holder
+
+
+@pytest.mark.asyncio
+async def test_detached_retire_sweep_retires_when_lock_is_free() -> None:
+    from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers
+
+    session = _make_bridge_session()
+    session.upstream_control.reconnect_requested = True
+    session.upstream_control.retire_after_drain = True
+    close_bounded = AsyncMock()
+    service = _make_sweep_service(session, close_bounded)
+
+    await asyncio.wait_for(
+        http_bridge_helpers._release_http_bridge_unanchored_handoffs_for_request(
+            cast(Any, service), request_scope_id="req-sweep"
+        ),
+        timeout=1,
+    )
+
+    close_bounded.assert_awaited_once()
+    assert session.upstream_close_attempted
+    assert not session.pending_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_retire_without_timeout_still_waits_for_pending_lock() -> None:
+    """Lifecycle owners keep the unbounded wait: the check runs once the lock frees."""
+
+    mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
+    session = _make_bridge_session()
+    session.upstream_control.reconnect_requested = True
+    session.upstream_control.retire_after_drain = True
+    close_bounded = AsyncMock()
+    fake_self = SimpleNamespace(_close_http_bridge_session_bounded=close_bounded)
+
+    release = asyncio.Event()
+
+    async def hold_lock_briefly() -> None:
+        async with session.pending_lock:
+            await release.wait()
+
+    holder = asyncio.create_task(hold_lock_briefly())
+    await asyncio.sleep(0)
+    retire_task = asyncio.create_task(mixin._retire_http_bridge_after_drain_if_ready(fake_self, session))
+    await asyncio.sleep(0.05)
+    assert not retire_task.done()
+
+    release.set()
+    await holder
+    assert await asyncio.wait_for(retire_task, timeout=1) is True
+    close_bounded.assert_awaited_once()

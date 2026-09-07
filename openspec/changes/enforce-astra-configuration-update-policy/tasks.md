@@ -23,3 +23,4 @@
 - [x] 3.7 Preserve terminal SSE policy errors and reservation cleanup after late HTTP-bridge anchor injection, including recovery attempts
 - [x] 3.8 Keep schema selection and owner routing consistent across concurrent owner publication, and re-resolve on the next request
 - [x] 3.9 Validate update ordering after subscription input normalization, including deduplication and serialization, preserving valid separated updates
+- [x] 3.10 Preserve source configuration updates without reasoning changes while enforcing explicit efforts on restricted keys

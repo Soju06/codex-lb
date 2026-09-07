@@ -479,6 +479,9 @@ def validate_configuration_update_policy(
         if not is_json_mapping(item) or item.get("type") != "configuration_update":
             continue
         reasoning = item.get("reasoning")
+        if not subscription and (not is_json_mapping(reasoning) or "effort" not in reasoning):
+            # Sources own update shape; an omitted effort leaves it unchanged.
+            continue
         value = reasoning.get("effort") if is_json_mapping(reasoning) else None
         if not isinstance(value, str):
             if api_key.allowed_reasoning_efforts is not None or api_key.enforced_reasoning_effort is not None:

@@ -37,6 +37,14 @@ validated before upstream connection or send, using client-plane values.
 - **THEN** subscription-specific Astra validation does not override that contract
 - **AND** API-key reasoning policy remains enforced before source forwarding
 
+#### Scenario: Source updates may leave reasoning unchanged
+
+- **GIVEN** a reasoning-restricted API key routes to an external model source with an allowed request-level effort
+- **WHEN** a source-specific configuration update omits reasoning.effort
+- **THEN** the proxy SHALL preserve the update without requiring subscription-specific reasoning fields
+- **AND** an explicit forbidden or non-string reasoning.effort SHALL still be rejected for the restricted key
+- **AND** a source-owned WebSocket request SHALL retain its HTTP-transport fallback after the same policy check
+
 #### Scenario: A subscription anchor overrides a source model contract
 
 - **GIVEN** a configured source claims gpt-6-astra and a previous_response_id belongs to a recorded subscription account

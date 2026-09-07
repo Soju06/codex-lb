@@ -235,13 +235,32 @@ def test_subscription_owner_rejects_source_schema(
 
 
 @pytest.mark.parametrize("path", _PATHS)
+@pytest.mark.parametrize(
+    "policy",
+    [None, {"allowedReasoningEfforts": ["low"]}, {"enforcedReasoningEffort": "low"}],
+    ids=["unrestricted", "allowed", "enforced"],
+)
+@pytest.mark.parametrize(
+    "update",
+    [
+        None,
+        {"type": "configuration_update", "vendor_setting": True},
+        {"type": "configuration_update", "reasoning": {"vendor_setting": True}},
+    ],
+    ids=["no-update", "no-reasoning", "no-effort"],
+)
 def test_websocket_source_without_subscription_owner_keeps_http_fallback(
-    app_instance, source_and_subscription_owner, monkeypatch, path
+    app_instance, source_and_subscription_owner, monkeypatch, path, policy, update
 ):
     client, key, _ = source_and_subscription_owner
+    if policy is not None:
+        updated = client.patch("/api/api-keys/" + key["id"], json=policy)
+        assert updated.status_code == 200
     connect = AsyncMock(side_effect=AssertionError("Source-only request reached subscription connect"))
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
     payload = _continuation({"previous_response_id": "resp_source_unrecorded", "top_logprobs": 2})
+    if update is not None:
+        payload["input"].insert(0, update)
 
     with client.websocket_connect(path, headers={"Authorization": "Bearer " + key["key"]}) as ws:
         ws.send_json(payload)

@@ -73,11 +73,35 @@ async def test_source_named_astra_keeps_its_own_model_contract(async_client, sou
 
 
 @pytest.mark.parametrize("policy", [{"allowedReasoningEfforts": ["low"]}, {"enforcedReasoningEffort": "low"}])
-async def test_source_configuration_update_cannot_evade_key_policy(async_client, source_upstream, policy):
+@pytest.mark.parametrize("endpoint", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize(
+    ("update", "expected_status"),
+    [
+        ({"type": "configuration_update", "vendor_setting": True}, 200),
+        ({"type": "configuration_update", "reasoning": {"vendor_setting": True}}, 200),
+        ({"type": "configuration_update", "reasoning": {"effort": "low"}}, 200),
+        ({"type": "configuration_update", "reasoning": {"effort": "high"}}, 403),
+        ({"type": "configuration_update", "reasoning": {"effort": None}}, 400),
+        ({"type": "configuration_update", "reasoning": {"effort": 7}}, 400),
+    ],
+    ids=["no-reasoning", "no-effort", "allowed", "denied", "null", "non-string"],
+)
+async def test_source_configuration_update_enforces_only_explicit_effort(
+    async_client, source_upstream, policy, endpoint, update, expected_status
+):
     captured = []
 
     async def capture(request: web.Request) -> web.Response:
-        captured.append(await request.json())
+        payload = await request.json()
+        captured.append(payload)
+        if payload.get("stream"):
+            return web.Response(
+                body=(
+                    b'data: {"type":"response.completed","response":'
+                    b'{"id":"resp_source","status":"completed","output":[]}}\n\n'
+                ),
+                content_type="text/event-stream",
+            )
         return web.json_response({"id": "resp_source", "status": "completed", "output": []})
 
     source_id = await _create_model_source(
@@ -86,6 +110,7 @@ async def test_source_configuration_update_cannot_evade_key_policy(async_client,
         model="gpt-6-astra",
         base_url=await source_upstream(capture),
         supports_responses=True,
+        raw_metadata_json='{"supports_reasoning": true, "supported_reasoning_levels": ["low", "high"]}',
     )
     await _enable_api_key_auth(async_client)
     created = await async_client.post(
@@ -93,14 +118,21 @@ async def test_source_configuration_update_cannot_evade_key_policy(async_client,
     )
     assert created.status_code == 200
     response = await async_client.post(
-        "/v1/responses",
+        endpoint,
         json={
             "model": "gpt-6-astra",
             "reasoning": {"effort": "low"},
-            "input": [{"type": "configuration_update", "reasoning": {"effort": "high"}}],
+            "input": [update],
         },
         headers={"Authorization": f"Bearer {created.json()['key']}"},
     )
-    assert response.status_code == 403
-    assert response.json()["error"]["code"] == "reasoning_effort_not_allowed"
-    assert captured == []
+    assert response.status_code == expected_status, response.text
+    if expected_status == 200:
+        assert len(captured) == 1
+        assert captured[0]["input"] == [update]
+        assert captured[0]["reasoning"]["effort"] == "low"
+    else:
+        assert captured == []
+        assert response.json()["error"]["param"] == "input.0.reasoning.effort"
+        if expected_status == 403:
+            assert response.json()["error"]["code"] == "reasoning_effort_not_allowed"

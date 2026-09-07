@@ -82,6 +82,9 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge.accepted_replay import (
+    _websocket_accepted_capacity_retry_error_code,
+)
 from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
 )
@@ -442,9 +445,19 @@ def _is_websocket_stale_previous_response(
 def _prepare_websocket_request_state_for_visible_output_replay(
     request_state: "_WebSocketRequestState",
 ) -> str | None:
-    downstream_response_id = None
-    if request_state.response_id is not None and not request_state.awaiting_response_created:
+    # An identity captured by an earlier replay (or staged by the terminal
+    # capacity path before ``response_id`` was cleared) outlives this call, so
+    # a bounded extra replay keeps rewriting to the id the client is reading.
+    downstream_response_id = request_state.replay_downstream_response_id
+    if (
+        downstream_response_id is None
+        and request_state.response_id is not None
+        and not request_state.awaiting_response_created
+    ):
         downstream_response_id = request_state.response_id
+    suppress_in_progress = request_state.suppress_next_in_progress_downstream or (
+        downstream_response_id is not None and request_state.response_event_count >= 2
+    )
     if request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text:
         request_state.request_text = request_state.fresh_upstream_request_text
         request_state.previous_response_id = None
@@ -461,6 +474,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.response_event_count = 0
     request_state.replay_downstream_response_id = downstream_response_id
     request_state.suppress_next_created_downstream = downstream_response_id is not None
+    request_state.suppress_next_in_progress_downstream = suppress_in_progress
     _clear_websocket_request_error_overrides(request_state)
     return request_text
 
@@ -798,6 +812,21 @@ def _websocket_precreated_retry_error_code(
 ) -> str | None:
     if request_state is None:
         return None
+    if request_state.response_id is not None and not request_state.awaiting_response_created:
+        # An accepted response is only replayable under the output-free
+        # capacity rule; every pre-created classifier below refuses it.
+        return _websocket_accepted_capacity_retry_error_code(
+            request_state,
+            event_type=event_type,
+            error_code=_normalize_error_code(
+                _websocket_event_error_code(event_type, payload),
+                _websocket_event_error_type(event_type, payload),
+            ),
+            error_message=_websocket_event_error_message(event_type, payload),
+            payload_response_id=_websocket_response_id(None, payload),
+            payload=payload,
+            has_other_pending_requests=has_other_pending_requests,
+        )
     if request_state.last_downstream_sequence_number is not None:
         return None
     if request_state.downstream_visible:

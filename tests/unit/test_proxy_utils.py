@@ -38153,7 +38153,7 @@ async def test_pop_replayable_created_generate_false_prewarm_accepts_initial_seq
 @pytest.mark.parametrize(
     ("generate_false_prewarm", "response_event_count", "sequence_number"),
     [
-        (False, 1, 0),
+        (False, 2, 0),
         (True, 2, 0),
         (True, 1, 1),
     ],
@@ -52977,3 +52977,444 @@ async def test_stream_with_retry_reframes_data_only_delta_frames_after_ttft(monk
     assert chunks[2] == 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"b"}\n\n'
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
+
+
+# --- Accepted output-free capacity replay (#1384 takeover, narrowed scope) ---
+
+
+def _accepted_lifecycle_request_state(**overrides: Any) -> proxy_service._WebSocketRequestState:
+    """Upstream accepted the request (created + in_progress forwarded), no output yet."""
+    values: dict[str, Any] = {
+        "request_id": "req_accepted_lifecycle",
+        "model": "gpt-5.6-sol",
+        "service_tier": None,
+        "reasoning_effort": None,
+        "api_key_reservation": None,
+        "started_at": 0.0,
+        "response_create_sent_at": 0.0,
+        "awaiting_response_created": False,
+        "response_id": "resp_accepted_visible",
+        "response_event_count": 2,
+        "request_text": '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+    }
+    values.update(overrides)
+    return proxy_service._WebSocketRequestState(**values)
+
+
+def _accepted_capacity_error_payload(
+    *,
+    code: str = "server_is_overloaded",
+    message: str = "Our servers are currently overloaded. Please try again later.",
+    response_id: str | None = None,
+) -> dict[str, JsonValue]:
+    if response_id is None:
+        return {"type": "error", "error": {"type": "service_unavailable_error", "code": code, "message": message}}
+    return {
+        "type": "response.failed",
+        "response": {"id": response_id, "status": "failed", "error": {"code": code, "message": message}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "payload_response_id", "expected"),
+    [
+        (
+            "server_is_overloaded",
+            "Our servers are currently overloaded. Please try again later.",
+            None,
+            "server_is_overloaded",
+        ),
+        ("overloaded_error", "Our servers are currently overloaded. Please try again later.", None, "overloaded_error"),
+        (
+            "model_at_capacity",
+            "Selected model is at capacity. Please try a different model.",
+            "resp_accepted_visible",
+            "model_at_capacity",
+        ),
+        (
+            "invalid_request_error",
+            "Selected model is at capacity. Please try a different model.",
+            "resp_accepted_visible",
+            "server_is_overloaded",
+        ),
+    ],
+)
+def test_websocket_precreated_retry_error_code_replays_accepted_output_free_capacity_failure(
+    code: str,
+    message: str,
+    payload_response_id: str | None,
+    expected: str,
+):
+    """An accepted response that failed before any output is classified for
+    replay when the terminal is a capacity code or the selected-model capacity
+    message, even when the payload names the accepted response id."""
+    payload = _accepted_capacity_error_payload(code=code, message=message, response_id=payload_response_id)
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type=cast(str, payload["type"]),
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"replay_count": 1},
+        {"upstream_model_output_seen": True},
+        {"downstream_visible": True},
+        {"response_event_count": 3},
+        {"pending_function_call_ids": ["call_pending"]},
+        {"pending_tool_call_types": {"call_pending": "function_call"}},
+        {"deferred_reasoning_downstream_texts": ["data: {}\n\n"]},
+        {"previous_response_id": "resp_anchor"},
+        {"last_downstream_sequence_number": 0},
+        {"request_text": None},
+        {"response_create_sent_at": None},
+    ],
+)
+def test_websocket_precreated_retry_error_code_refuses_unsafe_accepted_capacity_failure(overrides: dict[str, Any]):
+    payload = _accepted_capacity_error_payload()
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(**overrides),
+            event_type="error",
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
+def test_websocket_precreated_retry_error_code_refuses_accepted_capacity_failure_with_other_pending_requests():
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type="error",
+            payload=_accepted_capacity_error_payload(),
+            has_other_pending_requests=True,
+        )
+        is None
+    )
+
+
+def test_websocket_precreated_retry_error_code_refuses_accepted_terminal_naming_another_response():
+    payload = _accepted_capacity_error_payload(response_id="resp_someone_else")
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type="response.failed",
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["rate_limit_exceeded", "usage_limit_reached", "insufficient_quota", "usage_not_included", "quota_exceeded"],
+)
+def test_websocket_precreated_retry_error_code_keeps_quota_codes_fail_closed_after_acceptance(code: str):
+    """Quota and rate-limit codes keep their stronger classification: an
+    accepted turn that hit a quota wall may already be billed, so it is never
+    replayed even when the message names the selected-model capacity."""
+    payload = _accepted_capacity_error_payload(
+        code=code,
+        message="Selected model is at capacity. Please try a different model.",
+    )
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type="error",
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**_accepted_capacity_error_payload(), "usage": {"input_tokens": 12, "output_tokens": 1}},
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_accepted_visible",
+                "error": {"code": "server_is_overloaded", "message": "Our servers are currently overloaded."},
+                "usage": {"output_tokens": 0, "output_tokens_details": {"reasoning_tokens": 7}},
+            },
+        },
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_accepted_visible",
+                "error": {"code": "server_is_overloaded", "message": "Our servers are currently overloaded."},
+                "output": [{"type": "message", "role": "assistant", "content": []}],
+            },
+        },
+    ],
+)
+def test_websocket_precreated_retry_error_code_refuses_accepted_terminal_reporting_output(payload: dict[str, Any]):
+    """Credit: Darafei Praliaskouski (#1384) -- a terminal whose payload reports
+    output items or billed output/reasoning tokens proves the model ran."""
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type=cast(str, payload["type"]),
+            payload=cast(dict[str, JsonValue], payload),
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
+def test_precreated_only_classifiers_refuse_accepted_states():
+    """The account/model, auth, and owner-pinned quota classifiers stay
+    pre-created only: none of their replay branches can null an accepted
+    response id, so they can never leak a second lifecycle."""
+    model_unsupported_payload: dict[str, JsonValue] = {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+        },
+    }
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type="error",
+            payload=model_unsupported_payload,
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+    auth_payload: dict[str, JsonValue] = {
+        "type": "error",
+        "error": {"type": "invalid_request_error", "code": "invalid_api_key", "message": "Invalid API key"},
+    }
+    assert (
+        proxy_service._websocket_precreated_auth_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type="error",
+            payload=auth_payload,
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+    assert (
+        proxy_service._websocket_owner_pinned_quota_error_code(
+            _accepted_lifecycle_request_state(
+                previous_response_id="resp_anchor",
+                preferred_account_id="acc_owner",
+            ),
+            event_type="error",
+            payload=_accepted_capacity_error_payload(
+                message="Selected model is at capacity. Please try a different model."
+            ),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({}, True),
+        ({"last_downstream_sequence_number": 1}, True),
+        ({"last_downstream_sequence_number": 0}, False),
+        ({"response_event_count": 1, "last_downstream_sequence_number": 0}, True),
+        ({"upstream_model_output_seen": True}, False),
+        ({"pending_function_call_ids": ["call_pending"]}, False),
+        ({"deferred_reasoning_downstream_texts": ["data: {}\n\n"]}, False),
+        ({"response_event_count": 3}, False),
+        ({"previous_response_id": "resp_anchor"}, False),
+        (
+            {
+                "previous_response_id": "resp_anchor",
+                "fresh_upstream_request_is_retry_safe": True,
+                "fresh_upstream_request_text": '{"type":"response.create","model":"gpt-5.6-sol","input":"full"}',
+            },
+            True,
+        ),
+    ],
+)
+def test_websocket_request_can_replay_before_visible_output_accepts_lifecycle_only_prelude(
+    overrides: dict[str, Any],
+    expected: bool,
+):
+    """created + in_progress (two counted lifecycle events) is still pre-visible;
+    a sequenced watermark qualifies only when it covers exactly that prelude."""
+    request_state = _accepted_lifecycle_request_state(**overrides)
+
+    assert proxy_service._websocket_request_can_replay_before_visible_output(request_state) is expected
+
+
+@pytest.mark.parametrize(("response_event_count", "expect_in_progress_suppressed"), [(2, True), (1, False)])
+def test_prepare_visible_output_replay_arms_prelude_suppression_for_accepted_state(
+    response_event_count: int,
+    expect_in_progress_suppressed: bool,
+):
+    request_state = _accepted_lifecycle_request_state(response_event_count=response_event_count)
+
+    replay_text = proxy_service._prepare_websocket_request_state_for_visible_output_replay(request_state)
+
+    assert replay_text == request_state.request_text
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.suppress_next_in_progress_downstream is expect_in_progress_suppressed
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_id is None
+    assert request_state.response_event_count == 0
+    assert request_state.replay_count == 1
+
+
+def test_prepare_visible_output_replay_preserves_staged_identity_across_bounded_extra_replay():
+    """A created-only replay whose replacement socket closes cleanly before
+    ``response.created`` gets one bounded extra replay. The identity captured
+    by the first replay must survive that second prepare, otherwise the extra
+    attempt's ``response.created`` would leak a second lifecycle."""
+    request_state = _accepted_lifecycle_request_state(
+        response_id=None,
+        awaiting_response_created=True,
+        response_event_count=0,
+        replay_count=1,
+        replay_downstream_response_id="resp_accepted_visible",
+        suppress_next_created_downstream=True,
+        suppress_next_in_progress_downstream=True,
+    )
+
+    assert proxy_service._prepare_websocket_request_state_for_visible_output_replay(request_state) is not None
+
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.suppress_next_in_progress_downstream is True
+    assert request_state.replay_count == 2
+
+
+@pytest.mark.asyncio
+async def test_pop_replayable_sequenced_lifecycle_prelude_replays_without_prewarm_marker():
+    """Sequenced created + in_progress (watermark 1) is replayable for ordinary
+    native requests, not only ``generate: false`` prewarms."""
+    pending_request = _accepted_lifecycle_request_state(last_downstream_sequence_number=1)
+    pending_requests = deque([pending_request])
+
+    replayed_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+    )
+
+    assert replayed_request is pending_request
+    assert pending_requests == deque()
+    assert pending_request.replay_downstream_response_id == "resp_accepted_visible"
+    assert pending_request.suppress_next_created_downstream is True
+    assert pending_request.suppress_next_in_progress_downstream is True
+    assert pending_request.last_downstream_sequence_number == 1
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_replays_accepted_capacity_error_within_one_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Direct websocket surface: created(X) and in_progress(X) are forwarded,
+    the output-free capacity error stages a replay on another account, and the
+    replay's created(Y)/in_progress(Y) are suppressed while its completion is
+    rewritten to X."""
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_accepted_replay")
+    pending_request = _accepted_lifecycle_request_state(
+        request_id="ws_req_accepted_capacity_replay",
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_gate_acquired=True,
+    )
+    pending_requests = deque([pending_request])
+    response_create_gate = asyncio.Semaphore(0)
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=response_create_gate,
+        )
+
+    created_text = await process({"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    assert json.loads(created_text)["response"]["id"] == "resp_x"
+    assert upstream_control.suppress_downstream_event is False
+    in_progress_text = await process(
+        {"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}}
+    )
+    assert json.loads(in_progress_text)["response"]["id"] == "resp_x"
+    assert upstream_control.suppress_downstream_event is False
+    assert pending_request.response_event_count == 2
+
+    await process(_accepted_capacity_error_payload())
+
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.replay_request_state is pending_request
+    assert pending_requests == deque()
+    assert pending_request.replay_downstream_response_id == "resp_x"
+    assert pending_request.suppress_next_created_downstream is True
+    assert pending_request.suppress_next_in_progress_downstream is True
+    assert pending_request.awaiting_response_created is True
+    assert pending_request.response_id is None
+    assert pending_request.response_event_count == 0
+    assert pending_request.replay_count == 1
+    assert pending_request.excluded_account_ids == {account.id}
+    assert pending_request.affinity_policy.reallocate_sticky is True
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[2] == "server_is_overloaded"
+
+    # The relay loop re-registers the replay on a fresh socket.
+    pending_requests.append(pending_request)
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    response_create_gate = asyncio.Semaphore(0)
+    pending_request.response_create_gate_acquired = True
+
+    replay_created_text = await process(
+        {"type": "response.created", "response": {"id": "resp_y", "status": "in_progress"}}
+    )
+    assert upstream_control.suppress_downstream_event is True
+    assert json.loads(replay_created_text)["response"]["id"] == "resp_x"
+    assert pending_request.response_id == "resp_y"
+    upstream_control.suppress_downstream_event = False
+    await process({"type": "response.in_progress", "response": {"id": "resp_y", "status": "in_progress"}})
+    assert upstream_control.suppress_downstream_event is True
+    upstream_control.suppress_downstream_event = False
+    completed_text = await process(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_y",
+                "status": "completed",
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "OK"}]}
+                ],
+            },
+        }
+    )
+
+    assert upstream_control.suppress_downstream_event is False
+    assert json.loads(completed_text)["response"]["id"] == "resp_x"
+    assert pending_requests == deque()

@@ -121,6 +121,9 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge.accepted_replay import (
+    _stage_websocket_request_state_for_replay,
+)
 from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
 )
@@ -426,6 +429,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _trim_websocket_previous_response_input_items,
     _upstream_websocket_disconnect_message,
     _websocket_auth_failure_requires_reauth,
+    _websocket_auth_request_can_switch_account,
     _websocket_capability_metadata_values,
     _websocket_client_previous_response_full_resend_is_retry_safe,
     _websocket_connect_deadline,
@@ -1256,6 +1260,15 @@ async def _process_upstream_websocket_transport_end(
             pending_lock=anyio.Lock(),
             replay_refusal_reasons=replay_refusal_reasons,
         )
+        if (
+            replay_request_state is not None
+            and replay_request_state.replay_downstream_response_id is not None
+            and _websocket_auth_request_can_switch_account(replay_request_state)
+        ):
+            # An accepted turn was lost on this account; move the
+            # account-neutral replay to another one like the bridge does.
+            replay_request_state.excluded_account_ids.add(account.id)
+            replay_request_state.affinity_policy = replace(replay_request_state.affinity_policy, reallocate_sticky=True)
     if replay_request_state is not None:
         upstream_control.replay_request_state = replay_request_state
         _facade().logger.info(
@@ -5437,9 +5450,9 @@ class _WebSocketMixin:
             else:
                 release_create_gate = False
             if request_state is not None:
-                replay_created_will_be_suppressed = (
+                replay_prelude_will_be_suppressed = (
                     event_type == "response.created" and request_state.suppress_next_created_downstream
-                )
+                ) or (event_type == "response.in_progress" and request_state.suppress_next_in_progress_downstream)
                 sequence_number = payload.get("sequence_number") if payload is not None else None
                 if (
                     request_state.replay_downstream_response_id is not None
@@ -5447,7 +5460,7 @@ class _WebSocketMixin:
                     and isinstance(sequence_number, int)
                     and not isinstance(sequence_number, bool)
                     and sequence_number <= request_state.last_downstream_sequence_number
-                    and not replay_created_will_be_suppressed
+                    and not replay_prelude_will_be_suppressed
                 ):
                     raise _WebSocketReplaySequenceRegression(
                         f"request_id={request_state.request_log_id or request_state.request_id} "
@@ -5491,6 +5504,9 @@ class _WebSocketMixin:
                     request_state.downstream_visible = True
                 if event_type == "response.created" and request_state.suppress_next_created_downstream:
                     request_state.suppress_next_created_downstream = False
+                    upstream_control.suppress_downstream_event = True
+                elif event_type == "response.in_progress" and request_state.suppress_next_in_progress_downstream:
+                    request_state.suppress_next_in_progress_downstream = False
                     upstream_control.suppress_downstream_event = True
                 if payload is not None:
                     rewritten_payload = _rewrite_websocket_downstream_response_id(payload, request_state)
@@ -5897,10 +5913,24 @@ class _WebSocketMixin:
                         upstream_control.replay_request_state = request_state
             else:
                 upstream_control.reconnect_requested = True
+                accepted_lifecycle_replay = (
+                    request_state.response_id is not None and not request_state.awaiting_response_created
+                )
+                # The loop re-acquires the create gate and admission for a
+                # replay whose gate is not held, so no gate is claimed here.
+                await _stage_websocket_request_state_for_replay(
+                    request_state,
+                    create_gate=None,
+                    surface="websocket",
+                    trigger="capacity_error",
+                )
                 request_state.replay_count += 1
-                request_state.awaiting_response_created = True
-                request_state.response_id = None
                 _clear_websocket_request_error_overrides(request_state)
+                if accepted_lifecycle_replay and _websocket_auth_request_can_switch_account(request_state):
+                    # The accepted turn failed on this account; move the
+                    # account-neutral replay to another one like the bridge does.
+                    request_state.excluded_account_ids.add(account.id)
+                    request_state.affinity_policy = replace(request_state.affinity_policy, reallocate_sticky=True)
                 upstream_control.suppress_downstream_event = True
                 upstream_control.replay_request_state = request_state
                 await proxy._handle_stream_error(

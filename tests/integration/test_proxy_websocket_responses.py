@@ -13234,3 +13234,435 @@ def test_backend_responses_websocket_trusted_capability_pending_conflict_keeps_o
         "acct_ws_capability_conflict_ordinary_1",
         "acct_ws_capability_conflict_cyber_1",
     ]
+
+
+# --- Reproduction for #1384 takeover (narrowed scope): accepted, output-free capacity failure ---
+
+
+def _ws_event(payload: dict[str, object]) -> _FakeUpstreamMessage:
+    return _FakeUpstreamMessage("text", text=json.dumps(payload, separators=(",", ":")))
+
+
+def _accepted_output_free_prelude(response_id: str) -> list[_FakeUpstreamMessage]:
+    """Upstream ACCEPTED the turn: created + in_progress, still no output."""
+    return [
+        _ws_event({"type": "response.created", "response": {"id": response_id, "status": "in_progress"}}),
+        _ws_event({"type": "response.in_progress", "response": {"id": response_id, "status": "in_progress"}}),
+    ]
+
+
+def _recovered_upstream(response_id: str) -> _SequencedUpstreamWebSocket:
+    return _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _ws_event({"type": "response.created", "response": {"id": response_id, "status": "in_progress"}}),
+                _ws_event(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "OK"}],
+                                }
+                            ],
+                        },
+                    }
+                ),
+            ]
+        ],
+    )
+
+
+def _receive_until_terminal(websocket, *, limit: int = 12) -> tuple[list[dict[str, Any]], WebSocketDisconnect | None]:
+    """Collect downstream frames (keepalives dropped) until a terminal event,
+    a disconnect, or ``limit`` frames (bounded so a missing retry cannot hang)."""
+    events: list[dict[str, Any]] = []
+    for _ in range(limit):
+        try:
+            event = json.loads(websocket.receive_text())
+        except WebSocketDisconnect as exc:
+            return events, exc
+        if event.get("type") == "codex.keepalive":
+            continue
+        events.append(event)
+        if event.get("type") in {"response.completed", "response.failed", "response.incomplete", "error"}:
+            break
+    return events, None
+
+
+class _TwoAccountWebSocketFailover:
+    """Hands out ``acct_ws_accepted_a``/``first_upstream`` on the first connect
+    and ``acct_ws_accepted_b``/``recovered_upstream`` on the second, recording
+    what the proxy knew about the first account at retry time."""
+
+    def __init__(self, first_upstream: _FakeUpstreamWebSocket, recovered_upstream: _FakeUpstreamWebSocket) -> None:
+        self.upstreams = [("acct_ws_accepted_a", first_upstream), ("acct_ws_accepted_b", recovered_upstream)]
+        self.connect_accounts: list[str] = []
+        self.excluded_at_connect: list[set[str]] = []
+        self.stream_errors: list[tuple[str, str]] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        failover = self
+        real_handle_stream_error = proxy_module.ProxyService._handle_stream_error
+
+        class _FakeSettingsCache:
+            async def get(self):
+                return _websocket_settings(sse_keepalive_interval_seconds=0.5)
+
+        async def allow_firewall(_websocket):
+            return None
+
+        async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+            return None
+
+        async def fake_connect_proxy_websocket(self, headers, *, request_state, **kwargs):
+            del self, headers, kwargs
+            assert failover.upstreams, "unexpected extra upstream connect"
+            account_id, upstream = failover.upstreams.pop(0)
+            failover.connect_accounts.append(account_id)
+            failover.excluded_at_connect.append(set(getattr(request_state, "excluded_account_ids", set())))
+            return SimpleNamespace(id=account_id), upstream
+
+        async def spy_handle_stream_error(self, account, error, code, http_status=None):
+            failover.stream_errors.append((account.id, code))
+            return await real_handle_stream_error(self, account, error, code, http_status)
+
+        async def fake_write_request_log(self, **kwargs):
+            del self, kwargs
+
+        monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+        monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+        monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+        monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+        monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", spy_handle_stream_error)
+        monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    def run(self, app_instance) -> tuple[list[dict[str, Any]], WebSocketDisconnect | None]:
+        with TestClient(app_instance) as client:
+            with client.websocket_connect("/backend-api/codex/responses") as websocket:
+                websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "response.create",
+                            "model": "gpt-5.4",
+                            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                            "stream": True,
+                        }
+                    )
+                )
+                return _receive_until_terminal(websocket)
+
+    def assert_retried_on_another_account(self) -> None:
+        assert self.connect_accounts == ["acct_ws_accepted_a", "acct_ws_accepted_b"], self.connect_accounts
+        # The failing account must be out of the running for the replacement
+        # connect: either excluded on the request state or penalized in the
+        # load balancer through the stream-error path.
+        penalized = {account_id for account_id, _code in self.stream_errors}
+        assert "acct_ws_accepted_a" in (self.excluded_at_connect[-1] | penalized), (
+            self.excluded_at_connect,
+            self.stream_errors,
+        )
+
+
+def _assert_ws_single_response_lifecycle_completed(
+    events: list[dict[str, Any]],
+    disconnect: WebSocketDisconnect | None,
+) -> str:
+    types = [event["type"] for event in events]
+    assert disconnect is None, f"unexpected disconnect code={disconnect.code} after {types}"
+    created_ids = [event["response"]["id"] for event in events if event["type"] == "response.created"]
+    assert len(created_ids) == 1, f"client must observe exactly one response.created, got {types}"
+    assert not any(event_type in {"error", "response.failed", "response.incomplete"} for event_type in types), types
+    assert types[-1] == "response.completed", types
+    assert events[-1]["response"]["id"] == created_ids[0]
+    return created_ids[0]
+
+
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [
+        ("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
+        ("model_at_capacity", "Selected model is at capacity. Please try a different model."),
+    ],
+)
+def test_backend_responses_websocket_retries_accepted_output_free_capacity_error_on_another_account(
+    app_instance,
+    monkeypatch,
+    error_code,
+    error_message,
+):
+    """#1384 (narrowed scope): upstream accepts the turn (``response.created``
+    + ``response.in_progress``) and then fails it with an output-free capacity
+    terminal ``error``. The proxy must retry on another account while the
+    client observes a single response lifecycle."""
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                *_accepted_output_free_prelude("resp_ws_accepted_capacity_failed"),
+                _ws_event(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "service_unavailable_error",
+                            "code": error_code,
+                            "message": error_message,
+                        },
+                    }
+                ),
+            ]
+        ],
+    )
+    recovered_upstream = _recovered_upstream("resp_ws_accepted_capacity_recovered")
+    failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run(app_instance)
+
+    _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    failover.assert_retried_on_another_account()
+    assert len(first_upstream.sent_text) == 1
+    assert len(recovered_upstream.sent_text) == 1
+    assert json.loads(recovered_upstream.sent_text[0])["input"] == json.loads(first_upstream.sent_text[0])["input"]
+
+
+def test_backend_responses_websocket_retries_accepted_output_free_abrupt_close_on_another_account(
+    app_instance,
+    monkeypatch,
+):
+    """#1384 (narrowed scope): upstream accepts the turn (``response.created``
+    + ``response.in_progress``) and then the transport closes abruptly before
+    any output. Unanchored first turn only: anchored (``previous_response_id``)
+    replay without an idempotency proof is out of scope."""
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                *_accepted_output_free_prelude("resp_ws_accepted_abrupt_closed"),
+                _FakeUpstreamMessage("close", close_code=1011),
+            ]
+        ],
+    )
+    recovered_upstream = _recovered_upstream("resp_ws_accepted_close_recovered")
+    failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run(app_instance)
+
+    _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    failover.assert_retried_on_another_account()
+    assert len(first_upstream.sent_text) == 1
+    assert len(recovered_upstream.sent_text) == 1
+    assert json.loads(recovered_upstream.sent_text[0])["input"] == json.loads(first_upstream.sent_text[0])["input"]
+
+
+def _sequenced_ws_event(payload: dict[str, object], sequence_number: int) -> _FakeUpstreamMessage:
+    return _ws_event({**payload, "sequence_number": sequence_number})
+
+
+def _sequenced_accepted_capacity_failure_upstream(response_id: str) -> _SequencedUpstreamWebSocket:
+    """Native sequenced frames: created 0, in_progress 1, then a capacity error."""
+    return _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _sequenced_ws_event(
+                    {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}}, 0
+                ),
+                _sequenced_ws_event(
+                    {"type": "response.in_progress", "response": {"id": response_id, "status": "in_progress"}}, 1
+                ),
+                _sequenced_ws_event(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "service_unavailable_error",
+                            "code": "server_is_overloaded",
+                            "message": "Our servers are currently overloaded. Please try again later.",
+                        },
+                    },
+                    2,
+                ),
+            ]
+        ],
+    )
+
+
+def _sequenced_recovered_upstream(response_id: str, *, completed_sequence: int) -> _SequencedUpstreamWebSocket:
+    """A fresh upstream generation restarts its counter: created 0,
+    in_progress 1 (both suppressed downstream), then output 2 and completion."""
+    return _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _sequenced_ws_event(
+                    {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}}, 0
+                ),
+                _sequenced_ws_event(
+                    {"type": "response.in_progress", "response": {"id": response_id, "status": "in_progress"}}, 1
+                ),
+                _sequenced_ws_event(
+                    {
+                        "type": "response.output_item.added",
+                        "response_id": response_id,
+                        "output_index": 0,
+                        "item": {
+                            "id": "msg_ws_seq_recovered",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "in_progress",
+                            "content": [],
+                        },
+                    },
+                    2,
+                ),
+                _sequenced_ws_event(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "OK"}],
+                                }
+                            ],
+                        },
+                    },
+                    completed_sequence,
+                ),
+            ]
+        ],
+    )
+
+
+def test_backend_responses_websocket_accepted_capacity_replay_keeps_sequenced_frames_advancing(
+    app_instance,
+    monkeypatch,
+):
+    """Native Codex frames carry ``sequence_number``. The replay's duplicate
+    prelude (created 0, in_progress 1) is suppressed, so the client's counter
+    keeps advancing under the single response id it already reads."""
+    first_upstream = _sequenced_accepted_capacity_failure_upstream("resp_ws_seq_accepted_failed")
+    recovered_upstream = _sequenced_recovered_upstream("resp_ws_seq_accepted_recovered", completed_sequence=3)
+    failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run(app_instance)
+
+    created_id = _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    assert created_id == "resp_ws_seq_accepted_failed"
+    assert [(event["type"], event["sequence_number"]) for event in events] == [
+        ("response.created", 0),
+        ("response.in_progress", 1),
+        ("response.output_item.added", 2),
+        ("response.completed", 3),
+    ]
+    assert events[2]["response_id"] == created_id
+    failover.assert_retried_on_another_account()
+    assert len(recovered_upstream.sent_text) == 1
+
+
+def test_backend_responses_websocket_accepted_capacity_replay_fails_closed_on_non_advancing_sequence(
+    app_instance,
+    monkeypatch,
+):
+    """Mutant: a replay frame that does not advance past the forwarded prelude
+    (completed with ``sequence_number`` 1 after the client saw 0 and 1) is
+    refused by the existing fail-closed sequence guard instead of reaching
+    the client with a stale counter."""
+    first_upstream = _sequenced_accepted_capacity_failure_upstream("resp_ws_seq_regressed_failed")
+    recovered_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _sequenced_ws_event(
+                    {
+                        "type": "response.created",
+                        "response": {"id": "resp_ws_seq_regressed_recovered", "status": "in_progress"},
+                    },
+                    0,
+                ),
+                _sequenced_ws_event(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_ws_seq_regressed_recovered", "status": "completed", "output": []},
+                    },
+                    1,
+                ),
+            ]
+        ],
+    )
+    failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run(app_instance)
+
+    assert [(event["type"], event["sequence_number"]) for event in events] == [
+        ("response.created", 0),
+        ("response.in_progress", 1),
+    ]
+    assert disconnect is not None and disconnect.code == 1011
+    assert failover.connect_accounts == ["acct_ws_accepted_a", "acct_ws_accepted_b"]
+
+
+def test_backend_responses_websocket_does_not_replay_accepted_capacity_error_after_output_item(
+    app_instance,
+    monkeypatch,
+):
+    """Mutant: once ``response.output_item.added`` reached the client the turn
+    is not replay-safe; the capacity error surfaces on the single connect."""
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                *_accepted_output_free_prelude("resp_ws_accepted_output_failed"),
+                _ws_event(
+                    {
+                        "type": "response.output_item.added",
+                        "response_id": "resp_ws_accepted_output_failed",
+                        "output_index": 0,
+                        "item": {
+                            "id": "msg_ws_accepted_output",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "in_progress",
+                            "content": [],
+                        },
+                    }
+                ),
+                _ws_event(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "service_unavailable_error",
+                            "code": "server_is_overloaded",
+                            "message": "Our servers are currently overloaded. Please try again later.",
+                        },
+                    }
+                ),
+            ]
+        ],
+    )
+    recovered_upstream = _recovered_upstream("resp_ws_accepted_output_unused")
+    failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
+    failover.install(monkeypatch)
+
+    events, _disconnect = failover.run(app_instance)
+
+    assert [event["type"] for event in events] == [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "error",
+    ]
+    assert events[-1]["error"]["code"] == "server_is_overloaded"
+    assert failover.connect_accounts == ["acct_ws_accepted_a"]
+    assert recovered_upstream.sent_text == []

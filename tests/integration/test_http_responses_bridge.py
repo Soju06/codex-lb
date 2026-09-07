@@ -16459,3 +16459,588 @@ async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_den
     assert not [line for line in continuity_diagnostics if "previous_response_source=client_supplied" in line], (
         "an anchored recovery retry reported a proxy-injected anchor as client-supplied"
     )
+
+
+# --- Reproduction for #1384 takeover (narrowed scope): accepted, output-free capacity failure ---
+
+
+class _AcceptedOutputFreeCapacityErrorUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    """Upstream ACCEPTS the request (created + in_progress) then fails output-free.
+
+    Models the production symptom behind #1384: the ChatGPT backend delivers
+    ``response.created`` and ``response.in_progress`` and only then terminates
+    the turn with a capacity ``error`` event carrying no output at all.
+    """
+
+    def __init__(
+        self,
+        *,
+        error_code: str = "server_is_overloaded",
+        error_message: str = "Our servers are currently overloaded. Please try again later.",
+    ) -> None:
+        super().__init__("resp_accepted_capacity_failed")
+        self.error_code = error_code
+        self.error_message = error_message
+
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        response_id = f"{self.response_id_prefix}_{len(self.sent_text)}"
+        for event in (
+            {
+                "type": "response.created",
+                "response": {"id": response_id, "object": "response", "status": "in_progress"},
+            },
+            {
+                "type": "response.in_progress",
+                "response": {"id": response_id, "object": "response", "status": "in_progress"},
+            },
+            {
+                "type": "error",
+                "error": {
+                    "type": "service_unavailable_error",
+                    "code": self.error_code,
+                    "message": self.error_message,
+                },
+            },
+        ):
+            await self._messages.put(_FakeUpstreamMessage("text", text=json.dumps(event, separators=(",", ":"))))
+
+
+class _AcceptedOutputFreeAbruptCloseUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    """Upstream ACCEPTS the request (created + in_progress) then the transport dies."""
+
+    def __init__(self) -> None:
+        super().__init__("resp_accepted_abrupt_closed")
+
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        response_id = f"{self.response_id_prefix}_{len(self.sent_text)}"
+        for event in (
+            {
+                "type": "response.created",
+                "response": {"id": response_id, "object": "response", "status": "in_progress"},
+            },
+            {
+                "type": "response.in_progress",
+                "response": {"id": response_id, "object": "response", "status": "in_progress"},
+            },
+        ):
+            await self._messages.put(_FakeUpstreamMessage("text", text=json.dumps(event, separators=(",", ":"))))
+        await self._messages.put(_FakeUpstreamMessage("close", close_code=1011))
+
+
+def _install_two_account_bridge_failover(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    first_account: Account,
+    second_account: Account,
+    upstreams: list[_FakeBridgeUpstreamWebSocket],
+) -> tuple[list[str | None], list[frozenset[str]]]:
+    """Route selection to ``first_account`` until it is excluded, then to
+    ``second_account``; hand out ``upstreams`` in connect order.
+
+    Returns ``(connect_account_ids, selection_exclusions)`` where the former
+    records the ``chatgpt-account-id`` header of every upstream connect and the
+    latter the ``exclude_account_ids`` of every selection call.
+    """
+
+    connect_account_ids: list[str | None] = []
+    selection_exclusions: list[frozenset[str]] = []
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            additional_limit_name,
+            api_key,
+            preferred_account_id,
+        )
+        excluded = frozenset(exclude_account_ids or ())
+        selection_exclusions.append(excluded)
+        chosen = second_account if first_account.id in excluded else first_account
+        return AccountSelection(account=chosen, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, base_url, session
+        connect_account_ids.append(account_id_header)
+        assert upstreams, "unexpected extra upstream connect"
+        return upstreams.pop(0)
+
+    async def fail_legacy_stream(*args, **kwargs):
+        raise AssertionError("legacy core_stream_responses path must not be used when HTTP bridge is enabled")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
+    return connect_account_ids, selection_exclusions
+
+
+def _assert_single_response_lifecycle_completed(events: list[dict]) -> str:
+    """The client must observe ONE response lifecycle: exactly one
+    ``response.created`` whose id is the id of the ``response.completed`` that
+    ends the stream, and no error-shaped event in between. Returns that id."""
+    types = [event["type"] for event in events]
+    created_ids = [event["response"]["id"] for event in events if event["type"] == "response.created"]
+    assert len(created_ids) == 1, f"client must observe exactly one response.created, got {types}"
+    assert not any(event_type in {"error", "response.failed", "response.incomplete"} for event_type in types), types
+    assert types[-1] == "response.completed", types
+    assert events[-1]["response"]["id"] == created_ids[0]
+    assert events[-1]["response"]["output"][0]["content"][0]["text"] == "OK"
+    return created_ids[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [
+        ("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
+        ("model_at_capacity", "Selected model is at capacity. Please try a different model."),
+    ],
+)
+async def test_backend_responses_http_bridge_retries_accepted_output_free_capacity_error_on_another_account(
+    async_client,
+    monkeypatch,
+    error_code,
+    error_message,
+):
+    """#1384 (narrowed scope): upstream accepts the turn (``response.created``
+    + ``response.in_progress``) and then fails it with an output-free capacity
+    terminal ``error``. The bridge must retry on another account while the
+    client observes a single response lifecycle."""
+    _install_bridge_settings(monkeypatch, enabled=True)
+    first_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_accepted_capacity_a",
+        "http-bridge-accepted-capacity-a@example.com",
+    )
+    second_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_accepted_capacity_b",
+        "http-bridge-accepted-capacity-b@example.com",
+    )
+    first_account = await _get_account(first_account_id)
+    second_account = await _get_account(second_account_id)
+    failing_upstream = _AcceptedOutputFreeCapacityErrorUpstreamWebSocket(
+        error_code=error_code,
+        error_message=error_message,
+    )
+    retry_upstream = _FakeBridgeUpstreamWebSocket("resp_accepted_capacity_retry")
+    connect_account_ids, selection_exclusions = _install_two_account_bridge_failover(
+        monkeypatch,
+        first_account=first_account,
+        second_account=second_account,
+        upstreams=[failing_upstream, retry_upstream],
+    )
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "retry-accepted-capacity",
+            "prompt_cache_key": "accepted-capacity-retry-key",
+            "stream": True,
+        },
+    )
+
+    _assert_single_response_lifecycle_completed(events)
+    # Retried on ANOTHER account: the failing account is excluded from the
+    # replacement selection and the second connect carries the other account.
+    assert connect_account_ids == ["acc_http_bridge_accepted_capacity_a", "acc_http_bridge_accepted_capacity_b"]
+    assert first_account.id in selection_exclusions[-1]
+    assert second_account.id not in selection_exclusions[-1]
+    assert len(failing_upstream.sent_text) == 1
+    assert len(retry_upstream.sent_text) == 1
+    assert json.loads(retry_upstream.sent_text[0])["input"] == json.loads(failing_upstream.sent_text[0])["input"]
+    assert failing_upstream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_retries_accepted_output_free_abrupt_close_on_another_account(
+    async_client,
+    monkeypatch,
+):
+    """#1384 (narrowed scope): upstream accepts the turn (``response.created``
+    + ``response.in_progress``) and then the transport closes abruptly before
+    any output. Unanchored first turn only: anchored (``previous_response_id``)
+    replay without an idempotency proof is out of scope."""
+    _install_bridge_settings(monkeypatch, enabled=True)
+    first_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_accepted_close_a",
+        "http-bridge-accepted-close-a@example.com",
+    )
+    second_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_accepted_close_b",
+        "http-bridge-accepted-close-b@example.com",
+    )
+    first_account = await _get_account(first_account_id)
+    second_account = await _get_account(second_account_id)
+    failing_upstream = _AcceptedOutputFreeAbruptCloseUpstreamWebSocket()
+    retry_upstream = _FakeBridgeUpstreamWebSocket("resp_accepted_close_retry")
+    connect_account_ids, selection_exclusions = _install_two_account_bridge_failover(
+        monkeypatch,
+        first_account=first_account,
+        second_account=second_account,
+        upstreams=[failing_upstream, retry_upstream],
+    )
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "retry-accepted-abrupt-close",
+            "prompt_cache_key": "accepted-abrupt-close-retry-key",
+            "stream": True,
+        },
+    )
+
+    _assert_single_response_lifecycle_completed(events)
+    assert connect_account_ids == ["acc_http_bridge_accepted_close_a", "acc_http_bridge_accepted_close_b"]
+    assert first_account.id in selection_exclusions[-1]
+    assert second_account.id not in selection_exclusions[-1]
+    assert len(failing_upstream.sent_text) == 1
+    assert len(retry_upstream.sent_text) == 1
+    assert json.loads(retry_upstream.sent_text[0])["input"] == json.loads(failing_upstream.sent_text[0])["input"]
+
+
+class _AcceptedOutputItemCapacityErrorUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    """Upstream accepts the turn, emits an output item, then fails with a
+    capacity error. Once any model output exists the turn is not replay-safe."""
+
+    def __init__(self) -> None:
+        super().__init__("resp_accepted_output_capacity_failed")
+
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        response_id = f"{self.response_id_prefix}_{len(self.sent_text)}"
+        for event in (
+            {
+                "type": "response.created",
+                "response": {"id": response_id, "object": "response", "status": "in_progress"},
+            },
+            {
+                "type": "response.in_progress",
+                "response": {"id": response_id, "object": "response", "status": "in_progress"},
+            },
+            {
+                "type": "response.output_item.added",
+                "response_id": response_id,
+                "output_index": 0,
+                "item": {
+                    "id": "msg_accepted_output",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": [],
+                },
+            },
+            {
+                "type": "error",
+                "error": {
+                    "type": "service_unavailable_error",
+                    "code": "server_is_overloaded",
+                    "message": "Our servers are currently overloaded. Please try again later.",
+                },
+            },
+        ):
+            await self._messages.put(_FakeUpstreamMessage("text", text=json.dumps(event, separators=(",", ":"))))
+
+
+class _AcceptedBilledCapacityFailureUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    """Upstream accepts the turn and fails it with a capacity ``response.failed``
+    whose payload reports billed output tokens: the model ran, so no replay."""
+
+    def __init__(self) -> None:
+        super().__init__("resp_accepted_billed_capacity_failed")
+
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        response_id = f"{self.response_id_prefix}_{len(self.sent_text)}"
+        for event in (
+            {
+                "type": "response.created",
+                "response": {"id": response_id, "object": "response", "status": "in_progress"},
+            },
+            {
+                "type": "response.in_progress",
+                "response": {"id": response_id, "object": "response", "status": "in_progress"},
+            },
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "status": "failed",
+                    "error": {
+                        "code": "server_is_overloaded",
+                        "message": "Our servers are currently overloaded. Please try again later.",
+                    },
+                    "usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15},
+                },
+            },
+        ):
+            await self._messages.put(_FakeUpstreamMessage("text", text=json.dumps(event, separators=(",", ":"))))
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_does_not_replay_accepted_capacity_error_after_output_item(
+    async_client,
+    monkeypatch,
+):
+    """Mutant of the output-free replay: a capacity error that arrives after
+    ``response.output_item.added`` is not replay-safe and surfaces unchanged
+    on the single upstream connect."""
+    _install_bridge_settings(monkeypatch, enabled=True)
+    first_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_accepted_output_a",
+        "http-bridge-accepted-output-a@example.com",
+    )
+    second_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_accepted_output_b",
+        "http-bridge-accepted-output-b@example.com",
+    )
+    first_account = await _get_account(first_account_id)
+    second_account = await _get_account(second_account_id)
+    failing_upstream = _AcceptedOutputItemCapacityErrorUpstreamWebSocket()
+    connect_account_ids, selection_exclusions = _install_two_account_bridge_failover(
+        monkeypatch,
+        first_account=first_account,
+        second_account=second_account,
+        upstreams=[failing_upstream],
+    )
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "accepted-output-then-capacity",
+            "prompt_cache_key": "accepted-output-capacity-key",
+            "stream": True,
+        },
+    )
+
+    assert [event["type"] for event in events] == [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "error",
+    ]
+    assert events[-1]["error"]["code"] == "server_is_overloaded"
+    assert connect_account_ids == ["acc_http_bridge_accepted_output_a"]
+    assert len(selection_exclusions) == 1
+    assert len(failing_upstream.sent_text) == 1
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_does_not_replay_accepted_capacity_failure_reporting_billed_output(
+    async_client,
+    monkeypatch,
+):
+    """Mutant of the output-free replay: a terminal whose payload reports
+    billed output tokens proves the model ran, so the failure surfaces
+    unchanged instead of re-sending an already charged turn."""
+    _install_bridge_settings(monkeypatch, enabled=True)
+    first_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_accepted_billed_a",
+        "http-bridge-accepted-billed-a@example.com",
+    )
+    second_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_accepted_billed_b",
+        "http-bridge-accepted-billed-b@example.com",
+    )
+    first_account = await _get_account(first_account_id)
+    second_account = await _get_account(second_account_id)
+    failing_upstream = _AcceptedBilledCapacityFailureUpstreamWebSocket()
+    connect_account_ids, _selection_exclusions = _install_two_account_bridge_failover(
+        monkeypatch,
+        first_account=first_account,
+        second_account=second_account,
+        upstreams=[failing_upstream],
+    )
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "accepted-billed-capacity",
+            "prompt_cache_key": "accepted-billed-capacity-key",
+            "stream": True,
+        },
+    )
+
+    assert [event["type"] for event in events] == ["response.created", "response.in_progress", "response.failed"]
+    assert events[-1]["response"]["id"] == events[0]["response"]["id"]
+    assert events[-1]["response"]["error"]["code"] == "server_is_overloaded"
+    assert connect_account_ids == ["acc_http_bridge_accepted_billed_a"]
+    assert len(failing_upstream.sent_text) == 1
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_accepted_capacity_replay_failure_surfaces_one_lifecycle(
+    async_client,
+    monkeypatch,
+):
+    """The replay is bounded to one attempt: when the replacement account also
+    fails the accepted turn, the client sees the single lifecycle it started
+    with (one ``response.created``, one ``response.in_progress``) and one
+    terminal error; no third upstream attempt is made."""
+    _install_bridge_settings(monkeypatch, enabled=True)
+    first_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_accepted_twice_a",
+        "http-bridge-accepted-twice-a@example.com",
+    )
+    second_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_accepted_twice_b",
+        "http-bridge-accepted-twice-b@example.com",
+    )
+    first_account = await _get_account(first_account_id)
+    second_account = await _get_account(second_account_id)
+    first_upstream = _AcceptedOutputFreeCapacityErrorUpstreamWebSocket()
+    second_upstream = _AcceptedOutputFreeCapacityErrorUpstreamWebSocket()
+    connect_account_ids, selection_exclusions = _install_two_account_bridge_failover(
+        monkeypatch,
+        first_account=first_account,
+        second_account=second_account,
+        upstreams=[first_upstream, second_upstream],
+    )
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "accepted-capacity-twice",
+            "prompt_cache_key": "accepted-capacity-twice-key",
+            "stream": True,
+        },
+    )
+
+    types = [event["type"] for event in events]
+    assert types.count("response.created") == 1, types
+    assert types.count("response.in_progress") == 1, types
+    assert types[-1] == "error", types
+    assert events[-1]["error"]["code"] == "server_is_overloaded"
+    assert connect_account_ids == ["acc_http_bridge_accepted_twice_a", "acc_http_bridge_accepted_twice_b"]
+    assert first_account.id in selection_exclusions[-1]
+    assert len(first_upstream.sent_text) == 1
+    assert len(second_upstream.sent_text) == 1
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_retries_accepted_output_free_capacity_error_within_one_lifecycle(
+    async_client,
+    monkeypatch,
+):
+    """``/v1/responses`` bridge streams propagate startup HTTP errors, but once
+    the response has started an accepted output-free capacity failure is
+    replayed like the native path: no keepalive frame leaks into the public
+    stream during the capacity wait and the client observes one lifecycle."""
+    _install_bridge_settings(monkeypatch, enabled=True)
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS", 0.01)
+    first_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_accepted_v1_a",
+        "http-bridge-accepted-v1-a@example.com",
+    )
+    second_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_accepted_v1_b",
+        "http-bridge-accepted-v1-b@example.com",
+    )
+    first_account = await _get_account(first_account_id)
+    second_account = await _get_account(second_account_id)
+    failing_upstream = _AcceptedOutputFreeCapacityErrorUpstreamWebSocket(
+        error_code="model_at_capacity",
+        error_message="Selected model is at capacity. Please try a different model.",
+    )
+    retry_upstream = _FakeBridgeUpstreamWebSocket("resp_accepted_v1_retry")
+    connect_account_ids, selection_exclusions = _install_two_account_bridge_failover(
+        monkeypatch,
+        first_account=first_account,
+        second_account=second_account,
+        upstreams=[failing_upstream, retry_upstream],
+    )
+
+    async with async_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "model": "gpt-5.4",
+            "instructions": "Return exactly OK.",
+            "input": "retry-accepted-capacity-v1",
+            "prompt_cache_key": "accepted-capacity-v1-key",
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        raw_events = [
+            json.loads(line[6:])
+            async for line in response.aiter_lines()
+            if line.startswith("data: ") and line[6:] != "[DONE]"
+        ]
+
+    assert not [event for event in raw_events if event.get("type") == "codex.keepalive"], (
+        "a public propagated-error stream received a keepalive during the capacity wait"
+    )
+    _assert_single_response_lifecycle_completed(raw_events)
+    assert [event["type"] for event in raw_events].count("response.in_progress") == 1
+    assert connect_account_ids == ["acc_http_bridge_accepted_v1_a", "acc_http_bridge_accepted_v1_b"]
+    assert first_account.id in selection_exclusions[-1]
+    assert len(failing_upstream.sent_text) == 1
+    assert len(retry_upstream.sent_text) == 1

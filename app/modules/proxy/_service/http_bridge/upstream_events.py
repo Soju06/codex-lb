@@ -61,6 +61,9 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge.accepted_replay import (
+    _stage_websocket_request_state_for_replay,
+)
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
     _await_task_deferring_cancellation,
@@ -2306,6 +2309,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                         getattr(request_state, "upstream_model_output_seen", False)
                         for request_state in session.pending_requests
                     )
+                    accepted_response_pending = any(
+                        request_state.response_id is not None and not request_state.awaiting_response_created
+                        for request_state in session.pending_requests
+                    )
                     reader_failure_retry_circuit_attempt_selection = (
                         _http_bridge_retry_circuit_attempt_selection_for_pending_requests(
                             tuple(session.pending_requests)
@@ -2321,7 +2328,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # side effects. Clean closes remain eligible for the bounded
                 # pre-created retry circuit maintained by the session.
                 account_neutral = is_account_neutral_websocket_error_code(message.error_code)
-                if not account_neutral:
+                # Only a terminal transport message (close or error) may replay
+                # an accepted turn: a protocol-invalid binary frame did not end
+                # the socket, so it keeps the pre-created retry semantics only.
+                if not account_neutral and (message.kind in {"close", "error"} or not accepted_response_pending):
                     retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
@@ -2712,6 +2722,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                     matched_request_state.downstream_visible = True
                 if event_type == "response.created" and matched_request_state.suppress_next_created_downstream:
                     matched_request_state.suppress_next_created_downstream = False
+                    suppress_downstream_event = True
+                elif (
+                    event_type == "response.in_progress" and matched_request_state.suppress_next_in_progress_downstream
+                ):
+                    matched_request_state.suppress_next_in_progress_downstream = False
                     suppress_downstream_event = True
                 if payload is not None:
                     rewritten_payload = _rewrite_websocket_downstream_response_id(payload, matched_request_state)
@@ -3390,15 +3405,25 @@ class _HTTPBridgeUpstreamEventsMixin:
             # submit cannot claim its queue slot while account health is being
             # updated. A concurrent detach will mark this state as draining.
             retry_consumer_attached = False
+            # An accepted request has already committed its response start,
+            # so the pre-response startup-wait signals must not fire for it.
+            accepted_lifecycle_replay = (
+                status_request_state.response_id is not None and not status_request_state.awaiting_response_created
+            )
             async with session.pending_lock:
                 if status_request_state.event_queue is not None:
                     retry_consumer_attached = True
                     if status_request_state not in session.pending_requests:
                         session.pending_requests.appendleft(status_request_state)
                         session.queued_request_count += 1
-                    status_request_state.awaiting_response_created = True
-                    status_request_state.response_id = None
-            if status_request_state.propagate_http_errors:
+                    if not await _stage_websocket_request_state_for_replay(
+                        status_request_state,
+                        create_gate=session.response_create_gate,
+                        surface="http_bridge",
+                        trigger="capacity_error",
+                    ):
+                        retry_consumer_attached = False
+            if status_request_state.propagate_http_errors and not accepted_lifecycle_replay:
                 _signal_http_bridge_capacity_startup_wait(status_request_state)
             await self._handle_or_defer_precreated_stream_health(
                 status_request_state,
@@ -3438,11 +3463,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                         request_state=status_request_state,
                     )
                     if retried:
-                        _signal_http_bridge_model_capacity_retry_ready(
-                            status_request_state,
-                            waited_for_model_capacity_retry=True,
-                            retried=True,
-                        )
+                        if not accepted_lifecycle_replay:
+                            _signal_http_bridge_model_capacity_retry_ready(
+                                status_request_state,
+                                waited_for_model_capacity_retry=True,
+                                retried=True,
+                            )
                         return
                 finally:
                     if suppress_capacity_keepalives_until_retry_finishes:
@@ -3604,23 +3630,30 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if status_request_state not in session.pending_requests:
                         session.pending_requests.appendleft(status_request_state)
                         session.queued_request_count += 1
-                    status_request_state.awaiting_response_created = True
-                    status_request_state.response_id = None
-                retried = await self._retry_http_bridge_precreated_request(session)
+                    staged = await _stage_websocket_request_state_for_replay(
+                        status_request_state,
+                        create_gate=session.response_create_gate,
+                        surface="http_bridge",
+                        trigger="capacity_error",
+                    )
+                retried = staged and await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     return
                 async with session.pending_lock:
                     if status_request_state in session.pending_requests:
                         session.pending_requests.remove(status_request_state)
                         session.queued_request_count = max(0, session.queued_request_count - 1)
-                status_request_state.error_http_status_override = 502
-                (
-                    _downstream_text,
-                    event_block,
-                    event,
-                    payload,
-                    event_type,
-                ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
+                if staged:
+                    # A busy create gate forwards the upstream terminal as-is;
+                    # only a replay that was attempted and failed is rewritten.
+                    status_request_state.error_http_status_override = 502
+                    (
+                        _downstream_text,
+                        event_block,
+                        event,
+                        payload,
+                        event_type,
+                    ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
 
         completed_usage = (
             event.response.usage if event_type == "response.completed" and event and event.response else None

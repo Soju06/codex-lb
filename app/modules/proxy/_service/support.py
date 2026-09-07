@@ -1247,6 +1247,10 @@ class _WebSocketRequestState:
     deferred_keyed_stream_health: list[_DeferredKeyedStreamHealthPenalty] = field(default_factory=list)
     deferred_reasoning_downstream_texts: list[str] = field(default_factory=list)
     suppress_next_created_downstream: bool = False
+    # Armed together with the created suppression when the client already saw
+    # ``response.in_progress`` from the failed attempt, so the replay's
+    # duplicate prelude frame is dropped and the lifecycle stays single.
+    suppress_next_in_progress_downstream: bool = False
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
     completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None = None
@@ -1670,15 +1674,16 @@ def _websocket_request_can_replay_before_visible_output(
         and request_state.clean_close_replay_count == 0
     ):
         return False
-    sequenced_created_only_prewarm = (
-        request_state.generate_false_prewarm
-        and request_state.last_downstream_sequence_number == 0
-        and request_state.response_id is not None
-        and not request_state.awaiting_response_created
-        and request_state.response_event_count == 1
-        and not request_state.downstream_visible
+    # A sequenced downstream frame normally pins the request to its socket: a
+    # fresh upstream generation restarts ``sequence_number`` from zero. The
+    # accepted lifecycle prelude is the one exception because its replay is
+    # suppressed downstream, so the client's counter keeps advancing; the
+    # websocket relay still fails closed if a replay frame does not advance.
+    sequenced_lifecycle_only = (
+        request_state.last_downstream_sequence_number is not None
+        and _websocket_request_is_accepted_lifecycle_only(request_state)
     )
-    if request_state.last_downstream_sequence_number is not None and not sequenced_created_only_prewarm:
+    if request_state.last_downstream_sequence_number is not None and not sequenced_lifecycle_only:
         return False
     if request_state.downstream_visible:
         return False
@@ -1690,15 +1695,40 @@ def _websocket_request_can_replay_before_visible_output(
     precreated_pending = request_state.response_id is None and request_state.awaiting_response_created
     if precreated_pending and request_state.previous_response_id is not None and not has_retry_safe_fresh_payload:
         return False
-    created_only_pending = (
-        request_state.response_id is not None
-        and not request_state.awaiting_response_created
-        and request_state.response_event_count <= 1
-        and (request_state.previous_response_id is None or has_retry_safe_fresh_payload)
+    accepted_lifecycle_only_pending = _websocket_request_is_accepted_lifecycle_only(request_state) and (
+        request_state.previous_response_id is None or has_retry_safe_fresh_payload
     )
     if precreated_pending and request_state.response_event_count > 0:
         return False
-    return precreated_pending or created_only_pending
+    return precreated_pending or accepted_lifecycle_only_pending
+
+
+def _websocket_request_is_accepted_lifecycle_only(request_state: _WebSocketRequestState) -> bool:
+    """Return whether upstream accepted the request without producing any output.
+
+    True only while the accepted response consists of its lifecycle prelude:
+    ``response.created`` and optionally ``response.in_progress``. In the
+    Responses protocol every other counted ``response.*`` event follows
+    ``response.output_item.added``, which is a model-output event and flips
+    ``upstream_model_output_seen``, so "at most two counted events and no
+    output marker" is equivalent to "lifecycle only". A buffered reasoning
+    prelude, a pending tool call, or a downstream sequence watermark that does
+    not cover exactly that prelude (frames ``0 .. count - 1``) disqualify the
+    request. Such a turn has no client-observable or conversational side
+    effect, which is what makes its single-lifecycle replay safe.
+    """
+    if request_state.response_id is None or request_state.awaiting_response_created:
+        return False
+    if not 1 <= request_state.response_event_count <= 2:
+        return False
+    if request_state.downstream_visible or request_state.upstream_model_output_seen:
+        return False
+    if request_state.deferred_reasoning_downstream_texts:
+        return False
+    if request_state.pending_function_call_ids or request_state.pending_tool_call_types:
+        return False
+    watermark = request_state.last_downstream_sequence_number
+    return watermark is None or watermark == request_state.response_event_count - 1
 
 
 def _record_websocket_route_metadata(

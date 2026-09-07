@@ -76,6 +76,9 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge.accepted_replay import (
+    _claim_websocket_replay_create_gate,
+)
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR,
     _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR,
@@ -3963,6 +3966,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 if len(retryable_requests) != 1:
                     return False
                 request_state = retryable_requests[0]
+            # A request that already saw response.created released the session
+            # create gate. Its replay must hold the gate again before it can
+            # own the pre-created identity, and never waits for a contended one.
+            if not await _claim_websocket_replay_create_gate(request_state, session.response_create_gate):
+                return False
             if retry_send_baselines is not None:
                 # The send-attempt baseline: a retried request already carries
                 # prior attempts, so the release keys on advancement past
@@ -4095,6 +4103,7 @@ class _HTTPBridgeRequestSubmitMixin:
             session.key,
             account_id=session.account.id,
             model=session.request_model,
+            detail="accepted_lifecycle_replay" if request_state.replay_downstream_response_id is not None else None,
             pending_count=1,
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,

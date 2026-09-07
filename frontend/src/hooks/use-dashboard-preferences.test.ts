@@ -33,9 +33,11 @@ describe("useDashboardPreferencesStore", () => {
     expect(useDashboardPreferencesStore.getState().accountViewMode).toBe("cards");
     expect(useDashboardPreferencesStore.getState().accountListSort).toBeNull();
     expect(useDashboardPreferencesStore.getState().refreshSeconds).toBe(15);
+    expect(useDashboardPreferencesStore.getState().dashboardDisplayMode).toBe("weeklyPace");
     expect(window.localStorage.getItem("codex-lb-dashboard-account-view-mode")).toBe("cards");
     expect(window.localStorage.getItem("codex-lb-dashboard-account-list-sort")).toBeNull();
     expect(window.localStorage.getItem("codex-lb-dashboard-refresh-seconds")).toBe("15");
+    expect(window.localStorage.getItem("codex-lb-dashboard-display-mode")).toBe("weeklyPace");
   });
 
   it("persists a valid dashboard refresh cadence", async () => {
@@ -74,6 +76,34 @@ describe("useDashboardPreferencesStore", () => {
 
     expect(useDashboardPreferencesStore.getState().accountViewMode).toBe("list");
     expect(window.localStorage.getItem("codex-lb-dashboard-account-view-mode")).toBe("list");
+  });
+
+  it("restores a valid dashboard display mode", async () => {
+    window.localStorage.setItem("codex-lb-dashboard-display-mode", "requestHeatmap");
+    const { useDashboardPreferencesStore } = await import("@/hooks/use-dashboard-preferences");
+
+    useDashboardPreferencesStore.getState().initializePreferences();
+
+    expect(useDashboardPreferencesStore.getState().dashboardDisplayMode).toBe("requestHeatmap");
+  });
+
+  it("falls back to weekly pace for an invalid dashboard display mode", async () => {
+    window.localStorage.setItem("codex-lb-dashboard-display-mode", "invalid");
+    const { useDashboardPreferencesStore } = await import("@/hooks/use-dashboard-preferences");
+
+    useDashboardPreferencesStore.getState().initializePreferences();
+
+    expect(useDashboardPreferencesStore.getState().dashboardDisplayMode).toBe("weeklyPace");
+    expect(window.localStorage.getItem("codex-lb-dashboard-display-mode")).toBe("weeklyPace");
+  });
+
+  it("persists dashboard display mode updates", async () => {
+    const { useDashboardPreferencesStore } = await import("@/hooks/use-dashboard-preferences");
+
+    useDashboardPreferencesStore.getState().setDashboardDisplayMode("requestHeatmap");
+
+    expect(useDashboardPreferencesStore.getState().dashboardDisplayMode).toBe("requestHeatmap");
+    expect(window.localStorage.getItem("codex-lb-dashboard-display-mode")).toBe("requestHeatmap");
   });
 
   it("persists account list sort updates", async () => {

@@ -36,7 +36,7 @@ describe("AppearanceSettings", () => {
     useTimeFormatStore.setState({ timeFormat: "12h" });
     useDateDisplayFormatStore.setState({ dateDisplayFormat: "default" });
     useAccountQuotaDisplayStore.setState({ quotaDisplay: "both" });
-    useDashboardPreferencesStore.setState({ refreshSeconds: 15 });
+    useDashboardPreferencesStore.setState({ refreshSeconds: 15, dashboardDisplayMode: "weeklyPace" });
   });
 
   it("updates the dashboard refresh cadence", async () => {
@@ -51,6 +51,22 @@ describe("AppearanceSettings", () => {
 
     expect(fiveSeconds).toHaveAttribute("aria-pressed", "true");
     expect(useDashboardPreferencesStore.getState().refreshSeconds).toBe(5);
+  });
+
+  it("switches the dashboard activity view", async () => {
+    const user = userEvent.setup();
+    render(<AppearanceSettings />);
+
+    const weeklyPace = screen.getByRole("button", { name: "Weekly credits pace" });
+    const requestHeatmap = screen.getByRole("button", { name: "Request activity heatmap" });
+    expect(weeklyPace).toHaveAttribute("aria-pressed", "true");
+    expect(requestHeatmap).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(requestHeatmap);
+
+    expect(requestHeatmap).toHaveAttribute("aria-pressed", "true");
+    expect(useDashboardPreferencesStore.getState().dashboardDisplayMode).toBe("requestHeatmap");
+    expect(window.localStorage.getItem("codex-lb-dashboard-display-mode")).toBe("requestHeatmap");
   });
 
   it("exposes selected state for the time-format toggle", async () => {

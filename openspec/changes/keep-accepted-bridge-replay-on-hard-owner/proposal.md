@@ -29,6 +29,17 @@ immediately; the direct WebSocket surface already refuses this exclusion
   as the created-only transport-close replay did before accepted replays
   existed on the direct WebSocket surface: the hard row resolves to the owner
   again and the request is re-sent to it within the single lifecycle.
+- The reconnect loop builds the replacement handshake before its
+  post-connect account-change cleanup. It now offers the retained turn state
+  only when selection returned the same account
+  (`_http_bridge_reconnect_turn_state` in `http_bridge/helpers.py`). The
+  unexcluded accepted replay skips the exclusion-driven turn-state cleanup of
+  the retry path, so when its soft namespaced row moved the replay to another
+  account (owner unselectable at reconnect time) the owner's turn state reached
+  the replacement handshake -- a regression against `main`, which cleared it
+  through the exclusion, and a violation of "Cross-account bridge retries clear
+  turn-state". No cross-account bridge reconnect carries a retired account's
+  turn state now, excluded or not; same-account reconnects are unchanged.
 - The "may resolve a hard owner" predicate is shared by both surfaces
   (`_affinity_may_resolve_hard_owner` in `_service/support.py`); the direct
   WebSocket helper delegates to it.
@@ -50,6 +61,9 @@ immediately; the direct WebSocket surface already refuses this exclusion
 
 - `responses-api-compat`: HTTP bridge accepted replays on hard session keys
   keep a hard-capable Codex session owner eligible instead of excluding it.
+- `responses-api-compat`: "Cross-account bridge retries clear turn-state"
+  covers every reconnect that lands on a different account, not only the
+  exclusion-driven replay.
 
 # Impact
 
@@ -59,3 +73,7 @@ close on the owner within the single lifecycle, instead of spinning on
 `hard_affinity_saturated` for up to the bridge request budget before a 502.
 Soft session keys, created-only replays and the direct WebSocket surface keep
 their existing behaviour.
+A bridge reconnect that lands on a different account -- through an exclusion
+or through a soft row moving an unexcluded replay -- opens the replacement
+socket without the retired account's turn state; same-account reconnects keep
+offering it.

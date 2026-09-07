@@ -16975,6 +16975,140 @@ async def test_backend_responses_http_bridge_re_sends_a_bare_session_accepted_fa
     assert failing_upstream.closed is True
 
 
+class _OwnerTurnStateAcceptedCapacityErrorUpstreamWebSocket(_AcceptedOutputFreeCapacityErrorUpstreamWebSocket):
+    """The owner's socket issues an upstream turn state on its handshake, then
+    accepts the turn and fails it output-free."""
+
+    def __init__(self, turn_state: str) -> None:
+        super().__init__()
+        self._turn_state = turn_state
+
+    def response_header(self, name: str) -> str | None:
+        if name.lower() == "x-codex-turn-state":
+            return self._turn_state
+        return None
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_accepted_replay_moved_by_a_soft_row_clears_the_owner_turn_state(
+    async_client,
+    monkeypatch,
+):
+    """The accepted output-free replay on a hard ``session_header`` key leaves
+    its owner unexcluded so a raw legacy hard row can resolve to it again. On a
+    current replica the bare session header usually has NO raw row: the owner is
+    only the soft namespaced-row preference, and when it is unselectable at
+    reconnect time (error backoff, cap, status) the unexcluded reconnect moves
+    the replay to another account -- without ever passing the exclusion-driven
+    turn-state cleanup of ``_retry_http_bridge_precreated_request``. The
+    replacement handshake must still carry no ``x-codex-turn-state`` learned on
+    the owner's socket (``responses-api-compat`` "Cross-account bridge retries
+    clear turn-state"); ``main`` cleared it because the owner was excluded."""
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(enabled=True).model_copy(
+            update={"http_responses_session_bridge_request_budget_seconds": 15.0}
+        ),
+        dashboard_settings=_make_dashboard_settings(),
+    )
+    monkeypatch.setattr(proxy_support, "_HARD_AFFINITY_RECOVERY_SLEEP_SECONDS", 0.05)
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS", 0.01)
+    owner_id = await _import_account(
+        async_client,
+        "acc_http_bridge_turn_state_owner",
+        "http-bridge-turn-state-owner@example.com",
+    )
+    alternate_id = await _import_account(
+        async_client,
+        "acc_http_bridge_turn_state_alternate",
+        "http-bridge-turn-state-alternate@example.com",
+    )
+    owner = await _get_account(owner_id)
+    alternate = await _get_account(alternate_id)
+    failing_upstream = _OwnerTurnStateAcceptedCapacityErrorUpstreamWebSocket("owner_turn_state_token")
+    owner_recovered_upstream = _FakeBridgeUpstreamWebSocket("resp_turn_state_owner_recovered")
+    alternate_upstream = _FakeBridgeUpstreamWebSocket("resp_turn_state_alternate")
+    connects: list[tuple[str | None, dict[str, str]]] = []
+    reattach_selections: list[tuple[str | None, bool | None, frozenset[str]]] = []
+
+    async def fake_select_account_with_budget(self, deadline, *, request_id, kind, **kwargs):
+        del self, deadline, request_id, kind
+        excluded = frozenset(kwargs.get("exclude_account_ids") or ())
+        preferred_account_id = kwargs.get("preferred_account_id")
+        fallback = kwargs.get("fallback_on_preferred_account_unavailable")
+        if kwargs.get("request_stage") != "reattach":
+            return AccountSelection(account=owner, error_message=None, error_code=None)
+        reattach_selections.append((preferred_account_id, fallback, excluded))
+        # No raw legacy row exists for the bare session header, so the owner is
+        # only the soft-row preference; at reconnect time it is not selectable.
+        # The production selector reports the preferred miss when no fallback
+        # is allowed and otherwise returns the other account.
+        if preferred_account_id == owner.id and not fallback:
+            return AccountSelection(
+                account=None,
+                error_message="Preferred account is not available",
+                error_code="preferred_account_unavailable",
+            )
+        return AccountSelection(account=alternate, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del access_token, base_url, session
+        connects.append((account_id_header, {key.lower(): value for key, value in dict(headers).items()}))
+        if account_id_header == "acc_http_bridge_turn_state_owner":
+            return failing_upstream if not failing_upstream.sent_text else owner_recovered_upstream
+        return alternate_upstream
+
+    async def fail_legacy_stream(*args, **kwargs):
+        raise AssertionError("legacy core_stream_responses path must not be used when HTTP bridge is enabled")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "accepted-replay-soft-row-moves-without-owner-turn-state",
+            "stream": True,
+        },
+        headers={"session_id": "sid-http-bridge-turn-state-soft-row"},
+    )
+
+    _assert_single_response_lifecycle_completed(events)
+    # The unexcluded accepted replay preferred its owner, found it unselectable
+    # and moved through selection to the other account.
+    assert [account for account, _ in connects] == [
+        "acc_http_bridge_turn_state_owner",
+        "acc_http_bridge_turn_state_alternate",
+    ]
+    assert reattach_selections
+    assert all(excluded == frozenset() for _, _, excluded in reattach_selections), reattach_selections
+    assert reattach_selections[0][0] == owner.id
+    assert len(failing_upstream.sent_text) == 1
+    assert len(alternate_upstream.sent_text) == 1
+    assert owner_recovered_upstream.sent_text == []
+    assert json.loads(alternate_upstream.sent_text[0])["input"] == json.loads(failing_upstream.sent_text[0])["input"]
+    # The owner's socket did hand out a turn state, yet the replacement account's
+    # handshake carries none of it.
+    assert "x-codex-turn-state" not in connects[0][1]
+    assert "x-codex-turn-state" not in connects[1][1], connects[1][1]["x-codex-turn-state"]
+
+
 class _AcceptedOutputItemCapacityErrorUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     """Upstream accepts the turn, emits an output item, then fails with a
     capacity error. Once any model output exists the turn is not replay-safe."""

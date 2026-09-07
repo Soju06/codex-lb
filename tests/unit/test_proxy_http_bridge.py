@@ -12983,6 +12983,127 @@ async def test_reconnect_http_bridge_session_filters_http_headers_for_upstream_w
     assert "x-handshake-debug" not in forwarded
 
 
+@pytest.mark.parametrize(
+    ("codex_session_anchor", "selected_account_id", "owner_rebind", "expected"),
+    [
+        pytest.param(
+            False, "acc-bridge", False, "upstream-turn-state-owner", id="same_account_keeps_upstream_turn_state"
+        ),
+        pytest.param(False, "acc-replacement", False, None, id="replacement_account_receives_none"),
+        pytest.param(False, "acc-bridge", True, None, id="owner_rebind_receives_none"),
+        pytest.param(True, "acc-bridge", False, "bridge-test", id="same_account_keeps_codex_session_anchor"),
+        pytest.param(True, "acc-replacement", False, None, id="replacement_account_receives_no_codex_session_anchor"),
+    ],
+)
+def test_http_bridge_reconnect_turn_state_is_offered_only_to_the_account_that_issued_it(
+    codex_session_anchor: bool,
+    selected_account_id: str,
+    owner_rebind: bool,
+    expected: str | None,
+) -> None:
+    """The turn state a bridge session retains was learned on the retired
+    account's socket. The reconnect may offer it again only when selection
+    returns that same account; a replacement account -- or an owner rebind --
+    opens its socket without it (``responses-api-compat`` "Cross-account bridge
+    retries clear turn-state"), matching the session-side cleanup the
+    reconnect performs once the replacement socket is open."""
+    session = _make_bridge_session()
+    session.upstream_turn_state = "upstream-turn-state-owner"
+    if codex_session_anchor:
+        session.codex_session = True
+        session.downstream_turn_state = session.affinity.key
+    owner_rebind_affinity = (
+        proxy_service._AffinityPolicy(key="rebound-owner", kind=proxy_service.StickySessionKind.CODEX_SESSION)
+        if owner_rebind
+        else None
+    )
+
+    assert (
+        http_bridge_helpers_module._http_bridge_reconnect_turn_state(
+            session, selected_account_id, owner_rebind_affinity
+        )
+        == expected
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selected", ["same_account", "replacement_account"])
+async def test_reconnect_http_bridge_session_offers_the_retired_turn_state_only_to_the_same_account(
+    monkeypatch: pytest.MonkeyPatch,
+    selected: str,
+) -> None:
+    """A reconnect that is not pinned to the current account builds the
+    replacement handshake *before* the post-connect account-change cleanup. The
+    handshake must therefore decide on its own: the retained turn state goes to
+    the same account (established reconnect behaviour) but never to a
+    replacement account, whether the session moved through an exclusion or --
+    as the unexcluded accepted replay on a soft namespaced row does -- simply
+    because the preferred owner was unselectable at reconnect time."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.headers = {"x-codex-session-id": "bridge-test", "x-codex-turn-state": "stale-client-turn-state"}
+    session.upstream_turn_state = "upstream-turn-state-owner"
+    session.downstream_turn_state = "downstream-turn-state-owner"
+    replacement_account = cast(
+        Any, SimpleNamespace(id="acc-replacement", status=AccountStatus.ACTIVE, plan_type="plus")
+    )
+    selected_account = session.account if selected == "same_account" else replacement_account
+    captured_headers: list[dict[str, str]] = []
+
+    async def select_account(_deadline: float, **_: object) -> proxy_service.AccountSelection:
+        return proxy_service.AccountSelection(account=selected_account, error_message=None, error_code=None)
+
+    async def ensure_fresh(account: object, **_: object) -> object:
+        return account
+
+    async def open_upstream(_account: object, headers: dict[str, str], **_: object) -> UpstreamWebSocket:
+        captured_headers.append(dict(headers))
+        return cast(UpstreamWebSocket, SimpleNamespace(response_header=lambda _name: None, close=AsyncMock()))
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-turn-state-account-boundary",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_upstream)
+
+    await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    assert len(captured_headers) == 1
+    forwarded = {key.lower(): value for key, value in captured_headers[0].items()}
+    assert session.account is selected_account
+    assert session.closed is False
+    if selected == "same_account":
+        assert forwarded["x-codex-turn-state"] == "upstream-turn-state-owner"
+        assert session.upstream_turn_state == "upstream-turn-state-owner"
+        assert session.downstream_turn_state == "downstream-turn-state-owner"
+    else:
+        # The replacement handshake carries no turn state learned on the
+        # retired account, and the session keeps none of it either.
+        assert "x-codex-turn-state" not in forwarded
+        assert session.upstream_turn_state is None
+        assert session.downstream_turn_state is None
+        assert not any(key.lower() == "x-codex-turn-state" for key in session.headers)
+
+
 @pytest.mark.asyncio
 async def test_reconnect_keeps_handoff_protected_during_lease_swap(
     monkeypatch: pytest.MonkeyPatch,

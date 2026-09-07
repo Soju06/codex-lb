@@ -9,6 +9,11 @@
 - [x] 1.3 Consult it at the fresh-request exclusion site of
   `_retry_http_bridge_precreated_request` (model-fallback replays keep
   excluding).
+- [x] 1.4 Add `_http_bridge_reconnect_turn_state` in `http_bridge/helpers.py`
+  and build both replacement handshakes of `_reconnect_http_bridge_session`
+  through it: the retained turn state is offered only to the same account
+  (never to a replacement account or an owner rebind), keeping
+  `http_bridge/mixin.py` under its line ceiling.
 
 ## 2. Regression coverage
 
@@ -25,6 +30,16 @@
   to the owner within one lifecycle.
 - [x] 2.4 Mutant check: deleting the guard fails the accepted unit shapes and
   all four integration terminals.
+- [x] 2.5 Helper and reconnect-level unit coverage: same account keeps the
+  upstream turn state (and the codex-session anchor); a replacement account
+  or an owner rebind receives none, and the session retains none.
+- [x] 2.6 Relay-level bridge integration coverage: an unexcluded accepted
+  replay on a hard `session_header` key whose owner is unselectable at
+  reconnect time moves through the soft row to the other account, whose
+  handshake carries no `x-codex-turn-state` learned on the owner.
+- [x] 2.7 Mutant check: offering the turn state to any account fails the
+  replacement-account unit shapes and the integration test while the
+  same-account shapes still pass.
 
 ## 3. Validation
 

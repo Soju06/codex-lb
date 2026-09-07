@@ -68,3 +68,10 @@ preparation SHALL be idempotent.
 - **WHEN** continuation preparation prepends a policy update and a later advance reconstructs the request
 - **THEN** each historical configuration_update is restored to its stored client-plane effort and original position
 - **AND** the prepended policy update keeps the selected continuation effort
+
+#### Scenario: A late continuation-policy rejection terminates an open stream
+
+- **WHEN** HTTP-bridge recovery adds an anchor and Astra policy rejects the reconstructed request after HTTP streaming has started
+- **THEN** the proxy SHALL emit exactly one terminal response.failed event with the policy error code, type, message and parameter
+- **AND** the proxy SHALL release any reservation it still owns without dispatching the rejected request
+- **AND** this behavior SHALL also apply when the policy rejection occurs during a server-owned recovery attempt

@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from starlette.requests import Request
 
 from app.core.clients.proxy import ProxyResponseError, _error_event_from_response, _error_payload_from_response
-from app.core.exceptions import ProxyRateLimitError
+from app.core.exceptions import ProxyInvalidRequestError, ProxyRateLimitError, ProxyReasoningEffortNotAllowed
 from app.core.openai.requests import ResponsesRequest
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.api import _logged_error_json_response, _stream_response_error_events
@@ -146,6 +147,96 @@ async def test_stream_proxy_error_preserves_retry_after_as_sse_retry_hint():
 
     assert len(events) == 1
     assert events[0].startswith("retry: 2000\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", ["initial-stream", "recovery-factory", "recovery-stream"])
+@pytest.mark.parametrize("native_lifecycle", [False, True], ids=["openai", "native"])
+@pytest.mark.parametrize(
+    "policy_error",
+    [
+        ProxyInvalidRequestError("Automatic truncation conflicts with updates", param="truncation"),
+        ProxyReasoningEffortNotAllowed("Effort is not allowed", param="input.0.reasoning.effort"),
+        ProxyInvalidRequestError("Invalid continuation"),
+    ],
+    ids=["invalid-request", "reasoning-policy", "without-param"],
+)
+async def test_stream_policy_rejection_preserves_terminal_error_during_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    location: str,
+    native_lifecycle: bool,
+    policy_error: ProxyInvalidRequestError | ProxyReasoningEffortNotAllowed,
+) -> None:
+    monkeypatch.setattr(
+        proxy_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_server_recovery_max_attempts=6,
+        ),
+    )
+    scheduler = VirtualScheduler(VirtualClock())
+    cleanup = AsyncMock(spec=proxy_api._ResponsesReservationCleanup)
+    created_event = 'data: {"type":"response.created","response":{"id":"resp_policy"}}\n\n'
+
+    async def stream() -> AsyncIterator[str]:
+        if location == "initial-stream":
+            yield created_event
+            raise policy_error
+        exc = ProxyResponseError(
+            502,
+            {"error": {"code": "stream_incomplete", "message": "closed", "type": "server_error"}},
+        )
+        setattr(exc, "http_bridge_durable_recovery_eligible", True)
+        raise exc
+
+    async def recovery_stream() -> AsyncIterator[str]:
+        yield created_event
+        raise policy_error
+
+    def recovery_factory() -> AsyncIterator[str]:
+        assert location != "initial-stream", "policy rejection must not trigger recovery"
+        if location == "recovery-factory":
+            raise policy_error
+        return recovery_stream()
+
+    events: list[str] = []
+
+    async def consume() -> None:
+        async for event in _stream_response_error_events(
+            stream(),
+            owns_reservation=True,
+            reservation=None,
+            reservation_cleanup=cleanup,
+            recovery_stream_factory=recovery_factory,
+            require_durable_recovery_fence=True,
+            preserve_native_failure_lifecycle=native_lifecycle,
+            scheduler=scheduler,
+        ):
+            events.append(event)
+
+    consumer = scheduler.create_task(consume())
+    try:
+        await scheduler.drain()
+        await scheduler.advance(5.0)
+        assert consumer.done(), "policy rejection must terminate without further recovery"
+        await consumer
+    finally:
+        await scheduler.cancel_owned_tasks()
+
+    failures = [proxy_api._parse_sse_payload(event) for event in events if "response.failed" in event]
+    assert len(failures) == 1
+    failed = failures[0]
+    assert failed is not None
+    assert proxy_api.SYNTHETIC_TRANSPORT_FAILURE_MARKER not in failed
+    response = failed["response"]
+    assert isinstance(response, dict)
+    expected_error = {"code": policy_error.code, "type": policy_error.error_type, "message": policy_error.message}
+    if policy_error.param is not None:
+        expected_error["param"] = policy_error.param
+    assert response["error"] == expected_error
+    assert events.count(created_event) == (0 if location == "recovery-factory" else 1)
+    cleanup.release.assert_awaited_once_with(action="responses stream cleanup")
 
 
 @pytest.mark.asyncio

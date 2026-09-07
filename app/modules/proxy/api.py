@@ -94,8 +94,10 @@ from app.core.errors import (
 )
 from app.core.exceptions import (
     ProxyAuthError,
+    ProxyInvalidRequestError,
     ProxyModelNotAllowed,
     ProxyRateLimitError,
+    ProxyReasoningEffortNotAllowed,
     ProxyUpstreamError,
 )
 from app.core.metrics.prometheus import (
@@ -7995,6 +7997,15 @@ async def _stream_proxy_errors_as_response_failed(
         yield line
 
 
+def _stream_policy_response_error(
+    exc: ProxyInvalidRequestError | ProxyReasoningEffortNotAllowed,
+) -> ProxyResponseError:
+    envelope = openai_error(exc.code, exc.message, error_type=exc.error_type)
+    if exc.param is not None:
+        envelope["error"]["param"] = exc.param
+    return ProxyResponseError(exc.status_code, envelope)
+
+
 async def _stream_response_error_events(
     stream: AsyncIterator[str],
     *,
@@ -8035,7 +8046,8 @@ async def _stream_response_error_events(
             if line.startswith("data:") or line.startswith("event:"):
                 saw_downstream_event = True
             yield line
-    except ProxyResponseError as exc:
+    except (ProxyResponseError, ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed) as stream_exc:
+        exc = stream_exc if isinstance(stream_exc, ProxyResponseError) else _stream_policy_response_error(stream_exc)
         error_code = exc.payload.get("error", {}).get("code") if isinstance(exc.payload, dict) else None
         settings = get_settings()
         indefinite_recovery = (
@@ -8096,6 +8108,13 @@ async def _stream_response_error_events(
                     ):
                         break
                     retry_delay = max(1.0, min(30.0, float(retry_exc.retry_after_seconds or retry_delay)))
+                except (ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed) as retry_policy_exc:
+                    # Recovery can add an anchor that makes Astra policy reject
+                    # the request. This is terminal policy feedback, not another
+                    # transport failure eligible for native retry handling.
+                    exc = _stream_policy_response_error(retry_policy_exc)
+                    error_code = retry_policy_exc.code
+                    break
                 except (ProxyRateLimitError, ProxyAuthError) as retry_limit_exc:
                     # A quota revocation or limit can happen between recovery
                     # attempts. Convert it into the same terminal SSE shape

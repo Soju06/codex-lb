@@ -466,6 +466,7 @@ from app.modules.proxy._service.websocket.steering import (
     forget_suppressed_steering_response,
     process_websocket_steering_event,
     public_steering_app_error,
+    release_completed_steering_payload,
     release_steering_request,
     required_steering_input_is_present,
     steering_error,
@@ -6302,6 +6303,8 @@ class _WebSocketMixin:
             event_type == "response.incomplete" and _websocket_event_incomplete_reason(event_type, payload) == "steered"
         )
         if successful_boundary and not completed_empty_prewarm:
+            if request_state.model == "gpt-6-astra":
+                release_completed_steering_payload(request_state)
             upstream_control.last_completed_request = request_state if request_state.model == "gpt-6-astra" else None
             if event_type == "response.completed" and response_id is not None:
                 queued_steering = upstream_control.steering_continuations.get(response_id)

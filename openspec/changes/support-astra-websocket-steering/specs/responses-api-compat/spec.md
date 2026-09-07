@@ -3,10 +3,18 @@
 ### Requirement: Steering continuations retain owned WebSocket lifecycles
 The proxy SHALL accept valid response.steer events on an active subscription Responses WebSocket for an owned Astra response and SHALL forward them on that response's existing upstream connection/account. Steering events SHALL contain only type, previous_response_id and a nonempty supported user input. Accepted, pending, failed, and automatically created continuation responses SHALL remain correlated to the originating request and API key. Each continuation SHALL receive admission and usage accounting and SHALL settle once on its own terminal event. Each additional queued steer SHALL extend the same successor reservation before upstream dispatch; rejection SHALL release only that submission's unapplied reservation increment without charging or settling the successor twice. If this refund fails, the proxy SHALL retain the existing reservation for normal terminal reconciliation without terminating unrelated in-flight responses; failed admission extensions SHALL still reject the steer. A steered incomplete response SHALL not be treated as an unhealthy upstream account. Automatic continuations SHALL not bind to unrelated queued response.create requests. Completed request-state retention for post-completion steering SHALL be limited to Astra responses; a subsequent successful non-Astra response SHALL clear the retained steering parent.
 
+Completed Astra parents retained for later steering SHALL discard historical input and serialized request/replay bodies while preserving the effective configuration needed for later steering and explicit tool continuations.
+
 #### Scenario: Steering creates an automatic successor
 - **GIVEN** an owned Astra response and accepted steering
 - **WHEN** the original response ends with incomplete reason steered and upstream automatically creates a successor
 - **THEN** the successor retains the original account and policy ownership and its usage is recorded exactly once
+
+#### Scenario: Completed Astra parents retain settings without request bodies
+- **GIVEN** an Astra request contains user input and reasoning configuration updates
+- **WHEN** it completes successfully or becomes incomplete because it was steered
+- **THEN** the retained parent SHALL discard its historical input and serialized original/replay request bodies before forwarding the terminal event
+- **AND** later steering and required-tool continuations SHALL preserve the effective reasoning settings, stream identity, account ownership and accounting
 
 #### Scenario: Ordinary responses do not retain steering request bodies
 - **GIVEN** a WebSocket previously completed an Astra response

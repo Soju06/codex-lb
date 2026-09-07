@@ -35,3 +35,4 @@
 - [x] 3.22 Verify integration with the main-branch Clock/Scheduler and accepted-capacity replay changes, including virtual-time retirement after local cleanup with keepalives disabled
 - [x] 3.23 Forward the normalized steering parent ID and prove echoed rejection releases the matching reservation before disconnect, preserving canonical IDs and string/structured input
 - [x] 3.24 Normalize explicit required-tool parent IDs before continuation lookup; prove placeholder release before disconnect and completion before planned retirement for canonical and whitespace-padded IDs
+- [x] 3.25 Discard completed Astra input and request/replay bodies before idle retention; preserve effective configuration updates and prove later steering, required-tool continuations and accounting through the WebSocket route

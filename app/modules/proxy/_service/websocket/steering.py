@@ -156,21 +156,15 @@ def steering_parent(
     return parent
 
 
-def steering_response_payload(
-    parent: _WebSocketRequestState, *, parent_id: str, input_items: list[JsonValue]
-) -> ResponsesRequest:
+def _steering_response_configuration(parent: _WebSocketRequestState) -> dict[str, JsonValue]:
     if parent.steering_configuration is not None:
         data = dict(parent.steering_configuration)
     elif parent.request_text is not None:
         data = json.loads(parent.request_text)
     else:
         raise steering_error("response_not_found", "The original response settings are unavailable on this connection.")
-    if data.get("conversation") or data.get("context_management"):
-        raise steering_error("steering_not_supported", "Steering cannot use conversations or automatic compaction.")
     reasoning = data.get("reasoning")
-    if isinstance(reasoning, dict) and reasoning.get("mode") not in (None, "standard"):
-        raise steering_error("steering_not_supported", "Steering requires standard single-agent reasoning.")
-    original_input = data.get("input")
+    original_input = data.pop("input", None)
     if isinstance(original_input, list):
         for item in original_input:
             if isinstance(item, dict) and item.get("type") == "configuration_update":
@@ -187,6 +181,26 @@ def steering_response_payload(
             "effort": "medium",
         }
     data.pop("type", None)
+    return data
+
+
+def release_completed_steering_payload(parent: _WebSocketRequestState) -> None:
+    if parent.steering_configuration is not None or parent.request_text is not None:
+        parent.steering_configuration = _steering_response_configuration(parent)
+    parent.request_text = None
+    parent.fresh_upstream_request_text = None
+    parent.fresh_upstream_request_is_retry_safe = False
+
+
+def steering_response_payload(
+    parent: _WebSocketRequestState, *, parent_id: str, input_items: list[JsonValue]
+) -> ResponsesRequest:
+    data = _steering_response_configuration(parent)
+    if data.get("conversation") or data.get("context_management"):
+        raise steering_error("steering_not_supported", "Steering cannot use conversations or automatic compaction.")
+    reasoning = data.get("reasoning")
+    if isinstance(reasoning, dict) and reasoning.get("mode") not in (None, "standard"):
+        raise steering_error("steering_not_supported", "Steering requires standard single-agent reasoning.")
     data["input"] = input_items
     data["previous_response_id"] = parent_id
     return ResponsesRequest.model_validate(data)

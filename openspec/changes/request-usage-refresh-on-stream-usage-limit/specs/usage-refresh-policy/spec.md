@@ -9,10 +9,15 @@ MUST request an immediate usage refresh for the failing account in addition to
 marking it rate limited. The refresh MUST run as a tracked background task that
 never blocks or alters the response, MUST load the account from a fresh
 background-session row rather than the request's `Account` instance, and MUST
-bypass the usage freshness gate. Concurrent requests for the same account MUST
-join a single in-flight owned-session refresh (the scheduler's or another
-request's) and MUST NOT queue a successor fetch. Repeated requests for the same
-account within a fixed 15 second window MUST be dropped. The request MUST be
+bypass the usage freshness gate. Usage refreshes run on two per-account
+singleflight lanes: the background scheduler and forced refreshes use the bare
+account key with caller-bound sessions, while the rate-limit payload, fleet and
+request-triggered refreshes use the owned-session key. A requested refresh MUST
+join a refresh already in flight on either lane rather than starting a third
+concurrent upstream fetch, and concurrent requests for the same account MUST
+share a single in-flight owned-session refresh without queueing a successor
+fetch. Repeated requests for the same account within a fixed 15 second window
+MUST be dropped. The request MUST be
 skipped when usage refresh is disabled, when the account is in usage-refresh auth
 cooldown, or when the fresh row is missing, `paused`, `reauth_required`, or
 `deactivated`. Plain `rate_limit_exceeded` throttling and quota error codes MUST
@@ -27,9 +32,16 @@ NOT request a refresh.
 
 #### Scenario: A request joins the scheduler's in-flight refresh
 
-- **GIVEN** the background scheduler is refreshing an account on its owned-session singleflight key
+- **GIVEN** the background scheduler is refreshing an account on the bare account singleflight key
 - **WHEN** a stream on that account fails with `usage_limit_reached`
-- **THEN** the requested refresh joins the in-flight refresh
+- **THEN** the requested refresh waits on the scheduler's in-flight refresh and records its outcome
+- **AND** no additional upstream fetch starts
+
+#### Scenario: A request joins an in-flight owned-session refresh
+
+- **GIVEN** the rate-limit payload path or another request is refreshing an account on the owned-session singleflight key
+- **WHEN** a stream on that account fails with `usage_limit_reached`
+- **THEN** the requested refresh joins that in-flight refresh
 - **AND** no additional upstream fetch starts
 
 #### Scenario: Repeats inside the debounce window are dropped

@@ -5342,7 +5342,12 @@ async def test_requested_refresh_coalesces_concurrent_runs(monkeypatch: pytest.M
 
 @pytest.mark.asyncio
 async def test_requested_refresh_joins_inflight_scheduler_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A requested refresh joins the scheduler's owned-session refresh instead of fetching again."""
+    """A requested refresh joins the scheduler's in-flight refresh instead of fetching again.
+
+    ``UsageRefreshScheduler`` calls ``refresh_accounts([account], ...)`` with the default
+    ``own_singleflight_sessions=False``, so its singleflight key is the bare account id --
+    not the owned-session key the request lane runs on.
+    """
     stored_account = _make_account("acc_request_join", "workspace_request_join")
     lookups: list[str] = []
     _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
@@ -5359,10 +5364,49 @@ async def test_requested_refresh_joins_inflight_scheduler_refresh(monkeypatch: p
         await release.wait()
         return usage_updater_module.AccountRefreshResult(usage_written=True)
 
+    scheduler_key = usage_updater_module._usage_refresh_singleflight_key(stored_account.id)
+    assert scheduler_key == stored_account.id
     scheduler_run = asyncio.create_task(
+        usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.run(scheduler_key, scheduler_factory, join_existing=True)
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    requested = asyncio.create_task(usage_updater_module._run_requested_refresh(stored_account.id))
+    await asyncio.sleep(0)
+    assert not requested.done()
+    assert list(usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight) == [scheduler_key]
+
+    release.set()
+    await asyncio.gather(scheduler_run, requested)
+
+    assert lookups == []
+    assert stored_account.id in usage_updater_module._last_successful_refresh
+    assert usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_requested_refresh_joins_inflight_owned_session_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rate-limit payload and fleet lanes refresh on the owned-session key; a request joins them too."""
+    stored_account = _make_account("acc_request_join_owned", "workspace_request_join_owned")
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+    monkeypatch.setattr(
+        UsageUpdater,
+        "_refresh_account",
+        lambda *args, **kwargs: pytest.fail("joined refresh must not start its own fetch"),
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def owned_session_factory() -> usage_updater_module.AccountRefreshResult:
+        started.set()
+        await release.wait()
+        return usage_updater_module.AccountRefreshResult(usage_written=True)
+
+    owned_run = asyncio.create_task(
         usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.run(
             usage_updater_module._usage_refresh_singleflight_key(stored_account.id, own_singleflight_session=True),
-            scheduler_factory,
+            owned_session_factory,
             join_existing=True,
         )
     )
@@ -5373,10 +5417,85 @@ async def test_requested_refresh_joins_inflight_scheduler_refresh(monkeypatch: p
     assert not requested.done()
 
     release.set()
-    await asyncio.gather(scheduler_run, requested)
+    await asyncio.gather(owned_run, requested)
 
     assert lookups == []
     assert stored_account.id in usage_updater_module._last_successful_refresh
+
+
+@pytest.mark.asyncio
+async def test_requested_refresh_ignores_completed_scheduler_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A finished scheduler task lingering in the singleflight map is not joined; the request fetches."""
+    stored_account = _make_account("acc_request_join_done", "workspace_request_join_done")
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+    fetches = 0
+
+    async def fake_refresh_account(
+        self: UsageUpdater,
+        account: Account,
+        *,
+        usage_account_id: str | None,
+        access_token_override: str | None = None,
+    ) -> usage_updater_module.AccountRefreshResult:
+        nonlocal fetches
+        fetches += 1
+        return usage_updater_module.AccountRefreshResult(usage_written=True)
+
+    monkeypatch.setattr(UsageUpdater, "_refresh_account", fake_refresh_account)
+
+    async def finished_factory() -> usage_updater_module.AccountRefreshResult:
+        return usage_updater_module.AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+
+    done_task = asyncio.create_task(finished_factory())
+    await done_task
+    usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight[stored_account.id] = done_task
+
+    await usage_updater_module._run_requested_refresh(stored_account.id)
+
+    assert fetches == 1
+    assert lookups == [stored_account.id]
+
+
+@pytest.mark.asyncio
+async def test_requested_refresh_logs_joined_scheduler_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failing scheduler refresh that the request joined is logged and swallowed, not re-fetched."""
+    stored_account = _make_account("acc_request_join_fail", "workspace_request_join_fail")
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+    monkeypatch.setattr(
+        UsageUpdater,
+        "_refresh_account",
+        lambda *args, **kwargs: pytest.fail("joined refresh must not start its own fetch"),
+    )
+    release = asyncio.Event()
+
+    async def failing_scheduler_factory() -> usage_updater_module.AccountRefreshResult:
+        await release.wait()
+        raise RuntimeError("upstream usage fetch exploded")
+
+    scheduler_run = asyncio.create_task(
+        usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.run(
+            usage_updater_module._usage_refresh_singleflight_key(stored_account.id),
+            failing_scheduler_factory,
+            join_existing=True,
+        )
+    )
+    await asyncio.sleep(0)
+    requested = asyncio.create_task(usage_updater_module._run_requested_refresh(stored_account.id))
+    await asyncio.sleep(0)
+    release.set()
+
+    with caplog.at_level(logging.WARNING, logger=usage_updater_module.logger.name):
+        await requested
+    with pytest.raises(RuntimeError):
+        await scheduler_run
+
+    assert lookups == []
+    assert stored_account.id not in usage_updater_module._last_successful_refresh
+    assert any("Requested usage refresh failed" in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.asyncio

@@ -233,6 +233,13 @@ class _UsageRefreshSingleflight:
         with contextlib.suppress(BaseException):
             task.exception()
 
+    def inflight(self, account_id: Hashable) -> asyncio.Task[AccountRefreshResult] | None:
+        """Return the running refresh task registered under ``account_id``, if any."""
+        task = self._inflight.get(account_id)
+        if task is None or task.done():
+            return None
+        return task
+
     def clear(self) -> None:
         self._inflight.clear()
 
@@ -449,9 +456,11 @@ class UsageUpdater:
 
         The caller schedules the coroutine as a tracked task. It loads the
         account from a fresh background row (never a caller's ``Account``),
-        bypasses freshness, and joins any in-flight owned-session refresh.
-        Repeats within ``_REQUEST_REFRESH_DEBOUNCE_SECONDS`` are dropped, as
-        are disabled refresh and accounts in auth cooldown.
+        bypasses freshness, and joins an in-flight refresh of the account on
+        either singleflight lane (the scheduler's caller-session key or the
+        owned-session key) instead of fetching again. Repeats within
+        ``_REQUEST_REFRESH_DEBOUNCE_SECONDS`` are dropped, as are disabled
+        refresh and accounts in auth cooldown.
         """
         if not get_settings().usage_refresh_enabled or _is_usage_refresh_in_cooldown(account_id):
             return None
@@ -986,13 +995,22 @@ async def _run_requested_refresh(account_id: str) -> None:
         return await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
 
     try:
-        # The owned-session key coalesces with the scheduler's refresh of the
-        # same account; joining never queues a successor fetch.
-        result = await _USAGE_REFRESH_SINGLEFLIGHT.run(
-            _usage_refresh_singleflight_key(account_id, own_singleflight_session=True),
-            refresh_factory,
-            join_existing=True,
-        )
+        # Two singleflight lanes exist per account: the scheduler (and
+        # ``force_refresh``) run on the bare ``account_id`` key with
+        # caller-bound sessions, while the rate-limit payload and fleet paths
+        # run on the owned-session key. A request must not add a third
+        # concurrent fetch, so it joins a scheduler refresh already in flight
+        # and otherwise runs on the owned-session key, where ``join_existing``
+        # never queues a successor fetch.
+        scheduler_refresh = _USAGE_REFRESH_SINGLEFLIGHT.inflight(_usage_refresh_singleflight_key(account_id))
+        if scheduler_refresh is not None:
+            result = await wait_on_shared_future(scheduler_refresh)
+        else:
+            result = await _USAGE_REFRESH_SINGLEFLIGHT.run(
+                _usage_refresh_singleflight_key(account_id, own_singleflight_session=True),
+                refresh_factory,
+                join_existing=True,
+            )
     except Exception as exc:
         logger.warning(
             "Requested usage refresh failed account_id=%s request_id=%s error=%s",

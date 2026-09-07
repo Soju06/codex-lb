@@ -27,11 +27,14 @@ reasoning items are counted.
 
 - `UsageUpdater.request_refresh(account_id)` returns a background refresh
   coroutine (or `None` when suppressed) that loads the account from a fresh
-  background row, bypasses the freshness gate, joins any in-flight owned-session
-  refresh of the same account (`join_existing=True`; never queues a successor
-  fetch), and never touches a caller's `Account`. Repeats within a fixed 15 s
-  debounce window, disabled usage refresh, and accounts in auth cooldown return
-  `None`.
+  background row, bypasses the freshness gate, and never touches a caller's
+  `Account`. Usage refreshes run on two per-account singleflight lanes -- the
+  scheduler and `force_refresh` on the bare account key, the rate-limit payload
+  and fleet paths on the owned-session key -- so the requested refresh first
+  joins a scheduler refresh already in flight and otherwise runs on the
+  owned-session key with `join_existing=True` (never queues a successor fetch).
+  Repeats within a fixed 15 s debounce window, disabled usage refresh, and
+  accounts in auth cooldown return `None`.
 - `_handle_stream_error` requests that refresh after `mark_rate_limit` when the
   stream error code is exactly `usage_limit_reached`, scheduling it through
   `ProxyService._schedule_cancel_safe_cleanup` (tracked task
@@ -63,7 +66,11 @@ None.
   selection after the >= 100 % row lands, seconds after the first upstream 429
   instead of up to one scheduler interval later.
 - A 429 storm on one account produces at most one upstream `/wham/usage` fetch
-  per debounce window per process; concurrent requests join the in-flight fetch.
+  per debounce window per process; concurrent requests join the in-flight fetch,
+  including a scheduler refresh of the same account that is already running. The
+  debounce and the singleflight lanes are process-local, so under a cross-replica
+  storm each replica fetches once per window (the scheduler lane does not join
+  request lanes; that pre-existing asymmetry is unchanged).
 - No new settings (PRINCIPLES.md P2): the debounce is a constant. No new SQL;
   existing background repositories are reused (SQLite/PostgreSQL parity).
 - `CancelledError` propagates out of the tracked refresh; only `Exception` is

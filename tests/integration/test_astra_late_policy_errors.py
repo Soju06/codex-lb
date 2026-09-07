@@ -31,6 +31,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.timeout(20)]
 
 
 @pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize("server_recovery", [False, True], ids=["initial-attempt", "server-recovery"])
 @pytest.mark.parametrize(
     ("extra", "error_param"),
     [
@@ -40,7 +41,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.timeout(20)]
     ids=["auto-truncation", "auto-compaction"],
 )
 async def test_late_astra_recovery_policy_error_is_terminal_and_releases_reservation(
-    async_client, app_instance, monkeypatch, path: str, extra, error_param: str
+    async_client, app_instance, monkeypatch, path: str, server_recovery: bool, extra, error_param: str
 ) -> None:
     account_id = await _import_account(async_client, "astra-late", "astra-late@example.com")
     account = await _get_account(account_id)
@@ -58,11 +59,41 @@ async def test_late_astra_recovery_policy_error_is_terminal_and_releases_reserva
     key = created.json()
     _install_bridge_settings(monkeypatch, enabled=True)
     service = get_proxy_service_for_app(app_instance)
-    session_key = proxy_module._HTTPBridgeSessionKey("session_header", "astra-late-session", key["id"])
+    stream_calls = 0
+    if server_recovery:
+        bridge_settings = proxy_module.get_settings()
+        bridge_settings.http_responses_session_bridge_ambiguous_continuation_recovery_mode = (
+            "server_indefinite_recovery"
+        )
+        monkeypatch.setattr(proxy_api, "get_settings", lambda: bridge_settings)
+        real_stream = service.stream_http_responses
+
+        def initial_failure_then_real_recovery(payload, headers, **kwargs):
+            nonlocal stream_calls
+            stream_calls += 1
+            if stream_calls > 1:
+                return real_stream(payload, headers, **kwargs)
+
+            async def first_failure():
+                await service._release_websocket_reservation(kwargs["api_key_reservation"])
+                exc = ProxyResponseError(502, openai_error("stream_incomplete", "Durable operation failed"))
+                setattr(exc, "http_bridge_durable_recovery_eligible", True)
+                raise exc
+                yield ""  # pragma: no cover
+
+            return first_failure()
+
+        monkeypatch.setattr(service, "stream_http_responses", initial_failure_then_real_recovery)
+    bridge_headers = {"x-codex-session-id": "astra-late-session"}
+    if server_recovery:
+        bridge_headers["x-codex-turn-state"] = "astra-late-session"
+    session_key = proxy_module._HTTPBridgeSessionKey(
+        "turn_state_header" if server_recovery else "session_header", "astra-late-session", key["id"]
+    )
     recovery_upstream = _FakeBridgeUpstreamWebSocket()
     recovery_session = proxy_module._HTTPBridgeSession(
         key=session_key,
-        headers={"x-codex-session-id": "astra-late-session"},
+        headers=bridge_headers,
         affinity=proxy_module._AffinityPolicy(
             key="astra-late-session", kind=proxy_module.StickySessionKind.CODEX_SESSION
         ),
@@ -80,13 +111,13 @@ async def test_late_astra_recovery_policy_error_is_terminal_and_releases_reserva
     stored_items = [{"role": "user", "content": "first question"}]
     lookup = proxy_module.DurableBridgeLookup(
         session_id="astra-late-durable",
-        canonical_kind="session_header",
+        canonical_kind=session_key.affinity_kind,
         canonical_key="astra-late-session",
         api_key_scope=key["id"],
         account_id=account_id,
         owner_instance_id="remote-owner",
         owner_epoch=1,
-        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=-60 if server_recovery else 60),
         state=HttpBridgeSessionState.ACTIVE,
         latest_turn_state=None,
         latest_response_id="resp_astra_late_anchor",
@@ -131,7 +162,7 @@ async def test_late_astra_recovery_policy_error_is_terminal_and_releases_reserva
                     "stream": True,
                     **extra,
                 },
-                headers={"Authorization": f"Bearer {key['key']}", "x-codex-session-id": "astra-late-session"},
+                headers={"Authorization": f"Bearer {key['key']}", **bridge_headers},
             )
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
@@ -152,4 +183,5 @@ async def test_late_astra_recovery_policy_error_is_terminal_and_releases_reserva
     await service.drain_persistence_tasks(timeout_seconds=5)
     async with SessionLocal() as db:
         statuses = list((await db.execute(select(ApiKeyUsageReservation.status))).scalars())
-    assert statuses == ["released"]
+    assert stream_calls == (2 if server_recovery else 0)
+    assert statuses == ["released"] * (2 if server_recovery else 1)

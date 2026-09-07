@@ -2732,8 +2732,20 @@ class _HTTPBridgeStreamingMixin:
                 )
                 if recovery_injected_input is not None:
                     recovery_payload = recovery_payload.model_copy(update={"input": recovery_injected_input})
-                prepare_astra_reasoning_policy_continuation(recovery_payload, api_key)
-                validate_astra_request(recovery_payload, api_key)
+                try:
+                    prepare_astra_reasoning_policy_continuation(recovery_payload, api_key)
+                    validate_astra_request(recovery_payload, api_key)
+                except (ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed):
+                    # A server-owned retry may carry a different reservation
+                    # from the API's original request. Settle this unsubmitted
+                    # lifecycle before returning the terminal policy error.
+                    try:
+                        await release_unowned_bridge_lifecycle(
+                            request_state.deferred_account_backoff_lifecycle, request_state
+                        )
+                    except Exception:
+                        logger.warning("Failed to release policy-rejected bridge reservation", exc_info=True)
+                    raise
                 owner_recovery_scope_id = ensure_request_scope_id() if original_request_unanchored else None
                 if owner_recovery_scope_id is not None:
                     _reserve_http_bridge_unanchored_handoff(

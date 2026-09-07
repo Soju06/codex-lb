@@ -4,7 +4,7 @@
 
 - [x] 1.1 Add `UsageUpdater.request_refresh(account_id)` with a 15 s per-account debounce, `usage_refresh_enabled` and auth-cooldown short-circuits, and reset in `_clear_usage_refresh_state()`.
 - [x] 1.2 Join a scheduler refresh already in flight on the bare account key; otherwise run on the owned-session singleflight key with `join_existing=True`, loading a fresh background row and bypassing the freshness gate; never touch a caller's `Account`.
-- [x] 1.3 Record `_last_successful_refresh` and clear the auth cooldown on a successful fetch; log and swallow `Exception` only.
+- [x] 1.3 Record `_last_successful_refresh` and clear the auth cooldown on a successful fetch; invalidate the account selection cache when usage rows were written; log and swallow `Exception` only.
 
 ## 2. Streaming trigger
 
@@ -19,5 +19,5 @@
 ## 4. Verification
 
 - [x] 4.1 Unit coverage: storm -> single fetch, concurrent runs coalesce, joins the scheduler's in-flight refresh on the bare account key and an owned-session refresh, ignores completed scheduler tasks, logs a joined scheduler failure, debounce, fresh-row/ineligible rows, cancellation propagation, trigger and negative controls, counter predicate and no-op paths.
-- [x] 4.2 Integration coverage: a streamed `usage_limit_reached` writes the >= 100 % row without a scheduler tick and the next selection reports `usage_limit_reached` with `resets_at`.
+- [x] 4.2 Integration coverage: with the production selection-cache TTL and a stale selection primed between the mark and the row write, a streamed `usage_limit_reached` writes the >= 100 % row without a scheduler tick, invalidates the selection cache, and the next selection reports `usage_limit_reached` with `resets_at`.
 - [x] 4.3 ruff format/check, ty, `scripts/check_proxy_architecture.py`, strict OpenSpec validation.

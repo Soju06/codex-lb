@@ -18,6 +18,7 @@ import time
 import aiohttp
 import pytest
 
+import app.modules.proxy.account_cache as account_cache_module
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
@@ -29,6 +30,7 @@ from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage import updater as usage_updater_module
 from app.modules.usage.repository import UsageRepository
 
@@ -1332,12 +1334,25 @@ async def test_compact_sticky_503_unknown_code_excludes_failing_account_on_failo
 
 
 @pytest.mark.asyncio
-async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exhaustion(async_client, monkeypatch):
+async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exhaustion(
+    async_client, app_instance, monkeypatch
+):
     """A streamed usage_limit_reached marks the account rate limited *and* writes the >= 100 %
     usage row seconds later without a scheduler tick, so the next selection reports the
     structured pool exhaustion with the row's reset time instead of waiting for the next
-    refresh interval."""
+    refresh interval.
+
+    Runs with the production selection-cache TTL (pytest defaults it to 0): ``mark_rate_limit``
+    invalidates the cache before the row exists, and a selection in between repopulates it
+    without usage evidence, so the refresh must invalidate again once the row is written.
+    The cross-replica invalidation poller is detached so its echo of the earlier
+    ``mark_rate_limit`` bump cannot stand in for the refresh's own invalidation.
+    """
     usage_updater_module._clear_usage_refresh_state()
+    monkeypatch.setattr(account_cache_module, "get_cache_invalidation_poller", lambda: None)
+    selection_cache = get_account_selection_cache()
+    monkeypatch.setattr(selection_cache, "_ttl_seconds", 5)
+    selection_cache.invalidate()
     raw_account_id = "acc_usage_limit_refresh"
     account_id = await _import_account(async_client, raw_account_id, "usage-limit-refresh@example.com")
     reset_at = int(time.time()) + 1800
@@ -1351,9 +1366,13 @@ async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exh
         yield  # pragma: no cover - makes this an async generator
 
     fetched: list[str | None] = []
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
 
     async def fake_fetch_usage(*, access_token, account_id, route=None, allow_direct_egress=True):
         fetched.append(account_id)
+        fetch_started.set()
+        await release_fetch.wait()
         return UsagePayload(
             plan_type="plus",
             rate_limit=RateLimitPayload(
@@ -1384,7 +1403,18 @@ async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exh
         first = await async_client.post("/backend-api/codex/responses", json=payload)
         assert first.status_code == 429
         assert first.json()["error"]["code"] == "usage_limit_reached"
+        await asyncio.wait_for(fetch_started.wait(), timeout=5)
+        assert fetched == [raw_account_id]
+        assert await latest_primary_row() is None
 
+        # Production race: a selection between ``mark_rate_limit`` and the refresh's row write
+        # repopulates the cache from a row set that carries no usage evidence yet.
+        load_balancer = app_instance.state.proxy_service._load_balancer
+        await load_balancer._load_selection_inputs(model=payload["model"])
+        assert selection_cache._cache, "the stale selection must be cached before the row lands"
+        stale_generation = selection_cache.generation
+
+        release_fetch.set()
         # The refresh is a tracked background task: poll briefly for its row instead of a
         # scheduler tick (usage_refresh_interval_seconds).
         latest = None
@@ -1396,15 +1426,21 @@ async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exh
         assert latest is not None, "a streamed usage_limit_reached must request an immediate usage refresh"
         assert latest.used_percent == 100.0
         assert latest.reset_at == reset_at
-        assert fetched == [raw_account_id]
+
+        deadline = time.monotonic() + 5.0
+        while selection_cache.generation == stale_generation and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        assert selection_cache.generation > stale_generation, "the written row must invalidate the selection cache"
+        assert selection_cache._cache == {}
 
         async with SessionLocal() as session:
             account = await session.get(Account, account_id)
             assert account is not None
             assert account.status in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED)
 
-        # With the >= 100 % row written, the pool is usage-proven exhausted on the very next
-        # selection and surfaces the structured failure with the row's reset time.
+        # With the >= 100 % row written and the stale selection dropped, the pool is
+        # usage-proven exhausted on the very next selection and surfaces the structured
+        # failure with the row's reset time -- without waiting out the cache TTL.
         second = await async_client.post("/backend-api/codex/responses", json=payload)
         assert second.status_code == 429
         error = second.json()["error"]
@@ -1413,4 +1449,6 @@ async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exh
         assert error["resets_at"] == reset_at
         assert fetched == [raw_account_id], "the second selection failure must not fetch upstream again"
     finally:
+        release_fetch.set()
         usage_updater_module._clear_usage_refresh_state()
+        selection_cache.invalidate()

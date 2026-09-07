@@ -5498,6 +5498,91 @@ async def test_requested_refresh_logs_joined_scheduler_failure(
     assert any("Requested usage refresh failed" in record.getMessage() for record in caplog.records)
 
 
+@pytest.mark.parametrize(
+    ("usage_written", "fetch_succeeded", "expected_invalidations"),
+    [
+        (True, True, 1),
+        (False, True, 0),
+        (False, False, 0),
+    ],
+)
+@pytest.mark.asyncio
+async def test_requested_refresh_invalidates_selection_cache_only_when_usage_written(
+    monkeypatch: pytest.MonkeyPatch,
+    usage_written: bool,
+    fetch_succeeded: bool,
+    expected_invalidations: int,
+) -> None:
+    """The written >= 100 % row must be visible to the next selection without waiting out the cache TTL."""
+    stored_account = _make_account("acc_request_cache", "workspace_request_cache")
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+    invalidations: list[bool] = []
+
+    class SelectionCache:
+        def invalidate(self, *, propagate: bool = True) -> None:
+            invalidations.append(propagate)
+
+    monkeypatch.setattr(usage_updater_module, "get_account_selection_cache", SelectionCache)
+
+    async def fake_refresh_account(
+        self: UsageUpdater,
+        account: Account,
+        *,
+        usage_account_id: str | None,
+        access_token_override: str | None = None,
+    ) -> usage_updater_module.AccountRefreshResult:
+        return usage_updater_module.AccountRefreshResult(
+            usage_written=usage_written,
+            fetch_succeeded=fetch_succeeded,
+        )
+
+    monkeypatch.setattr(UsageUpdater, "_refresh_account", fake_refresh_account)
+
+    await usage_updater_module._run_requested_refresh(stored_account.id)
+
+    assert invalidations == [True] * expected_invalidations
+
+
+@pytest.mark.asyncio
+async def test_requested_refresh_invalidates_selection_cache_after_joined_scheduler_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scheduler only invalidates at cycle end; a joined per-account write is surfaced immediately."""
+    stored_account = _make_account("acc_request_cache_join", "workspace_request_cache_join")
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+    invalidations = 0
+
+    class SelectionCache:
+        def invalidate(self, *, propagate: bool = True) -> None:
+            nonlocal invalidations
+            invalidations += 1
+
+    monkeypatch.setattr(usage_updater_module, "get_account_selection_cache", SelectionCache)
+    release = asyncio.Event()
+
+    async def scheduler_factory() -> usage_updater_module.AccountRefreshResult:
+        await release.wait()
+        return usage_updater_module.AccountRefreshResult(usage_written=True)
+
+    scheduler_run = asyncio.create_task(
+        usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.run(
+            usage_updater_module._usage_refresh_singleflight_key(stored_account.id),
+            scheduler_factory,
+            join_existing=True,
+        )
+    )
+    await asyncio.sleep(0)
+    requested = asyncio.create_task(usage_updater_module._run_requested_refresh(stored_account.id))
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(scheduler_run, requested)
+
+    assert lookups == []
+    assert invalidations == 1
+
+
 @pytest.mark.asyncio
 async def test_requested_refresh_uses_fresh_row_and_bypasses_freshness(monkeypatch: pytest.MonkeyPatch) -> None:
     caller_account = _make_account("acc_request_fresh", "workspace_request_fresh")

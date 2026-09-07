@@ -1023,6 +1023,12 @@ async def _run_requested_refresh(account_id: str) -> None:
     if result.fetch_succeeded:
         _last_successful_refresh[account_id] = utcnow()
         _clear_usage_refresh_auth_cooldown(account_id)
+    if result.usage_written:
+        # ``mark_rate_limit`` invalidated the selection cache before this row
+        # existed, so a selection in between repopulated it without usage
+        # evidence. Drop that entry now instead of letting the >= 100 % row
+        # wait out the cache TTL before the pool reports exhaustion.
+        get_account_selection_cache().invalidate()
 
 
 def build_background_usage_updater() -> UsageUpdater:

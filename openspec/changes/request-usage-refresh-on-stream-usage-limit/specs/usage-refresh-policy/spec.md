@@ -20,8 +20,10 @@ fetch. Repeated requests for the same account within a fixed 15 second window
 MUST be dropped. The request MUST be
 skipped when usage refresh is disabled, when the account is in usage-refresh auth
 cooldown, or when the fresh row is missing, `paused`, `reauth_required`, or
-`deactivated`. Plain `rate_limit_exceeded` throttling and quota error codes MUST
-NOT request a refresh.
+`deactivated`. When the requested (or joined) refresh writes usage rows it MUST
+invalidate the account selection cache, so the next selection observes the new
+usage evidence without waiting out the cache TTL. Plain `rate_limit_exceeded`
+throttling and quota error codes MUST NOT request a refresh.
 
 #### Scenario: A 429 storm produces a single upstream fetch
 
@@ -54,10 +56,12 @@ NOT request a refresh.
 #### Scenario: The pool reports usage exhaustion on the next selection
 
 - **GIVEN** the last selectable account's stream fails upstream with `usage_limit_reached`
+- **AND** a selection between the rate-limit mark and the refresh's row write repopulated the selection cache without usage evidence
 - **AND** the requested refresh writes a usage row at or above 100 % with its reset time
 - **WHEN** the next request selects an account
-- **THEN** selection fails with the structured `usage_limit_reached` failure carrying that `resets_at`
-- **AND** it does not wait for the next scheduled refresh interval
+- **THEN** the written row has invalidated the selection cache
+- **AND** selection fails with the structured `usage_limit_reached` failure carrying that `resets_at`
+- **AND** it does not wait for the next scheduled refresh interval or the selection cache TTL
 
 #### Scenario: The request never mutates the streaming request's account
 

@@ -34,7 +34,11 @@ reasoning items are counted.
   joins a scheduler refresh already in flight and otherwise runs on the
   owned-session key with `join_existing=True` (never queues a successor fetch).
   Repeats within a fixed 15 s debounce window, disabled usage refresh, and
-  accounts in auth cooldown return `None`.
+  accounts in auth cooldown return `None`. A refresh that writes usage rows
+  invalidates the account selection cache (as the scheduler and the reset-credit
+  refresh already do): `mark_rate_limit` invalidated it before the row existed,
+  and a selection in between would otherwise pin usage-less inputs for the cache
+  TTL (5 s in production).
 - `_handle_stream_error` requests that refresh after `mark_rate_limit` when the
   stream error code is exactly `usage_limit_reached`, scheduling it through
   `ProxyService._schedule_cancel_safe_cleanup` (tracked task
@@ -64,7 +68,8 @@ None.
 
 - The pool reports `usage_limit_reached` with the correct `resets_at` on the next
   selection after the >= 100 % row lands, seconds after the first upstream 429
-  instead of up to one scheduler interval later.
+  instead of up to one scheduler interval later, and without waiting out the
+  selection cache TTL.
 - A 429 storm on one account produces at most one upstream `/wham/usage` fetch
   per debounce window per process; concurrent requests join the in-flight fetch,
   including a scheduler refresh of the same account that is already running. The

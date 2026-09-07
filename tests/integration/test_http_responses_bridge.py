@@ -16562,8 +16562,9 @@ class _AcceptedOutputFreeCapacityErrorUpstreamWebSocket(_FakeBridgeUpstreamWebSo
 class _AcceptedOutputFreeAbruptCloseUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     """Upstream ACCEPTS the request (created + in_progress) then the transport dies."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, close_code: int = 1011) -> None:
         super().__init__("resp_accepted_abrupt_closed")
+        self.close_code = close_code
 
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
@@ -16579,7 +16580,7 @@ class _AcceptedOutputFreeAbruptCloseUpstreamWebSocket(_FakeBridgeUpstreamWebSock
             },
         ):
             await self._messages.put(_FakeUpstreamMessage("text", text=json.dumps(event, separators=(",", ":"))))
-        await self._messages.put(_FakeUpstreamMessage("close", close_code=1011))
+        await self._messages.put(_FakeUpstreamMessage("close", close_code=self.close_code))
 
 
 def _install_two_account_bridge_failover(
@@ -16802,6 +16803,176 @@ async def test_backend_responses_http_bridge_retries_accepted_output_free_abrupt
     assert len(failing_upstream.sent_text) == 1
     assert len(retry_upstream.sent_text) == 1
     assert json.loads(retry_upstream.sent_text[0])["input"] == json.loads(failing_upstream.sent_text[0])["input"]
+
+
+def _install_two_account_bridge_failover_with_hard_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    owner: Account,
+    alternate: Account,
+    legacy_session_key: str,
+    upstreams_by_account_header: dict[str, list[_FakeBridgeUpstreamWebSocket]],
+) -> tuple[list[str | None], list[frozenset[str]], list[str | None]]:
+    """Two selectable accounts whose fake selection honors what the real
+    sticky selection honors: ``exclude_account_ids``, and a raw legacy
+    ``CODEX_SESSION`` row for ``legacy_session_key`` naming ``owner`` as the hard
+    owner (``hard_sticky`` in ``sticky_selection``). A selection that consults
+    that row (``legacy_sticky_key``) can only return the owner; when the owner
+    is excluded it fails with ``hard_affinity_saturated`` exactly as the
+    production selector does. Upstream sockets are handed out per connected
+    account (``chatgpt-account-id`` header) in connect order.
+
+    Returns ``(connect_account_ids, selection_exclusions, selection_legacy_keys)``.
+    """
+
+    connect_account_ids: list[str | None] = []
+    selection_exclusions: list[frozenset[str]] = []
+    selection_legacy_keys: list[str | None] = []
+
+    async def fake_select_account_with_budget(self, deadline, *, request_id, kind, **kwargs):
+        del self, deadline, request_id, kind
+        excluded = frozenset(kwargs.get("exclude_account_ids") or ())
+        legacy_sticky_key = kwargs.get("legacy_sticky_key")
+        selection_exclusions.append(excluded)
+        selection_legacy_keys.append(legacy_sticky_key)
+        if legacy_sticky_key == legacy_session_key:
+            if owner.id in excluded:
+                return AccountSelection(
+                    account=None,
+                    error_message="Hard affinity owner account is unavailable",
+                    error_code="hard_affinity_saturated",
+                )
+            return AccountSelection(account=owner, error_message=None, error_code=None)
+        chosen = alternate if owner.id in excluded else owner
+        return AccountSelection(account=chosen, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, base_url, session
+        connect_account_ids.append(account_id_header)
+        upstreams = upstreams_by_account_header.get(account_id_header) or []
+        assert upstreams, f"unexpected upstream connect for account header {account_id_header!r}"
+        return upstreams.pop(0)
+
+    async def fail_legacy_stream(*args, **kwargs):
+        raise AssertionError("legacy core_stream_responses path must not be used when HTTP bridge is enabled")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
+    return connect_account_ids, selection_exclusions, selection_legacy_keys
+
+
+_BRIDGE_BARE_SESSION_ACCEPTED_TERMINALS = [
+    pytest.param(lambda: _AcceptedOutputFreeCapacityErrorUpstreamWebSocket(), id="capacity_error"),
+    pytest.param(
+        lambda: _AcceptedOutputFreeCapacityErrorUpstreamWebSocket(
+            error_code="model_at_capacity",
+            error_message="Selected model is at capacity. Please try a different model.",
+        ),
+        id="model_at_capacity",
+    ),
+    pytest.param(lambda: _AcceptedOutputFreeAbruptCloseUpstreamWebSocket(), id="abrupt_close_1011"),
+    pytest.param(lambda: _AcceptedOutputFreeAbruptCloseUpstreamWebSocket(close_code=1006), id="abrupt_close_1006"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make_failing_upstream", _BRIDGE_BARE_SESSION_ACCEPTED_TERMINALS)
+async def test_backend_responses_http_bridge_re_sends_a_bare_session_accepted_failure_to_its_hard_sticky_owner(
+    async_client,
+    monkeypatch,
+    make_failing_upstream,
+):
+    """Bridge twin of the direct-websocket bare-session test (#2127 round 7):
+    a native Codex request carries ``session_id``, so the bridge session key is
+    hard (``session_header``) and its affinity consults the raw legacy
+    ``CODEX_SESSION`` row for that value, which an old replica may have persisted
+    naming the accepting account as the hard owner. The accepted output-free
+    replay used to exclude that owner like the created-only replay does, and
+    the raw row then failed every reconnect re-selection with
+    ``hard_affinity_saturated`` until the bridge request budget (7200s) ran out
+    (``main`` before #2127 failed this shape closed immediately). The replay
+    must leave the owner eligible and go back to it on a fresh socket within
+    the single lifecycle the client is reading."""
+    legacy_session_key = "sid-http-bridge-legacy-hard-owner"
+    # Bound the pre-fix failure mode (sleeping re-selection until the connect
+    # budget) so a regression fails in seconds instead of hanging for 7200s;
+    # the fixed path never waits.
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(enabled=True).model_copy(
+            update={"http_responses_session_bridge_request_budget_seconds": 15.0}
+        ),
+        dashboard_settings=_make_dashboard_settings(),
+    )
+    monkeypatch.setattr(proxy_support, "_HARD_AFFINITY_RECOVERY_SLEEP_SECONDS", 0.05)
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS", 0.01)
+    owner_id = await _import_account(
+        async_client,
+        "acc_http_bridge_bare_session_owner",
+        "http-bridge-bare-session-owner@example.com",
+    )
+    alternate_id = await _import_account(
+        async_client,
+        "acc_http_bridge_bare_session_alternate",
+        "http-bridge-bare-session-alternate@example.com",
+    )
+    owner = await _get_account(owner_id)
+    alternate = await _get_account(alternate_id)
+    failing_upstream = make_failing_upstream()
+    owner_recovered_upstream = _FakeBridgeUpstreamWebSocket("resp_bare_session_owner_recovered")
+    other_account_upstream = _FakeBridgeUpstreamWebSocket("resp_bare_session_other_account")
+    connect_account_ids, selection_exclusions, selection_legacy_keys = (
+        _install_two_account_bridge_failover_with_hard_owner(
+            monkeypatch,
+            owner=owner,
+            alternate=alternate,
+            legacy_session_key=legacy_session_key,
+            upstreams_by_account_header={
+                "acc_http_bridge_bare_session_owner": [failing_upstream, owner_recovered_upstream],
+                "acc_http_bridge_bare_session_alternate": [other_account_upstream],
+            },
+        )
+    )
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "retry-accepted-on-bare-session-hard-owner",
+            "stream": True,
+        },
+        headers={"session_id": legacy_session_key},
+    )
+
+    _assert_single_response_lifecycle_completed(events)
+    # Re-sent to the SAME owner: the replacement selection consulted the raw row
+    # (``legacy_sticky_key``) with nothing excluded, so the hard row resolved to
+    # the owner again instead of reporting ``hard_affinity_saturated``.
+    assert connect_account_ids == ["acc_http_bridge_bare_session_owner", "acc_http_bridge_bare_session_owner"]
+    assert selection_legacy_keys[-1] == legacy_session_key
+    assert selection_exclusions[-1] == frozenset()
+    assert len(failing_upstream.sent_text) == 1
+    assert len(owner_recovered_upstream.sent_text) == 1
+    assert other_account_upstream.sent_text == []
+    assert (
+        json.loads(owner_recovered_upstream.sent_text[0])["input"] == json.loads(failing_upstream.sent_text[0])["input"]
+    )
+    assert failing_upstream.closed is True
 
 
 class _AcceptedOutputItemCapacityErrorUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):

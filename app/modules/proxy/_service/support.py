@@ -34,7 +34,7 @@ from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.locks import fast_lock
 from app.core.utils.sse import sse_event_type_from_block
-from app.db.models import Account
+from app.db.models import Account, StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyRequestUsageBudget,
@@ -1760,6 +1760,28 @@ def _websocket_request_is_accepted_lifecycle_only(request_state: _WebSocketReque
     if request_state.deferred_reasoning_downstream_texts:
         return False
     return not (request_state.pending_function_call_ids or request_state.pending_tool_call_types)
+
+
+def _affinity_may_resolve_hard_owner(affinity_policy: _AffinityPolicy) -> bool:
+    """Return whether sticky selection may bind this affinity to one owner account.
+
+    A resolved hard ``CODEX_SESSION`` row narrows selection to its owner
+    (``hard_sticky`` in ``sticky_selection``): turn-state ownership, or the raw
+    compatibility row an old replica persisted for a bare session or thread
+    header, which every policy exposing ``legacy_selection_key`` consults and
+    which wins over the namespaced soft row. The owner is not a request-state
+    pin -- it is read from the database at selection time -- so neither the
+    direct websocket request nor the HTTP bridge session can tell whether its
+    affinity resolves to a hard owner. Any policy that may is treated as
+    owner-bound: excluding that owner would leave every re-selection at
+    ``hard_affinity_saturated`` until the connect budget runs out. Shared by
+    the direct websocket accepted-replay exclusion and the HTTP bridge one.
+    """
+    return (
+        affinity_policy.kind == StickySessionKind.CODEX_SESSION
+        or affinity_policy.legacy_selection_key is not None
+        or affinity_policy.legacy_continuity_source is not None
+    )
 
 
 def _record_websocket_route_metadata(

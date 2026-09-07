@@ -6336,6 +6336,211 @@ async def test_retry_http_bridge_precreated_request_refuses_accepted_replay_whil
     assert session.response_create_gate.locked() is False
 
 
+_BRIDGE_BARE_SESSION_HEADER_AFFINITY = proxy_service._AffinityPolicy(
+    key="bridge-legacy-process",
+    kind=proxy_service.StickySessionKind.CODEX_SESSION,
+    codex_session_source="session_header",
+)
+_BRIDGE_PROMPT_CACHE_AFFINITY = proxy_service._AffinityPolicy(
+    key="cache-key",
+    kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+    max_age_seconds=300,
+)
+
+
+@pytest.mark.parametrize(
+    ("accepted", "key_kind", "session_affinity", "expected"),
+    [
+        pytest.param(
+            False, "session_header", _BRIDGE_BARE_SESSION_HEADER_AFFINITY, True, id="created_only_keeps_excluding"
+        ),
+        pytest.param(True, "session_header", _BRIDGE_BARE_SESSION_HEADER_AFFINITY, False, id="accepted_bare_session"),
+        pytest.param(
+            True,
+            "turn_state_header",
+            proxy_service._AffinityPolicy(
+                key="turn_0123456789abcdef0123456789abcdef",
+                kind=proxy_service.StickySessionKind.CODEX_SESSION,
+                codex_session_source="turn_state",
+            ),
+            False,
+            id="accepted_turn_state",
+        ),
+        pytest.param(
+            True,
+            "thread_header",
+            proxy_service._AffinityPolicy(
+                key="thread-selection-key",
+                kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+                max_age_seconds=300,
+                codex_session_source="thread_header",
+                legacy_codex_session_key="bridge-legacy-process",
+                legacy_continuity_source="session_header",
+            ),
+            False,
+            id="accepted_thread_header_with_legacy_process_lookup",
+        ),
+        pytest.param(
+            True, "session_header", _BRIDGE_PROMPT_CACHE_AFFINITY, True, id="accepted_hard_key_without_owner_lookup"
+        ),
+        pytest.param(True, "prompt_cache", _BRIDGE_PROMPT_CACHE_AFFINITY, True, id="accepted_prompt_cache_key_moves"),
+        pytest.param(True, "request", proxy_service._AffinityPolicy(), True, id="accepted_request_key_moves"),
+        pytest.param(
+            True, "request", _BRIDGE_BARE_SESSION_HEADER_AFFINITY, True, id="accepted_soft_key_keeps_main_exclusion"
+        ),
+    ],
+)
+def test_http_bridge_accepted_replay_may_exclude_account_refuses_hard_capable_session_affinity(
+    accepted: bool,
+    key_kind: str,
+    session_affinity: proxy_service._AffinityPolicy,
+    expected: bool,
+) -> None:
+    """Bridge twin of ``_websocket_accepted_replay_may_exclude_account`` (#2127
+    round 7): the reconnect selects with the *session* affinity, and a resolved
+    hard ``CODEX_SESSION`` row -- turn state, or the raw compatibility row an
+    old replica persisted for the bare session header that
+    ``legacy_selection_key`` consults -- narrows selection to its owner. An
+    accepted replay on a hard session key must therefore leave that owner
+    eligible instead of excluding it into ``hard_affinity_saturated``. The
+    created-only replay and every soft session key are deliberately untouched
+    and keep excluding the failing account."""
+    request_state = _accepted_bridge_request_state(request_id="req-accepted-exclusion-predicate")
+    if accepted:
+        request_state.replay_downstream_response_id = request_state.response_id
+    request_state.awaiting_response_created = True
+    request_state.response_id = None
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey(key_kind, "bridge-legacy-process", None),
+        key_value="bridge-legacy-process",
+    )
+    session.affinity = session_affinity
+    assert (session.key.strength == "hard") is (key_kind in proxy_service._HARD_HTTP_BRIDGE_AFFINITY_KINDS)
+
+    assert (
+        http_bridge_accepted_replay_module._http_bridge_accepted_replay_may_exclude_account(request_state, session)
+        is expected
+    )
+    # One predicate decides "may resolve a hard owner" on both surfaces so the
+    # bridge and the direct websocket cannot drift apart again.
+    assert (
+        http_bridge_accepted_replay_module._affinity_may_resolve_hard_owner
+        is proxy_support_module._affinity_may_resolve_hard_owner
+    )
+    assert websocket_helpers_module._websocket_affinity_may_resolve_hard_owner(
+        session_affinity
+    ) is proxy_support_module._affinity_may_resolve_hard_owner(session_affinity)
+
+
+def _hard_capable_bridge_session(
+    request_state: proxy_service._WebSocketRequestState,
+    *,
+    close_code: int | None,
+) -> proxy_service._HTTPBridgeSession:
+    """Native Codex bridge session (hard ``session_header`` key) whose affinity
+    consults the raw legacy ``CODEX_SESSION`` row for the bare session header."""
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-legacy-process", None),
+        key_value="bridge-legacy-process",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.affinity = _BRIDGE_BARE_SESSION_HEADER_AFFINITY
+    assert session.affinity.legacy_selection_key == "bridge-legacy-process"
+    session.account = cast(Any, SimpleNamespace(id="acc-legacy-hard-owner", status=AccountStatus.ACTIVE))
+    session.last_upstream_close_code = close_code
+    session.upstream_turn_state = "upstream-turn-state-owner"
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()))
+    return session
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["transport_close", "capacity_terminal_pre_staged", "created_only"])
+async def test_retry_http_bridge_precreated_request_keeps_accepted_replay_on_hard_capable_session_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    entry: str,
+) -> None:
+    """An accepted output-free request on a native Codex bridge session (hard
+    ``session_header`` key) is replayed as a fresh hard request: #2127 excluded
+    the accepting account like the created-only replay does. When the session
+    affinity resolves a raw legacy hard ``CODEX_SESSION`` row, that owner is the
+    only account selection can return, so the exclusion made every reconnect
+    re-selection fail with ``hard_affinity_saturated`` and sleep to the bridge
+    request budget (7200s) before a 502 -- ``main`` before #2127 failed this
+    shape closed immediately. The accepted replay now reconnects unexcluded
+    (direct-websocket parity) through the otherwise unchanged fresh-switch
+    path: the owner's pin stays clear, its create lease is released for
+    re-acquisition, and the reconnect is not same-account-required, so a soft
+    row could still move. The created-only shape keeps excluding the silent
+    account exactly as before."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    if entry == "created_only":
+        request_state = proxy_service._WebSocketRequestState(
+            request_id="req-created-only-legacy-owner",
+            model="gpt-5.6-sol",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=time.monotonic(),
+            awaiting_response_created=True,
+            request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+            transport="http",
+            account_response_create_lease=cast(Any, object()),
+        )
+    else:
+        request_state = _accepted_bridge_request_state(
+            request_id=f"req-accepted-legacy-owner-{entry}",
+            account_response_create_lease=cast(Any, object()),
+        )
+    session = _hard_capable_bridge_session(
+        request_state,
+        close_code=None if entry == "capacity_terminal_pre_staged" else 1006,
+    )
+    if entry == "capacity_terminal_pre_staged":
+        # The terminal-error branch stages the request (visible id captured,
+        # gate re-claimed) before it hands the pre-created shape to the retry.
+        assert await http_bridge_accepted_replay_module._stage_websocket_request_state_for_replay(
+            request_state,
+            create_gate=session.response_create_gate,
+            surface="http_bridge",
+            trigger="capacity_error",
+        )
+    old_lease = request_state.account_response_create_lease
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    release_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+
+    assert await service._retry_http_bridge_precreated_request(session) is True
+
+    if entry == "created_only":
+        assert request_state.replay_downstream_response_id is None
+        assert request_state.excluded_account_ids == {"acc-legacy-hard-owner"}
+        # The owner's turn state cannot follow a request that left the account.
+        assert session.upstream_turn_state is None
+    else:
+        assert request_state.replay_downstream_response_id == "resp-accepted-visible"
+        assert request_state.suppress_next_created_downstream is True
+        assert request_state.suppress_next_in_progress_downstream is True
+        assert request_state.excluded_account_ids == set()
+        assert session.upstream_turn_state == "upstream-turn-state-owner"
+    assert request_state.preferred_account_id is None
+    assert request_state.replay_required_account_id is None
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_id is None
+    assert request_state.replay_count == 1
+    assert request_state.response_create_gate_acquired is True
+    release_lease.assert_awaited_once_with(old_lease)
+    reconnect.assert_awaited_once()
+    reconnect_call = reconnect.await_args
+    assert reconnect_call is not None
+    assert reconnect_call.kwargs["request_state"] is request_state
+    assert "require_same_account" not in reconnect_call.kwargs
+    assert "require_preferred_account" not in reconnect_call.kwargs
+    cast(AsyncMock, session.upstream.send_text).assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_transport_close_with_a_visible_sibling_fails_both_requests_closed(
     monkeypatch: pytest.MonkeyPatch,

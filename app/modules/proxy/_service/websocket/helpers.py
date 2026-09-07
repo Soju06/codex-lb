@@ -71,7 +71,6 @@ from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
-    StickySessionKind,
 )
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -291,6 +290,7 @@ from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _affinity_may_resolve_hard_owner,
     _clear_websocket_request_error_overrides,
     _DeferredKeyedStreamHealthPenalty,
     _event_type_from_payload,
@@ -625,22 +625,14 @@ def _websocket_accepted_replay_can_switch_account(request_state: "_WebSocketRequ
 def _websocket_affinity_may_resolve_hard_owner(affinity_policy: _AffinityPolicy) -> bool:
     """Return whether sticky selection may bind this request to one owner account.
 
-    A resolved hard ``CODEX_SESSION`` row narrows selection to its owner
-    (``hard_sticky`` in ``sticky_selection``): turn-state ownership, or the raw
-    compatibility row an old replica persisted for a bare session or thread
-    header, which every policy exposing ``legacy_selection_key`` consults and
-    which wins over the namespaced soft row. The owner is not a request-state
-    pin -- it is read from the database at selection time -- so the request
-    cannot tell whether its session resolves to a hard owner. Any policy that
-    may is treated as owner-bound: excluding that owner would leave every
-    re-selection at ``hard_affinity_saturated`` until the connect budget runs
-    out.
+    The predicate is shared with the HTTP bridge accepted replay
+    (``_affinity_may_resolve_hard_owner``): a resolved hard ``CODEX_SESSION``
+    row -- turn-state ownership or the raw compatibility row consulted through
+    ``legacy_selection_key`` -- narrows selection to an owner the request state
+    never carries, so excluding that owner would leave every re-selection at
+    ``hard_affinity_saturated`` until the connect budget runs out.
     """
-    return (
-        affinity_policy.kind == StickySessionKind.CODEX_SESSION
-        or affinity_policy.legacy_selection_key is not None
-        or affinity_policy.legacy_continuity_source is not None
-    )
+    return _affinity_may_resolve_hard_owner(affinity_policy)
 
 
 def _websocket_accepted_replay_may_exclude_account(request_state: "_WebSocketRequestState") -> bool:

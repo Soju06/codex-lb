@@ -13459,6 +13459,45 @@ class _TwoAccountWebSocketFailover:
             headers={"Authorization": "Bearer external-token", "session_id": "sid-ws-accepted-anchored"},
         )
 
+    TURN_STATE_SESSION_HEADERS: dict[str, str] = {
+        "Authorization": "Bearer external-token",
+        "session_id": "sid-ws-accepted-turn-state",
+    }
+
+    def run_turn_state_follow_up(self, app_instance) -> tuple[list[dict[str, Any]], WebSocketDisconnect | None]:
+        """Native Codex turn-state flow: the first connection (no header)
+        completes turn 1 and the handshake hands the client a synthesized
+        ``x-codex-turn-state``; the second connection echoes it and repeats the
+        history, so the request is classified ``turn_state`` (hard owner) while
+        the proxy injects the completed id as ``previous_response_id`` and
+        retains the full resend as the retry-safe fresh body. Each connection
+        opens its own upstream socket, so the owner's upstreams are consumed
+        one per connect."""
+        result: tuple[list[dict[str, Any]], WebSocketDisconnect | None] = ([], None)
+        with TestClient(app_instance) as client:
+            with client.websocket_connect(
+                "/backend-api/codex/responses",
+                headers=self.TURN_STATE_SESSION_HEADERS,
+            ) as first_socket:
+                accept_headers = {
+                    key.decode(): value.decode()
+                    for key, value in cast(list[tuple[bytes, bytes]], first_socket.extra_headers)
+                }
+                turn_state = accept_headers["x-codex-turn-state"]
+                first_socket.send_text(json.dumps(self.response_create([self.HISTORICAL_INPUT])))
+                result = _receive_until_terminal(first_socket)
+                self.turn_events.append(result[0])
+                if result[1] is not None:
+                    return result
+            with client.websocket_connect(
+                "/backend-api/codex/responses",
+                headers={**self.TURN_STATE_SESSION_HEADERS, "x-codex-turn-state": turn_state},
+            ) as second_socket:
+                second_socket.send_text(json.dumps(self.response_create([self.HISTORICAL_INPUT, self.FOLLOW_UP_INPUT])))
+                result = _receive_until_terminal(second_socket)
+                self.turn_events.append(result[0])
+                return result
+
     def assert_retried_on_another_account(self) -> None:
         assert not self.refused_connects, self.refused_connects
         assert self.connect_accounts == [self.FIRST_ACCOUNT_ID, self.SECOND_ACCOUNT_ID], self.connect_accounts
@@ -14045,3 +14084,120 @@ def test_backend_responses_websocket_replays_a_client_anchored_accepted_capacity
     assert replayed_payload["input"] == anchored_payload["input"]
     assert other_account_upstream.sent_text == []
     assert (failover.FIRST_ACCOUNT_ID, "server_is_overloaded") in failover.stream_errors
+
+
+def _turn_state_owner_failover(
+    accepted_failure: list[_FakeUpstreamMessage],
+) -> tuple[
+    _TwoAccountWebSocketFailover, _SequencedUpstreamWebSocket, _SequencedUpstreamWebSocket, _SequencedUpstreamWebSocket
+]:
+    """Owner ``acct_ws_accepted_a`` serves turn 1, then accepts and fails the
+    follow-up, then serves the replay on a fresh socket; ``acct_ws_accepted_b``
+    must stay idle."""
+    first_turn_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[_completed_first_turn_upstream_batch("resp_ws_turn_state_turn_1")],
+    )
+    accepted_upstream = _SequencedUpstreamWebSocket([], deferred_message_batches=[accepted_failure])
+    owner_recovered_upstream = _recovered_upstream("resp_ws_turn_state_owner_recovered")
+    other_account_upstream = _recovered_upstream("resp_ws_turn_state_other_account")
+    failover = _TwoAccountWebSocketFailover(first_turn_upstream, other_account_upstream)
+    failover.upstreams_by_account[failover.FIRST_ACCOUNT_ID].extend([accepted_upstream, owner_recovered_upstream])
+    return failover, accepted_upstream, owner_recovered_upstream, other_account_upstream
+
+
+def _assert_turn_state_follow_up_re_sent_to_its_owner(
+    failover: _TwoAccountWebSocketFailover,
+    *,
+    accepted_upstream: _SequencedUpstreamWebSocket,
+    owner_recovered_upstream: _SequencedUpstreamWebSocket,
+    other_account_upstream: _SequencedUpstreamWebSocket,
+) -> None:
+    assert [event["type"] for event in failover.turn_events[0]] == ["response.created", "response.completed"]
+    assert not failover.refused_connects, failover.refused_connects
+    # Turn 1, the accepted follow-up, and its replay all connect to the owner;
+    # the turn-state owner is required on the reconnect, so it is never excluded.
+    assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID] * 3, failover.connect_accounts
+    assert failover.excluded_at_connect[-1] == set(), failover.excluded_at_connect
+    assert failover.required_at_connect[-1] == failover.FIRST_ACCOUNT_ID, failover.required_at_connect
+    anchored_payload = json.loads(accepted_upstream.sent_text[0])
+    assert anchored_payload["previous_response_id"] == "resp_ws_turn_state_turn_1"
+    assert anchored_payload["input"] == [failover.FOLLOW_UP_INPUT]
+    assert len(owner_recovered_upstream.sent_text) == 1
+    replayed_payload = json.loads(owner_recovered_upstream.sent_text[0])
+    assert "previous_response_id" not in replayed_payload
+    assert replayed_payload["input"] == [failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]
+    assert other_account_upstream.sent_text == []
+
+
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [
+        ("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
+        ("model_at_capacity", "Selected model is at capacity. Please try a different model."),
+    ],
+)
+def test_backend_responses_websocket_re_sends_a_turn_state_accepted_capacity_error_to_its_owner(
+    app_instance,
+    monkeypatch,
+    error_code,
+    error_message,
+):
+    """#2127 round 3 P1 (capacity path): in a native ``x-codex-turn-state``
+    session the accepted follow-up is owner-bound by the turn state itself.
+    The fresh-body install cleared the owner pin, the exclusion predicate saw
+    a movable replay and excluded the owner, and the session loop then
+    re-resolved and hard-required that same owner: ``previous_response_owner_
+    unavailable`` reached the client after ``response.created``, with no
+    replay. The replay must go back to the owner on a fresh socket."""
+    failover, accepted_upstream, owner_recovered_upstream, other_account_upstream = _turn_state_owner_failover(
+        [
+            *_accepted_output_free_prelude("resp_ws_turn_state_accepted_capacity_failed"),
+            _ws_event(
+                {
+                    "type": "error",
+                    "error": {"type": "service_unavailable_error", "code": error_code, "message": error_message},
+                }
+            ),
+        ]
+    )
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run_turn_state_follow_up(app_instance)
+
+    created_id = _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    assert created_id == "resp_ws_turn_state_accepted_capacity_failed"
+    _assert_turn_state_follow_up_re_sent_to_its_owner(
+        failover,
+        accepted_upstream=accepted_upstream,
+        owner_recovered_upstream=owner_recovered_upstream,
+        other_account_upstream=other_account_upstream,
+    )
+    assert (failover.FIRST_ACCOUNT_ID, "server_is_overloaded") in failover.stream_errors
+
+
+def test_backend_responses_websocket_re_sends_a_turn_state_accepted_abrupt_close_to_its_owner(
+    app_instance,
+    monkeypatch,
+):
+    """#2127 round 3 P1 (transport-close path): same turn-state session, the
+    owner drops the socket after accepting the follow-up. The replay reconnects
+    to the owner with the fresh body instead of excluding it."""
+    failover, accepted_upstream, owner_recovered_upstream, other_account_upstream = _turn_state_owner_failover(
+        [
+            *_accepted_output_free_prelude("resp_ws_turn_state_accepted_closed"),
+            _FakeUpstreamMessage("close", close_code=1011),
+        ]
+    )
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run_turn_state_follow_up(app_instance)
+
+    created_id = _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    assert created_id == "resp_ws_turn_state_accepted_closed"
+    _assert_turn_state_follow_up_re_sent_to_its_owner(
+        failover,
+        accepted_upstream=accepted_upstream,
+        owner_recovered_upstream=owner_recovered_upstream,
+        other_account_upstream=other_account_upstream,
+    )

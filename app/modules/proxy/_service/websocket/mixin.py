@@ -5859,11 +5859,16 @@ class _WebSocketMixin:
                 # re-acquires the account-local slot only when this field is
                 # clear.
                 await proxy._release_request_state_account_response_create_lease(request_state)
-                request_state.excluded_account_ids.add(account.id)
-                request_state.affinity_policy = replace(
-                    request_state.affinity_policy,
-                    reallocate_sticky=True,
-                )
+                if _websocket_accepted_replay_can_switch_account(request_state):
+                    request_state.excluded_account_ids.add(account.id)
+                    request_state.affinity_policy = replace(
+                        request_state.affinity_policy,
+                        reallocate_sticky=True,
+                    )
+                # Otherwise the session still requires this owner (turn state):
+                # the loop re-resolves that owner and the connect hard-requires
+                # it, so the fresh body is re-sent to the same account on a
+                # fresh socket instead of excluding the account it must use.
                 request_state.request_text = safe_request_text
         if retry_error_code == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
             retry_text = None

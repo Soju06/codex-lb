@@ -556,11 +556,23 @@ def _install_fresh_replay_body(
     the fresh body must reconcile the pin with it; a stale pin under a body
     that turned neutral is what let an accepted transport-close replay exclude
     the very account its reconnect still required.
+
+    A turn-state owner is a session pin, not a body pin. The session loop
+    re-resolves it before every reconnect and ``_connect_proxy_websocket``
+    hard-requires it (``turn_state_owner_required``) whenever the session
+    carries an owner, so the fresh body cannot release it: clearing it here
+    only hid the requirement from the exclusion decision, and the replay then
+    excluded the account its reconnect was about to require.
     """
     replay_required_account_id = request_state.replay_required_account_id or request_state.preferred_account_id
+    turn_state_owner_account_id = (
+        request_state.preferred_account_id
+        if request_state.affinity_policy.codex_session_source == "turn_state"
+        else None
+    )
     request_state.request_text = fresh_request_text
     request_state.previous_response_id = None
-    request_state.preferred_account_id = None
+    request_state.preferred_account_id = turn_state_owner_account_id
     request_state.replay_required_account_id = None if account_neutral else replay_required_account_id
     request_state.proxy_injected_previous_response_id = False
     request_state.fresh_upstream_request_is_retry_safe = False
@@ -577,7 +589,10 @@ def _websocket_accepted_replay_can_switch_account(request_state: "_WebSocketRequ
     turn-state owner keeps the replay on that account, so excluding it would
     leave the reconnect no eligible account. Evaluate this after the replay
     body has been prepared, once the anchor is stripped and the owner pin
-    reconciled with the body that will actually be sent.
+    reconciled with the body that will actually be sent; the turn-state owner
+    survives that reconciliation (``_install_fresh_replay_body``) because the
+    connect requires it regardless of the body. A turn-state session without
+    a resolved owner is free to move.
     """
     if request_state.replay_required_account_id is not None:
         return False

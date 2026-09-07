@@ -53987,6 +53987,13 @@ def test_prepare_visible_output_replay_keeps_the_owner_for_an_account_bound_fres
             False,
             id="turn_state_owner",
         ),
+        # ``turn_state_owner_required`` needs a resolved owner: a turn-state
+        # session that has none is free to move (and the loop finds none again).
+        pytest.param(
+            {"affinity_policy": proxy_service._AffinityPolicy(codex_session_source="turn_state")},
+            True,
+            id="turn_state_without_owner",
+        ),
     ],
 )
 def test_websocket_accepted_replay_can_switch_account_mirrors_the_connect_owner_requirements(
@@ -54499,3 +54506,215 @@ async def test_process_upstream_websocket_text_defers_owner_bound_accepted_repla
     assert calls == ["settle", f"health:{owner.id}:server_is_overloaded"]
     assert request_state.deferred_keyed_stream_health == []
     assert request_state.api_key_reservation is None
+
+
+_TURN_STATE_SESSION_AFFINITY = proxy_service._AffinityPolicy(
+    key="turn_0123456789abcdef0123456789abcdef",
+    kind=StickySessionKind.CODEX_SESSION,
+    codex_session_source="turn_state",
+)
+
+
+@pytest.mark.parametrize(
+    "prepare",
+    [
+        pytest.param(
+            websocket_helpers_module._prepare_websocket_request_state_for_visible_output_replay,
+            id="transport_close_prep",
+        ),
+        pytest.param(
+            websocket_helpers_module._prepare_websocket_request_state_for_account_switch,
+            id="capacity_owner_switch_prep",
+        ),
+    ],
+)
+def test_fresh_replay_body_install_keeps_the_turn_state_owner_pin(prepare: Callable[[Any], str | None]):
+    """#2127 round 3 P1: a turn-state session (``x-codex-turn-state``) pins the
+    request to its owner independently of the body -- the session loop
+    re-resolves that owner before every reconnect and the connect hard-requires
+    it. Swapping the account-neutral fresh body in releases the anchor's
+    body-derived pin but must keep the turn-state owner, otherwise the
+    exclusion predicate sees no owner and excludes the account the reconnect is
+    about to require."""
+    request_state = _anchored_accepted_lifecycle_request_state(affinity_policy=_TURN_STATE_SESSION_AFFINITY)
+
+    replay_text = prepare(request_state)
+
+    assert replay_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.replay_required_account_id is None
+    assert request_state.preferred_account_id == "acc_ws_anchor_owner"
+    assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [
+        ("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
+        ("model_at_capacity", "Selected model is at capacity. Please try a different model."),
+    ],
+)
+async def test_process_upstream_websocket_text_re_sends_a_turn_state_accepted_capacity_failure_to_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    error_message: str,
+):
+    """#2127 round 3 P1 (capacity path): the accepted anchored follow-up of a
+    turn-state session fails output-free. The owner-switch prep swaps the
+    fresh body in; the replay must stay on the owner the session requires
+    (no exclusion, owner pin kept) instead of excluding the account the
+    reconnect then hard-requires, which failed the turn closed as
+    ``previous_response_owner_unavailable`` after the client had already read
+    ``response.created``."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        request_id="ws_req_turn_state_accepted_capacity",
+        affinity_policy=_TURN_STATE_SESSION_AFFINITY,
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_sent_at=1.0,
+        response_create_gate_acquired=True,
+    )
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    async def process(payload: dict[str, JsonValue]) -> str:
+        return await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(0),
+        )
+
+    await process({"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}})
+    await process({"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}})
+
+    terminal_text = await process(_accepted_capacity_error_payload(code=error_code, message=error_message))
+
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.replay_request_state is request_state
+    assert pending_requests == deque()
+    assert request_state.replay_downstream_response_id == "resp_x"
+    assert request_state.replay_count == 1
+    # The fresh body goes to the same owner on a fresh socket.
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id == account.id
+    assert request_state.excluded_account_ids == set()
+    assert request_state.affinity_policy.reallocate_sticky is False
+    assert request_state.affinity_policy.codex_session_source == "turn_state"
+    assert "Previous response owner account is unavailable" not in terminal_text
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[0] is account
+    assert handle_stream_error.await_args.args[2] == "server_is_overloaded"
+
+
+@pytest.mark.asyncio
+async def test_transport_end_replay_of_a_turn_state_accepted_turn_stays_on_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#2127 round 3 P1 (transport-close path): same session shape, upstream
+    drops the socket after accepting the turn. The replay swaps the fresh body
+    in and reconnects to the turn-state owner without excluding it."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        response_create_sent_at=1.0,
+        affinity_policy=_TURN_STATE_SESSION_AFFINITY,
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    replayed = await websocket_mixin._process_upstream_websocket_transport_end(
+        service,
+        cast(WebSocket, SimpleNamespace(send_text=AsyncMock())),
+        cast(UpstreamWebSocket, _ClosableUpstream()),
+        message=SimpleNamespace(kind="close", text=None, data=None, close_code=1011, error=None, error_code=None),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    assert replayed is True
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert request_state.preferred_account_id == account.id
+    assert request_state.excluded_account_ids == set()
+    assert request_state.affinity_policy.reallocate_sticky is False
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_precreated_owner_replay_in_a_turn_state_session_stays_on_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Same root cause on the pre-created ``retry_safe_owner_replay`` branch
+    (pre-existing on main): before ``response.created`` the anchored follow-up
+    of a turn-state session hits a transparent capacity code. The owner-switch
+    prep swaps the fresh body in and the branch excluded the owner
+    unconditionally, while the loop re-resolved the turn-state owner and the
+    connect hard-required it -- ``previous_response_owner_unavailable`` with no
+    replay. The replay must be re-sent to that owner on a fresh socket."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    release_lease = AsyncMock()
+    monkeypatch.setattr(service, "_release_request_state_account_response_create_lease", release_lease)
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        request_id="ws_req_turn_state_precreated_capacity",
+        affinity_policy=_TURN_STATE_SESSION_AFFINITY,
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_sent_at=1.0,
+        response_create_gate_acquired=True,
+    )
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    terminal_text = await service._process_upstream_websocket_text(
+        json.dumps(_accepted_capacity_error_payload(), separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+    )
+
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.replay_count == 1
+    assert request_state.replay_downstream_response_id is None
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id == account.id
+    assert request_state.excluded_account_ids == set()
+    assert request_state.affinity_policy.reallocate_sticky is False
+    assert "Previous response owner account is unavailable" not in terminal_text
+    release_lease.assert_awaited_once_with(request_state)
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[2] == "server_is_overloaded"

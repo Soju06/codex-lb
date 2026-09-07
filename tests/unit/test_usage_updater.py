@@ -5743,3 +5743,49 @@ async def test_requested_refresh_cancellation_propagates(monkeypatch: pytest.Mon
     release.set()
     await inflight
     assert stored_account.id not in usage_updater_module._last_successful_refresh
+
+
+@pytest.mark.asyncio
+async def test_requested_refresh_registers_owned_lane_before_first_suspension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bare-lane check and the owned-lane registration are one synchronous step.
+
+    ``_UsageRefreshSingleflight.run`` never awaits while holding its lock, so the
+    uncontended ``asyncio.Lock`` fast path registers the factory task before the
+    request's first suspension. Nothing can run between ``inflight(bare key)``
+    returning ``None`` and the owned-session task appearing in the map, so a
+    scheduler refresh cannot slip into that window and leave the request on a
+    third lane.
+    """
+    stored_account = _make_account("acc_request_atomic", "workspace_request_atomic")
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+    release = asyncio.Event()
+
+    async def held_refresh_account(
+        self: UsageUpdater,
+        account: Account,
+        *,
+        usage_account_id: str | None,
+        access_token_override: str | None = None,
+    ) -> usage_updater_module.AccountRefreshResult:
+        await release.wait()
+        return usage_updater_module.AccountRefreshResult(usage_written=True)
+
+    monkeypatch.setattr(UsageUpdater, "_refresh_account", held_refresh_account)
+    owned_key = usage_updater_module._usage_refresh_singleflight_key(stored_account.id, own_singleflight_session=True)
+
+    requested = asyncio.create_task(usage_updater_module._run_requested_refresh(stored_account.id))
+    assert usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.inflight(owned_key) is None
+
+    # Exactly one loop iteration: the request's first step runs to its first suspension.
+    await asyncio.sleep(0)
+    assert not requested.done()
+    assert usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.inflight(owned_key) is not None
+    assert list(usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight) == [owned_key]
+
+    release.set()
+    await requested
+    assert lookups == [stored_account.id]
+    assert usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight == {}

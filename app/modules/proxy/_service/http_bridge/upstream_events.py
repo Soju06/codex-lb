@@ -172,6 +172,7 @@ from app.modules.proxy._service.support import (
     _mark_response_create_attempt_observed,
     _pop_websocket_deferred_reasoning_downstream_texts,
     _record_response_event,
+    _record_upstream_websocket_failure_metadata,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _websocket_request_can_replay_before_visible_output,
@@ -2325,6 +2326,7 @@ class _HTTPBridgeUpstreamEventsMixin:
 
                 async with session.pending_lock:
                     archive_request_state = session.pending_requests[0] if len(session.pending_requests) == 1 else None
+                    pending_request_states = list(session.pending_requests)
                     response_events_seen = max(
                         (request_state.response_event_count for request_state in session.pending_requests),
                         default=0,
@@ -2363,6 +2365,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
+                _record_upstream_websocket_failure_metadata(message, pending_request_states)
                 close_classification = (
                     _classify_upstream_close(message.close_code, response_events_seen=response_events_seen)
                     if message.close_code is not None

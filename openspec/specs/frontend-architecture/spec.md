@@ -977,13 +977,25 @@ The compact list SHALL sort subscription and purchased credits independently. A 
 - **AND** persists the migrated preference
 
 ### Requirement: Dashboard settings must expose upstream proxy routing controls
-The settings dashboard MUST allow operators to inspect upstream proxy routing state, enable or disable routing, choose the default proxy pool, create proxy endpoints, create proxy pools, and add endpoints to pools.
+The settings dashboard MUST allow operators to inspect upstream proxy routing state, enable or disable routing, choose the default proxy pool, create proxy endpoints, create proxy pools, and add endpoints to pools. For every endpoint the admin API reports as `plaintextCredentials: true`, the endpoint list MUST render a warning stating that its credentials are sent unencrypted over that scheme and recommending an `https://` proxy or a credential-free IP allowlist; endpoints reported as `false` MUST render no such warning.
 
 #### Scenario: Operator creates a pool from existing endpoints
 - **GIVEN** the upstream proxy admin API returns at least one endpoint
 - **WHEN** an operator creates a pool and selects endpoint members
 - **THEN** the dashboard MUST call the pool creation API with the selected endpoint ids
 - **AND** refresh the displayed upstream proxy admin state.
+
+#### Scenario: Plaintext-credential endpoint shows a warning
+
+- **GIVEN** the upstream proxy admin API returns an endpoint with `plaintextCredentials: true`
+- **WHEN** the upstream proxy settings section renders
+- **THEN** that endpoint's row shows the plaintext-credential warning naming its scheme
+
+#### Scenario: Encrypted or credential-free endpoint shows no warning
+
+- **GIVEN** the upstream proxy admin API returns an endpoint with `plaintextCredentials: false`
+- **WHEN** the upstream proxy settings section renders
+- **THEN** that endpoint's row shows no plaintext-credential warning
 
 ### Requirement: Dashboard accounts must expose account proxy bindings
 The accounts dashboard MUST allow operators to bind an account to a proxy pool and disable an existing account binding.
@@ -1879,10 +1891,33 @@ The Accounts page SHALL support account import, untargeted OAuth account
 addition, and targeted OAuth reauthentication. Reauthentication MUST preserve
 separate local seats that share one workspace `chatgpt_account_id`.
 
+The account import flow SHALL allow one or more `auth.json` files to be selected
+at once. It MUST import the selected files sequentially in selection order by
+sending each file through one existing `POST /api/accounts/import` request, so
+the server's single-file multipart contract and resource limits remain
+unchanged. The dialog SHALL close and clear its selection only after every file
+succeeds.
+
+If an import fails after earlier files succeeded, the flow MUST stop before
+attempting later files, keep the dialog open, and retain the failed file and all
+unattempted files for retry without retaining already successful files. Every
+successful request MUST continue to refresh the account list.
+
 #### Scenario: Account import
 
-- **WHEN** a user opens the import flow and uploads an auth.json file
-- **THEN** the app calls `POST /api/accounts/import` and refreshes the account list on success
+- **WHEN** a user selects multiple auth.json files and submits the import flow
+- **THEN** the app calls `POST /api/accounts/import` once per file, sequentially in selection order
+- **AND** refreshes the account list after each successful request
+- **AND** closes and clears the import dialog after every selected file succeeds
+
+#### Scenario: Multi-file account import stops on failure
+
+- **GIVEN** a user submits multiple selected auth.json files
+- **AND** at least one earlier file has imported successfully
+- **WHEN** a later file fails to import
+- **THEN** the app does not attempt any files after the failed file
+- **AND** the dialog remains open with the failed and unattempted files retained for retry
+- **AND** files that already succeeded are not retained for retry
 
 #### Scenario: OAuth add account
 
@@ -3347,4 +3382,3 @@ The x-axis tick format of the Account Trend and API Trend charts SHALL be `MM-DD
 
 - **WHEN** the API Trend chart renders with timestamp data
 - **THEN** the x-axis tick labels SHALL be in `MM-DD` format (e.g., `"08-09"`)
-

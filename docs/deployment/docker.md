@@ -55,6 +55,99 @@ docker compose -f docker-compose.prod.yml up -d
 
 For PostgreSQL profiles and the Postgres 16 → 18 upgrade runbook, see [Database](../database.md).
 
+## Active-active deployment with HAProxy
+
+The opt-in topology runs three private application backends, `blue`, `green` and `amber`,
+behind HAProxy on public port `2455`. A fourth `surge` backend is stopped/weight zero outside
+rollouts. HAProxy uses `leastconn` for new connections; requests within an established WebSocket
+stay on its selected backend. Stock Compose remains single-replica.
+
+Source of truth: [deployment requirements](../../openspec/specs/deployment-installation/spec.md)
+and [operational context](../../openspec/specs/deployment-installation/context.md).
+
+### Capacity profile and prerequisites
+
+- Use shared PostgreSQL in `CODEX_LB_DATABASE_URL`; SQLite is rejected. Keep leader election enabled.
+- Keep encryption material in the shared `codex-lb-data` volume.
+- Each backend has a 3-GiB memory ceiling, including a 1-GiB aggregate native WebSocket queue
+  budget. Four overlapping containers can therefore consume 12 GiB. On a roughly 16-GiB host,
+  reserve the remainder for the OS, PostgreSQL, HAProxy, build processes and other services.
+  A memory ceiling is not an allocation or a throughput guarantee.
+- HA overrides each of two database pools to size 8 plus overflow 2: at most 20 connections per
+  candidate replica, 80 across four. PostgreSQL's 100-connection setting is not changed.
+  Legacy replicas retain their larger pools until replaced; monitor connection use/pool waits
+  during the first migration. These overrides intentionally take precedence over `.env.local`.
+- Native WebSocket queues account raw and decoded data together, with a 128-MiB per-socket cap.
+  Buffer bytes are not whole-process RSS; JSON parsing, active messages and the native process
+  require headroom. Slow consumers exceeding budget fail locally without penalizing an account
+  or replaying ambiguously accepted work. Native HTTP buffering is a separate mechanism.
+- Back up shared data and keep migrations rolling-compatible. Measure event-loop lag, CPU, RSS,
+  queue-pressure errors, DB waits and upstream quota under realistic load before claiming capacity.
+
+### Bootstrap and deployment
+
+A first-time bootstrap requires explicit acknowledgement of the one-time public-port rebind:
+
+```bash
+./scripts/deploy-compose-ha.sh bootstrap
+```
+
+It checks all three backends before stopping the stock port owner and starting HAProxy. A failed
+public-readiness check restores the stock server when present. Later deployments use only:
+
+```bash
+./scripts/deploy-compose-ha.sh deploy
+./scripts/deploy-compose-ha.sh status
+```
+
+The repository's automatically discoverable `$codex-lb-ha-deploy` skill uses this script, waits
+through all phases and verifies `blue,green,amber`, exactly three eligible base backends, surge
+retired and public readiness. A deploy request does not authorize commit, push or rollback.
+
+1. Build and activate surge after strict readiness.
+2. Drain and replace blue, green and amber sequentially using the same candidate image.
+   An established healthy 3+1 topology retains three eligible backends during replacement.
+3. If the checked-in proxy configuration changed, validate it, snapshot runtime state, gracefully
+   reload the HAProxy master and verify a new worker plus public readiness. Do not recreate the
+   public-facing container. Existing connections remain with old workers.
+4. Drain/stop surge and persist `blue,green,amber`.
+
+Existing `blue`, `green` and `blue,green` markers migrate through the same command. Missing
+servers are registered through the private Runtime API. Legacy migration preserves a two-backend
+floor after surge activation, replaces the larger-pool legacy backends, then brings up amber.
+It does not claim three-backend capacity before that topology is established.
+
+The default per-backend drain bound is 300 seconds. Supply a positive second argument to change
+it. If old HAProxy workers still exist after a graceful reload, the script conservatively waits
+the full bound because their connections are not in the new worker's per-server counters.
+A transient inability to read drain state stops replacement rather than treating it as zero.
+
+An explicitly requested rollback can cancel the currently visible healthy base-backend drain:
+
+```bash
+./scripts/deploy-compose-ha.sh rollback 300
+```
+
+This aborts later replacements; it does not undo earlier replacements. Rollback is unavailable
+during replacement, proxy reload or surge retirement. If cancellation happens during legacy
+migration before amber exists, a `retained` phase keeps surge serving until a later deploy completes
+the recorded candidate. A serving surge is never silently rebuilt/recreated.
+
+A later `deploy` resumes a recorded retained-candidate, replacement, reload or retirement phase using the already
+built candidate, without rebuilding source edits made after interruption. Inspect the intended
+revision first. Failed proxy adoption leaves the base backends and surge serving for recovery.
+If the running container's mounted configuration differs from the checkout, the script refuses
+the reload; do not bypass this check with manual runtime commands.
+
+“Zero downtime” refers to admission of new connections during healthy application rollout, not
+unlimited lifetime for old streams. Connections can terminate at the bounded drain deadline.
+An already degraded topology cannot promise three-backend capacity. The single host and HAProxy
+remain one failure domain; this is not host-level HA.
+
+Port `1455` is intentionally not proxied. Account onboarding that requires publishing the temporary
+OAuth callback listener needs a separately planned maintenance window. Never publish backend
+application ports during normal HA operation.
+
 ## Auth mode examples
 
 **Authelia / trusted header**
@@ -84,4 +177,4 @@ For Helm, pass the same values through `extraEnv`. What these modes mean and whe
 
 ---
 
-*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [deployment-networking](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-networking)*
+*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [deployment-networking](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-networking) · [replica-operations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/replica-operations)*

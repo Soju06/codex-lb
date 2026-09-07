@@ -450,17 +450,30 @@ The shared upstream TCP connectors MUST configure connection keepalive of at lea
 
 When the fixed packaged `codex-lb-native-egress` executable is available, direct and account-routed Codex model-discovery, JSON/raw/multipart HTTP, Responses HTTP/SSE, and Responses or Live WebSocket calls MUST prefer it over the corresponding Python data-plane client. Python MUST retain ownership of account selection, route resolution, ordered proxy endpoint fallback, route metadata, and health classification, while each native command MUST target exactly one concrete direct or proxy endpoint. The worker MUST reuse one persistent helper generation and compatible reqwest HTTP/2 client pools across HTTP requests, and MUST multiplex concurrent HTTP and WebSocket operations without cross-delivering events. Native calls MUST preserve standard direct HTTP/HTTPS/SOCKS proxy environment resolution and `NO_PROXY` bypass behavior, and routed calls MUST use the resolved endpoint without consulting environment proxy variables. Python fallback is permitted only when the executable is absent or cannot be spawned. Once a helper process launches, a malformed, timed-out, or incompatible hello/negotiation exchange MUST fail closed without dispatching the operation to Python. A non-idempotent request, WebSocket handshake, or WebSocket frame MUST NOT fall back to Python after its native command may have been dispatched. Helper failure MUST fail operations from that generation without replay and MAY be recovered only by starting a new generation for a later operation. A confirmed pre-dispatch routed connection failure MAY use the next endpoint under the existing route policy, while a TLS verification failure or ambiguous delivery MUST NOT gain new replay eligibility.
 
-Credential-bearing routed proxy endpoints MUST use encrypted `https://`
-transport. Route resolution MUST reject a username or password on a plaintext
-`http://`, `socks5://`, or `socks5h://` endpoint before either the native helper
-or Python connector can use the URL.
+Credential-bearing routed proxy endpoints MAY use `http://`, `socks5://`, or
+`socks5h://` transport; the credential then crosses the LB-to-proxy hop
+unencrypted. Route resolution MUST accept such endpoints, MUST mark the
+resolved endpoint as carrying plaintext credentials, and MUST log one
+credential-free warning per endpoint per process. Credentials MUST still reach
+aiohttp through the CONNECT `Proxy-Authorization` header (TLS targets) or the
+SOCKS connector's username/password parameters, never through a logged URL,
+and a credentialed proxy route MUST still require an `https`/`wss` upstream
+target.
 
 #### Scenario: Plaintext proxy credentials fail before connector selection
 
+- **GIVEN** a routed endpoint contains credentials
+- **AND** the upstream target is not an `https`/`wss` URL, so aiohttp could not carry the credential on a CONNECT tunnel
+- **WHEN** codex-lb resolves the route for that operation
+- **THEN** the operation fails closed before either native or Python egress is selected
+- **AND** neither connector receives the credential-bearing route
+
+#### Scenario: Plaintext proxy credentials are accepted and flagged
+
 - **GIVEN** a routed endpoint contains credentials and uses `http://`, `socks5://`, or `socks5h://`
 - **WHEN** codex-lb resolves the route for an HTTP or WebSocket operation
-- **THEN** route resolution fails closed
-- **AND** neither native nor Python egress receives the credential-bearing URL
+- **THEN** route resolution succeeds with the endpoint marked as carrying plaintext credentials
+- **AND** one warning naming the endpoint id, scheme, host, and port (never the credential) is logged the first time that endpoint resolves in the process
 
 #### Scenario: Packaged direct request prefers native transport
 
@@ -638,3 +651,20 @@ fallback.
 - **WHEN** the helper handshake times out, is malformed, selects an unsupported version, or lacks a required capability
 - **THEN** the adapter terminates that process before dispatch
 - **AND** the attempted operation fails without Python replay
+
+### Requirement: Native WebSocket transport-event queues do not impose a fixed event-count limit
+
+The Python native-egress adapter MUST NOT impose a fixed event-count capacity on an individual native WebSocket transport-event queue and MUST NOT terminate an otherwise healthy WebSocket solely because more than a fixed number of helper events are pending. It MUST preserve event ordering, request isolation, cancellation, helper-generation failure handling, and terminal delivery. The separate application-message queue exposed to WebSocket consumers MUST retain its existing bounded overflow behavior.
+
+#### Scenario: Bursty native WebSocket events exceed the former limit
+
+- **GIVEN** a native WebSocket helper emits more than 64 ordered transport events for one connection before its relay task drains them
+- **WHEN** the relay consumes the connection
+- **THEN** every event is delivered in order through the existing WebSocket API
+- **AND** the adapter does not synthesize a `consumer_backpressure` failure from the transport-event queue
+
+#### Scenario: Application-message backpressure remains bounded
+
+- **GIVEN** a native WebSocket consumer stops draining application messages
+- **WHEN** more than the existing message-queue capacity is received
+- **THEN** the adapter preserves its existing bounded overflow failure and cleans up the native request

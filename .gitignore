@@ -47,6 +47,7 @@ frontend/coverage/
 certs/
 
 .codex-lb/
+.codex-lb-ha/
 .sisyphus/
 
 .specstory/

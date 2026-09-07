@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -20,6 +20,7 @@ from app.core.clients.proxy import CodexControlRequestPrivacyPolicy, ProxyRespon
 from app.core.clients.proxy_websocket import (
     UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL,
     UpstreamWebSocket,
+    UpstreamWebSocketMessage,
 )
 from app.core.clock import REAL_CLOCK, Clock, Scheduler
 from app.core.config.settings import get_settings
@@ -139,6 +140,24 @@ _PROPAGATED_RESPONSES_OWNER_FORWARD_REJECTED: ContextVar[asyncio.Event | None] =
     "propagated_responses_owner_forward_rejected",
     default=None,
 )
+
+
+def _record_upstream_websocket_failure_metadata(
+    message: UpstreamWebSocketMessage,
+    request_states: Iterable[_WebSocketRequestState],
+) -> None:
+    """Copy bounded transport provenance to terminal request-log state."""
+    if message.kind != "error":
+        return
+    failure_phase = getattr(message, "failure_phase", None)
+    failure_detail = getattr(message, "failure_detail", None)
+    if failure_phase is None and failure_detail is None:
+        return
+    for request_state in request_states:
+        if failure_phase is not None and request_state.failure_phase_override is None:
+            request_state.failure_phase_override = failure_phase
+        if failure_detail is not None and request_state.failure_detail_override is None:
+            request_state.failure_detail_override = failure_detail
 
 
 def _strip_blank_html_comment_lines(text: str) -> str:
@@ -1878,6 +1897,7 @@ async def _websocket_full_replay_should_wait_for_continuity(
 
 def _is_account_neutral_error_code(code: str | None) -> bool:
     return is_local_overload_error_code(code) or code in {
+        "proxy_websocket_buffer_exhausted",
         PROCESS_NETWORK_UNAVAILABLE_CODE,
         "proxy_unavailable",
         "responses_compact_input_too_large",

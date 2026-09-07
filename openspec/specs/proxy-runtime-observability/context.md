@@ -20,6 +20,26 @@ See `openspec/specs/proxy-runtime-observability/spec.md` for normative requireme
 
 ## Operational Notes
 
+### Native WebSocket queue pressure
+
+Raw helper events and decoded messages share queue-byte accounting. The default helper budget is
+256 MiB and each connection is capped at 128 MiB. The API-focused HA profile sets
+`CODEX_LB_NATIVE_WEBSOCKET_BUFFER_MAX_BYTES=1073741824` inside each 3-GiB container. A separate
+setting is needed to avoid applying that larger budget to stock 1-GiB deployments. Object sizes
+and queue bookkeeping are included; active parsing/processing/native-process memory is not.
+
+The reader and pump yield every 32 events. For example, 128 small deltas followed by completion
+are delivered in order even if the consumer starts later, without blocking send acknowledgements.
+An over-budget connection reports `proxy_websocket_buffer_exhausted` with failure phase
+`consumer_backpressure` and bounded numeric details (`connection_queue_bytes`, `connection_limit_bytes`,
+`helper_queue_bytes`, `helper_limit_bytes`, `incoming_bytes`). Accepted messages precede the terminal
+failure. Raw payloads and credentials are not included in diagnostics.
+
+This is local overload: direct and HTTP-bridge relays settle pending requests without penalizing
+the selected account or replaying ambiguously accepted work. Consumption, discard, abandoned-queue
+collection and shutdown release queue charges. Already-waiting receivers still receive a terminal
+signal during close. Native HTTP queue limits and upstream quota/owner failures are separate work.
+
 - Use request ids to correlate inbound proxy logs, outbound upstream traces, and client-visible failures.
 - Prefer summary tracing in normal debugging sessions; enable payload tracing only when the exact normalized outbound request matters.
 - For direct compact `5xx` failures, look for `proxy_compact_failure` alongside `upstream_request_complete`; together they show the compact failure phase, failure detail, exception type, retry metadata, and affinity source.

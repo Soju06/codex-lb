@@ -127,6 +127,20 @@ describe("route recovery flow integration", () => {
     expect(screen.queryByTestId("route-load-error")).not.toBeInTheDocument();
   });
 
+  it("opens the standalone key dashboard after an unknown administrator route", async () => {
+    window.localStorage.clear();
+    window.history.pushState({}, "", "/definitely-unknown");
+    renderWithProviders(<App />);
+    expect(await screen.findByTestId("route-not-found")).toBeVisible();
+
+    window.history.pushState({}, "", "/key-dashboard");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+
+    expect(await screen.findByRole("heading", { name: "View your API key usage" })).toBeVisible();
+    expect(screen.queryByTestId("route-not-found")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("API key")).toHaveValue("");
+  });
+
   it("remounts a failed route when search and hash recover on the same path", async () => {
     window.history.pushState({}, "", "/settings?advanced=1#firewall");
 

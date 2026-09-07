@@ -49,6 +49,7 @@ _UNAVAILABLE_LIVE_OWNER_STATUSES = frozenset(
         AccountStatus.RATE_LIMITED,
         AccountStatus.QUOTA_EXCEEDED,
         AccountStatus.PAUSED,
+        AccountStatus.REAUTH_REQUIRED,
         AccountStatus.DEACTIVATED,
     }
 )

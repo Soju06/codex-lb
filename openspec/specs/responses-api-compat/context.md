@@ -39,6 +39,60 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - A DRAINING durable row with a live lease is still owned. Foreign `claim_live_session` and local session create must not steal it, including when forced recovery would otherwise run because the owner endpoint is missing; expired or ownerless DRAINING rows remain recoverable.
 - Hard-affinity retry-circuit evidence is request-lifecycle evidence: retirement counts only while the bridge still owns an eventless pending request. Idle no-pending retirement remains observable but neutral, so routine socket churn cannot manufacture the first strike for a later real timeout.
 
+## Standalone Codex web search
+
+Standalone search uses the shared Codex control-request handler at
+`POST /backend-api/codex/alpha/search` and `POST /v1/alpha/search`. The v1 alias
+supports clients configured with a `/v1` base URL; previously those clients
+received a local HTTP 405 before account selection even when Responses worked.
+Both paths forward the opaque body and repeated query parameters to upstream
+`/codex/alpha/search`, with the same proxy authentication, account scope,
+session affinity, capability restrictions, and error normalization.
+
+For example, base URL `https://proxy.example/v1` produces a standalone request
+to `https://proxy.example/v1/alpha/search` without requiring a client setting
+change. The existing doubled-prefix rewrite also handles
+`/backend-api/codex/v1/alpha/search`. Trailing-slash POST requests retain HTTP
+405 behavior; missing or invalid API keys receive HTTP 401 when proxy
+authentication is enabled. Upstream failures remain subject to the existing
+control-request policy. See the standalone search requirement in [spec.md](spec.md).
+
+Codex Desktop native control requests preserve exactly one case-insensitive
+`Content-Type` header. The inbound media type and opaque body bytes are retained;
+this prevents duplicate `content-type`/`Content-Type` fields from being appended
+by the native transport and rejected upstream as `Unsupported content type`.
+
+Unary control requests negotiate `Accept-Encoding: identity`. Before the native
+compression-relay fix, native egress returned raw compressed bytes, while the
+control response allowlist deliberately omitted `Content-Encoding`. Passing a client's gzip preferences upstream previously
+returned a 200 body that Codex could not decode. Identity negotiation keeps the
+body usable by both native and Python transports without changing the search
+schema. For example, a client sending `accept-encoding: gzip, br` now receives
+ordinary JSON after upstream sees `accept-encoding: identity`. The cost is extra
+upstream bandwidth; successful verification includes decoding the complete JSON
+and checking its output and results, rather than relying on status alone.
+Beta.4 retains that control-route negotiation while importing native HTTP
+decoding support; the two changes act at different layers.
+
+## Accepted output-free retry
+
+Beta.4 can retry an accepted bridge or direct-WebSocket turn once when the
+upstream fails before producing output. The client continues the response id
+already delivered, without a duplicate created/in-progress prelude. For example,
+an unanchored, unsequenced turn that receives only `response.created` followed
+by a capacity error can complete on a replacement account under the original
+visible id. Output, billing evidence, quota errors, numeric WebSocket sequences,
+shared pending work and consumed retry budgets restrict that path. Account/file
+and Codex-session ownership still constrain replacement selection; keyed health
+updates wait for reservation settlement. See the normative scenarios in
+[spec.md](spec.md) rather than treating every accepted failure as replayable.
+
+The imported abandoned-operation sweeper also changes persisted bridge states.
+An older replica can deserialize the string `abandoned` but lacks the new
+writer guard that keeps abandoned rows immutable. A rolling deployment with
+old writers or an arbitrary rollback therefore needs a separate compatibility
+assessment before production use; schema compatibility alone is insufficient.
+
 ## Fast Mode and Service Tiers
 
 codex-lb accepts the OpenAI/Codex `service_tier` field on Responses and Chat

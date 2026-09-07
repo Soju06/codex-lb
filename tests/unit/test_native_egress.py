@@ -417,7 +417,7 @@ async def test_client_close_is_idempotent_and_prevents_restart(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_client_close_does_not_hang_when_stream_queue_is_full(tmp_path: Path) -> None:
+async def test_http_stream_delivers_burst_beyond_former_event_queue_limit(tmp_path: Path) -> None:
     helper = tmp_path / "native-helper"
     _write_helper(
         helper,
@@ -450,7 +450,7 @@ for line in sys.stdin:
 """,
     )
     client = SubprocessNativeEgressClient(helper)
-    stalled = await client.request(
+    burst = await client.request(
         NativeEgressRequest(method="GET", url="https://example.test/slow-consumer", headers={})
     )
     await asyncio.sleep(0.05)
@@ -458,8 +458,7 @@ for line in sys.stdin:
     healthy = await client.request(NativeEgressRequest(method="GET", url="https://example.test/healthy", headers={}))
 
     assert await asyncio.wait_for(healthy.read(), timeout=2.0) == b"ok"
-    with pytest.raises(NativeEgressTransportError, match="bounded event queue"):
-        await stalled.read()
+    assert await asyncio.wait_for(burst.read(), timeout=2.0) == b"x" * 256
 
     await asyncio.wait_for(client.aclose(), timeout=2.0)
 
@@ -587,6 +586,65 @@ async def test_native_websocket_routes_frames_and_send_acknowledgements(tmp_path
         await asyncio.wait_for(websocket.receive(), timeout=0.1)
     assert client._process is process
     assert process is not None and process.returncode is None
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_native_websocket_delivers_event_burst_beyond_former_queue_limit(tmp_path: Path) -> None:
+    helper = tmp_path / "native-helper"
+    _write_helper(
+        helper,
+        """#!/usr/bin/env python3
+import json
+import sys
+
+for line in sys.stdin:
+    command = json.loads(line)
+    request_id = command["request_id"]
+    if command["type"] == "websocket_connect":
+        print(json.dumps({
+            "type": "websocket_open", "request_id": request_id,
+            "status": 101, "headers": [],
+        }), flush=True)
+        for index in range(128):
+            print(json.dumps({
+                "type": "websocket_sent", "request_id": request_id,
+                "command_id": "burst:" + str(index),
+            }), flush=True)
+        print(json.dumps({
+            "type": "websocket_text", "request_id": request_id,
+            "text": "after-burst",
+        }), flush=True)
+    elif command["type"] == "websocket_close":
+        print(json.dumps({
+            "type": "websocket_sent", "request_id": request_id,
+            "command_id": command["command_id"],
+        }), flush=True)
+        print(json.dumps({
+            "type": "websocket_close", "request_id": request_id,
+            "code": command["code"], "reason": command["reason"],
+        }), flush=True)
+    elif command["type"] == "cancel":
+        print(json.dumps({"type": "cancelled", "request_id": request_id}), flush=True)
+""",
+    )
+    client = SubprocessNativeEgressClient(helper)
+    websocket = await client.websocket(
+        NativeWebSocketRequest(
+            url="wss://example.test/codex/responses",
+            headers={},
+            connect_timeout_seconds=2,
+            max_message_bytes=1024,
+        )
+    )
+
+    assert websocket._events.maxsize == 0
+    assert websocket._messages.maxsize == 0
+    assert await asyncio.wait_for(websocket.receive(), timeout=2.0) == NativeWebSocketMessage(
+        kind="text",
+        text="after-burst",
+    )
+    await websocket.close()
     await client.aclose()
 
 
@@ -750,6 +808,44 @@ for line in sys.stdin:
         await websocket.receive()
 
     assert exc_info.value.failure_phase == "liveness_timeout"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_native_websocket_message_burst_preserves_order(tmp_path: Path) -> None:
+    helper = tmp_path / "native-helper"
+    _write_helper(
+        helper,
+        """#!/usr/bin/env python3
+import json
+import sys
+command = json.loads(sys.stdin.readline())
+request_id = command["request_id"]
+print(json.dumps({"type": "websocket_open", "request_id": request_id, "status": 101, "headers": []}), flush=True)
+for index in range(65):
+    print(json.dumps({
+        "type": "websocket_text", "request_id": request_id, "text": str(index),
+    }), flush=True)
+for line in sys.stdin:
+    command = json.loads(line)
+    if command["type"] == "cancel":
+        print(json.dumps({"type": "cancelled", "request_id": request_id}), flush=True)
+""",
+    )
+    client = SubprocessNativeEgressClient(helper)
+    websocket = await client.websocket(
+        NativeWebSocketRequest(
+            url="wss://example.test/codex/responses",
+            headers={},
+            connect_timeout_seconds=2,
+            max_message_bytes=1024,
+        )
+    )
+
+    await asyncio.sleep(0.05)
+    for index in range(65):
+        assert (await asyncio.wait_for(websocket.receive(), timeout=2.0)).text == str(index)
+    assert client._websocket_budget.used == 0
     await client.aclose()
 
 

@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from aiohttp import ClientSession, web
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 
 import app.modules.oauth.service as oauth_module
 from app.core.auth import generate_unique_account_id
@@ -22,7 +23,15 @@ from app.core.clients.oauth import DeviceCode, OAuthError, OAuthTokens
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, OAuthFlowState
+from app.db.models import (
+    Account,
+    AccountProxyBinding,
+    AccountStatus,
+    OAuthFlowState,
+    ProxyEndpoint,
+    ProxyPool,
+    ProxyPoolMember,
+)
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.oauth import api as oauth_api_module
@@ -573,6 +582,54 @@ async def test_oauth_persist_tokens_invalidates_routing_caches_after_identity_me
     assert account_cache.invalidated is True
     assert api_key_cache.cleared is True
     assert poller.bumped == ["api_key"]
+
+
+@pytest.mark.asyncio
+async def test_untargeted_oauth_creation_auto_assigns_proxy_pool() -> None:
+    async with SessionLocal() as session:
+        pool = ProxyPool(id="oauth_auto_pool", name="OAuth auto pool")
+        endpoint = ProxyEndpoint(
+            id="oauth_auto_endpoint",
+            name="OAuth auto endpoint",
+            scheme="http",
+            host="proxy.test",
+            port=8080,
+        )
+        session.add_all(
+            [
+                pool,
+                endpoint,
+                ProxyPoolMember(
+                    id="oauth_auto_member",
+                    pool=pool,
+                    endpoint=endpoint,
+                ),
+            ]
+        )
+        await session.commit()
+
+        service = oauth_module.OauthService(AccountsRepository(session))
+        await service._persist_tokens(
+            OAuthTokens(
+                access_token="oauth-auto-access",
+                refresh_token="oauth-auto-refresh",
+                id_token=_encode_jwt(
+                    {
+                        "email": "oauth-auto@example.com",
+                        "chatgpt_account_id": "oauth_auto_account",
+                        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+                    }
+                ),
+            )
+        )
+
+        account_id = generate_unique_account_id("oauth_auto_account", "oauth-auto@example.com")
+        binding = (
+            await session.execute(select(AccountProxyBinding).where(AccountProxyBinding.account_id == account_id))
+        ).scalar_one()
+
+    assert binding.pool_id == "oauth_auto_pool"
+    assert binding.is_active is True
 
 
 @pytest.mark.asyncio

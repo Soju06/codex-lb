@@ -218,9 +218,8 @@ async def test_failed_prime_recovery_stops_stale_bridge_session_reuse(db_setup, 
 
 
 @pytest.mark.asyncio
-async def test_reauth_status_clears_legacy_local_routing_marker(db_setup, poller_slot) -> None:
-    """A converged REAUTH_REQUIRED snapshot is request-routable and clears any
-    stale local overlay left by an older replica's hard-blocking behavior."""
+async def test_reauth_status_remains_routing_unavailable_after_cache_convergence(db_setup, poller_slot) -> None:
+    """A converged REAUTH_REQUIRED snapshot preserves the temporary quarantine."""
     account_id = "acct-bus-reauth"
     await _insert_account(account_id)
 
@@ -237,15 +236,15 @@ async def test_reauth_status_clears_legacy_local_routing_marker(db_setup, poller
     mark_account_routing_unavailable(account_id)
     assert is_account_routing_unavailable(account_id) is True
 
-    # A current replica publishes the committed status. REAUTH_REQUIRED itself
-    # is now routable, so convergence clears the stale overlay.
+    # A current replica publishes the committed status. The snapshot itself
+    # keeps REAUTH_REQUIRED unavailable even after the local overlay converges.
     remote_poller = CacheInvalidationPoller(SessionLocal)
     assert await remote_poller.bump(NAMESPACE_ACCOUNT_ROUTING) is True
 
     await local_poller._poll_once()
-    assert is_account_routing_unavailable(account_id) is False
+    assert is_account_routing_unavailable(account_id) is True
     reauth_session = _fake_bridge_session(_make_account(account_id, AccountStatus.REAUTH_REQUIRED))
-    assert _http_bridge_session_account_active(reauth_session) is True
+    assert _http_bridge_session_account_active(reauth_session) is False
 
 
 @pytest.mark.asyncio

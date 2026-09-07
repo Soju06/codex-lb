@@ -35,7 +35,7 @@ export function StatsGrid({ stats }: StatsGridProps) {
     <div className={cn("grid gap-3 sm:grid-cols-2", columnsClass)}>
       {stats.map((stat, index) => {
         const Icon = stat.icon;
-        const accent = ACCENT_STYLES[index % ACCENT_STYLES.length];
+        const accent = stat.accentClassName ?? ACCENT_STYLES[index % ACCENT_STYLES.length];
         return (
           <div
             key={stat.label}

@@ -45,6 +45,21 @@ is not bypassed. Multi-process SQLite is still unsupported because concurrent wr
 `uvicorn --workers N` or share one SQLite file between containers; scaling out means moving to
 PostgreSQL.
 
+## Single-host HAProxy blue/green operations
+
+The opt-in Compose topology under `deploy/compose/` applies these same multi-replica invariants to
+the short period when old and new revisions overlap. Stable `server-blue` and `server-green`
+bridge identities advertise their private slot hostnames, share PostgreSQL and the
+`codex-lb-data` encryption-key volume, and run through the project CLI's graceful drain path.
+HAProxy admits traffic to one ready slot at a time; the previous slot remains reachable within the
+private network while its assigned requests and bridge sessions drain.
+
+For example, `./scripts/deploy-compose-ha.sh deploy` builds the inactive slot, checks
+`/health/ready` from the HAProxy container, makes that slot ready before placing its predecessor in
+HAProxy drain, verifies readiness through public port `2455`, and persists the runtime server state.
+The command rejects SQLite and explicitly disabled leader election before starting the candidate.
+This is application rollout continuity on one Docker host, not host-level high availability.
+
 ## Why the encryption-key fingerprint sentinel
 
 Divergent encryption keys do not fail at startup; they fail replica-dependently at use time:

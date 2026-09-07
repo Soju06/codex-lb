@@ -293,6 +293,7 @@ class Settings(BaseSettings):
     # large built-in tool payloads (for example image_generation outputs) do not
     # fail locally with a 1009 before upstream completion.
     max_sse_event_bytes: int = Field(default=16 * 1024 * 1024, gt=0)
+    native_websocket_buffer_max_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
     upstream_response_create_max_bytes: int = Field(default=15 * 1024 * 1024, gt=0)
     oauth_timeout_seconds: float = 30.0
     oauth_callback_host: str = _default_oauth_callback_host()

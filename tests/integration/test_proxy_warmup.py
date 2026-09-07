@@ -19,7 +19,7 @@ from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.time import utcnow
-from app.db.models import ApiKeyLimit, RequestLog
+from app.db.models import AccountStatus, ApiKeyLimit, RequestLog
 from app.db.session import SessionLocal
 from app.modules.usage.repository import UsageRepository
 
@@ -189,6 +189,38 @@ async def test_warmup_normal_mode_uses_configured_model_and_logs_warmup_kind(asy
     assert rows[0].request_kind == "warmup"
     assert rows[0].model == "gpt-5.4-nano"
     assert limit.current_value == 0
+
+
+@pytest.mark.asyncio
+async def test_warmup_force_mode_excludes_reauth_accounts(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    active_id = await _import_account(async_client, "acc-warmup-active", "warmup-active@example.com")
+    reauth_id = await _import_account(async_client, "acc-warmup-reauth", "warmup-reauth@example.com")
+    await _add_primary_usage(active_id, used_percent=0.0, window_minutes=300)
+    await _add_primary_usage(reauth_id, used_percent=0.0, window_minutes=300)
+    async with SessionLocal() as session:
+        await session.execute(
+            update(proxy_module.Account)
+            .where(proxy_module.Account.id == reauth_id)
+            .values(status=AccountStatus.REAUTH_REQUIRED)
+        )
+        await session.commit()
+
+    _, key = await _create_api_key(async_client, name="warmup-quarantine")
+    captured_models: list[str] = []
+    _install_successful_warmup_stub(monkeypatch, captured_models)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "force"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_accounts"] == 1
+    assert [entry["account_id"] for entry in payload["submitted"]] == [active_id]
+    assert len(captured_models) == 1
 
 
 @pytest.mark.asyncio

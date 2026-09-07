@@ -150,6 +150,73 @@ input and is passed through unchanged.
 For example, a TCP peer at `10.0.0.8` may project client `192.168.65.1` and
 scheme `https`; raw-peer authorization still evaluates `10.0.0.8`.
 
+## Opt-in single-host HAProxy rollout
+
+See [spec.md](spec.md) for the capacity and authorization contracts. The opt-in Compose profile
+targets an API-focused 8-CPU/~16-GiB host and leaves stock single-replica defaults unchanged.
+Three private single-worker instances (`blue`, `green`, `amber`) serve through HAProxy on
+port 2455; a fourth `surge` instance supplies replacement capacity, then stops at weight zero.
+Each instance has a unique bridge identity and shares PostgreSQL, leader election and encryption
+material. Horizontal replicas, not multiple workers sharing an identity, partition account caps.
+
+### Resource decisions and failure modes
+
+Each container is capped at 3 GiB, with 1 GiB of that budget for native WebSocket queues.
+Four overlapping containers permit 12 GiB; remaining RAM must cover the OS, database, proxy,
+other services and build processes. Limits are not reserved allocations, and queue accounting is
+not whole-process RSS. No concurrency/RPS guarantee follows from these values alone.
+
+HA environment overrides cap each of two DB pools at size 8 + overflow 2, or 20 connections per
+replica/80 for four replicas, leaving 20 of PostgreSQL's existing 100 slots for migrations and
+operations. The single-process defaults are larger; during the first migration old replicas
+retain them until replaced. Inspect live connection use and pool waits instead of assuming the
+80-connection candidate total applies to mixed versions. Avoid raising PostgreSQL limits blindly.
+
+Native WebSocket buffering counts both raw and decoded queues, with a 128-MiB per-connection cap.
+Slow-reader overflow is local, not an upstream account-health failure. RAM does not solve
+upstream exhausted quotas or required-owner continuity. Native HTTP queues are separate.
+
+### Rollout, reload and recovery
+
+The script builds surge once, validates readiness, then replaces base slots one at a time from
+that image. For example, when blue drains, green + amber + surge keep accepting connections.
+An established healthy topology preserves three eligible backends. Legacy `blue`, `green`
+or `blue,green` markers retain a two-backend floor during migration and add amber after replacing
+the legacy base containers. Missing servers are registered via the private HAProxy Runtime API;
+runtime-added IPs are refreshed when their containers change.
+
+HAProxy uses leastconn for new connections, not per-turn redistribution inside an open WebSocket.
+Changed config is checksum-checked against the mounted file, validated and gracefully reloaded
+through the image's master-worker mode after saving server state. Static IDs preserve blue=1,
+green=2, surge=3, amber=4. The script checks a changed worker PID and readiness; it does not recreate
+the frontend container. Existing connections stay in old workers. If old workers remain, drains
+conservatively wait the full bound because their sessions are outside new-worker server counters.
+A missing/unreadable counter fails closed. A stale bind mount is reported, not bypassed.
+
+Phase state records draining, replacing, proxy reloading and surge retirement. Replacement recovery
+retains a comma-separated list of remaining slots and uses the already-built image. An explicit
+rollback only cancels the currently healthy drain; it does not restore already replaced slots.
+If amber does not exist yet, cancellation records a retained candidate and leaves surge serving;
+the next explicit deploy completes that candidate without rebuilding a live surge.
+
+First-time bootstrap rebinds port 2455 and has a brief interruption. Later healthy rollouts preserve
+new-connection admission, but the default 300-second per-backend drain can terminate long-lived
+connections. The host and proxy are still one failure domain. Rolling-compatible migrations remain
+necessary. OAuth callback port 1455 remains outside the normal HA topology.
+
+### Operations and validation
+
+The deployment skill delegates mutations exclusively to `scripts/deploy-compose-ha.sh`, checks
+headroom, waits through all phases, and verifies three active base slots, surge retirement and
+public readiness. Deploy does not imply commit, push, rollback or bootstrap authorization.
+
+Local validation covers 100/300/500 fake-helper sockets with 128 messages and completion per socket,
+byte overflow, delayed consumers, send acknowledgements, close/shutdown and relay account-neutral
+settlement; it is not a production API load test. Fake-Docker tests cover migration/recovery and
+drain ordering. An isolated HAProxy check verified a new worker while an old worker retained a TCP
+connection and a separate readiness endpoint still returned 200. Before production capacity claims,
+measure CPU, RSS, event-loop lag, queue overflow, DB waits, first-token latency and account quota.
+
 ## NEXT-RELEASE QUEUE (do not lose)
 
 Work queued for the release after the one that shipped the

@@ -129,8 +129,8 @@ async def _commit_peer_reauth(account_id: str, *, refresh_token: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_invalid_refresh_token_payload_requires_reauth_and_gates_routing_on_expiry(db_setup, monkeypatch):
-    """Exercise the OAuth payload, guarded DB downgrade, and expiry-gated routing together."""
+async def test_invalid_refresh_token_payload_requires_reauth_and_quarantines_routing(db_setup, monkeypatch):
+    """Exercise the OAuth payload, guarded DB downgrade, and routing quarantine together."""
     account_id = "acc_invalid_refresh_token"
     await _create_account(account_id)
 
@@ -179,13 +179,11 @@ async def test_invalid_refresh_token_payload_requires_reauth_and_gates_routing_o
     status, stored_refresh_token, sticky_present = await _account_snapshot(account_id)
     assert status == AccountStatus.REAUTH_REQUIRED
     assert stored_refresh_token == "refresh-old"
-    # Reauth-required accounts keep request-routable continuity until the
-    # stored access token's derived expiry passes (see keep-reauth-required-
-    # access-routable): sticky pins survive and routing only excludes the
-    # account once its access token is known-expired.
+    # Sticky ownership survives so a later successful re-auth can repair
+    # continuity, but the terminal status must prevent any upstream token use.
     assert sticky_present is True
     unexpired = AccountState(account_id=account_id, status=status)
-    assert select_account([unexpired]).account is not None
+    assert select_account([unexpired]).account is None
     expired = AccountState(account_id=account_id, status=status, access_token_expires_at=time.time() - 1.0)
     assert select_account([expired]).account is None
 

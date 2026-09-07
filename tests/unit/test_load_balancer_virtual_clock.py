@@ -1,10 +1,10 @@
 """The balancer's selection-time clock reads come from its injected clock.
 
 ``LoadBalancer(clock=...)`` owns the epoch clock used by account selection.
-The reauthentication and additional-quota eligibility helpers used to read
-``time.time()`` themselves; they now take the balancer's sample so a virtual
-clock steers every decision and the wall clock is never consulted. The tests
-make ``time.time`` raise to prove the paths below never touch it.
+The eligibility helpers accept the balancer's sample so additional-quota
+decisions follow the injected clock without consulting wall time. Reauthentication
+quarantine remains status-based, independent of token expiry or clock movement.
+The tests make ``time.time`` raise to prove the paths below never touch it.
 """
 
 from __future__ import annotations
@@ -77,18 +77,24 @@ def _additional_usage(
     )
 
 
-def test_all_accounts_require_reauthentication_uses_the_caller_clock_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_all_accounts_require_reauthentication_preserves_quarantine_with_injected_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     encryptor = TokenEncryptor()
     clock = VirtualClock(epoch_value=2_000_000_000.0)
     expired = _account("expired", encryptor=encryptor, expires_at=int(clock.time()) - 1)
     still_valid = _account("valid", encryptor=encryptor, expires_at=int(clock.time()) + 3600)
+    active = _account("active", encryptor=encryptor, expires_at=int(clock.time()) + 3600)
+    active.status = AccountStatus.ACTIVE
     _forbid_wall_clock(monkeypatch)
 
     assert all_accounts_require_reauthentication([expired], encryptor, now=clock.time()) is True
-    assert all_accounts_require_reauthentication([expired, still_valid], encryptor, now=clock.time()) is False
+    assert all_accounts_require_reauthentication([expired, still_valid], encryptor, now=clock.time()) is True
+    assert all_accounts_require_reauthentication([expired, still_valid, active], encryptor, now=clock.time()) is False
     assert all_accounts_require_reauthentication([], encryptor, now=clock.time()) is False
     clock.advance(3600.0)
     assert all_accounts_require_reauthentication([expired, still_valid], encryptor, now=clock.time()) is True
+    assert all_accounts_require_reauthentication([expired, still_valid, active], encryptor, now=clock.time()) is False
 
 
 @pytest.mark.asyncio

@@ -47,6 +47,17 @@ the owner-bound source-only control while WebSocket still connects upstream;
 the earlier source-schema exemption left this new policy incomplete. This
 repair closes that contract gap rather than redesigning source ownership.
 
+The schema decision also fixes the ownership lookup result for that request.
+If preparation finds no subscription owner for an Astra anchor, a concurrent
+publication must not redirect the already prepared source payload to a
+subscription socket. Reuse the request's existing lookup-outcome field for
+that miss; the next request performs a fresh lookup. For example, an owner
+published just after preparation's lookup leaves this turn on the HTTP
+fallback, while the next turn validates `top_logprobs` against the subscription
+schema. This applies to both new and reused WebSocket connections. An
+8-case upstream control at 15ccd901 retains that fallback in the same ordering;
+the extra lookup introduced with early schema selection exposed the race.
+
 ## Example
 
 Key allows `low` only. Request input contains

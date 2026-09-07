@@ -1828,7 +1828,10 @@ class _WebSocketMixin:
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
                                 if request_state.previous_response_id is not None:
-                                    if request_state.previous_response_owner_account_id is None:
+                                    if (
+                                        request_state.previous_response_owner_account_id is None
+                                        and request_state.previous_response_owner_lookup_outcome is None
+                                    ):
                                         request_state.previous_response_owner_account_id = (
                                             await proxy._resolve_websocket_previous_response_owner(
                                                 previous_response_id=request_state.previous_response_id,
@@ -3369,6 +3372,12 @@ class _WebSocketMixin:
         request_state.client_ip = client_ip
         request_state.raw_source_model = raw_source_model
         request_state.previous_response_owner_account_id = previous_response_owner_account_id
+        if source_owned and responses_payload.previous_response_id is not None:
+            # Schema selection already resolved this anchor without an owner.
+            # Reuse that miss for this request: a later publication must not
+            # route source-schema bytes to a subscription account. The next
+            # request resolves its owner again during preparation.
+            request_state.previous_response_owner_lookup_outcome = "miss"
         request_state.source_route_excluded = source_route_excluded
         request_state.responses_lite_model = next_responses_lite_model
         request_state.expose_stale_previous_response_classifier = codex_session_affinity

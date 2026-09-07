@@ -21,3 +21,4 @@
 - [x] 3.5 Real-route subscription-owner regression and source/subscription/key-policy compatibility controls on canonical and equivalent sockets
 - [x] 3.6 Validate the selected WebSocket continuation and its preserved stale-anchor full-resend fallback after subscription ownership overrides a model source
 - [x] 3.7 Preserve terminal SSE policy errors and reservation cleanup after late HTTP-bridge anchor injection, including recovery attempts
+- [x] 3.8 Keep schema selection and owner routing consistent across concurrent owner publication, and re-resolve on the next request

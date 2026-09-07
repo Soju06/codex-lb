@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from starlette.websockets import WebSocketDisconnect
 
 import app.modules.proxy.service as proxy_module
@@ -199,6 +199,108 @@ def test_websocket_source_without_subscription_owner_keeps_http_fallback(
             ).one()
 
     assert client.portal.call(failure_outcome) == ("error", "model_source_requires_http_transport")
+
+
+@pytest.mark.parametrize("path", _PATHS)
+@pytest.mark.parametrize("reuse_socket", [False, True], ids=["connect", "reuse"])
+@pytest.mark.parametrize(
+    ("extra", "param"),
+    [
+        pytest.param({"top_logprobs": 2}, "top_logprobs", id="source-control"),
+        pytest.param(
+            {"input": [{"type": "configuration_update", "reasoning": {"effort": "low"}, "vendor_setting": True}]},
+            "input.0",
+            id="source-update",
+        ),
+    ],
+)
+def test_websocket_owner_publication_keeps_schema_and_routing_consistent(
+    app_instance, source_and_subscription_owner, monkeypatch, path, extra, param, reuse_socket
+):
+    client, key, account_id = source_and_subscription_owner
+    service = get_proxy_service_for_app(app_instance)
+
+    async def remove_owner():
+        async with SessionLocal() as session:
+            await session.execute(delete(RequestLog).where(RequestLog.request_id == _ANCHOR))
+            await session.commit()
+
+    client.portal.call(remove_owner)
+    original_lookup = service._resolve_websocket_previous_response_owner
+    published = False
+
+    async def lookup_then_publish(**kwargs):
+        nonlocal published
+        owner = await original_lookup(**kwargs)
+        if not published:
+            assert owner is None
+            # Publish after the real lookup missed, before preparation resumes.
+            async with SessionLocal() as session:
+                session.add(
+                    RequestLog(
+                        account_id=account_id,
+                        api_key_id=key["id"],
+                        request_id=_ANCHOR,
+                        model="gpt-6-astra",
+                        status="success",
+                    )
+                )
+                await session.commit()
+            published = True
+        return owner
+
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", lookup_then_publish)
+    batches = [_websocket_response_batch("resp_owner_race")]
+    if reuse_socket:
+        first_turn = _websocket_response_batch("resp_existing_socket")
+        first_turn[-1].text = json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_existing_socket",
+                    "status": "completed",
+                    "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+                },
+            }
+        )
+        batches.insert(0, first_turn)
+    upstream = _SequencedUpstreamWebSocket([], deferred_message_batches=batches)
+    connect = AsyncMock(return_value=upstream)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    headers = {"Authorization": "Bearer " + key["key"]}
+
+    with client.websocket_connect(path, headers=headers) as ws:
+        if reuse_socket:
+            ws.send_json(_continuation({"model": "gpt-5.1", "previous_response_id": None}))
+            assert ws.receive_json()["type"] == "response.created"
+            assert ws.receive_json()["type"] == "response.completed"
+        ws.send_json(_continuation(extra))
+        event = ws.receive_json()
+        if reuse_socket:
+            assert event["type"] == "response.failed", event
+            assert event["response"]["error"]["code"] == "model_source_requires_http_transport"
+            # Reuse the same downstream connection after the rejected turn.
+            ws.send_json(_continuation(extra))
+            next_event = ws.receive_json()
+            assert next_event["error"]["param"] == param, next_event
+        else:
+            assert event["type"] == "error", event
+            assert event["status"] == 503
+            assert event["error"]["code"] == "model_source_requires_http_transport"
+    assert published
+    assert len(upstream.sent_text) == int(reuse_socket)
+    assert connect.await_count == int(reuse_socket)
+
+    # The miss belongs to this request only; the next request sees the new owner.
+    with client.websocket_connect(path, headers=headers) as ws:
+        ws.send_json(_continuation(extra))
+        event = ws.receive_json()
+    assert event["status"] == 400, event
+    assert event["error"]["param"] == param
+    assert len(upstream.sent_text) == int(reuse_socket)
+    assert connect.await_count == int(reuse_socket)
+    expected_reservations = ["finalized", "released"] if reuse_socket else ["released"]
+    assert sorted(client.portal.call(_reservation_statuses, app_instance)) == expected_reservations
 
 
 @pytest.mark.parametrize("path", _PATHS)

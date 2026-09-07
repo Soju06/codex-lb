@@ -46,6 +46,13 @@ validated before upstream connection or send, using client-plane values.
 - **AND** any preserved full-resend fallback is validated against the same subscription schema and refreshed API-key policy before it can be retained for replay
 - **AND** source-owned continuations without a recorded subscription owner retain the HTTP-transport fallback rather than subscription schema errors
 
+#### Scenario: Owner publication cannot change an already selected schema
+
+- **GIVEN** a source-owned Astra continuation has no recorded subscription owner when preparation selects its schema
+- **WHEN** another request publishes that owner before dispatch
+- **THEN** the current WebSocket request SHALL retain the source HTTP-transport fallback
+- **AND** a subsequent request SHALL resolve the published owner and apply subscription validation before forwarding
+
 #### Scenario: Configuration updates cannot use standalone compaction
 
 - **WHEN** a compact request contains a configuration_update item

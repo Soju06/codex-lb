@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -9,10 +10,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 import app.modules.proxy._service.streaming.helpers as streaming_helpers_module
-from app.core.balancer import ERROR_BACKOFF_THRESHOLD, TRAFFIC_CLASS_FOREGROUND
+from app.core.balancer import ERROR_BACKOFF_THRESHOLD
 from app.core.balancer.logic import AccountState
 from app.core.crypto import TokenEncryptor
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, StickySessionKind
 from app.modules.proxy._load_balancer.overload_backoff import (
     OVERLOAD_BACKOFF_BASE_SECONDS,
     OVERLOAD_BACKOFF_MAX_SECONDS,
@@ -27,6 +28,11 @@ from app.modules.proxy._load_balancer.overload_backoff import (
     record_upstream_overload,
 )
 from app.modules.proxy._load_balancer.types import RuntimeState
+from app.modules.proxy._service.streaming.retry import (
+    _record_aggregated_overload_observations,
+    _transient_retry_error_code,
+)
+from app.modules.proxy._service.support import _TransientStreamError
 from app.modules.proxy.load_balancer import LoadBalancer
 from tests.simulation.virtual_time import VirtualClock
 from tests.unit.test_load_balancer_concurrency import (
@@ -141,10 +147,10 @@ def test_level_decays_after_a_quiet_period() -> None:
 
 
 def _filter(states: list[AccountState], runtime: dict[str, RuntimeState], now: float) -> list[AccountState]:
-    return filter_overload_backoff_candidates(states, runtime, traffic_class=TRAFFIC_CLASS_FOREGROUND, now=now)
+    return filter_overload_backoff_candidates(states, runtime, now=now)
 
 
-def test_filter_drops_backed_off_candidates_only_while_eligible_others_remain() -> None:
+def test_filter_returns_the_overload_free_remainder_or_the_pool_itself() -> None:
     now = 1000.0
     runtime = {
         "hot": RuntimeState(overload_backoff_until=now + 30.0),
@@ -167,33 +173,41 @@ def test_filter_drops_backed_off_candidates_only_while_eligible_others_remain() 
     assert _filter(untouched, runtime, now) is untouched
 
 
-def test_filter_keeps_backed_off_account_when_the_remainder_is_ineligible() -> None:
-    now = 1000.0
-    runtime = {"hot": RuntimeState(overload_backoff_until=now + 30.0)}
-    hot = _state("hot")
-    rate_limited = AccountState(
-        account_id="limited",
-        status=AccountStatus.RATE_LIMITED,
-        used_percent=0.0,
-        reset_at=now + 300.0,
-    )
-    cooling = AccountState(
-        account_id="cooling", status=AccountStatus.ACTIVE, used_percent=0.0, cooldown_until=now + 60.0
-    )
-    erroring = AccountState(
-        account_id="erroring",
-        status=AccountStatus.ACTIVE,
-        used_percent=0.0,
-        error_count=ERROR_BACKOFF_THRESHOLD,
-        last_error_at=now - 1.0,
-    )
+def test_transient_retry_error_code_keeps_overload_codes_from_http_status_failures() -> None:
+    def _http_failure(code: str | None) -> SimpleNamespace:
+        error: dict[str, object] = {"message": "Our servers are currently overloaded.", "type": "server_error"}
+        if code is not None:
+            error["code"] = code
+        return SimpleNamespace(payload={"error": error}, status_code=500)
 
-    pool = [hot, rate_limited, cooling, erroring]
-    assert _filter(pool, runtime, now) is pool
+    assert _transient_retry_error_code(cast(BaseException, _http_failure("server_is_overloaded"))) == (
+        "server_is_overloaded"
+    )
+    assert _transient_retry_error_code(cast(BaseException, _http_failure("unknown_thing"))) == "server_error"
+    assert _transient_retry_error_code(cast(BaseException, _http_failure(None))) == "server_error"
+    assert _transient_retry_error_code(RuntimeError("no payload at all")) == "server_error"
+    framed = _TransientStreamError("stream_incomplete", {"message": "cut"})
+    assert _transient_retry_error_code(framed) == "stream_incomplete"
 
-    # One eligible sibling is enough to drop the backed-off account again.
-    with_clean = [hot, rate_limited, _state("clean")]
-    assert [state.account_id for state in _filter(with_clean, runtime, now)] == ["limited", "clean"]
+
+@pytest.mark.asyncio
+async def test_aggregated_retry_observations_feed_the_window_for_overload_codes_only() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(cast(Any, None), clock=clock)
+    account = _make_account("acc-retried")
+    proxy = SimpleNamespace(_load_balancer=balancer)
+
+    await _record_aggregated_overload_observations(proxy, account, "server_error", 2)
+    assert account.id not in balancer._runtime
+
+    await _record_aggregated_overload_observations(proxy, account, "server_is_overloaded", 0)
+    assert account.id not in balancer._runtime
+
+    # Two absorbed same-account retries plus the final health write = the trip count.
+    await _record_aggregated_overload_observations(proxy, account, "server_is_overloaded", OVERLOAD_TRIP_COUNT - 1)
+    assert balancer._runtime[account.id].overload_rejections == [clock.time()] * (OVERLOAD_TRIP_COUNT - 1)
+    await record_upstream_overload(balancer, account)
+    assert overload_backoff_active(balancer._runtime[account.id], clock.time())
 
 
 @pytest.mark.asyncio
@@ -300,3 +314,57 @@ async def test_select_account_still_uses_backed_off_account_when_every_sibling_i
     assert result.error_code is None, result.error_message
     assert result.account is not None
     assert result.account.id == hot.id
+
+
+@asynccontextmanager
+async def _mock_repo_factory():
+    yield AsyncMock()
+
+
+def _sticky_repo(existing_account_id: str | None) -> AsyncMock:
+    repo = AsyncMock()
+    repo.get_account_id = AsyncMock(return_value=existing_account_id)
+    repo.upsert = AsyncMock()
+    repo.delete = AsyncMock()
+    return repo
+
+
+async def _select_sticky(balancer: LoadBalancer, states: list[AccountState], repo: AsyncMock):
+    account_map = {state.account_id: cast(Account, AsyncMock()) for state in states}
+    outcome = await balancer._select_with_stickiness(
+        states=states,
+        account_map=account_map,
+        sticky_key="fresh-or-owned-key",
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=600,
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        sticky_repo=repo,
+    )
+    return outcome.selection
+
+
+@pytest.mark.asyncio
+async def test_fresh_sticky_binding_avoids_backed_off_account_but_established_owner_is_kept() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(_mock_repo_factory, clock=clock)
+    balancer._runtime["hot"] = RuntimeState(overload_backoff_until=clock.time() + OVERLOAD_BACKOFF_BASE_SECONDS)
+    states = [_state("hot"), _state("clean")]
+
+    # A previously unseen key is a fresh upstream admission: bind away from the overloaded account.
+    for _ in range(40):
+        fresh = await _select_sticky(balancer, [_state("hot"), _state("clean")], _sticky_repo(None))
+        assert fresh.account is not None
+        assert fresh.account.account_id == "clean"
+
+    # An established owner is warm-session reuse: the overload window never touches it.
+    owned = await _select_sticky(balancer, states, _sticky_repo("hot"))
+    assert owned.account is not None
+    assert owned.account.account_id == "hot"
+
+    # With no overload-free alternative the fresh binding still lands on the backed-off account.
+    alone = await _select_sticky(balancer, [_state("hot")], _sticky_repo(None))
+    assert alone.account is not None
+    assert alone.account.account_id == "hot"

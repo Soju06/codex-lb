@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Collection, Iterable
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Generic, Literal, Protocol, TypeVar
@@ -27,12 +27,14 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy._load_balancer.overload_backoff import filter_overload_backoff_candidates
 from app.modules.proxy._load_balancer.types import (
     MAX_SELECTION_ATTEMPTS,
     AccountConcurrencyCaps,
     AccountLease,
     AccountLeaseKind,
     ProbeReservation,
+    RuntimeState,
 )
 from app.modules.proxy.affinity import _CodexSessionSource
 from app.modules.proxy.fair_share import (
@@ -1176,6 +1178,7 @@ async def _select_with_stickiness(
     allow_usage_exhaustion_error: bool = True,
     usage_exhaustion_states: Iterable[AccountState] | None = None,
     sticky_refresh_skip_deadline: datetime | None = None,
+    overload_backoff_runtime: Mapping[str, RuntimeState] | None = None,
     clock: Clock,
 ) -> _StickySelectionOutcome:
     if not sticky_key or not sticky_repo:
@@ -1442,22 +1445,37 @@ async def _select_with_stickiness(
             if not preserve_existing_mapping_on_fallback:
                 pending_mutation = _StickyMutation(account_id=None)
 
-    chosen = _select_account_preferring_budget_safe(
-        states,
-        prefer_earlier_reset=prefer_earlier_reset_accounts,
-        prefer_earlier_reset_window=prefer_earlier_reset_window,
-        routing_strategy=routing_strategy,
-        relative_availability_power=relative_availability_power,
-        relative_availability_top_k=relative_availability_top_k,
-        budget_threshold_pct=budget_threshold_pct,
-        secondary_budget_threshold_pct=secondary_budget_threshold_pct,
-        apply_secondary_budget_threshold=apply_sticky_secondary_budget_threshold,
-        traffic_class=traffic_class,
-        ignore_standard_quota=ignore_standard_quota,
-        routing_costs_by_account_id=routing_costs_by_account_id,
-        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
-        usage_exhaustion_states=usage_exhaustion_states,
-    )
+    def _choose_from(candidates: list[AccountState]) -> SelectionResult:
+        return _select_account_preferring_budget_safe(
+            candidates,
+            prefer_earlier_reset=prefer_earlier_reset_accounts,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=routing_strategy,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
+            budget_threshold_pct=budget_threshold_pct,
+            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+            apply_secondary_budget_threshold=apply_sticky_secondary_budget_threshold,
+            traffic_class=traffic_class,
+            ignore_standard_quota=ignore_standard_quota,
+            routing_costs_by_account_id=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
+        )
+
+    # Reaching here means a NEW account is being chosen for this key (no
+    # owner, an unusable owner, or a reallocation): a fresh upstream
+    # admission, not warm-session reuse. Prefer accounts upstream is not
+    # currently rejecting as overloaded; fall back to the full pool when the
+    # strategy rejects every overload-free candidate. The pinned-owner paths
+    # above never consult the overload window, so an established owner keeps
+    # serving its session even while backed off.
+    fallback_candidates = states
+    if overload_backoff_runtime is not None:
+        fallback_candidates = filter_overload_backoff_candidates(states, overload_backoff_runtime, now=clock.time())
+    chosen = _choose_from(fallback_candidates)
+    if chosen.account is None and fallback_candidates is not states:
+        chosen = _choose_from(states)
     if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
         return finish_selection(chosen, persist_account_id=chosen.account.account_id)
     if preserve_existing_mapping_on_fallback and chosen.account is not None and existing is not None:

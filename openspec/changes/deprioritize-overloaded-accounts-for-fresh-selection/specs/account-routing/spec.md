@@ -13,10 +13,13 @@ base, capped at 600 seconds, decaying to the base after 30 minutes without a
 trip); the level MUST saturate once the cap is reached so sustained overload
 cannot grow it without bound, and a trip while already deprioritized MUST NOT
 shorten the deadline.
-Deprioritization MUST be soft: the account is removed from the fresh-selection
-candidate pool only while at least one other candidate that passes routing
-eligibility on its own remains, and it MUST NOT be applied to sticky,
-continuity-owner, or hard-affinity selection. The
+Deprioritization MUST be soft: selection first runs over the candidates not in
+overload backoff and, when the configured strategy and budget gates select
+none of them, runs again over the full candidate pool exactly as before. It
+MUST apply wherever a NEW account is chosen for a request — unbound selection
+and the sticky path's fresh binding, reallocation, or fallback pick — and MUST
+NOT apply to an established sticky owner, a continuity owner, or a
+hard-affinity owner. The
 proxy MUST log when the backoff engages. The failure classification, the
 failover decision, the existing transient error penalty, and the status and
 body returned to the client MUST remain unchanged.
@@ -39,12 +42,29 @@ body returned to the client MUST remain unchanged.
 
 #### Scenario: Backoff yields to an ineligible remainder
 
-- **GIVEN** account A is in overload backoff and every other account is
-  ineligible on its own (rate-limited, cooling down, or in generic error
-  backoff)
+- **GIVEN** account A is in overload backoff and the configured strategy
+  selects none of the other accounts (rate-limited, cooling down, in generic
+  error backoff, or excluded by the strategy's budget gates)
 - **WHEN** a fresh request selects an account
 - **THEN** account A is selected rather than failing the request or reporting
   an account-cap error
+
+#### Scenario: A previously unseen sticky key binds away from the backed-off account
+
+- **GIVEN** account A is in overload backoff and account B is selectable
+- **WHEN** a request carrying a session or prompt-cache key with no established
+  owner selects an account
+- **THEN** the new binding is made to account B
+- **AND** a request whose key already maps to account A keeps using account A
+
+#### Scenario: Same-account retries count as admission rejections
+
+- **GIVEN** upstream answers a fresh admission with an HTTP 5xx whose body
+  carries `server_is_overloaded`
+- **WHEN** the same-account transient retries are exhausted and health is
+  written after settlement
+- **THEN** the health write keeps the overload code and every absorbed retry
+  counts toward the account's overload window
 
 #### Scenario: Pinned sessions are not denied by overload backoff
 

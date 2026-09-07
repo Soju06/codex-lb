@@ -41,6 +41,7 @@ from app.core.utils.shared_future import _await_task_deferring_cancellation
 from app.core.utils.sse import format_sse_event
 from app.db.models import Account, StickySessionKind
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
+from app.modules.proxy._load_balancer.overload_backoff import UPSTREAM_OVERLOAD_CODES, record_upstream_overload
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_shape,
     _record_continuity_fail_closed,
@@ -279,6 +280,32 @@ async def _iter_account_capacity_recovery_wait(
 
 def _payload_size_estimate_bytes(payload: ResponsesRequest) -> int:
     return len(json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
+
+
+def _transient_retry_error_code(tex: BaseException) -> str:
+    """Error code the same-account transient retry loop aggregates under.
+
+    Stream-framed failures keep their own code. HTTP-status failures used to
+    collapse to ``server_error``; an upstream 5xx whose body says the account
+    is overloaded keeps that code so the health write after retry exhaustion
+    still counts as an admission rejection (the overload backoff feeds on the
+    code, and ``server_is_overloaded`` classifies as the same transient class).
+    """
+    if isinstance(tex, _TransientStreamError):
+        return tex.code
+    payload = getattr(tex, "payload", None)
+    if isinstance(payload, Mapping):
+        parsed = _parse_openai_error(payload)
+        if parsed is not None and isinstance(parsed.code, str) and parsed.code in UPSTREAM_OVERLOAD_CODES:
+            return parsed.code
+    return "server_error"
+
+
+async def _record_aggregated_overload_observations(proxy: Any, account: Account, code: str, extra: int) -> None:
+    """Same-account retries absorbed ``extra`` further rejections before
+    failing over; each was an admission refusal for the overload window."""
+    if extra > 0 and code in UPSTREAM_OVERLOAD_CODES:
+        await record_upstream_overload(proxy._load_balancer, account, count=extra)
 
 
 class _StreamingRetryMixin:
@@ -531,6 +558,7 @@ class _StreamingRetryMixin:
                         )
                         if retry_count > 1:
                             await proxy._load_balancer.record_errors(account, retry_count - 1)
+                            await _record_aggregated_overload_observations(proxy, account, error_code, retry_count - 1)
                     except Exception:
                         logger.warning(
                             "Failed to flush deferred keyed stream health account_id=%s request_id=%s",
@@ -650,6 +678,9 @@ class _StreamingRetryMixin:
             )
             if transient_retry_count > 1:
                 await proxy._load_balancer.record_errors(failed_account, transient_retry_count - 1)
+                await _record_aggregated_overload_observations(
+                    proxy, failed_account, failed_code, transient_retry_count - 1
+                )
             return classified
 
         async def _drain_pending_post_refresh_penalty_on_terminal(
@@ -2462,12 +2493,12 @@ class _StreamingRetryMixin:
                                     http_status=tex.status_code,
                                 )
                                 raise
-                            error_code = tex.code if isinstance(tex, _TransientStreamError) else "server_error"
                             error_payload: UpstreamError = (
                                 tex.error
                                 if isinstance(tex, _TransientStreamError)
                                 else _upstream_error_from_openai(_parse_openai_error(tex.payload))
                             )
+                            error_code = _transient_retry_error_code(tex)
                             error_message = str(error_payload.get("message") or "")
                             recovery_decision = await _wait_for_process_network_recovery(
                                 account,

@@ -30,10 +30,8 @@ import logging
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
-from app.core.balancer import TrafficClass
 from app.core.balancer.logic import AccountState
 from app.db.models import Account
-from app.modules.proxy._load_balancer.sticky_selection import _pool_has_available_account_without_backoff
 from app.modules.proxy._load_balancer.types import RuntimeState
 
 logger = logging.getLogger(__name__)
@@ -53,9 +51,10 @@ OVERLOAD_BACKOFF_MAX_SECONDS = 600.0
 # The level decays back to the base once the account has gone this long
 # without tripping, so a recovered account is not punished for last hour.
 OVERLOAD_LEVEL_DECAY_SECONDS = 1800.0
-# Levels saturate once the interval is capped; the stored level and the
-# exponent are both bounded so sustained overload can never overflow.
-OVERLOAD_MAX_LEVEL = 8
+# Levels saturate at the first level whose interval hits the cap
+# (60, 120, 240, 480, then 600), so the stored level and the exponent are
+# both bounded and sustained overload can never overflow or inflate the log.
+OVERLOAD_MAX_LEVEL = 5
 
 
 class _OverloadBalancerLike(Protocol):
@@ -75,9 +74,9 @@ def overload_backoff_active(runtime: RuntimeState | None, now: float) -> bool:
     return runtime is not None and runtime.overload_backoff_until is not None and now < runtime.overload_backoff_until
 
 
-def record_overload_rejection_locked(runtime: RuntimeState, now: float) -> float | None:
-    """Record one overload rejection at ``now``; return the new backoff deadline
-    when this rejection trips the window, else ``None``.
+def record_overload_rejection_locked(runtime: RuntimeState, now: float, *, count: int = 1) -> float | None:
+    """Record ``count`` overload rejections observed at ``now``; return the new
+    backoff deadline when they trip the window, else ``None``.
 
     Caller holds the balancer's per-account lock.
     """
@@ -88,7 +87,7 @@ def record_overload_rejection_locked(runtime: RuntimeState, now: float) -> float
         runtime.overload_backoff_level = 0
     window_start = now - OVERLOAD_WINDOW_SECONDS
     recent = [at for at in (runtime.overload_rejections or ()) if at > window_start]
-    recent.append(now)
+    recent.extend([now] * max(1, count))
     if len(recent) < OVERLOAD_TRIP_COUNT:
         runtime.overload_rejections = recent
         return None
@@ -104,9 +103,17 @@ def record_overload_rejection_locked(runtime: RuntimeState, now: float) -> float
     return deadline
 
 
-async def record_upstream_overload(balancer: Any, account: Account, *, redact_account_id: bool = False) -> None:
-    """Record an upstream overload rejection for ``account`` on ``balancer``.
+async def record_upstream_overload(
+    balancer: Any,
+    account: Account,
+    *,
+    count: int = 1,
+    redact_account_id: bool = False,
+) -> None:
+    """Record ``count`` upstream overload rejections for ``account``.
 
+    ``count`` > 1 carries same-account retry aggregation: N rejections that
+    the retry loop absorbed before failing over are N admission refusals.
     No-op when ``balancer`` does not expose the runtime map (test doubles).
     """
     runtime_map = getattr(balancer, "_runtime", None)
@@ -116,11 +123,11 @@ async def record_upstream_overload(balancer: Any, account: Account, *, redact_ac
     async with lock:
         now = float(balancer._clock.time())
         runtime = runtime_map.setdefault(account.id, RuntimeState())
-        deadline = record_overload_rejection_locked(runtime, now)
+        deadline = record_overload_rejection_locked(runtime, now, count=count)
     if deadline is not None:
         logger.warning(
             "Account overload backoff engaged account_id=%s level=%d backoff_seconds=%.0f "
-            "(fresh selection deprioritizes the account while other candidates remain)",
+            "(fresh selection deprioritizes the account while another candidate can be selected)",
             "<redacted>" if redact_account_id else account.id,
             runtime.overload_backoff_level,
             deadline - now,
@@ -131,22 +138,21 @@ def filter_overload_backoff_candidates(
     states: list[AccountState],
     runtime_by_account_id: Mapping[str, RuntimeState],
     *,
-    traffic_class: TrafficClass,
     now: float,
 ) -> list[AccountState]:
-    """Drop candidates in overload backoff while an *eligible* other remains.
+    """Return the candidates not in overload backoff, or ``states`` itself
+    when that would leave nothing (or change nothing).
 
-    Soft by construction: the backed-off accounts are removed only when the
-    remainder still passes routing eligibility (status, cooldown, generic
-    error backoff, opportunistic window) on its own -- the same check the
-    recovery-probe filter uses. Otherwise the pool is returned unchanged, so
-    this can never turn usable capacity into ``No available accounts`` or a
-    spurious account-cap error.
+    Callers select from the returned list first and, when the configured
+    strategy rejects every remaining candidate, select again from the
+    original ``states`` -- the identity check (``is``) tells them whether a
+    fallback is possible. Eligibility is therefore judged by the real
+    selector under the real strategy and budget gates, never approximated
+    here, so the backoff can only ever *reorder* preference: it cannot turn
+    usable capacity into ``No available accounts`` or an account-cap error.
     """
     kept = [state for state in states if not overload_backoff_active(runtime_by_account_id.get(state.account_id), now)]
-    if len(kept) == len(states):
-        return states
-    if not kept or not _pool_has_available_account_without_backoff(kept, traffic_class=traffic_class, now=now):
+    if not kept or len(kept) == len(states):
         return states
     return kept
 

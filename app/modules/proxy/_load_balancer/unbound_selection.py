@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Generic, Protocol, TypeVar
 
 from app.core.balancer import (
+    AccountState,
     ResetPreferenceWindow,
     RoutingCostsByAccount,
     RoutingStrategy,
@@ -177,16 +178,6 @@ async def run_unbound_selection_path(
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
             )
-            # Fresh admissions avoid accounts upstream is currently rejecting
-            # as overloaded, as long as another candidate remains. Sticky and
-            # continuity selection never reach this path, so warm sessions on
-            # those accounts keep flowing.
-            selection_states = filter_overload_backoff_candidates(
-                selection_states,
-                owner._runtime,
-                traffic_class=traffic_class,
-                now=selection_now,
-            )
             if suppress_recovery_probe_candidates:
                 selection_states = _filter_recovery_probe_candidates(
                     selection_states,
@@ -214,21 +205,39 @@ async def run_unbound_selection_path(
             else:
                 selection_error_code = None
                 selection_resets_at = None
-                result = _select_account_preferring_budget_safe(
+
+                def _select_from(candidates: list[AccountState]) -> SelectionResult:
+                    return _select_account_preferring_budget_safe(
+                        candidates,
+                        prefer_earlier_reset=prefer_earlier_reset_accounts,
+                        prefer_earlier_reset_window=prefer_earlier_reset_window,
+                        routing_strategy=routing_strategy,
+                        relative_availability_power=relative_availability_power,
+                        relative_availability_top_k=relative_availability_top_k,
+                        budget_threshold_pct=budget_threshold_pct,
+                        secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                        traffic_class=traffic_class,
+                        ignore_standard_quota=False,
+                        routing_costs_by_account_id=effective_routing_costs,
+                        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                        usage_exhaustion_states=states,
+                    )
+
+                # Fresh admissions prefer accounts upstream is not currently
+                # rejecting as overloaded. The cap-filtered pool stays intact
+                # for cap-error detection below, and when the configured
+                # strategy rejects every overload-free candidate the full pool
+                # is selected from exactly as before. Sticky and continuity
+                # selection never reach this path, so warm sessions on those
+                # accounts keep flowing.
+                overload_free_states = filter_overload_backoff_candidates(
                     selection_states,
-                    prefer_earlier_reset=prefer_earlier_reset_accounts,
-                    prefer_earlier_reset_window=prefer_earlier_reset_window,
-                    routing_strategy=routing_strategy,
-                    relative_availability_power=relative_availability_power,
-                    relative_availability_top_k=relative_availability_top_k,
-                    budget_threshold_pct=budget_threshold_pct,
-                    secondary_budget_threshold_pct=secondary_budget_threshold_pct,
-                    traffic_class=traffic_class,
-                    ignore_standard_quota=False,
-                    routing_costs_by_account_id=effective_routing_costs,
-                    allow_usage_exhaustion_error=allow_usage_exhaustion_error,
-                    usage_exhaustion_states=states,
+                    owner._runtime,
+                    now=selection_now,
                 )
+                result = _select_from(overload_free_states)
+                if result.account is None and overload_free_states is not selection_states:
+                    result = _select_from(selection_states)
                 if (
                     result.account is None
                     and result.error_code is None

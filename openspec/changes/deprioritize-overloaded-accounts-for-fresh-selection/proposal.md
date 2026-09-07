@@ -29,10 +29,18 @@ feeding the rejected accounts at their normal capacity weight.
   fresh (unbound) selection for a bounded, exponentially growing interval
   (60 s, 120 s, …, capped at 600 s; the level decays after 30 quiet minutes).
   A trip while already deprioritized extends the deadline, never shortens it.
-- Deprioritization is soft: the account is dropped from the fresh-selection
-  candidate pool only while the remaining candidates still pass routing
-  eligibility on their own (the same check the recovery-probe filter uses), so
-  it can never produce `No available accounts` or a spurious account-cap error. Sticky, continuity-owner, and
+- Deprioritization is soft and strategy-agnostic: selection first runs over
+  the overload-free candidates and, when the configured strategy/budget gates
+  select none of them, runs again over the full pool exactly as before — so it
+  can never produce `No available accounts` or a spurious account-cap error,
+  and cap detection still sees the untouched cap-filtered pool.
+- It applies wherever a NEW account is chosen: the unbound path and the sticky
+  path's fresh binding / reallocation / fallback pick (a previously unseen
+  session or prompt-cache key is a fresh upstream admission). An established
+  sticky owner, continuity owner, or hard-affinity owner is never touched.
+- HTTP-status failures whose body carries an overload code keep that code
+  through the same-account retry loop (they used to collapse to
+  `server_error`), and each absorbed retry counts toward the window. Sticky, continuity-owner, and
   hard-affinity selection are untouched, so warm sessions on the account keep
   flowing and hard-pinned sessions are never denied because of this signal.
 - Engaging the backoff is logged with the level and duration.
@@ -57,8 +65,13 @@ None.
   trip/decay math, the soft candidate filter.
 - `app/modules/proxy/_service/streaming/helpers.py`: the hook after the
   transient penalty in `_handle_stream_error`.
-- `app/modules/proxy/_load_balancer/unbound_selection.py`: the filter after
-  the account-cap filter on the fresh-selection path.
-- No change to `load_balancer.py`, `service.py`, settings, schema, or API.
+- `app/modules/proxy/_load_balancer/unbound_selection.py`: overload-free
+  first pass with full-pool fallback on the fresh-selection path.
+- `app/modules/proxy/_load_balancer/sticky_selection.py`: the same two-pass
+  pick where the sticky path chooses a new account; `load_balancer.py`
+  forwards the runtime map (one line).
+- `app/modules/proxy/_service/streaming/retry.py`: overload codes survive
+  HTTP-status retry aggregation; absorbed retries feed the window.
+- No change to `service.py`, settings, schema, or API.
   Thresholds are fixed constants, matching the existing drain/probe
   thresholds.

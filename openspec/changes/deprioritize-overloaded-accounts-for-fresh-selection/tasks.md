@@ -6,12 +6,13 @@
 
 ## 2. Deprioritize on fresh selection only
 
-- [x] 2.1 Apply `filter_overload_backoff_candidates` on the unbound selection path after the account-cap filter; return the pool unchanged unless the non-backed-off remainder passes routing eligibility on its own.
-- [x] 2.2 Leave sticky, continuity-owner, and hard-affinity selection untouched.
+- [x] 2.1 Unbound path: select from the overload-free candidates first, then from the untouched cap-filtered pool when the strategy selects none; keep cap detection on the cap-filtered pool.
+- [x] 2.2 Sticky path: apply the same two-pass pick where a NEW account is chosen for a key (fresh binding, reallocation, fallback); pinned-owner paths untouched. `load_balancer.py` forwards its runtime map.
+- [x] 2.3 Retry loop: HTTP-status failures keep an overload payload code instead of collapsing to `server_error`; absorbed same-account retries feed the window after settlement.
 
 ## 3. Verification
 
 - [x] 3.1 Unit: trip only on the third in-window rejection, stale rejections pruned, exponential growth with cap, deadline never shortened, level decay, soft filter semantics (drops only while others remain).
 - [x] 3.2 Unit: `record_upstream_overload` writes runtime state and logs the engagement; `_handle_stream_error` feeds the window for overload codes only and still records the generic transient error; the level saturates (no overflow at any level).
-- [x] 3.3 Routing surface: `LoadBalancer.select_account()` skips a backed-off account while a healthy sibling exists, and still selects it when every sibling is in generic error backoff.
+- [x] 3.3 Routing surface: `LoadBalancer.select_account()` skips a backed-off account while a healthy sibling exists, and still selects it when every sibling is in generic error backoff; `LoadBalancer._select_with_stickiness` binds a fresh key away from the backed-off account, keeps an established owner, and falls back when no alternative exists; retry code preservation and aggregated observations.
 - [x] 3.4 Run `uv run ruff check`, `uv run ruff format --check`, `uv run ty check`, `scripts/check_proxy_architecture.py`, and the unit suite.

@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Reject cancellation retry loops around ``asyncio.shield`` waits."""
+"""Reject cancellation-unsafe waits on owned asyncio tasks.
+
+Two shapes are rejected:
+
+1. A loop that catches caller cancellation and retries an ``asyncio.shield()``
+   wait (the 2026-08-30 event-loop livelock).
+2. A bare ``await`` of a task that may defer cancellation -- one whose
+   coroutine drives an async iterator (``anext``/``__anext__``/``async for``)
+   or calls a cancellation-deferring helper. A level-cancelled anyio scope
+   re-cancels its host task every loop iteration; ``Task.cancel()`` cascades
+   down the ``_fut_waiter`` chain into a directly awaited task, so the
+   awaited task's deferring wait is re-entered once per iteration for as long
+   as its cleanup takes (the 2026-09-07 busy spin). Await such tasks through
+   ``wait_on_shared_future`` or ``_await_task_deferring_cancellation`` so the
+   proxy future, not the owned task, absorbs the repeated cancels.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +32,22 @@ APP_DIR = ROOT / "app"
 class Violation:
     path: Path
     line: int
+    reason: str = "cancellation-catching loop retries asyncio.shield; use wait_on_shared_future"
+
+
+_DEFERRING_HELPER_NAMES = frozenset(
+    {
+        "_await_task_deferring_cancellation",
+        "_await_cleanup_deferring_cancellation",
+        "_await_result_deferring_cancellation",
+    }
+)
+_TASK_FACTORY_ATTRS = frozenset({"create_task", "ensure_future"})
+_PROBE_TASK_FACTORIES = frozenset({"_create_first_stream_probe_task"})
+_DIRECT_AWAIT_REASON = (
+    "direct await of a task that may defer cancellation; "
+    "await it through wait_on_shared_future or _await_task_deferring_cancellation"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +264,146 @@ def _assigned_shields_awaited_by_try(
     return shield_calls
 
 
+def _deferring_helper_aliases(module: ast.Module) -> frozenset[str]:
+    names = set(_DEFERRING_HELPER_NAMES)
+    for node in module.body:
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.endswith("shared_future"):
+            for imported in node.names:
+                if imported.name in _DEFERRING_HELPER_NAMES:
+                    names.add(imported.asname or imported.name)
+    return frozenset(names)
+
+
+def _callee_name(call: ast.Call) -> str | None:
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return None
+
+
+def _is_task_factory(call: ast.Call) -> bool:
+    name = _callee_name(call)
+    return name in _TASK_FACTORY_ATTRS or name in _PROBE_TASK_FACTORIES
+
+
+def _is_iterator_step(call: ast.Call) -> bool:
+    return _callee_name(call) in {"anext", "__anext__"}
+
+
+def _function_defers_cancellation(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    helper_names: frozenset[str],
+) -> bool:
+    """The task body drives an async iterator or calls a deferring helper."""
+
+    for statement in function.body:
+        for child in _walk_same_scope(statement):
+            if isinstance(child, ast.AsyncFor):
+                return True
+            if isinstance(child, ast.Call) and (_is_iterator_step(child) or _callee_name(child) in helper_names):
+                return True
+    return False
+
+
+def _deferring_function_names(module: ast.Module, helper_names: frozenset[str]) -> frozenset[str]:
+    return frozenset(
+        node.name
+        for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and _function_defers_cancellation(node, helper_names)
+    )
+
+
+def _task_creation_defers(call: ast.Call, deferring_functions: frozenset[str]) -> bool:
+    if _callee_name(call) in _PROBE_TASK_FACTORIES:
+        return True
+    if not call.args:
+        return False
+    coroutine = call.args[0]
+    if not isinstance(coroutine, ast.Call):
+        return False
+    if _is_iterator_step(coroutine):
+        return True
+    return _callee_name(coroutine) in deferring_functions
+
+
+def _is_task_annotation(annotation: ast.expr | None) -> bool:
+    if annotation is None:
+        return False
+    base = annotation.value if isinstance(annotation, ast.Subscript) else annotation
+    name = _qualified_name(base)
+    return name[-1:] == ("Task",)
+
+
+def _task_parameters(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """Task-typed parameters lose their provenance at the call boundary.
+
+    A caller may hand over a probe task whose coroutine defers cancellation,
+    so a bare await of such a parameter is treated like a bare await of a
+    known deferring task.
+    """
+
+    arguments = function.args
+    return {
+        parameter.arg
+        for parameter in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)
+        if _is_task_annotation(parameter.annotation)
+    }
+
+
+def _settled_through_asyncio_wait(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """Names passed to ``asyncio.wait(...)``: a later bare await only reads a settled result."""
+
+    settled: set[str] = set()
+    for statement in function.body:
+        for child in _walk_same_scope(statement):
+            if not (isinstance(child, ast.Call) and _callee_name(child) == "wait" and child.args):
+                continue
+            waited = child.args[0]
+            members = waited.elts if isinstance(waited, ast.Set | ast.List | ast.Tuple) else (waited,)
+            settled.update(member.id for member in members if isinstance(member, ast.Name))
+    return settled
+
+
+def _direct_await_violations(
+    path: Path,
+    module: ast.Module,
+    deferring_functions: frozenset[str],
+) -> list[Violation]:
+    violations: list[Violation] = []
+    for function in ast.walk(module):
+        if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        deferring_tasks: set[str] = _task_parameters(function)
+        for statement in function.body:
+            for child in _walk_same_scope(statement):
+                if isinstance(child, ast.Assign):
+                    targets, value = child.targets, child.value
+                elif isinstance(child, ast.AnnAssign):
+                    targets, value = (child.target,), child.value
+                else:
+                    continue
+                if (
+                    isinstance(value, ast.Call)
+                    and _is_task_factory(value)
+                    and _task_creation_defers(value, deferring_functions)
+                ):
+                    deferring_tasks.update(target.id for target in targets if isinstance(target, ast.Name))
+        deferring_tasks -= _settled_through_asyncio_wait(function)
+        if not deferring_tasks:
+            continue
+        for statement in function.body:
+            for child in _walk_same_scope(statement):
+                if (
+                    isinstance(child, ast.Await)
+                    and isinstance(child.value, ast.Name)
+                    and child.value.id in deferring_tasks
+                ):
+                    violations.append(Violation(path=path, line=child.lineno, reason=_DIRECT_AWAIT_REASON))
+    return violations
+
+
 def find_violations(path: Path) -> list[Violation]:
     module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     aliases = _import_aliases(module)
@@ -266,7 +437,9 @@ def find_violations(path: Path) -> list[Violation]:
             shield_calls = _assigned_shields_awaited_by_try(loop, node, aliases, parents)
         if shield_calls:
             violations.append(Violation(path=path, line=shield_calls[0].lineno))
-    return violations
+    helper_names = _deferring_helper_aliases(module)
+    violations.extend(_direct_await_violations(path, module, _deferring_function_names(module, helper_names)))
+    return sorted(violations, key=lambda violation: violation.line)
 
 
 def repository_violations(app_dir: Path | None = None) -> list[Violation]:
@@ -285,8 +458,7 @@ def main() -> int:
         except ValueError:
             relative = violation.path
         print(
-            f"cancellation safety check failed: {relative}:{violation.line}: "
-            "cancellation-catching loop retries asyncio.shield; use wait_on_shared_future",
+            f"cancellation safety check failed: {relative}:{violation.line}: {violation.reason}",
             file=sys.stderr,
         )
     return 1

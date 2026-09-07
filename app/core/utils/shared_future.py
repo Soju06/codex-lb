@@ -100,7 +100,14 @@ async def _await_task_deferring_cancellation(
     result: _TaskResultT | None = None
     # The anyio shield keeps a level-cancelled Starlette scope from re-raising
     # into every ``await``, which would otherwise busy-spin this loop until the
-    # owned task completes. ``wait_on_shared_future`` keeps the loop's waits
+    # owned task completes. The shield only covers the task anyio tracks: when
+    # this helper runs inside a plain ``asyncio.create_task`` task that an
+    # anyio-tracked task awaits directly (``await task``), each level re-cancel
+    # of the tracked task cascades down the ``_fut_waiter`` chain and re-enters
+    # this loop anyway. Callers that hand such a task across a task boundary
+    # must await it through ``wait_on_shared_future`` so the proxy future, not
+    # the owned task, absorbs the repeated cancels (2026-09-07 production
+    # busy spin). ``wait_on_shared_future`` keeps the loop's waits
     # off the task's done-callback list: Python 3.14's ``asyncio.shield``
     # leaks a callback per cancelled wait, so re-shielding a task wedged on a
     # lock grew 100k+ callbacks and O(n^2) remove scans in the 2026-08-30

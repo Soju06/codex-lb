@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from app.core.errors import ResponseFailedEvent
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_dict
-from app.core.utils.shared_future import wait_on_shared_future
+from app.core.utils.shared_future import _await_task_deferring_cancellation, wait_on_shared_future
 
 type JsonPayload = Mapping[str, JsonValue] | ResponseFailedEvent
 
@@ -99,7 +99,18 @@ async def inject_sse_keepalives(
             if pending is not None and not pending.done():
                 pending.cancel()
                 try:
-                    await pending
+                    # Not ``await pending``: a level-cancelled consumer scope
+                    # re-cancels this task on every loop iteration, and a
+                    # direct task await cascades each cancel into ``pending``
+                    # and any cancellation-deferring wait beneath it (the
+                    # startup-probe task), spinning the loop until that
+                    # cleanup completes. The canonical helper shields this
+                    # task and waits through a proxy future, so the chunk task
+                    # sees only the explicit cancel above; it still settles
+                    # before the outer finalizers close the iterator chain the
+                    # chunk task is driving, and its eventual exception is
+                    # retrieved here rather than logged as never retrieved.
+                    await _await_task_deferring_cancellation(pending)
                 except BaseException:
                     pass
     finally:

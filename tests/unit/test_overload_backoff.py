@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import app.modules.proxy._service.streaming.helpers as streaming_helpers_module
+from app.core.balancer import ERROR_BACKOFF_THRESHOLD, TRAFFIC_CLASS_FOREGROUND
 from app.core.balancer.logic import AccountState
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
@@ -16,16 +17,23 @@ from app.modules.proxy._load_balancer.overload_backoff import (
     OVERLOAD_BACKOFF_BASE_SECONDS,
     OVERLOAD_BACKOFF_MAX_SECONDS,
     OVERLOAD_LEVEL_DECAY_SECONDS,
+    OVERLOAD_MAX_LEVEL,
     OVERLOAD_TRIP_COUNT,
     OVERLOAD_WINDOW_SECONDS,
     filter_overload_backoff_candidates,
     overload_backoff_active,
+    overload_backoff_seconds,
     record_overload_rejection_locked,
     record_upstream_overload,
 )
 from app.modules.proxy._load_balancer.types import RuntimeState
 from app.modules.proxy.load_balancer import LoadBalancer
 from tests.simulation.virtual_time import VirtualClock
+from tests.unit.test_load_balancer_concurrency import (
+    _repo_factory,
+    _StubAccountsRepository,
+    _StubUsageRepository,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -97,6 +105,17 @@ def test_repeated_trips_grow_exponentially_and_are_capped() -> None:
     assert deadlines[-1] == pytest.approx(OVERLOAD_BACKOFF_MAX_SECONDS)
 
 
+def test_level_saturates_so_sustained_overload_cannot_overflow() -> None:
+    assert overload_backoff_seconds(10_000) == OVERLOAD_BACKOFF_MAX_SECONDS
+    runtime = RuntimeState(overload_backoff_level=OVERLOAD_MAX_LEVEL, overload_last_trip_at=0.0)
+    now = 10.0
+    for _ in range(OVERLOAD_TRIP_COUNT - 1):
+        record_overload_rejection_locked(runtime, now)
+    deadline = record_overload_rejection_locked(runtime, now)
+    assert runtime.overload_backoff_level == OVERLOAD_MAX_LEVEL
+    assert deadline == pytest.approx(now + OVERLOAD_BACKOFF_MAX_SECONDS)
+
+
 def test_trip_while_deprioritized_never_shortens_the_deadline() -> None:
     runtime = RuntimeState(overload_backoff_until=5000.0, overload_backoff_level=5, overload_last_trip_at=4000.0)
     for _ in range(OVERLOAD_TRIP_COUNT - 1):
@@ -121,7 +140,11 @@ def test_level_decays_after_a_quiet_period() -> None:
     assert deadline == pytest.approx(now + OVERLOAD_BACKOFF_BASE_SECONDS)
 
 
-def test_filter_drops_backed_off_candidates_only_while_others_remain() -> None:
+def _filter(states: list[AccountState], runtime: dict[str, RuntimeState], now: float) -> list[AccountState]:
+    return filter_overload_backoff_candidates(states, runtime, traffic_class=TRAFFIC_CLASS_FOREGROUND, now=now)
+
+
+def test_filter_drops_backed_off_candidates_only_while_eligible_others_remain() -> None:
     now = 1000.0
     runtime = {
         "hot": RuntimeState(overload_backoff_until=now + 30.0),
@@ -130,18 +153,47 @@ def test_filter_drops_backed_off_candidates_only_while_others_remain() -> None:
     }
     states = [_state("hot"), _state("expired"), _state("clean"), _state("unknown")]
 
-    kept = filter_overload_backoff_candidates(states, runtime, now=now)
+    kept = _filter(states, runtime, now)
     assert [state.account_id for state in kept] == ["expired", "clean", "unknown"]
 
     only_hot = [_state("hot")]
-    assert filter_overload_backoff_candidates(only_hot, runtime, now=now) is only_hot
+    assert _filter(only_hot, runtime, now) is only_hot
 
     all_hot = [_state("hot"), _state("hot2")]
     runtime["hot2"] = RuntimeState(overload_backoff_until=now + 5.0)
-    assert filter_overload_backoff_candidates(all_hot, runtime, now=now) is all_hot
+    assert _filter(all_hot, runtime, now) is all_hot
 
     untouched = [_state("clean"), _state("expired")]
-    assert filter_overload_backoff_candidates(untouched, runtime, now=now) is untouched
+    assert _filter(untouched, runtime, now) is untouched
+
+
+def test_filter_keeps_backed_off_account_when_the_remainder_is_ineligible() -> None:
+    now = 1000.0
+    runtime = {"hot": RuntimeState(overload_backoff_until=now + 30.0)}
+    hot = _state("hot")
+    rate_limited = AccountState(
+        account_id="limited",
+        status=AccountStatus.RATE_LIMITED,
+        used_percent=0.0,
+        reset_at=now + 300.0,
+    )
+    cooling = AccountState(
+        account_id="cooling", status=AccountStatus.ACTIVE, used_percent=0.0, cooldown_until=now + 60.0
+    )
+    erroring = AccountState(
+        account_id="erroring",
+        status=AccountStatus.ACTIVE,
+        used_percent=0.0,
+        error_count=ERROR_BACKOFF_THRESHOLD,
+        last_error_at=now - 1.0,
+    )
+
+    pool = [hot, rate_limited, cooling, erroring]
+    assert _filter(pool, runtime, now) is pool
+
+    # One eligible sibling is enough to drop the backed-off account again.
+    with_clean = [hot, rate_limited, _state("clean")]
+    assert [state.account_id for state in _filter(with_clean, runtime, now)] == ["limited", "clean"]
 
 
 @pytest.mark.asyncio
@@ -203,3 +255,48 @@ async def test_handle_stream_error_feeds_the_overload_window_for_overload_codes_
     )
     assert balancer._runtime[account.id].overload_rejections == [clock.time()]
     assert balancer.record_error.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_select_account_skips_backed_off_account_while_a_healthy_sibling_exists() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    hot = _make_account("acc-hot")
+    clean = _make_account("acc-clean")
+    balancer = LoadBalancer(
+        lambda: _repo_factory(_StubAccountsRepository([hot, clean]), _StubUsageRepository({}, {})),
+        clock=clock,
+    )
+    balancer._runtime[hot.id] = RuntimeState(overload_backoff_until=clock.time() + OVERLOAD_BACKOFF_BASE_SECONDS)
+
+    # Equal weights: 40 draws all landing on ``clean`` is 2**-40 by chance.
+    for _ in range(40):
+        result = await balancer.select_account()
+        assert result.account is not None
+        assert result.account.id == clean.id
+
+    clock.advance(OVERLOAD_BACKOFF_BASE_SECONDS + 1.0)
+    selected: set[str] = set()
+    for _ in range(40):
+        result = await balancer.select_account()
+        assert result.account is not None
+        selected.add(result.account.id)
+    assert hot.id in selected
+
+
+@pytest.mark.asyncio
+async def test_select_account_still_uses_backed_off_account_when_every_sibling_is_in_error_backoff() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    hot = _make_account("acc-hot-only")
+    erroring = _make_account("acc-erroring")
+    balancer = LoadBalancer(
+        lambda: _repo_factory(_StubAccountsRepository([hot, erroring]), _StubUsageRepository({}, {})),
+        clock=clock,
+    )
+    balancer._runtime[hot.id] = RuntimeState(overload_backoff_until=clock.time() + OVERLOAD_BACKOFF_BASE_SECONDS)
+    balancer._runtime[erroring.id] = RuntimeState(error_count=ERROR_BACKOFF_THRESHOLD, last_error_at=clock.time())
+
+    result = await balancer.select_account(lease_kind="stream")
+
+    assert result.error_code is None, result.error_message
+    assert result.account is not None
+    assert result.account.id == hot.id

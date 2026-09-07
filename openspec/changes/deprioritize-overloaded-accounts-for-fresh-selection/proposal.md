@@ -30,8 +30,9 @@ feeding the rejected accounts at their normal capacity weight.
   (60 s, 120 s, …, capped at 600 s; the level decays after 30 quiet minutes).
   A trip while already deprioritized extends the deadline, never shortens it.
 - Deprioritization is soft: the account is dropped from the fresh-selection
-  candidate pool only while at least one other candidate remains, so it can
-  never produce `No available accounts`. Sticky, continuity-owner, and
+  candidate pool only while the remaining candidates still pass routing
+  eligibility on their own (the same check the recovery-probe filter uses), so
+  it can never produce `No available accounts` or a spurious account-cap error. Sticky, continuity-owner, and
   hard-affinity selection are untouched, so warm sessions on the account keep
   flowing and hard-pinned sessions are never denied because of this signal.
 - Engaging the backoff is logged with the level and duration.

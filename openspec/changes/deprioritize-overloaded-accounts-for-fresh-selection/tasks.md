@@ -6,11 +6,12 @@
 
 ## 2. Deprioritize on fresh selection only
 
-- [x] 2.1 Apply `filter_overload_backoff_candidates` on the unbound selection path after the account-cap filter; return the pool unchanged when every candidate is backed off.
+- [x] 2.1 Apply `filter_overload_backoff_candidates` on the unbound selection path after the account-cap filter; return the pool unchanged unless the non-backed-off remainder passes routing eligibility on its own.
 - [x] 2.2 Leave sticky, continuity-owner, and hard-affinity selection untouched.
 
 ## 3. Verification
 
 - [x] 3.1 Unit: trip only on the third in-window rejection, stale rejections pruned, exponential growth with cap, deadline never shortened, level decay, soft filter semantics (drops only while others remain).
-- [x] 3.2 Unit: `record_upstream_overload` writes runtime state and logs the engagement; `_handle_stream_error` feeds the window for overload codes only and still records the generic transient error.
-- [x] 3.3 Run `uv run ruff check`, `uv run ruff format --check`, `uv run ty check`, `scripts/check_proxy_architecture.py`, and the unit suite.
+- [x] 3.2 Unit: `record_upstream_overload` writes runtime state and logs the engagement; `_handle_stream_error` feeds the window for overload codes only and still records the generic transient error; the level saturates (no overflow at any level).
+- [x] 3.3 Routing surface: `LoadBalancer.select_account()` skips a backed-off account while a healthy sibling exists, and still selects it when every sibling is in generic error backoff.
+- [x] 3.4 Run `uv run ruff check`, `uv run ruff format --check`, `uv run ty check`, `scripts/check_proxy_architecture.py`, and the unit suite.

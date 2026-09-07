@@ -184,6 +184,7 @@ async def run_unbound_selection_path(
             selection_states = filter_overload_backoff_candidates(
                 selection_states,
                 owner._runtime,
+                traffic_class=traffic_class,
                 now=selection_now,
             )
             if suppress_recovery_probe_candidates:

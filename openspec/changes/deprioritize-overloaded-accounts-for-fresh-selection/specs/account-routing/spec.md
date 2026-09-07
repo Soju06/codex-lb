@@ -10,10 +10,13 @@ account. When at least three rejections land inside a 120-second window, the
 proxy MUST deprioritize the account for fresh (unbound) selection for a
 bounded interval that grows exponentially with consecutive trips (60 seconds
 base, capped at 600 seconds, decaying to the base after 30 minutes without a
-trip); a trip while already deprioritized MUST NOT shorten the deadline.
+trip); the level MUST saturate once the cap is reached so sustained overload
+cannot grow it without bound, and a trip while already deprioritized MUST NOT
+shorten the deadline.
 Deprioritization MUST be soft: the account is removed from the fresh-selection
-candidate pool only while at least one other candidate remains, and it MUST
-NOT be applied to sticky, continuity-owner, or hard-affinity selection. The
+candidate pool only while at least one other candidate that passes routing
+eligibility on its own remains, and it MUST NOT be applied to sticky,
+continuity-owner, or hard-affinity selection. The
 proxy MUST log when the backoff engages. The failure classification, the
 failover decision, the existing transient error penalty, and the status and
 body returned to the client MUST remain unchanged.
@@ -33,6 +36,15 @@ body returned to the client MUST remain unchanged.
 - **WHEN** a fresh request selects an account
 - **THEN** selection proceeds over the full candidate pool as if no account
   were backed off
+
+#### Scenario: Backoff yields to an ineligible remainder
+
+- **GIVEN** account A is in overload backoff and every other account is
+  ineligible on its own (rate-limited, cooling down, or in generic error
+  backoff)
+- **WHEN** a fresh request selects an account
+- **THEN** account A is selected rather than failing the request or reporting
+  an account-cap error
 
 #### Scenario: Pinned sessions are not denied by overload backoff
 

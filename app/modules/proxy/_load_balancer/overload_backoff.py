@@ -30,8 +30,10 @@ import logging
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
+from app.core.balancer import TrafficClass
 from app.core.balancer.logic import AccountState
 from app.db.models import Account
+from app.modules.proxy._load_balancer.sticky_selection import _pool_has_available_account_without_backoff
 from app.modules.proxy._load_balancer.types import RuntimeState
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,9 @@ OVERLOAD_BACKOFF_MAX_SECONDS = 600.0
 # The level decays back to the base once the account has gone this long
 # without tripping, so a recovered account is not punished for last hour.
 OVERLOAD_LEVEL_DECAY_SECONDS = 1800.0
+# Levels saturate once the interval is capped; the stored level and the
+# exponent are both bounded so sustained overload can never overflow.
+OVERLOAD_MAX_LEVEL = 8
 
 
 class _OverloadBalancerLike(Protocol):
@@ -61,8 +66,8 @@ class _OverloadBalancerLike(Protocol):
 
 
 def overload_backoff_seconds(level: int) -> float:
-    """Deprioritization interval for a trip at ``level`` (1-based)."""
-    exponent = max(0, level - 1)
+    """Deprioritization interval for a trip at ``level`` (1-based, saturating)."""
+    exponent = min(max(0, level - 1), OVERLOAD_MAX_LEVEL - 1)
     return min(OVERLOAD_BACKOFF_MAX_SECONDS, OVERLOAD_BACKOFF_BASE_SECONDS * (2**exponent))
 
 
@@ -88,7 +93,7 @@ def record_overload_rejection_locked(runtime: RuntimeState, now: float) -> float
         runtime.overload_rejections = recent
         return None
     runtime.overload_rejections = []
-    runtime.overload_backoff_level += 1
+    runtime.overload_backoff_level = min(runtime.overload_backoff_level + 1, OVERLOAD_MAX_LEVEL)
     runtime.overload_last_trip_at = now
     deadline = now + overload_backoff_seconds(runtime.overload_backoff_level)
     # A trip while already deprioritized (rejections keep arriving from
@@ -126,16 +131,22 @@ def filter_overload_backoff_candidates(
     states: list[AccountState],
     runtime_by_account_id: Mapping[str, RuntimeState],
     *,
+    traffic_class: TrafficClass,
     now: float,
 ) -> list[AccountState]:
-    """Drop candidates in overload backoff while at least one other remains.
+    """Drop candidates in overload backoff while an *eligible* other remains.
 
-    Soft by construction: when every candidate is backed off the list is
-    returned unchanged, so this can never turn an available pool into
-    ``No available accounts``.
+    Soft by construction: the backed-off accounts are removed only when the
+    remainder still passes routing eligibility (status, cooldown, generic
+    error backoff, opportunistic window) on its own -- the same check the
+    recovery-probe filter uses. Otherwise the pool is returned unchanged, so
+    this can never turn usable capacity into ``No available accounts`` or a
+    spurious account-cap error.
     """
     kept = [state for state in states if not overload_backoff_active(runtime_by_account_id.get(state.account_id), now)]
-    if not kept or len(kept) == len(states):
+    if len(kept) == len(states):
+        return states
+    if not kept or not _pool_has_available_account_without_backoff(kept, traffic_class=traffic_class, now=now):
         return states
     return kept
 

@@ -41,6 +41,7 @@ from app.modules.accounts.usage_time_rollup import (
     run_hourly_fold_pass,
 )
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.quota_planner.logic import _bin_demand_units
 from app.modules.quota_planner.repository import QuotaPlannerRepository
 from app.modules.reports.repository import ReportsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -294,6 +295,11 @@ async def _snapshot(*, lead_since: datetime = SINCE_UNALIGNED) -> dict:
         planner = QuotaPlannerRepository(session)
         api_keys = ApiKeysRepository(session)
         reports = ReportsRepository(session)
+        demand_bins = await planner.aggregate_demand_bins(since=BASE + timedelta(hours=1))
+        demand_slot_units = await planner.aggregate_demand_slot_units(since=BASE + timedelta(hours=1))
+        # Independent cross-check of the SQL reduction against the exact-grain
+        # Python reduction: per-row ``max()`` before the per-slot sum.
+        _assert_slot_units_match_bins(demand_slot_units, demand_bins)
         return {
             "buckets_1h": await logs.aggregate_by_bucket(lead_since, 3600),
             "buckets_6h": await logs.aggregate_by_bucket(lead_since, 21600),
@@ -324,10 +330,8 @@ async def _snapshot(*, lead_since: datetime = SINCE_UNALIGNED) -> dict:
             "top_error_tie": await logs.top_error_between(BASE + timedelta(days=3), BASE + timedelta(days=3, hours=3)),
             "top_error_empty": await logs.top_error_between(*EMPTY_ERROR_WINDOW),
             "earliest": await logs.earliest_activity_at(),
-            "demand": _project_demand(await planner.aggregate_demand_bins(since=BASE + timedelta(hours=1))),
-            "demand_slot_units": _project_demand_slot_units(
-                await planner.aggregate_demand_slot_units(since=BASE + timedelta(hours=1))
-            ),
+            "demand": _project_demand(demand_bins),
+            "demand_slot_units": _project_demand_slot_units(demand_slot_units),
             "trends_key1": await api_keys.trends_by_key("key_1", lead_since, NOW, 3600),
             "trends_key2": await api_keys.trends_by_key("key_2", SINCE_ALIGNED, UNTIL_UNALIGNED, 7200),
             "trends_raw_degrade": await api_keys.trends_by_key("key_1", lead_since, NOW, 5400),
@@ -392,6 +396,17 @@ def _project_demand(bins) -> dict:
         entry[3] += bin_row.output_tokens
         entry[4] += bin_row.cost_usd
     return projected
+
+
+def _assert_slot_units_match_bins(slots, bins) -> None:
+    expected: dict[tuple, float] = {}
+    for bin_row in bins:
+        key = (bin_row.slot_epoch, bin_row.request_kind)
+        expected[key] = expected.get(key, 0.0) + _bin_demand_units(bin_row)
+    actual = _project_demand_slot_units(slots)
+    assert actual.keys() == expected.keys()
+    for key, expected_units in expected.items():
+        assert actual[key] == pytest.approx(expected_units, rel=1e-9, abs=1e-9), key
 
 
 def _project_demand_slot_units(slots) -> dict:

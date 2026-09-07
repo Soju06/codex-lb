@@ -106,7 +106,14 @@ async def test_additional_limit_filter_evaluates_quota_resets_on_the_injected_cl
         assert quota_key == "codex_spark"
         if since is not None:
             fresh_since_cutoffs.append(since)
-        return dict(entries) if window == "primary" else {}
+        if window != "primary":
+            return {}
+        # A running usage refresher would have stamped the evidence "now" on
+        # the same clock; the double honors ``since`` like the real repository.
+        recorded_at = datetime.fromtimestamp(clock.time(), timezone.utc).replace(tzinfo=None)
+        for entry in entries.values():
+            entry.recorded_at = recorded_at
+        return {key: entry for key, entry in entries.items() if since is None or entry.recorded_at >= since}
 
     repos = SimpleNamespace(additional_usage=SimpleNamespace(latest_by_quota_key=latest_by_quota_key))
 

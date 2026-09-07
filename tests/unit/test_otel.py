@@ -896,7 +896,10 @@ async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown
         heartbeat=AsyncMock(),
         list_active=AsyncMock(return_value=[]),
     )
-    routing_availability_cache = SimpleNamespace(refresh_from_db=AsyncMock())
+    routing_availability_cache = SimpleNamespace(
+        refresh_from_db=AsyncMock(),
+        refresh_usage_caps_from_db=AsyncMock(),
+    )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
         prime=AsyncMock(),
@@ -1194,7 +1197,10 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
     # This test owns the bridge-membership lifecycle only. Keep startup's
     # unrelated database-backed seed and routing snapshot out of the mocked
     # database lifecycle so they cannot race another test's SQLite writer.
-    routing_availability_cache = SimpleNamespace(refresh_from_db=AsyncMock())
+    routing_availability_cache = SimpleNamespace(
+        refresh_from_db=AsyncMock(),
+        refresh_usage_caps_from_db=AsyncMock(),
+    )
 
     class _AccountsRepository:
         def __init__(self, _session: object) -> None:

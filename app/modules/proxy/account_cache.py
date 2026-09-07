@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -13,6 +12,7 @@ from app.core.cache.invalidation import (
     NAMESPACE_ACCOUNT_SELECTION,
     get_cache_invalidation_poller,
 )
+from app.core.clock import clock_for
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal, close_session
 from app.modules.proxy.usage_caps import reached_usage_cap_resets
@@ -56,7 +56,7 @@ class AccountSelectionCache:
         entry = self._cache.get(key)
         if entry is None:
             return None
-        if time.monotonic() >= entry.expires_at:
+        if clock_for(self).monotonic() >= entry.expires_at:
             return None
         return entry.data
 
@@ -72,7 +72,7 @@ class AccountSelectionCache:
                 return
             self._cache[key] = _CachedSelectionInputs(
                 data=data,
-                expires_at=time.monotonic() + self._ttl_seconds,
+                expires_at=clock_for(self).monotonic() + self._ttl_seconds,
             )
 
     def invalidate(self, *, propagate: bool = True) -> None:
@@ -179,7 +179,7 @@ class RoutingAvailabilityCache:
         }
 
     def is_usage_capped(self, account_id: str) -> bool:
-        now = time.time()
+        now = clock_for(self).time()
         return any(reset is None or reset > now for reset in self._usage_caps.get(account_id, ()))
 
     async def refresh_usage_caps_from_db(self) -> None:
@@ -200,7 +200,12 @@ class RoutingAvailabilityCache:
                 primary = await usage.latest_by_account(account_ids=ids)
                 secondary = await usage.latest_by_account(window="secondary", account_ids=ids)
                 snapshot = {
-                    account.id: reached_usage_cap_resets(account, primary.get(account.id), secondary.get(account.id))
+                    account.id: reached_usage_cap_resets(
+                        account,
+                        primary.get(account.id),
+                        secondary.get(account.id),
+                        now=clock_for(self).time(),
+                    )
                     for account in accounts
                 }
             finally:

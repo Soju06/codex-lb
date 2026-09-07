@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-
 from app.core import usage as usage_core
 from app.db.models import Account, UsageHistory
 from app.modules.usage.mappers import usage_history_to_window_row
@@ -12,12 +10,12 @@ def reached_usage_cap_resets(
     primary: UsageHistory | None,
     secondary: UsageHistory | None,
     *,
-    now: float | None = None,
+    now: float,
 ) -> tuple[int | None, ...]:
     """Reset deadlines of reached standard caps; None means no known deadline."""
     if account.usage_cap_5h_percent is None and account.usage_cap_weekly_percent is None:
         return ()
-    current = time.time() if now is None else now
+    current = now
     if primary is not None and usage_core.should_use_weekly_primary(
         usage_history_to_window_row(primary),
         usage_history_to_window_row(secondary) if secondary is not None else None,

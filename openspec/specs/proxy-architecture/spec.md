@@ -86,7 +86,6 @@ _wait_for_websocket_continuity_gap = ["scheduler", "clock"]
 "app/modules/proxy/_service/transcribe.py" = 2
 "app/modules/proxy/_service/warmup.py" = 2
 "app/modules/proxy/_service/websocket/helpers.py" = 3
-"app/modules/proxy/account_cache.py" = 2
 "app/modules/proxy/account_eligibility.py" = 1
 "app/modules/proxy/api.py" = 8
 "app/modules/proxy/durable_bridge_repository.py" = 2

@@ -1140,7 +1140,6 @@ class LoadBalancer:
         cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
             return _clone_selection_inputs(cached)
-
         load_generation = self._selection_inputs_cache.generation
 
         async with self._repo_factory() as repos:
@@ -1197,9 +1196,7 @@ class LoadBalancer:
                         account.id for account in accounts if account.id not in general_model_account_ids
                     )
             else:
-                # Administrative/runtime status affects routability, not who
-                # may own account-scoped upstream state. Capture this pool
-                # before PAUSED/DEACTIVATED/etc. can manufacture uniqueness.
+                # Runtime status affects routability, not account-scoped ownership.
                 continuity_owner_candidates = scoped_accounts
             if model and not accounts:
                 if not all_accounts:
@@ -1329,7 +1326,10 @@ class LoadBalancer:
                 account
                 for account in accounts
                 if not reached_usage_cap_resets(
-                    account, standard_latest_primary.get(account.id), standard_latest_secondary.get(account.id)
+                    account,
+                    standard_latest_primary.get(account.id),
+                    standard_latest_secondary.get(account.id),
+                    now=self._clock.time(),
                 )
             ]
             latest_monthly = await repos.usage.latest_by_account(window="monthly")

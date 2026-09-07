@@ -600,7 +600,7 @@ async def lifespan(app: FastAPI):
         await routing_availability_cache.refresh_usage_caps_from_db()
     except Exception:
         # Cap admission has its own snapshot and can recover independently of
-        # the status refresh above on the next account_routing bump.
+        # the status refresh above on the next account_selection bump.
         logger.warning("initial account usage cap snapshot refresh failed", exc_info=True)
 
     if settings.model_registry_enabled:

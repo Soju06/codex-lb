@@ -10,10 +10,16 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("accounts", sa.Column("usage_cap_5h_percent", sa.Float(), nullable=True))
-    op.add_column("accounts", sa.Column("usage_cap_weekly_percent", sa.Float(), nullable=True))
+    columns = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("accounts")}
+    if "usage_cap_5h_percent" not in columns:
+        op.add_column("accounts", sa.Column("usage_cap_5h_percent", sa.Float(), nullable=True))
+    if "usage_cap_weekly_percent" not in columns:
+        op.add_column("accounts", sa.Column("usage_cap_weekly_percent", sa.Float(), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("accounts", "usage_cap_weekly_percent")
-    op.drop_column("accounts", "usage_cap_5h_percent")
+    columns = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("accounts")}
+    if "usage_cap_weekly_percent" in columns:
+        op.drop_column("accounts", "usage_cap_weekly_percent")
+    if "usage_cap_5h_percent" in columns:
+        op.drop_column("accounts", "usage_cap_5h_percent")

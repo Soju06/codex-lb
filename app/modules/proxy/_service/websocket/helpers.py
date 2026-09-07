@@ -458,13 +458,13 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     suppress_in_progress = request_state.suppress_next_in_progress_downstream or (
         downstream_response_id is not None and request_state.response_event_count >= 2
     )
-    if request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text:
-        request_state.request_text = request_state.fresh_upstream_request_text
-        request_state.previous_response_id = None
-        request_state.proxy_injected_previous_response_id = False
-        request_state.fresh_upstream_request_is_retry_safe = False
-        request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
-        _refresh_websocket_request_input_fingerprint_from_text(request_state)
+    fresh_request_text = request_state.fresh_upstream_request_text
+    if request_state.fresh_upstream_request_is_retry_safe and fresh_request_text:
+        _install_fresh_replay_body(
+            request_state,
+            fresh_request_text,
+            account_neutral=_websocket_request_text_is_account_neutral_fresh_replay(fresh_request_text),
+        )
     request_text = request_state.request_text
     if not isinstance(request_text, str):
         return None
@@ -532,9 +532,29 @@ def _install_verified_fresh_replay(
     account_neutral = _websocket_request_text_is_account_neutral_fresh_replay(fresh_request_text)
     if require_account_neutral and not account_neutral:
         return None
-    replay_required_account_id = request_state.replay_required_account_id or request_state.preferred_account_id
-    if not account_neutral and replay_required_account_id is None:
+    if not account_neutral and (request_state.replay_required_account_id or request_state.preferred_account_id) is None:
         return None
+    return _install_fresh_replay_body(request_state, fresh_request_text, account_neutral=account_neutral)
+
+
+def _install_fresh_replay_body(
+    request_state: "_WebSocketRequestState",
+    fresh_request_text: str,
+    *,
+    account_neutral: bool,
+) -> str:
+    """Swap the retained fresh body in and re-derive the owner requirement from it.
+
+    The anchored body pinned the request to the anchor's owner
+    (``replay_required_account_id`` / ``preferred_account_id``, bound at
+    dispatch and on connect). The fresh body carries no anchor: an
+    account-neutral one is free to move, a non-neutral one stays with the
+    owner that was already required or preferred. Every path that installs
+    the fresh body must reconcile the pin with it; a stale pin under a body
+    that turned neutral is what let an accepted transport-close replay exclude
+    the very account its reconnect still required.
+    """
+    replay_required_account_id = request_state.replay_required_account_id or request_state.preferred_account_id
     request_state.request_text = fresh_request_text
     request_state.previous_response_id = None
     request_state.preferred_account_id = None
@@ -544,6 +564,26 @@ def _install_verified_fresh_replay(
     request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
     _refresh_websocket_request_input_fingerprint_from_text(request_state)
     return fresh_request_text
+
+
+def _websocket_accepted_replay_can_switch_account(request_state: "_WebSocketRequestState") -> bool:
+    """Return whether an accepted replay may leave the account that accepted it.
+
+    Mirrors the owner requirements ``_connect_proxy_websocket`` enforces on
+    the reconnect: a bound replay owner, a file pin, an anchored owner, or a
+    turn-state owner keeps the replay on that account, so excluding it would
+    leave the reconnect no eligible account. Evaluate this after the replay
+    body has been prepared, once the anchor is stripped and the owner pin
+    reconciled with the body that will actually be sent.
+    """
+    if request_state.replay_required_account_id is not None:
+        return False
+    if request_state.preferred_account_id is not None and (
+        request_state.previous_response_id is not None
+        or request_state.affinity_policy.codex_session_source == "turn_state"
+    ):
+        return False
+    return _websocket_auth_request_can_switch_account(request_state)
 
 
 def _prepare_websocket_request_state_for_account_switch(

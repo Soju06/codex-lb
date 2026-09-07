@@ -53878,3 +53878,211 @@ async def test_emit_pending_websocket_keepalive_uses_the_visible_response_id_for
         {"type": "response.in_progress", "response": {"id": "resp_x_staged", "status": "in_progress"}},
         {"type": "codex.keepalive", "request_id": "ws_req_keepalive_precreated", "status": "pending_response_created"},
     ]
+
+
+_ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT = json.dumps(
+    {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "first"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ],
+    },
+    separators=(",", ":"),
+)
+_ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT = json.dumps(
+    {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "input": [{"role": "user", "content": [{"type": "input_file", "file_id": "file_ws_anchor_owner"}]}],
+    },
+    separators=(",", ":"),
+)
+
+
+def _anchored_accepted_lifecycle_request_state(**overrides: Any) -> proxy_service._WebSocketRequestState:
+    """Accepted follow-up turn whose ``previous_response_id`` the proxy injected
+    (Lite continuity). Dispatch bound the anchored body to the anchor's owner;
+    the full resend is retained as a retry-safe, account-neutral fresh body."""
+    values: dict[str, Any] = {
+        "request_text": json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-5.6-sol",
+                "previous_response_id": "resp_ws_anchor",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+            },
+            separators=(",", ":"),
+        ),
+        "previous_response_id": "resp_ws_anchor",
+        "proxy_injected_previous_response_id": True,
+        "fresh_upstream_request_text": _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT,
+        "fresh_upstream_request_is_retry_safe": True,
+        "preferred_account_id": "acc_ws_anchor_owner",
+        "replay_required_account_id": "acc_ws_anchor_owner",
+    }
+    values.update(overrides)
+    return _accepted_lifecycle_request_state(**values)
+
+
+def test_prepare_visible_output_replay_releases_the_anchor_owner_with_an_account_neutral_fresh_body():
+    """#2127 P1: the anchored body bound the request to the anchor's owner at
+    dispatch. Swapping in the account-neutral fresh body must drop that pin the
+    way ``_install_verified_fresh_replay`` does; a pin that survives the swap
+    makes the transport-close replay exclude the account it still requires."""
+    request_state = _anchored_accepted_lifecycle_request_state()
+
+    replay_text = proxy_service._prepare_websocket_request_state_for_visible_output_replay(request_state)
+
+    assert replay_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.proxy_injected_previous_response_id is False
+    assert request_state.replay_required_account_id is None
+    assert request_state.preferred_account_id is None
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is True
+
+
+def test_prepare_visible_output_replay_keeps_the_owner_for_an_account_bound_fresh_body():
+    """Mutant guard: a fresh body that still names an account-scoped upload
+    cannot move, so the owner pin survives the swap and the accepted replay
+    reconnects to that account instead of excluding it."""
+    request_state = _anchored_accepted_lifecycle_request_state(
+        fresh_upstream_request_text=_ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT,
+        file_required_preferred_account=True,
+    )
+
+    replay_text = proxy_service._prepare_websocket_request_state_for_visible_output_replay(request_state)
+
+    assert replay_text == _ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.replay_required_account_id == "acc_ws_anchor_owner"
+    assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is False
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        pytest.param({}, True, id="unpinned"),
+        pytest.param({"preferred_account_id": "acc_ws_soft_preference"}, True, id="soft_preference"),
+        pytest.param({"replay_required_account_id": "acc_ws_bound_owner"}, False, id="bound_replay_owner"),
+        pytest.param({"file_required_preferred_account": True}, False, id="file_pin"),
+        pytest.param(
+            {"preferred_account_id": "acc_ws_anchor_owner", "previous_response_id": "resp_ws_anchor"},
+            False,
+            id="anchored_owner",
+        ),
+        pytest.param(
+            {
+                "preferred_account_id": "acc_ws_turn_state_owner",
+                "affinity_policy": proxy_service._AffinityPolicy(codex_session_source="turn_state"),
+            },
+            False,
+            id="turn_state_owner",
+        ),
+    ],
+)
+def test_websocket_accepted_replay_can_switch_account_mirrors_the_connect_owner_requirements(
+    overrides: dict[str, Any],
+    expected: bool,
+):
+    """The exclusion predicate must agree with ``_connect_proxy_websocket``'s
+    ``require_preferred_account``: whatever pins the reconnect to one account
+    also forbids excluding it."""
+    request_state = _accepted_lifecycle_request_state(**overrides)
+
+    assert websocket_helpers_module._websocket_accepted_replay_can_switch_account(request_state) is expected
+
+
+class _ClosableUpstream:
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_transport_end_replay_of_an_anchored_accepted_turn_releases_the_owner_it_excludes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#2127 P1 (direct websocket, transport close): the accepted anchored turn
+    is replayed with the fresh body on another account. The owner pin that the
+    anchored body carried must go with the anchor; otherwise the reconnect
+    requires ``acc_ws_anchor_owner`` while excluding it."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(response_create_sent_at=1.0)
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream = _ClosableUpstream()
+
+    replayed = await websocket_mixin._process_upstream_websocket_transport_end(
+        service,
+        cast(WebSocket, SimpleNamespace(send_text=AsyncMock())),
+        cast(UpstreamWebSocket, upstream),
+        message=SimpleNamespace(kind="close", text=None, data=None, close_code=1011, error=None, error_code=None),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    assert replayed is True
+    assert upstream_control.replay_request_state is request_state
+    assert pending_requests == deque()
+    assert upstream.close_calls == 1
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.replay_downstream_response_id == "resp_accepted_visible"
+    assert request_state.excluded_account_ids == {account.id}
+    assert request_state.affinity_policy.reallocate_sticky is True
+    assert request_state.replay_required_account_id is None
+    assert request_state.preferred_account_id is None
+
+
+@pytest.mark.asyncio
+async def test_transport_end_replay_of_an_account_bound_accepted_turn_stays_on_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Mutant guard: when the fresh body is still account-bound (uploaded
+    file), the replay keeps the owner and must not exclude it."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    account = _make_account("acc_ws_anchor_owner")
+    request_state = _anchored_accepted_lifecycle_request_state(
+        response_create_sent_at=1.0,
+        fresh_upstream_request_text=_ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT,
+        file_required_preferred_account=True,
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    replayed = await websocket_mixin._process_upstream_websocket_transport_end(
+        service,
+        cast(WebSocket, SimpleNamespace(send_text=AsyncMock())),
+        cast(UpstreamWebSocket, _ClosableUpstream()),
+        message=SimpleNamespace(kind="close", text=None, data=None, close_code=1011, error=None, error_code=None),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    assert replayed is True
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.request_text == _ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT
+    assert request_state.excluded_account_ids == set()
+    assert request_state.replay_required_account_id == account.id

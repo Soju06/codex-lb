@@ -13844,3 +13844,79 @@ def test_backend_responses_websocket_does_not_replay_output_item_when_upstream_s
         assert events[-1]["response"]["id"] == "resp_ws_no_in_progress"
     assert failover.connect_accounts == ["acct_ws_accepted_a"]
     assert recovered_upstream.sent_text == []
+
+
+def _completed_first_turn_upstream_batch(response_id: str) -> list[_FakeUpstreamMessage]:
+    return [
+        _ws_event({"type": "response.created", "response": {"id": response_id, "status": "in_progress"}}),
+        _ws_event(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": response_id,
+                    "status": "completed",
+                    "output": [
+                        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}
+                    ],
+                },
+            }
+        ),
+    ]
+
+
+def _assert_anchored_follow_up_replayed_with_fresh_body(
+    failover: _TwoAccountWebSocketFailover,
+    *,
+    first_upstream: _FakeUpstreamWebSocket,
+    recovered_upstream: _FakeUpstreamWebSocket,
+    anchor_response_id: str,
+) -> None:
+    """The follow-up went upstream anchored (proxy-injected Lite continuity) and
+    was replayed on the other account as the retained full resend."""
+    assert [event["type"] for event in failover.turn_events[0]] == ["response.created", "response.completed"]
+    failover.assert_retried_on_another_account()
+    assert len(first_upstream.sent_text) == 2
+    anchored_payload = json.loads(first_upstream.sent_text[1])
+    assert anchored_payload["previous_response_id"] == anchor_response_id
+    assert anchored_payload["input"] == [failover.FOLLOW_UP_INPUT]
+    assert len(recovered_upstream.sent_text) == 1
+    fresh_payload = json.loads(recovered_upstream.sent_text[0])
+    assert "previous_response_id" not in fresh_payload
+    assert fresh_payload["input"] == [failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]
+
+
+def test_backend_responses_websocket_retries_anchored_accepted_abrupt_close_with_the_fresh_body(
+    app_instance,
+    monkeypatch,
+):
+    """#2127 P1: a follow-up turn whose ``previous_response_id`` the proxy
+    injected is bound to the anchor's owner at dispatch. When upstream accepts
+    it and drops the transport before any output, the replay swaps in the
+    retained full resend and must release that owner pin with the anchor, so
+    the reconnect that excludes the failing account still has an eligible
+    account. With the pin left behind the replay excluded the account it
+    required and the reconnect failed closed."""
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            _completed_first_turn_upstream_batch("resp_ws_anchor_turn_1"),
+            [
+                *_accepted_output_free_prelude("resp_ws_anchored_accepted_closed"),
+                _FakeUpstreamMessage("close", close_code=1011),
+            ],
+        ],
+    )
+    recovered_upstream = _recovered_upstream("resp_ws_anchored_close_recovered")
+    failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run_anchored_follow_up(app_instance)
+
+    created_id = _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    assert created_id == "resp_ws_anchored_accepted_closed"
+    _assert_anchored_follow_up_replayed_with_fresh_body(
+        failover,
+        first_upstream=first_upstream,
+        recovered_upstream=recovered_upstream,
+        anchor_response_id="resp_ws_anchor_turn_1",
+    )

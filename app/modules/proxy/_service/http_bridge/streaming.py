@@ -269,6 +269,7 @@ from app.modules.proxy.replay_safety import (
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
+from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
@@ -605,6 +606,10 @@ def _http_bridge_error_is_ambiguous_transport(exc: ProxyResponseError) -> bool:
 def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float | None:
     code, message = _proxy_error_code_message(exc)
     if code == "capacity_exhausted_active_sessions":
+        return None
+    if code == USAGE_LIMIT_REACHED:
+        # Pool-wide usage exhaustion is terminal: never re-derive a recovery
+        # wait from the selector's capped retry hint that accompanies it.
         return None
     if code == "response_create_gate_timeout":
         # Per-session response-create gate contention is recoverable: the

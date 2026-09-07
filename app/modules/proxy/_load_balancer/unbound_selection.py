@@ -15,6 +15,7 @@ from app.core.balancer import (
     TrafficClass,
 )
 from app.db.models import Account, AccountStatus
+from app.modules.proxy._load_balancer.overload_backoff import filter_overload_backoff_candidates
 from app.modules.proxy._load_balancer.sticky_selection import (
     SelectionInputsProtocol,
     StickySelectionOwner,
@@ -175,6 +176,15 @@ async def run_unbound_selection_path(
                 lease_kind=lease_kind,
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
+            )
+            # Fresh admissions avoid accounts upstream is currently rejecting
+            # as overloaded, as long as another candidate remains. Sticky and
+            # continuity selection never reach this path, so warm sessions on
+            # those accounts keep flowing.
+            selection_states = filter_overload_backoff_candidates(
+                selection_states,
+                owner._runtime,
+                now=selection_now,
             )
             if suppress_recovery_probe_candidates:
                 selection_states = _filter_recovery_probe_candidates(

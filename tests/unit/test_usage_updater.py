@@ -5178,3 +5178,364 @@ async def test_refresh_accounts_does_not_repeat_post_reset_quota_probe(monkeypat
 
     updater = UsageUpdater(StubUsageRepository(), accounts_repo=None)
     await updater.refresh_accounts([acc], latest_usage={acc.id: latest})
+
+
+# ---------------------------------------------------------------------------
+# UsageUpdater.request_refresh: request-triggered coalesced background refresh
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _RequestRefreshSettings:
+    usage_refresh_enabled: bool = True
+    usage_refresh_interval_seconds: int = 60
+    usage_refresh_auth_failure_cooldown_seconds: int = 0
+
+
+def _install_owned_session_row(
+    monkeypatch: pytest.MonkeyPatch,
+    stored_account: Account | None,
+    *,
+    lookups: list[str],
+) -> None:
+    class AccountsRepo:
+        async def get_by_id(self, account_id: str):
+            lookups.append(account_id)
+            if stored_account is not None and account_id == stored_account.id:
+                return stored_account
+            return None
+
+        async def get_by_id_fresh(self, account_id: str):
+            return await self.get_by_id(account_id)
+
+    class AdditionalUsageRepo:
+        pass
+
+    monkeypatch.setattr(usage_updater_module, "get_settings", _RequestRefreshSettings)
+    monkeypatch.setattr(usage_updater_module, "BackgroundAccountsRepository", AccountsRepo)
+    monkeypatch.setattr(usage_updater_module, "BackgroundUsageRepository", StubUsageRepository)
+    monkeypatch.setattr(usage_updater_module, "BackgroundAdditionalUsageRepository", AdditionalUsageRepo)
+
+
+def test_request_refresh_returns_none_when_refresh_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        usage_updater_module, "get_settings", lambda: _RequestRefreshSettings(usage_refresh_enabled=False)
+    )
+
+    assert UsageUpdater.request_refresh("acc_request_disabled") is None
+    assert "acc_request_disabled" not in usage_updater_module._usage_request_refresh_deadlines
+
+
+def test_request_refresh_returns_none_during_auth_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(usage_updater_module, "get_settings", _RequestRefreshSettings)
+    usage_updater_module._usage_refresh_auth_cooldowns["acc_request_cooldown"] = time.monotonic() + 60
+
+    assert UsageUpdater.request_refresh("acc_request_cooldown") is None
+    assert "acc_request_cooldown" not in usage_updater_module._usage_request_refresh_deadlines
+
+
+def test_request_refresh_debounces_repeats_until_window_elapses(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(usage_updater_module, "get_settings", _RequestRefreshSettings)
+    account_id = "acc_request_debounce"
+
+    first = UsageUpdater.request_refresh(account_id)
+    assert first is not None
+    first.close()
+    deadline = usage_updater_module._usage_request_refresh_deadlines[account_id]
+    assert deadline - time.monotonic() <= usage_updater_module._REQUEST_REFRESH_DEBOUNCE_SECONDS
+
+    assert UsageUpdater.request_refresh(account_id) is None
+    assert usage_updater_module._usage_request_refresh_deadlines[account_id] == deadline
+
+    # Elapsed window: the next request refreshes again and re-arms the debounce.
+    usage_updater_module._usage_request_refresh_deadlines[account_id] = time.monotonic() - 1
+    again = UsageUpdater.request_refresh(account_id)
+    assert again is not None
+    again.close()
+    assert usage_updater_module._usage_request_refresh_deadlines[account_id] > time.monotonic()
+
+    # Test isolation hook resets the debounce alongside the other refresh state.
+    usage_updater_module._clear_usage_refresh_state()
+    assert usage_updater_module._usage_request_refresh_deadlines == {}
+    reset = UsageUpdater.request_refresh(account_id)
+    assert reset is not None
+    reset.close()
+
+
+def test_request_refresh_debounce_is_per_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(usage_updater_module, "get_settings", _RequestRefreshSettings)
+
+    first = UsageUpdater.request_refresh("acc_request_a")
+    other = UsageUpdater.request_refresh("acc_request_b")
+    assert first is not None and other is not None
+    first.close()
+    other.close()
+
+
+@pytest.mark.asyncio
+async def test_request_refresh_storm_yields_single_upstream_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """20 concurrent usage_limit_reached failures on one account fetch upstream once."""
+    stored_account = _make_account("acc_request_storm", "workspace_request_storm")
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+    fetches = 0
+
+    async def fake_refresh_account(
+        self: UsageUpdater,
+        account: Account,
+        *,
+        usage_account_id: str | None,
+        access_token_override: str | None = None,
+    ) -> usage_updater_module.AccountRefreshResult:
+        nonlocal fetches
+        fetches += 1
+        await asyncio.sleep(0)
+        return usage_updater_module.AccountRefreshResult(usage_written=True)
+
+    monkeypatch.setattr(UsageUpdater, "_refresh_account", fake_refresh_account)
+
+    requested = [UsageUpdater.request_refresh(stored_account.id) for _ in range(20)]
+    coroutines = [item for item in requested if item is not None]
+    assert len(coroutines) == 1
+
+    await asyncio.gather(*coroutines)
+
+    assert fetches == 1
+    assert lookups == [stored_account.id]
+
+
+@pytest.mark.asyncio
+async def test_requested_refresh_coalesces_concurrent_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Concurrent refresh runs for one account join a single in-flight fetch."""
+    stored_account = _make_account("acc_request_coalesce", "workspace_request_coalesce")
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    fetches = 0
+
+    async def fake_refresh_account(
+        self: UsageUpdater,
+        account: Account,
+        *,
+        usage_account_id: str | None,
+        access_token_override: str | None = None,
+    ) -> usage_updater_module.AccountRefreshResult:
+        nonlocal fetches
+        fetches += 1
+        started.set()
+        await release.wait()
+        return usage_updater_module.AccountRefreshResult(usage_written=True)
+
+    monkeypatch.setattr(UsageUpdater, "_refresh_account", fake_refresh_account)
+
+    runs = [asyncio.create_task(usage_updater_module._run_requested_refresh(stored_account.id)) for _ in range(20)]
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(*runs)
+
+    assert fetches == 1
+    assert lookups == [stored_account.id]
+    assert usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_requested_refresh_joins_inflight_scheduler_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A requested refresh joins the scheduler's owned-session refresh instead of fetching again."""
+    stored_account = _make_account("acc_request_join", "workspace_request_join")
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+    monkeypatch.setattr(
+        UsageUpdater,
+        "_refresh_account",
+        lambda *args, **kwargs: pytest.fail("joined refresh must not start its own fetch"),
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def scheduler_factory() -> usage_updater_module.AccountRefreshResult:
+        started.set()
+        await release.wait()
+        return usage_updater_module.AccountRefreshResult(usage_written=True)
+
+    scheduler_run = asyncio.create_task(
+        usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.run(
+            usage_updater_module._usage_refresh_singleflight_key(stored_account.id, own_singleflight_session=True),
+            scheduler_factory,
+            join_existing=True,
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    requested = asyncio.create_task(usage_updater_module._run_requested_refresh(stored_account.id))
+    await asyncio.sleep(0)
+    assert not requested.done()
+
+    release.set()
+    await asyncio.gather(scheduler_run, requested)
+
+    assert lookups == []
+    assert stored_account.id in usage_updater_module._last_successful_refresh
+
+
+@pytest.mark.asyncio
+async def test_requested_refresh_uses_fresh_row_and_bypasses_freshness(monkeypatch: pytest.MonkeyPatch) -> None:
+    caller_account = _make_account("acc_request_fresh", "workspace_request_fresh")
+    stored_account = _make_account("acc_request_fresh", "workspace_request_fresh_stored")
+    stored_account.status = AccountStatus.RATE_LIMITED
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+    refreshed: list[tuple[Account, str | None]] = []
+
+    async def fake_refresh_account(
+        self: UsageUpdater,
+        account: Account,
+        *,
+        usage_account_id: str | None,
+        access_token_override: str | None = None,
+    ) -> usage_updater_module.AccountRefreshResult:
+        refreshed.append((account, usage_account_id))
+        return usage_updater_module.AccountRefreshResult(usage_written=True)
+
+    monkeypatch.setattr(UsageUpdater, "_refresh_account", fake_refresh_account)
+    monkeypatch.setattr(
+        UsageUpdater,
+        "_refresh_account_if_stale",
+        lambda *args, **kwargs: pytest.fail("requested refresh must bypass the freshness gate"),
+    )
+    usage_updater_module._usage_refresh_auth_cooldowns[stored_account.id] = time.monotonic() + 60
+
+    await usage_updater_module._run_requested_refresh(caller_account.id)
+
+    assert lookups == [caller_account.id]
+    assert len(refreshed) == 1
+    account, usage_account_id = refreshed[0]
+    assert account is stored_account
+    assert account is not caller_account
+    assert usage_account_id == "workspace_request_fresh_stored"
+    # The caller's row is never read or written; only the fresh background row is.
+    assert caller_account.status == AccountStatus.ACTIVE
+    assert stored_account.id in usage_updater_module._last_successful_refresh
+    assert stored_account.id not in usage_updater_module._usage_refresh_auth_cooldowns
+
+
+@pytest.mark.parametrize(
+    "stored_status",
+    [None, AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED],
+)
+@pytest.mark.asyncio
+async def test_requested_refresh_skips_missing_or_ineligible_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    stored_status: AccountStatus | None,
+) -> None:
+    stored_account = None
+    if stored_status is not None:
+        stored_account = _make_account("acc_request_ineligible", "workspace_request_ineligible")
+        stored_account.status = stored_status
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+    monkeypatch.setattr(
+        UsageUpdater,
+        "_refresh_account",
+        lambda *args, **kwargs: pytest.fail("ineligible rows must not be fetched"),
+    )
+
+    await usage_updater_module._run_requested_refresh("acc_request_ineligible")
+
+    assert lookups == ["acc_request_ineligible"]
+    assert "acc_request_ineligible" not in usage_updater_module._last_successful_refresh
+
+
+@pytest.mark.asyncio
+async def test_requested_refresh_failed_fetch_does_not_record_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    stored_account = _make_account("acc_request_failed_fetch", "workspace_request_failed_fetch")
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+
+    async def fake_refresh_account(
+        self: UsageUpdater,
+        account: Account,
+        *,
+        usage_account_id: str | None,
+        access_token_override: str | None = None,
+    ) -> usage_updater_module.AccountRefreshResult:
+        return usage_updater_module.AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+
+    monkeypatch.setattr(UsageUpdater, "_refresh_account", fake_refresh_account)
+    usage_updater_module._usage_refresh_auth_cooldowns[stored_account.id] = time.monotonic() + 60
+
+    await usage_updater_module._run_requested_refresh(stored_account.id)
+
+    assert stored_account.id not in usage_updater_module._last_successful_refresh
+    assert stored_account.id in usage_updater_module._usage_refresh_auth_cooldowns
+
+
+@pytest.mark.asyncio
+async def test_requested_refresh_logs_refresh_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stored_account = _make_account("acc_request_error", "workspace_request_error")
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+
+    async def failing_refresh_account(
+        self: UsageUpdater,
+        account: Account,
+        *,
+        usage_account_id: str | None,
+        access_token_override: str | None = None,
+    ) -> usage_updater_module.AccountRefreshResult:
+        raise RuntimeError("usage endpoint exploded")
+
+    monkeypatch.setattr(UsageUpdater, "_refresh_account", failing_refresh_account)
+
+    with caplog.at_level(logging.WARNING, logger=usage_updater_module.logger.name):
+        await usage_updater_module._run_requested_refresh(stored_account.id)
+
+    assert any("Requested usage refresh failed" in record.getMessage() for record in caplog.records)
+    assert stored_account.id not in usage_updater_module._last_successful_refresh
+
+
+@pytest.mark.asyncio
+async def test_requested_refresh_cancellation_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancelling the tracked task raises CancelledError out of the refresh; it is never swallowed."""
+    stored_account = _make_account("acc_request_cancel", "workspace_request_cancel")
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    factory_cancelled = asyncio.Event()
+
+    async def blocking_refresh_account(
+        self: UsageUpdater,
+        account: Account,
+        *,
+        usage_account_id: str | None,
+        access_token_override: str | None = None,
+    ) -> usage_updater_module.AccountRefreshResult:
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            factory_cancelled.set()
+            raise
+        return usage_updater_module.AccountRefreshResult(usage_written=True)
+
+    monkeypatch.setattr(UsageUpdater, "_refresh_account", blocking_refresh_account)
+
+    task = asyncio.create_task(usage_updater_module._run_requested_refresh(stored_account.id))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The waiter is cancelled; the owned singleflight fetch keeps running to completion.
+    key = usage_updater_module._usage_refresh_singleflight_key(stored_account.id, own_singleflight_session=True)
+    inflight = usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight[key]
+    assert not inflight.done()
+    assert not factory_cancelled.is_set()
+    release.set()
+    await inflight
+    assert stored_account.id not in usage_updater_module._last_successful_refresh

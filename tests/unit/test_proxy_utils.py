@@ -285,6 +285,30 @@ async def test_process_network_failure_does_not_update_account_health() -> None:
             "No tool output found for function call call_abc.",
             True,
         ),
+        (
+            "misalignment_policy_violation",
+            None,
+            "This request was blocked by our safety systems.",
+            True,
+        ),
+        (
+            "misalignment_policy_violation",
+            400,
+            "This request was blocked by our safety systems. Reason: Potentially unintended activity.",
+            True,
+        ),
+        (
+            "misalignment_policy_violation",
+            400,
+            "Unrelated upstream failure",
+            False,
+        ),
+        (
+            "misalignment_policy_violation",
+            500,
+            "This request was blocked by our safety systems.",
+            False,
+        ),
         # A model-entitlement rejection is not a payload-shape rejection, so it
         # is not a member of this narrow set. Its own health-neutrality is
         # decided by ``_is_model_scoped_rejection`` instead.
@@ -337,6 +361,31 @@ async def test_missing_tool_output_rejection_does_not_penalize_account() -> None
         {"message": "No tool output found for custom tool call call_poisoned."},
         "invalid_request_error",
         400,
+    )
+
+    assert classified["failure_class"] == "non_retryable"
+    load_balancer.record_error.assert_not_awaited()
+    load_balancer.mark_rate_limit.assert_not_awaited()
+    load_balancer.mark_quota_exceeded.assert_not_awaited()
+    load_balancer.mark_permanent_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_safety_policy_rejection_does_not_penalize_account() -> None:
+    load_balancer = SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+    proxy = SimpleNamespace(_load_balancer=load_balancer)
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-healthy")),
+        {"message": "This request was blocked by our safety systems."},
+        "misalignment_policy_violation",
+        None,
     )
 
     assert classified["failure_class"] == "non_retryable"
@@ -637,6 +686,11 @@ async def test_usage_limit_stream_error_tolerates_proxy_without_cleanup_schedule
         ("quota_exceeded", 429, "quota exceeded"),
         # Account-neutral and model-scoped rejections never touch account health.
         ("invalid_request_error", 400, "No tool output found for function call call_abc."),
+        (
+            "misalignment_policy_violation",
+            None,
+            "This request was blocked by our safety systems.",
+        ),
         (
             "invalid_request_error",
             400,

@@ -212,6 +212,7 @@ from app.modules.proxy.affinity import (
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.helpers import (
     _normalize_error_code,
+    is_account_neutral_safety_policy_rejection,
     is_upstream_model_capacity_error,
 )
 from app.modules.proxy.tool_call_dedupe import (
@@ -4174,6 +4175,7 @@ class _HTTPBridgeUpstreamEventsMixin:
 
         if settlement_event_type in {"response.failed", "response.incomplete", "error"}:
             error_code = None
+            error = None
             if settlement_event_type == "error":
                 error = settlement_event.error if settlement_event else None
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
@@ -4200,6 +4202,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # states the completion settle already excludes.
                 and terminal_request_state.request_kind != "prewarm"
                 and not terminal_request_state.skip_request_log
+                and not is_account_neutral_safety_policy_rejection(
+                    code=error_code,
+                    http_status=_http_error_status_from_payload(settlement_payload),
+                    message=error.message if error else None,
+                )
                 # Only a held safe replay excludes the strike: an unanchored
                 # request with no replay is stranded like any other, and the
                 # delta spec's no-response/no-safe-replay rule applies to it

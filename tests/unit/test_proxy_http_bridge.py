@@ -37998,6 +37998,42 @@ _NATIVE_RESPONSE_FAILED_FRAME = json.dumps(
 )
 
 
+_SAFETY_POLICY_RESPONSE_FAILED_FRAME = json.dumps(
+    {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_failed_policy",
+            "object": "response",
+            "status": "failed",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "misalignment_policy_violation",
+                "message": "This request was blocked by our safety systems.",
+            },
+        },
+    },
+    separators=(",", ":"),
+)
+
+
+@pytest.mark.asyncio
+async def test_safety_policy_response_failed_does_not_poison_bridge_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, session, _request_state = _make_terminal_error_bridge_fixture(
+        request_id="req-policy-block",
+        key_value="sid-policy-block",
+        response_event_count=0,
+    )
+    record_failure = AsyncMock(return_value=None)
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(session, _SAFETY_POLICY_RESPONSE_FAILED_FRAME)
+
+    record_failure.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_native_response_failed_frame_consumes_a_circuit_strike() -> None:
     # Product path through the real recorder: a native ``response.failed``

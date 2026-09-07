@@ -179,6 +179,14 @@ duplicate lifecycle prelude MUST be suppressed so the client observes exactly on
 - **THEN** the proxy MUST apply the model-capacity wait before stripping the injected anchor and replaying the fresh
   request.
 
+#### Scenario: Accepted client-anchored requests forward the capacity message without waiting
+
+- **WHEN** an accepted request (`response.created` forwarded) carries a `previous_response_id` the client supplied,
+  even with a retry-safe fresh body retained
+- **AND** upstream returns a selected-model capacity error before visible output
+- **THEN** the proxy MUST NOT reserve, stage, or wait for that request
+- **AND** the upstream terminal MUST be forwarded unchanged, exactly as the bare transparent-code branch forwards it.
+
 #### Scenario: Remote-owner relay preserves the hidden startup wait
 
 - **WHEN** an origin replica forwards a bridge request to its remote owner

@@ -5786,6 +5786,93 @@ async def test_http_bridge_accepted_client_anchored_overload_code_forwards_the_t
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_accepted_client_anchored_capacity_message_forwards_the_terminal_without_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2127 round 4 P3-A, capacity-message twin of the test above: the wait
+    branch used to reserve and stage an accepted request whose anchor the
+    CLIENT supplied (retry-safe fresh body retained), penalize the owner, sleep,
+    and then hand it to a pre-created retry that refuses transport-only full
+    resends -- so the raw ``model_at_capacity`` terminal came back as a
+    synthetic ``stream_incomplete`` (502). The same client-anchor exclusion the
+    transparent-code branch applies must run before waiting or staging, and the
+    upstream terminal is forwarded unchanged without sleeping."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
+    wait_before_retry = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module, "_wait_before_http_bridge_model_capacity_retry", wait_before_retry
+    )
+    request_state = _accepted_anchored_bridge_request_state(proxy_injected_previous_response_id=False)
+    session = _make_bridge_session(
+        key_value="bridge-accepted-client-anchored-capacity-message",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        _capacity_error_text(code="model_at_capacity", message=_CAPACITY_MESSAGE),
+    )
+
+    wait_before_retry.assert_not_awaited()
+    retry_precreated.assert_not_awaited()
+    assert request_state not in session.pending_requests
+    assert session.queued_request_count == 0
+    assert request_state.account_capacity_waiting is False
+    assert request_state.replay_downstream_response_id is None
+    assert request_state.suppress_next_created_downstream is False
+    assert request_state.suppress_next_in_progress_downstream is False
+    assert request_state.response_create_gate_acquired is False
+    assert session.response_create_gate.locked() is False
+    assert request_state.error_http_status_override is None
+    assert request_state.previous_response_id == "resp-bridge-anchor"
+    assert request_state.event_queue is not None
+    terminal_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert terminal_block is not None
+    terminal = proxy_service.parse_sse_data_json(terminal_block)
+    assert isinstance(terminal, dict)
+    assert terminal["type"] == "error"
+    assert cast(dict[str, Any], terminal["error"])["code"] == "model_at_capacity"
+    assert await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0) is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_accepted_proxy_anchored_capacity_message_waits_then_stages_single_lifecycle_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard on the exclusion above: a proxy-injected anchor with a retry-safe
+    fresh body is what the pre-created retry can re-send, so the capacity
+    message keeps reserving, staging and waiting for it (spec: "Retry-safe
+    injected anchors still wait")."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    _handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
+    request_state = _accepted_anchored_bridge_request_state()
+    session = _make_bridge_session(
+        key_value="bridge-accepted-proxy-anchored-capacity-message",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        _capacity_error_text(code="model_at_capacity", message=_CAPACITY_MESSAGE),
+    )
+
+    _assert_staged_for_single_lifecycle_replay(request_state, session)
+    assert request_state.previous_response_id == "resp-bridge-anchor"
+    retry_precreated.assert_awaited_once_with(session, request_state=request_state)
+    assert session.queued_request_count == 1
+    assert request_state.event_queue is not None
+    keepalive_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert keepalive_block is not None
+    keepalive = proxy_service.parse_sse_data_json(keepalive_block)
+    assert isinstance(keepalive, dict)
+    assert keepalive["status"] == "waiting_for_account_capacity"
+    assert request_state.event_queue.empty(), "the upstream terminal must not reach the client during a replay"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("code", "message"),
     [("model_at_capacity", _CAPACITY_MESSAGE), ("server_is_overloaded", _OVERLOADED_MESSAGE)],

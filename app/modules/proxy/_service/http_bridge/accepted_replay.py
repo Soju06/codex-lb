@@ -120,6 +120,27 @@ def _http_bridge_accepted_anchored_replay_candidate(request_state: _WebSocketReq
     )
 
 
+def _http_bridge_accepted_capacity_retry_allowed(request_state: _WebSocketRequestState) -> bool:
+    """Return whether the bridge capacity branches may reserve and stage this request.
+
+    Pre-created requests keep their existing rules. An accepted request
+    qualifies unanchored, or anchored only as
+    ``_http_bridge_accepted_anchored_replay_candidate`` allows (proxy-injected
+    anchor with a retry-safe fresh body). The selected-model capacity *message*
+    used to reach the wait branch for every accepted request that retained a
+    retry-safe fresh body, including one whose anchor the client supplied: the
+    request was reserved, staged and penalized, then the pre-created retry
+    refused its transport-only full resend and the raw capacity terminal was
+    rewritten into a synthetic ``stream_incomplete`` (HTTP 502). Excluding the
+    client-supplied anchor before the wait keeps that terminal forwarded
+    unchanged, exactly as the bare transparent-code branch already does.
+    """
+    accepted = request_state.response_id is not None and not request_state.awaiting_response_created
+    if not accepted or request_state.previous_response_id is None:
+        return True
+    return _http_bridge_accepted_anchored_replay_candidate(request_state)
+
+
 def _positive_token_count(value: JsonValue | None) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
 

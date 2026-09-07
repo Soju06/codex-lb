@@ -144,10 +144,19 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
         async def run_after_usage_refresh(self, **kwargs: object) -> None:
             warmup_calls.append(kwargs)
 
+    class _RoutingCache:
+        async def refresh_usage_caps_from_db(self) -> None:
+            return None
+
     monkeypatch.setattr(UsageRepository, "latest_by_account", _tracked_latest_by_account)
     monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
     monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
     monkeypatch.setattr(refresh_scheduler_module, "LimitWarmupService", _WarmupService)
+    monkeypatch.setattr(
+        refresh_scheduler_module,
+        "get_routing_availability_cache",
+        lambda: _RoutingCache(),
+    )
 
     scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
 

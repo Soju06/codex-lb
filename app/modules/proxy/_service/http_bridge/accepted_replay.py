@@ -148,14 +148,23 @@ async def _claim_websocket_replay_create_gate(
     identity. An accepted request released the gate at ``response.created``,
     so take it back only if nobody else holds it; a contended gate is never
     awaited from the reader.
+
+    ``response.created`` released the gate together with the shared work
+    admission, so taking it back for an accepted request also marks the
+    admission for re-acquisition: the replay's ``response.create`` must
+    re-enter the configured work limit before it is sent, on the
+    transport-close path exactly as on the terminal-error path.
     """
     if request_state.response_create_gate_acquired:
         return True
     if gate.locked():
         return False
+    accepted = request_state.response_id is not None and not request_state.awaiting_response_created
     await gate.acquire()
     request_state.response_create_gate = gate
     request_state.response_create_gate_acquired = True
+    if accepted and request_state.response_create_admission is None:
+        request_state.response_create_admission_reacquire_required = True
     return True
 
 

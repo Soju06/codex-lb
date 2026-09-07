@@ -5829,6 +5829,10 @@ async def test_retry_http_bridge_precreated_request_replays_accepted_lifecycle_a
     assert request_state.replay_count == 1
     assert request_state.response_create_gate_acquired is True
     assert session.response_create_gate.locked() is True
+    # ``response.created`` released the shared work admission with the gate;
+    # the replacement ``response.create`` must hold a fresh admission lease.
+    assert request_state.response_create_admission is not None
+    assert request_state.response_create_admission_reacquire_required is False
     assert request_state.preferred_account_id is None
     assert request_state.excluded_account_ids == {session.account.id}
     reconnect.assert_awaited_once()
@@ -5977,6 +5981,39 @@ async def test_stage_websocket_request_state_for_replay_keeps_the_terminal_settl
     assert request_state.terminal_settlement_phase == "claimed"
     assert request_state.replay_downstream_response_id == "resp-accepted-visible"
     assert request_state.awaiting_response_created is True
+
+
+@pytest.mark.asyncio
+async def test_claim_websocket_replay_create_gate_marks_shared_admission_for_reacquisition() -> None:
+    """An accepted request released the session create gate and the shared
+    work admission together at ``response.created``; re-claiming the gate for
+    its replay must therefore flag the admission for re-acquisition. A
+    pre-created request that still holds both keeps its state."""
+    gate = asyncio.Semaphore(1)
+    accepted = _accepted_bridge_request_state(request_id="req-accepted-claim-gate")
+
+    assert await http_bridge_accepted_replay_module._claim_websocket_replay_create_gate(accepted, gate) is True
+
+    assert gate.locked() is True
+    assert accepted.response_create_gate is gate
+    assert accepted.response_create_gate_acquired is True
+    assert accepted.response_create_admission_reacquire_required is True
+
+    held_gate = asyncio.Semaphore(1)
+    await held_gate.acquire()
+    precreated = _accepted_bridge_request_state(
+        request_id="req-precreated-claim-gate",
+        response_id=None,
+        awaiting_response_created=True,
+        response_event_count=0,
+        response_create_gate=held_gate,
+        response_create_gate_acquired=True,
+        response_create_admission=cast(Any, object()),
+    )
+
+    assert await http_bridge_accepted_replay_module._claim_websocket_replay_create_gate(precreated, held_gate) is True
+
+    assert precreated.response_create_admission_reacquire_required is False
 
 
 @pytest.mark.asyncio

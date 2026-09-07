@@ -50770,13 +50770,17 @@ async def test_retry_http_bridge_precreated_request_replays_created_without_visi
         send_request_ids.append(get_request_id())
 
     send_text = AsyncMock(side_effect=capture_send_text)
+    # An accepted request released the session create gate and the shared work
+    # admission at ``response.created``; its replay re-enters admission within
+    # the request deadline, so the fixture models a live request and consumer.
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_created_no_output",
         model="gpt-5.1",
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=0.0,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
         transport="http",
         request_text='{"type":"response.create","model":"gpt-5.1","input":"retry"}',
         archive_request_id="archive_bridge_created_no_output",
@@ -50822,6 +50826,9 @@ async def test_retry_http_bridge_precreated_request_replays_created_without_visi
     assert request_state.awaiting_response_created is True
     assert request_state.response_id is None
     assert request_state.response_event_count == 0
+    assert request_state.response_create_gate_acquired is True
+    assert request_state.response_create_admission is not None
+    assert request_state.response_create_admission_reacquire_required is False
 
 
 @pytest.mark.asyncio

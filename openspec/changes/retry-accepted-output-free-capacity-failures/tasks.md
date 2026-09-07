@@ -26,3 +26,4 @@
 
 - [x] 5.1 Record model output on the direct websocket relay (`upstream_model_output_seen` for the shared `_MODEL_OUTPUT_EVENT_TYPES`) so an accepted turn whose upstream skipped `response.in_progress` is never replayed after a forwarded output item; mutant tests cover the capacity-error and abrupt-close paths.
 - [x] 5.2 Leave `terminal_settlement_phase` untouched when staging a bridge replay so a failed replay followed by an abort still settles the API-key reservation through the shielded #1594 path; unit tests for the preserved claim and the abort settlement.
+- [x] 5.3 Mark shared work admission for re-acquisition whenever the session create gate is re-claimed for an accepted replay, so the bridge transport-close path re-enters the configured work limit like the terminal-error path; unit tests on the claim helper and the transport-close replay.

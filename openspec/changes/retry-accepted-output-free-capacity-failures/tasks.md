@@ -12,7 +12,7 @@
 
 ## 3. Single-Lifecycle Replay
 
-- [x] 3.1 Add `suppress_next_in_progress_downstream`; suppress the replay's `response.in_progress` on both surfaces and exempt it from the WebSocket sequence-regression guard like the suppressed `response.created`.
+- [x] 3.1 Add `suppress_next_in_progress_downstream` and suppress the replay's `response.in_progress` on both surfaces. The WebSocket sequence-regression guard keeps its created-only exemption: a sequenced prelude is never replayed (5.15), so no suppressed `response.in_progress` can meet that guard.
 - [x] 3.2 Stage accepted replays before `response_id` is cleared at the bridge capacity-wait and transparent-code branches and at the WebSocket transparent-code branch; preserve an already captured identity in `_prepare_websocket_request_state_for_visible_output_replay`.
 - [x] 3.3 Re-claim the session response-create gate without waiting (bridge terminal and transport-close paths), mark work admission for re-acquisition, and exclude the failing account on the WebSocket surface.
 - [x] 3.4 Let only terminal transport messages (close/error) replay an accepted turn in the bridge relay loop.

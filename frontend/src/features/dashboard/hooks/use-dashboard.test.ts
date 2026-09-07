@@ -4,7 +4,11 @@ import { HttpResponse, http } from "msw";
 import { createElement, type PropsWithChildren } from "react";
 import { describe, expect, it } from "vitest";
 
-import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
+import {
+  useDashboard,
+  useDashboardProjections,
+  useDashboardRequestActivity,
+} from "@/features/dashboard/hooks/use-dashboard";
 import { server } from "@/test/mocks/server";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 
@@ -118,5 +122,31 @@ describe("useDashboard", () => {
     });
 
     await waitFor(() => expect(result.current.isError).toBe(true));
+  });
+
+  it("keeps request activity lazy until heatmap mode is enabled", async () => {
+    let requestCount = 0;
+    server.use(
+      http.get("/api/dashboard/request-activity", () => {
+        requestCount += 1;
+        return HttpResponse.json({ days: [] });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) => useDashboardRequestActivity(enabled),
+      {
+        initialProps: { enabled: false },
+        wrapper: createWrapper(queryClient),
+      },
+    );
+
+    expect(result.current.isPending).toBe(true);
+    expect(requestCount).toBe(0);
+
+    rerender({ enabled: true });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(requestCount).toBe(1);
   });
 });

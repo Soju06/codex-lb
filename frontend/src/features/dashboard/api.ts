@@ -6,6 +6,7 @@ import {
   DEFAULT_OVERVIEW_TIMEFRAME,
   DashboardOverviewSchema,
   DashboardProjectionsSchema,
+  RequestActivityResponseSchema,
   RequestLogFilterOptionsSchema,
   RequestLogsResponseSchema,
   type ConversationTimeframe,
@@ -16,6 +17,7 @@ import {
 const DASHBOARD_PATH = "/api/dashboard";
 const REQUEST_LOGS_PATH = "/api/request-logs";
 const CONVERSATIONS_PATH = "/api/conversations";
+const REQUEST_ACTIVITY_PATH = `${DASHBOARD_PATH}/request-activity`;
 
 export type RequestLogsListFilters = {
   limit?: number;
@@ -63,6 +65,10 @@ export function getDashboardOverview(params: DashboardOverviewParams = {}) {
 
 export function getDashboardProjections() {
   return get(`${DASHBOARD_PATH}/projections`, DashboardProjectionsSchema);
+}
+
+export function getDashboardRequestActivity() {
+  return get(REQUEST_ACTIVITY_PATH, RequestActivityResponseSchema);
 }
 
 export function getRequestLogs(params: RequestLogsListFilters = {}) {

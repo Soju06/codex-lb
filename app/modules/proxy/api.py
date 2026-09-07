@@ -1052,6 +1052,7 @@ async def codex_safety_arc(
 
 
 @router.post("/alpha/search")
+@v1_router.post("/alpha/search")
 async def codex_alpha_search(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),

@@ -38,6 +38,12 @@ from app.modules.proxy._service.support import _signal_propagated_capacity_start
 
 pytestmark = pytest.mark.integration
 
+_CODEX_SEARCH_PATHS = [
+    "/backend-api/codex/alpha/search",
+    "/v1/alpha/search",
+    "/backend-api/codex/v1/alpha/search",
+]
+
 
 @pytest.fixture(autouse=True)
 async def _force_usage_weighted_routing(async_client) -> None:
@@ -759,8 +765,19 @@ async def test_codex_control_json_endpoints_forward_upstream(
 
 
 @pytest.mark.asyncio
-async def test_codex_alpha_search_forwards_request_and_response(async_client, monkeypatch):
-    await _import_account(async_client, "acc_codex_search", "codex-search@example.com")
+@pytest.mark.parametrize("path", _CODEX_SEARCH_PATHS)
+@pytest.mark.parametrize("status_code", [200, 202])
+async def test_codex_alpha_search_forwards_request_and_response(async_client, monkeypatch, path, status_code):
+    account_id = await _import_account(async_client, "acc_codex_search", "codex-search@example.com")
+    await _import_account(async_client, "acc_other_search", "other-search@example.com")
+    settings = (await async_client.get("/api/settings")).json()
+    settings["apiKeyAuthEnabled"] = True
+    assert (await async_client.put("/api/settings", json=settings)).status_code == 200
+    key_response = await async_client.post(
+        "/api/api-keys/", json={"name": "search", "assignedAccountIds": [account_id]}
+    )
+    assert key_response.status_code == 200
+    api_key = key_response.json()["key"]
     calls = []
     upstream_body = b'{"results":[{"title":"OpenAI","url":"https://openai.com/"}]}'
 
@@ -789,7 +806,7 @@ async def test_codex_alpha_search_forwards_request_and_response(async_client, mo
             }
         )
         return core_proxy.CodexControlResponse(
-            status_code=200,
+            status_code=status_code,
             body=upstream_body,
             headers={
                 "content-type": "application/json",
@@ -802,12 +819,16 @@ async def test_codex_alpha_search_forwards_request_and_response(async_client, mo
     payload = b'{ "query": "OpenAI official website" }'
 
     response = await async_client.post(
-        "/backend-api/codex/alpha/search?result_count=10",
+        f"{path}?result_count=10&tag=one&tag=two",
         content=payload,
-        headers={"content-type": "application/json", "session_id": "search-session"},
+        headers={
+            "content-type": "application/json",
+            "session_id": "search-session",
+            "authorization": f"Bearer {api_key}",
+        },
     )
 
-    assert response.status_code == 200
+    assert response.status_code == status_code
     assert response.content == upstream_body
     assert response.headers["x-request-id"] == "search-request"
     assert "set-cookie" not in response.headers
@@ -816,7 +837,7 @@ async def test_codex_alpha_search_forwards_request_and_response(async_client, mo
             "path": "alpha/search",
             "method": "POST",
             "payload": payload,
-            "query_params": [("result_count", "10")],
+            "query_params": [("result_count", "10"), ("tag", "one"), ("tag", "two")],
             "session_id": "search-session",
             "access_token": "access-token",
             "account_id": "acc_codex_search",
@@ -828,7 +849,8 @@ async def test_codex_alpha_search_forwards_request_and_response(async_client, mo
 
 
 @pytest.mark.asyncio
-async def test_codex_alpha_search_preserves_normalized_control_error_contract(async_client, monkeypatch):
+@pytest.mark.parametrize("path", _CODEX_SEARCH_PATHS)
+async def test_codex_alpha_search_preserves_normalized_control_error_contract(async_client, monkeypatch, path):
     async def fake_codex_control_request(*_args, **_kwargs):
         raise ProxyResponseError(
             429,
@@ -844,7 +866,7 @@ async def test_codex_alpha_search_preserves_normalized_control_error_contract(as
     monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", fake_codex_control_request)
 
     response = await async_client.post(
-        "/backend-api/codex/alpha/search",
+        path,
         json={"query": "OpenAI official website"},
     )
 
@@ -856,6 +878,52 @@ async def test_codex_alpha_search_preserves_normalized_control_error_contract(as
             "type": "rate_limit_error",
         }
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", _CODEX_SEARCH_PATHS)
+@pytest.mark.parametrize("authorization", [None, "Bearer invalid-search-key"])
+async def test_codex_alpha_search_requires_valid_proxy_credentials(async_client, monkeypatch, path, authorization):
+    settings = (await async_client.get("/api/settings")).json()
+    settings["apiKeyAuthEnabled"] = True
+    assert (await async_client.put("/api/settings", json=settings)).status_code == 200
+    upstream = AsyncMock(side_effect=AssertionError("unauthenticated search reached upstream"))
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", upstream)
+
+    response = await async_client.post(path, json={}, headers={"authorization": authorization} if authorization else {})
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+    assert response.json()["error"]["type"] == "authentication_error"
+    upstream.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", _CODEX_SEARCH_PATHS)
+async def test_codex_alpha_search_trailing_slash_is_rejected(async_client, monkeypatch, path):
+    upstream = AsyncMock(side_effect=AssertionError("trailing-slash search reached upstream"))
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", upstream)
+
+    response = await async_client.post(f"{path}/", json={}, follow_redirects=False)
+
+    assert response.status_code == 405
+    assert response.json() == {
+        "error": {"message": "Method Not Allowed", "type": "invalid_request_error", "code": "invalid_request_error"}
+    }
+    assert "location" not in response.headers
+    upstream.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", _CODEX_SEARCH_PATHS)
+@pytest.mark.parametrize("method", ["GET", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+async def test_codex_alpha_search_unsupported_methods_do_not_forward(async_client, monkeypatch, path, method):
+    upstream = AsyncMock(side_effect=AssertionError("non-POST search reached upstream"))
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", upstream)
+
+    await async_client.request(method, path)
+
+    upstream.assert_not_awaited()
 
 
 @pytest.mark.asyncio

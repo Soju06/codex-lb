@@ -39,6 +39,24 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - A DRAINING durable row with a live lease is still owned. Foreign `claim_live_session` and local session create must not steal it, including when forced recovery would otherwise run because the owner endpoint is missing; expired or ownerless DRAINING rows remain recoverable.
 - Hard-affinity retry-circuit evidence is request-lifecycle evidence: retirement counts only while the bridge still owns an eventless pending request. Idle no-pending retirement remains observable but neutral, so routine socket churn cannot manufacture the first strike for a later real timeout.
 
+## Standalone Codex web search
+
+Standalone search uses the shared Codex control-request handler at
+`POST /backend-api/codex/alpha/search` and `POST /v1/alpha/search`. The v1 alias
+supports clients configured with a `/v1` base URL; previously those clients
+received a local HTTP 405 before account selection even when Responses worked.
+Both paths forward the opaque body and repeated query parameters to upstream
+`/codex/alpha/search`, with the same proxy authentication, account scope,
+session affinity, capability restrictions, and error normalization.
+
+For example, base URL `https://proxy.example/v1` produces a standalone request
+to `https://proxy.example/v1/alpha/search` without requiring a client setting
+change. The existing doubled-prefix rewrite also handles
+`/backend-api/codex/v1/alpha/search`. Trailing-slash POST requests retain HTTP
+405 behavior; missing or invalid API keys receive HTTP 401 when proxy
+authentication is enabled. Upstream failures remain subject to the existing
+control-request policy. See the standalone search requirement in [spec.md](spec.md).
+
 ## Fast Mode and Service Tiers
 
 codex-lb accepts the OpenAI/Codex `service_tier` field on Responses and Chat

@@ -45,6 +45,14 @@ validated before upstream connection or send, using client-plane values.
 - **AND** an explicit forbidden or non-string reasoning.effort SHALL still be rejected for the restricted key
 - **AND** a source-owned WebSocket request SHALL retain its HTTP-transport fallback after the same policy check
 
+#### Scenario: Source reasoning fields remain part of the reservation budget
+
+- **GIVEN** a source-specific configuration update includes reasoning.effort and additional reasoning fields
+- **WHEN** serialization prepares the request's API-key usage estimate
+- **THEN** effort normalization SHALL preserve every other reasoning field for the existing input-budget calculation
+- **AND** source forwarding SHALL retain the original configuration update
+- **AND** overlapping requests SHALL remain subject to the existing reservation limit, including when the additional fields exhaust its remaining budget
+
 #### Scenario: A subscription anchor overrides a source model contract
 
 - **GIVEN** a configured source claims gpt-6-astra and a previous_response_id belongs to a recorded subscription account

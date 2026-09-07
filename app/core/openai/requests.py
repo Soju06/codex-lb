@@ -873,12 +873,14 @@ def _normalize_configuration_update_efforts(payload: MutableJsonObject) -> None:
         if not is_json_mapping(item) or item.get("type") != "configuration_update":
             continue
         item_reasoning = item.get("reasoning")
-        item_effort = item_reasoning.get("effort") if is_json_mapping(item_reasoning) else None
+        if not is_json_mapping(item_reasoning):
+            continue
+        item_effort = item_reasoning.get("effort")
         if isinstance(item_effort, str):
             normalized = item_effort.strip().lower()
             items[index] = {
                 **item,
-                "reasoning": {"effort": "max" if normalized == "ultra" else normalized},
+                "reasoning": {**item_reasoning, "effort": "max" if normalized == "ultra" else normalized},
             }
 
 

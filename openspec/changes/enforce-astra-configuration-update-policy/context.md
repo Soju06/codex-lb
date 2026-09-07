@@ -60,6 +60,14 @@ the extra lookup introduced with early schema selection exposed the race.
 
 ## Example
 
+Effort serialization must retain the rest of each reasoning mapping. Source
+forwarding uses the original body, while API-key admission also uses the
+serialized representation for its existing bounded input estimate. Dropping a
+large source-specific reasoning value from that representation would reserve
+too little for overlapping requests even though the source receives the full
+value. Copying the reasoning mapping and changing only effort preserves this
+contract without changing the budget cap or remaining-quota calculation.
+
 Key allows `low` only. Request input contains
 `configuration_update` with `high`. The proxy returns
 `reasoning_effort_not_allowed` before any upstream send.

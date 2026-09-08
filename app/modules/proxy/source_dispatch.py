@@ -129,6 +129,11 @@ ERROR_MODEL_SOURCE_RESPONSE_FAILED = "model_source_response_failed"
 # The source closed the stream without any terminal frame (the public wrapper
 # synthesizes ``response.failed`` for SDK clients): no answer was delivered.
 ERROR_MODEL_SOURCE_STREAM_TRUNCATED = "model_source_stream_truncated"
+# The source ended with a success terminal the public contract could not accept
+# (``response`` not an object, invalid output items): the wrapper relayed
+# ``response.failed`` in its place, so the client received a failure and no
+# answer was delivered.
+ERROR_MODEL_SOURCE_RESPONSE_INVALID = "model_source_response_invalid"
 _FAILURE_TERMINAL_KINDS = frozenset({"failed", "error"})
 _SUCCESS_TERMINAL_KINDS = frozenset({"completed", "incomplete"})
 _RELAYED_TERMINAL_KINDS: Mapping[str, str] = {
@@ -861,6 +866,7 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
         completed_normally = True
         holder = owner.observe_stream()
         if holder is not None:
+            relayed_kind = relayed_terminal_kind(last_event_frame)
             if holder.terminal_kind in _FAILURE_TERMINAL_KINDS:
                 # The public wrapper relays a failure terminal and ends the
                 # stream normally; a limited key must not be charged (not even
@@ -868,9 +874,16 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
                 status = "error"
                 error_code = ERROR_MODEL_SOURCE_RESPONSE_FAILED
                 error_message = f"source terminated the stream with response.{holder.terminal_kind}"
-            elif (
-                holder.terminal_kind is None and relayed_terminal_kind(last_event_frame) not in _SUCCESS_TERMINAL_KINDS
-            ):
+            elif holder.terminal_kind in _SUCCESS_TERMINAL_KINDS and relayed_kind in _FAILURE_TERMINAL_KINDS:
+                # The parser read the source's success terminal, but the public
+                # contract rewrote it into ``response.failed`` (``response`` not
+                # an object, invalid output items): the client received a
+                # failure, so the row and the settlement follow the wire, not
+                # the parser's observation.
+                status = "error"
+                error_code = ERROR_MODEL_SOURCE_RESPONSE_INVALID
+                error_message = f"source response.{holder.terminal_kind} was relayed to the client as response.failed"
+            elif holder.terminal_kind is None and relayed_kind not in _SUCCESS_TERMINAL_KINDS:
                 # The source closed without a terminal the parser could read
                 # and the client did not receive a success terminal either (the
                 # wrapper synthesized ``response.failed`` or relayed nothing

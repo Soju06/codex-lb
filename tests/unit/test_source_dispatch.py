@@ -1034,6 +1034,67 @@ async def test_settlement_stream_unparseable_relayed_tail_without_a_terminal_is_
     assert recorder.release_calls == [owner.reservation]
 
 
+_SYNTHESIZED_INVALID_JSON = (
+    "event: response.failed\n"
+    'data: {"type":"response.failed","sequence_number":3,"response":{"id":"resp_invalid_json",'
+    '"object":"response","status":"failed","error":{"code":"invalid_json","message":"malformed"}}}\n\n'
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_kind", ["completed", "incomplete"])
+async def test_settlement_stream_success_terminal_rewritten_into_a_relayed_failure_is_an_error(
+    recorder: _Recorder, terminal_kind: str
+) -> None:
+    """The parser read the source's success terminal, but the public wrapper rewrote it into ``response.failed``
+    (non-mapping ``response``, invalid output items): the wire carried a failure, so the row is an error and a
+    limited key is released, never settled at the estimate."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder()
+    stream = _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        holder.first_content_seen = True
+        holder.first_output_item_seen = True
+        yield "event: response.output_item.added\ndata: {}\n\n"
+        holder.terminal_kind = cast(Any, terminal_kind)
+        yield _SYNTHESIZED_INVALID_JSON
+
+    chunks = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert len(chunks) == 3
+    assert recorder.settle_calls == []
+    assert recorder.release_calls == [owner.reservation]
+    assert stream.closed == 1
+    assert recorder.rows[0]["status"] == "error"
+    assert recorder.rows[0]["error_code"] == "model_source_response_invalid"
+    assert recorder.rows[0]["input_tokens"] is None
+    assert owner.claims.released is True
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_success_terminal_relayed_as_a_success_stays_a_success(recorder: _Recorder) -> None:
+    """Control for the rewrite rule: a parsed success terminal the wrapper relayed intact settles as before."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True)
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        holder.terminal_kind = "completed"
+        holder.usage = SourceUsage(input_tokens=11, output_tokens=5)
+        yield _RELAYED_COMPLETED
+
+    _ = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert recorder.release_calls == []
+    assert recorder.settle_calls[0]["usage"] == SourceUsage(input_tokens=11, output_tokens=5)
+    assert recorder.rows[0]["status"] == "success"
+
+
 @pytest.mark.parametrize(
     ("frame", "kind"),
     [

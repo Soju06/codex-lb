@@ -680,9 +680,6 @@ def _text_with_previous_response_id(
         forwarded_payload = request.to_payload()
         payload["input"] = forwarded_payload.get("input")
         if request_state is not None and isinstance(request.input, list):
-            prepared_input = cast(list[JsonValue], request.input)
-            request_state.input_item_count = len(prepared_input)
-            request_state.input_full_fingerprint = _fingerprint_input_items(prepared_input)
             request_state.request_usage_budget = estimate_api_key_request_usage(
                 request,
                 upstream_payload=forwarded_payload,

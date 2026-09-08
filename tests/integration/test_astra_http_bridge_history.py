@@ -9,9 +9,10 @@ from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
 from app.core.openai.requests import ResponsesRequest
-from app.db.models import ApiKeyUsageReservation, HttpBridgeSessionRecord
+from app.db.models import ApiKeyLimit, ApiKeyUsageReservation, HttpBridgeOperationRecord, HttpBridgeSessionRecord
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
+from app.modules.proxy._service.http_bridge import request_submit as bridge_request_submit
 from app.modules.proxy._service.http_bridge import streaming as bridge_streaming
 from app.modules.proxy.load_balancer import AccountSelection
 from tests.integration.test_astra_inherited_policy import _reasoning_key
@@ -246,6 +247,144 @@ async def test_astra_full_resend_preserves_bridge_prefix(async_client, monkeypat
         reset,
         {"role": "user", "content": "Next"},
     ]
+
+
+@pytest.mark.parametrize(
+    ("path", "stream"),
+    [("/v1/responses", False), ("/v1/responses", True), ("/backend-api/codex/responses", True)],
+    ids=["v1-collect", "v1-stream", "backend-stream"],
+)
+@pytest.mark.parametrize(
+    ("effort", "enforced"), [("low", False), ("ultra", True)], ids=["allowed-low", "enforced-ultra"]
+)
+async def test_astra_late_ledger_anchor_preserves_client_prefix(
+    async_client, monkeypatch, app_instance, path: str, stream: bool, effort: str, enforced: bool
+) -> None:
+    account_id = await _import_account(async_client, "astra-ledger", "astra-ledger@example.com")
+    account = await _get_account(account_id)
+    settings = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert settings.status_code == 200
+    policy = {"enforcedReasoningEffort": effort} if enforced else {"allowedReasoningEfforts": [effort]}
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "astra-ledger",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 1000000}],
+            **policy,
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()
+    _install_bridge_settings(monkeypatch, enabled=True)
+    bridge_settings = proxy_module.get_settings().model_copy(
+        update={"http_responses_session_bridge_ambiguous_continuation_recovery_mode": "server_indefinite_recovery"}
+    )
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: bridge_settings)
+    upstream = _FakeBridgeUpstreamWebSocket()
+    service = get_proxy_service_for_app(app_instance)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    connect = AsyncMock(return_value=upstream)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    late_anchors = []
+    original_anchor = bridge_request_submit._text_with_previous_response_id
+
+    def observe_anchor(text_data, response_id, **kwargs):
+        updated = original_anchor(text_data, response_id, **kwargs)
+        late_anchors.append(response_id)
+        return updated
+
+    monkeypatch.setattr(bridge_request_submit, "_text_with_previous_response_id", observe_anchor)
+    registered = {f"resp_bridge_{turn}": anyio.Event() for turn in (1, 2, 3, 4)}
+    original_register = service._register_http_bridge_previous_response_id
+
+    async def register_response(session, response_id, **kwargs):
+        result = await original_register(session, response_id, **kwargs)
+        assert result
+        registered[response_id].set()
+        return result
+
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_response)
+    headers = {"Authorization": "Bearer " + key["key"], "thread-id": "astra-ledger-thread"}
+    body = {"model": "gpt-6-astra", "instructions": "", "reasoning": {"effort": effort}, "stream": stream}
+    history = [{"role": "user", "content": "Continue"}]
+    normalized_history = ResponsesRequest.model_validate({**body, "input": history}).input
+    assert isinstance(normalized_history, list)
+
+    async def post_turn(input_items, response_id):
+        with anyio.fail_after(5):
+            response = await async_client.post(path, json={**body, "input": input_items}, headers=headers)
+            assert response.status_code == 200, response.text
+            if stream:
+                events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
+                completed = [event for event in events if event.get("type") == "response.completed"]
+                assert len(completed) == 1, events
+                assert completed[0]["response"]["id"] == response_id
+                assert not any(event.get("type") in {"error", "response.failed"} for event in events)
+            else:
+                assert response.json()["id"] == response_id
+            await registered[response_id].wait()
+            return response
+
+    # Establish a real session, then record the repeated hard turn without an anchor.
+    first = await post_turn(history, "resp_bridge_1")
+    headers["x-codex-turn-state"] = first.headers["x-codex-turn-state"]
+    await post_turn(history, "resp_bridge_2")
+    async with SessionLocal() as db:
+        operation = (
+            await db.execute(
+                select(HttpBridgeOperationRecord).where(HttpBridgeOperationRecord.response_id == "resp_bridge_2")
+            )
+        ).scalar_one()
+        assert operation.state == "completed"
+        assert operation.parent_response_id is None
+
+    # The actual completed ledger entry injects the third turn's anchor after preparation.
+    await post_turn(history, "resp_bridge_3")
+    assert late_anchors == ["resp_bridge_2"]
+    reset = {"type": "configuration_update", "reasoning": {"effort": "max" if effort == "ultra" else effort}}
+    third = json.loads(upstream.sent_text[2])
+    assert third["previous_response_id"] == "resp_bridge_2"
+    assert third["input"] == [reset, *normalized_history]
+    async with SessionLocal() as db:
+        stored = (
+            await db.execute(
+                select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.latest_response_id == "resp_bridge_3")
+            )
+        ).scalar_one()
+        stored_count = stored.latest_input_item_count
+        stored_fingerprint = stored.latest_input_full_fingerprint
+    session = next(
+        session
+        for session in service._http_bridge_sessions.values()
+        if session.last_completed_response_id == "resp_bridge_3"
+    )
+    live_count = session.last_completed_input_count
+    live_fingerprint = session.last_completed_input_prefix_fingerprint
+
+    # A client full resend omits the proxy reset and must still trim/reuse the third response.
+    suffix = [
+        {"role": "assistant", "content": [{"type": "output_text", "text": "OK"}]},
+        {"role": "user", "content": "Next"},
+    ]
+    await post_turn([*history, *suffix], "resp_bridge_4")
+    fourth = json.loads(upstream.sent_text[3])
+    assert fourth.get("previous_response_id") == "resp_bridge_3"
+    assert fourth["input"] == [reset, *suffix]
+    assert stored_count == live_count == len(normalized_history)
+    assert stored_fingerprint == live_fingerprint == proxy_module._fingerprint_input_items(normalized_history)
+    assert late_anchors == ["resp_bridge_2"]
+    connect.assert_awaited_once()
+    await service.drain_persistence_tasks(timeout_seconds=5)
+    async with SessionLocal() as db:
+        statuses = list((await db.execute(select(ApiKeyUsageReservation.status))).scalars())
+        charged = await db.scalar(select(ApiKeyLimit.current_value).where(ApiKeyLimit.api_key_id == key["id"]))
+    assert statuses == ["finalized"] * 4
+    assert charged == 104
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["collect", "stream"])

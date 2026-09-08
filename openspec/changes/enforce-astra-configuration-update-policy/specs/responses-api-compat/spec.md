@@ -76,6 +76,13 @@ validated before upstream connection or send, using client-plane values.
 - **THEN** HTTP-bridge and WebSocket preparation SHALL reject the resulting payload before upstream connection or send
 - **AND** a history whose updates remain separated after deduplication SHALL retain its supported ordering
 
+#### Scenario: Late policy resets preserve client continuation state
+
+- **GIVEN** a restricted-key Astra request receives a proxy-owned anchor after initial preparation
+- **WHEN** the proxy adds the required leading configuration update
+- **THEN** persisted input counts and fingerprints SHALL continue to describe the original client history
+- **AND** a subsequent full resend SHALL retain prefix matching and session anchoring
+
 #### Scenario: Configuration updates cannot use standalone compaction
 
 - **WHEN** a compact request contains a configuration_update item

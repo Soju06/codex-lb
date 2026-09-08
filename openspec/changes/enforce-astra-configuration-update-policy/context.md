@@ -60,6 +60,14 @@ the extra lookup introduced with early schema selection exposed the race.
 
 ## Example
 
+A policy reset inserted after an operation-ledger anchor
+belongs to the forwarded request, while continuation fingerprints describe the
+client's history. Keep those representations separate: a later full resend does
+not contain the proxy's reset. The late anchor helper updates the wire payload
+and its existing usage estimate while retaining the already captured client
+count and fingerprint. This extends the existing client-prefix contract to late
+anchors without changing the quota cap, settlement policy, or source-owned schema.
+
 Effort serialization must retain the rest of each reasoning mapping. Source
 forwarding uses the original body, while API-key admission also uses the
 serialized representation for its existing bounded input estimate. Dropping a

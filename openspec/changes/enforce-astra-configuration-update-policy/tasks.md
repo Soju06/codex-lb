@@ -25,3 +25,4 @@
 - [x] 3.9 Validate update ordering after subscription input normalization, including deduplication and serialization, preserving valid separated updates
 - [x] 3.10 Preserve source configuration updates without reasoning changes while enforcing explicit efforts on restricted keys
 - [x] 3.11 Preserve source-owned reasoning fields during effort serialization and API-key reservation estimation
+- [x] 3.12 Preserve client prefix metadata after a late ledger anchor and prove subsequent full-resend matching through the real HTTP bridge

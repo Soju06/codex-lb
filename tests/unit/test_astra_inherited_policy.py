@@ -287,7 +287,7 @@ def test_http_bridge_injected_anchor_clears_conversation() -> None:
     assert "conversation" not in wire_payload
 
 
-def test_http_bridge_injected_anchor_resets_before_derived_state() -> None:
+def test_http_bridge_injected_anchor_preserves_client_prefix_and_updates_budget() -> None:
     text_data = json.dumps(
         {
             "type": "response.create",
@@ -299,9 +299,10 @@ def test_http_bridge_injected_anchor_resets_before_derived_state() -> None:
         }
     )
 
+    client_fingerprint = request_submit_module._fingerprint_input_items(json.loads(text_data)["input"])
     request_state = SimpleNamespace(
         input_item_count=1,
-        input_full_fingerprint=None,
+        input_full_fingerprint=client_fingerprint,
         request_usage_budget=None,
     )
     updated_text = request_submit_module._text_with_previous_response_id(
@@ -318,8 +319,10 @@ def test_http_bridge_injected_anchor_resets_before_derived_state() -> None:
         "reasoning": {"effort": "high"},
     }
     assert wire_payload["client_metadata"] == {"caller": "test"}
-    assert request_state.input_item_count == 2
-    assert request_state.input_full_fingerprint == request_submit_module._fingerprint_input_items(wire_payload["input"])
+    assert request_state.input_item_count == 1
+    assert request_state.input_full_fingerprint == client_fingerprint
+    assert request_state.request_usage_budget is not None
+    assert request_state.request_usage_budget.input_tokens is None
     repeated_text = request_submit_module._text_with_previous_response_id(
         updated_text,
         "resp_injected",
@@ -327,6 +330,8 @@ def test_http_bridge_injected_anchor_resets_before_derived_state() -> None:
         request_state=cast(Any, request_state),
     )
     assert json.loads(repeated_text) == wire_payload
+    assert request_state.input_item_count == 1
+    assert request_state.input_full_fingerprint == client_fingerprint
 
 
 def test_http_bridge_injected_anchor_preserves_ultra_from_request_state() -> None:

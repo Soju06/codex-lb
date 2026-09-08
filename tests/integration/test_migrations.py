@@ -2461,3 +2461,93 @@ async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgr
     assert indisvalid is True
     assert indexdef.endswith("(purge_at)")  # rebuilt on purge_at, not the accepted decoy on kind
     assert indexdef.startswith("CREATE INDEX ")  # non-unique, as the ORM declares it
+
+
+@pytest.mark.asyncio
+async def test_drop_prewarm_canary_columns_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'drop-prewarm-canary-columns.sqlite'}"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    drop_revision = "20260908_000000_drop_prewarm_canary_columns"
+    retired_columns = {"prewarm_canary_bucket", "prewarm_eligible_reason"}
+
+    async def _request_log_columns() -> set[str]:
+        engine = create_async_engine(db_url, future=True)
+        try:
+            async with engine.connect() as conn:
+                return await conn.run_sync(
+                    lambda sync_conn: {column["name"] for column in sa_inspect(sync_conn).get_columns("request_logs")}
+                )
+        finally:
+            await engine.dispose()
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    assert retired_columns <= await _request_log_columns()
+
+    # A historical row written by a pre-phase-4 replica must survive the
+    # SQLite batch-mode table recreation with its live columns intact.
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO request_logs (
+                        id, account_id, request_id, requested_at, model, input_tokens, output_tokens,
+                        cached_input_tokens, reasoning_tokens, reasoning_effort, latency_ms, status,
+                        error_code, error_message, prewarm_status, prewarm_canary_bucket, prewarm_eligible_reason
+                    )
+                    VALUES (
+                        1, 'acc_prewarm_legacy', 'req_prewarm_legacy', '2026-07-01 00:00:00', 'gpt-5', 10, 20,
+                        0, 0, NULL, 100, 'ok', NULL, NULL, 'success', 'bucket-07', 'allowlist'
+                    )
+                    """
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, drop_revision, bootstrap_legacy=False))
+    columns_after_upgrade = await _request_log_columns()
+    assert not (retired_columns & columns_after_upgrade)
+    assert "prewarm_status" in columns_after_upgrade
+
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT account_id, model, status, prewarm_status FROM request_logs WHERE id = 1")
+                )
+            ).one()
+        assert tuple(row) == ("acc_prewarm_legacy", "gpt-5", "ok", "success")
+    finally:
+        await engine.dispose()
+
+    # Re-running the drop against an already-migrated schema is a no-op.
+    await to_thread.run_sync(lambda: run_upgrade(db_url, drop_revision, bootstrap_legacy=False))
+    assert not (retired_columns & await _request_log_columns())
+
+    config = _build_alembic_config(db_url)
+    await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+    columns_after_downgrade = await _request_log_columns()
+    assert retired_columns <= columns_after_downgrade
+
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT prewarm_canary_bucket, prewarm_eligible_reason, prewarm_status "
+                        "FROM request_logs WHERE id = 1"
+                    )
+                )
+            ).one()
+        assert tuple(row) == (None, None, "success")
+    finally:
+        await engine.dispose()

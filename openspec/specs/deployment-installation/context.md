@@ -156,13 +156,13 @@ Work queued for the release after the one that shipped the
 settings-surface reduction (issue #1340, phases 1-4 + retention dashboard
 settings, merged as PRs #1351, #1360, #1362, #1363, #1364 in v1.21.x):
 
-1. **Drop the deprecated prewarm request-log columns.** `RequestLog`
-   still declares `prewarm_canary_bucket` and `prewarm_eligible_reason`
-   (deprecated, unwritten since phase 4) so old replicas keep inserting
-   safely during rolling upgrades — the Helm migration job is a
-   pre-upgrade hook while the workload rolls. The Alembic drop revision
-   MUST ship in the next release; it could not ship together with the
-   writer removal.
+1. ~~**Drop the deprecated prewarm request-log columns.**~~ Done:
+   `prewarm_canary_bucket` and `prewarm_eligible_reason` (deprecated,
+   unwritten since phase 4; kept through v1.22–v1.24 so old replicas kept
+   inserting safely while the Helm pre-upgrade migration hook ran ahead of
+   the workload roll) are dropped by
+   `20260908_000000_drop_prewarm_canary_columns`
+   (`drop-prewarm-canary-columns`).
 2. **Retire the retention env aliases.**
    `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` and
    `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS` are deprecated one-release

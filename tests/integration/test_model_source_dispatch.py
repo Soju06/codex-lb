@@ -1275,6 +1275,51 @@ async def test_success_terminal_the_public_wrapper_rewrites_into_a_failure_is_an
 
 
 @pytest.mark.asyncio
+async def test_typed_event_trailing_a_rewritten_terminal_keeps_the_error_and_the_release(
+    async_client, source_upstream
+) -> None:
+    """The source keeps emitting a typed event after the ``response.completed`` the wrapper rewrote into
+    ``response.failed invalid_json``; the client-visible terminal is latched, so the trailing frame does not turn the
+    attempt into a ``success`` settled at the estimate."""
+
+    await _enable_api_key_auth(async_client)
+    state = _StubState()
+    malformed_completed = _sse({"type": "response.completed", "sequence_number": 3, "response": None})
+    trailing_delta = _sse(
+        {
+            "type": "response.output_text.delta",
+            "sequence_number": 4,
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "late",
+        }
+    )
+    base_url = await source_upstream(
+        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, malformed_completed, trailing_delta])
+    )
+    model = "dispatch-trailing-after-rewrite"
+    source_id = await _create_model_source(
+        async_client, name=model, model=model, base_url=base_url, supports_responses=True
+    )
+    key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
+
+    async with async_client.stream(
+        "POST", "/v1/responses", headers={"Authorization": f"Bearer {key}"}, json=_request_body(model)
+    ) as response:
+        assert response.status_code == 200
+        text = "".join([chunk async for chunk in response.aiter_text()])
+
+    assert "response.failed" in text and "invalid_json" in text
+    assert text.index("response.failed") < text.index('"late"')
+    reservations = await _reservations(key_id)
+    assert [reservation.status for reservation in reservations] == ["released"]
+    rows = await _source_rows(source_id)
+    assert [(row.status, row.error_code) for row in rows] == [("error", "model_source_response_invalid")]
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+@pytest.mark.asyncio
 async def test_unlimited_key_streams_live_without_a_settlement(async_client, source_upstream) -> None:
     await _enable_api_key_auth(async_client)
     state = _StubState()

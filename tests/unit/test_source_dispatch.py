@@ -1349,6 +1349,116 @@ async def test_settlement_stream_success_terminal_rewritten_into_a_relayed_failu
 
 
 @pytest.mark.asyncio
+async def test_settlement_stream_typed_event_trailing_a_rewritten_terminal_keeps_the_failure(
+    recorder: _Recorder,
+) -> None:
+    """The source keeps emitting typed events after the terminal the wrapper rewrote into ``response.failed``: the
+    client-visible terminal is latched, so the trailing frame does not turn the attempt back into a charged success."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder()
+    stream = _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        holder.first_content_seen = True
+        holder.first_output_item_seen = True
+        yield "event: response.output_item.added\ndata: {}\n\n"
+        holder.terminal_kind = "completed"
+        yield _SYNTHESIZED_INVALID_JSON
+        yield "event: response.output_text.done\ndata: {}\n\n"
+
+    chunks = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert len(chunks) == 4
+    assert recorder.settle_calls == []
+    assert recorder.release_calls == [owner.reservation]
+    assert stream.closed == 1
+    assert recorder.rows[0]["status"] == "error"
+    assert recorder.rows[0]["error_code"] == "model_source_response_invalid"
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_cancel_after_a_relayed_failure_and_a_trailing_typed_event_releases(
+    recorder: _Recorder,
+) -> None:
+    """A relayed failure terminal is sticky in the cancel branch too: a delta relayed behind it before the client
+    tears down does not reset the classification to a cancel settled at the estimate."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True, delta_chars=400)
+    stream = _attach_stream(owner, holder=holder)
+    gate = asyncio.Event()
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        yield "event: response.failed\ndata: {}\n\n"
+        yield "event: response.output_text.delta\ndata: {}\n\n"
+        await gate.wait()
+
+    async def consume() -> None:
+        async for _chunk in settlement_stream(owner, inner()):
+            pass
+
+    task = asyncio.create_task(consume())
+    for _ in range(10):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert recorder.settle_calls == []
+    assert recorder.release_calls == [owner.reservation]
+    assert stream.closed == 1
+    assert recorder.rows[0]["status"] == "error"
+    assert recorder.rows[0]["error_code"] == "model_source_response_failed"
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_typed_event_trailing_a_relayed_success_terminal_stays_a_success(
+    recorder: _Recorder,
+) -> None:
+    """Symmetric latch: a vendor frame relayed after ``response.completed`` the parser missed (oversized) does not
+    demote the delivered answer to a truncated stream."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True)
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        yield _RELAYED_COMPLETED
+        yield 'event: codex.rate_limits\ndata: {"type":"codex.rate_limits"}\n\n'
+
+    _ = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert holder.terminal_kind is None
+    assert recorder.release_calls == []
+    assert len(recorder.settle_calls) == 1
+    assert recorder.rows[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_relayed_failure_after_a_relayed_success_is_an_error(recorder: _Recorder) -> None:
+    """Failure precedence: a source that follows its success terminal with a failure terminal delivered a failure."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True)
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        yield _RELAYED_COMPLETED
+        yield "event: error\ndata: {}\n\n"
+
+    _ = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert recorder.settle_calls == []
+    assert recorder.release_calls == [owner.reservation]
+    assert recorder.rows[0]["status"] == "error"
+
+
+@pytest.mark.asyncio
 async def test_settlement_stream_success_terminal_relayed_as_a_success_stays_a_success(recorder: _Recorder) -> None:
     """Control for the rewrite rule: a parsed success terminal the wrapper relayed intact settles as before."""
 

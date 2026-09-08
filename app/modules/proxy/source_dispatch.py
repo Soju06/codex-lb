@@ -220,13 +220,14 @@ class ClientDisconnectedDuringOpen(Exception):
 
 
 def relayed_terminal_kind(frame: str | None) -> str | None:
-    """Terminal kind of the last event frame relayed to the client; ``None`` when it is not a terminal.
+    """Terminal kind of an event frame relayed to the client; ``None`` when it is not a terminal.
 
     Read from the ``event:`` line the public wrapper frames every typed event
-    with, falling back to the ``data:`` JSON for a raw pass-through block. This
-    is the client-visible outcome: when the parser saw no terminal (the frame
-    outgrew its cap, or the source closed without one) it decides between a
-    delivered success and a truncated stream.
+    with, falling back to the ``data:`` JSON for a raw pass-through block.
+    ``settlement_stream`` latches the kinds it sees into the client-visible
+    outcome: when the parser saw no terminal (the frame outgrew its cap, or the
+    source closed without one) it decides between a delivered success and a
+    truncated stream.
     """
 
     if not frame:
@@ -918,6 +919,17 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
     holds reasoning-summary deltas; a chunk the body flushed may therefore
     never reach the client (the one ``send()`` in flight when the client
     leaves is the residual ambiguity, resolved as delivered).
+
+    The client-visible terminal is latched from the relayed event frames, not
+    read from the last one: a typed event trailing a terminal (a delta the
+    source keeps emitting after the wrapper rewrote its ``response.completed``
+    into ``response.failed``, a vendor frame after ``response.completed``)
+    must not reset the classification, and a relayed failure terminal is
+    sticky -- once the client received a failure, nothing that follows turns
+    the attempt back into a charged success. The latch costs one
+    ``startswith`` and a string slice per ``event:``-framed event; only a raw
+    data-only pass-through block (a native-mode terminal, an unparseable
+    block) pays a JSON parse.
     """
 
     status: DispatchStatus = "success"
@@ -925,19 +937,21 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
     error_message: str | None = None
     completed_normally = False
     timeout_phase: TimeoutPhase | None = None
-    last_event_frame: str | None = None
+    relayed_kind: str | None = None
     owner.body_started = True
     try:
         async for chunk in wrapped:
             if _is_event_frame(chunk):
-                last_event_frame = chunk
+                if relayed_kind not in _FAILURE_TERMINAL_KINDS:
+                    frame_kind = relayed_terminal_kind(chunk)
+                    if frame_kind is not None:
+                        relayed_kind = frame_kind
                 if not owner.content_delivered and relayed_frame_delivers_content(chunk):
                     owner.content_delivered = True
             yield chunk
         completed_normally = True
         holder = owner.observe_stream()
         if holder is not None:
-            relayed_kind = relayed_terminal_kind(last_event_frame)
             if holder.terminal_kind in _FAILURE_TERMINAL_KINDS:
                 # The public wrapper relays a failure terminal and ends the
                 # stream normally; a limited key must not be charged (not even
@@ -976,7 +990,6 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
         # keyed only on ``first_output_item_seen`` and charged the estimate.
         owner.observe_stream()
         holder = owner.usage_holder
-        relayed_kind = relayed_terminal_kind(last_event_frame)
         if (
             holder is not None and holder.terminal_kind in _FAILURE_TERMINAL_KINDS
         ) or relayed_kind in _FAILURE_TERMINAL_KINDS:

@@ -43,7 +43,7 @@ Only `dashboard:read`, `api_keys:read`, `api_keys:write` may be granted with `ow
 
 ### `PUT /api/settings` splits security fields from operational fields
 
-The endpoint mixes both. `SECURITY_SETTINGS_FIELDS` (`totp_required_on_login`, `api_key_auth_enabled`, `guest_access_enabled`, `dashboard_session_ttl_seconds`) lives beside the request model; the handler requires `security:write` only when the request **changes** one of them — a non-null value that differs from the stored setting. Field presence is not enough: the dashboard client (`frontend/src/features/settings/payload.ts`) spreads the full current settings into every save, so a presence check would make every settings save a security write. Splitting the endpoint was rejected because that same full-form client behavior makes a second endpoint a contract change for no gain.
+The endpoint mixes both. `SECURITY_SETTINGS_FIELDS` (`totp_required_on_login`, `api_key_auth_enabled`, `guest_access_enabled`, `dashboard_session_ttl_seconds`, `hide_upstream_quota_from_api_keys`) lives beside the request model; the handler requires `security:write` only when the request **changes** one of them — a non-null value that differs from the stored setting. Field presence is not enough: the dashboard client (`frontend/src/features/settings/payload.ts`) spreads the full current settings into every save, so a presence check would make every settings save a security write. Splitting the endpoint was rejected because that same full-form client behavior makes a second endpoint a contract change for no gain.
 
 ### Account-window projections require `accounts:read`, not `dashboard:read`
 

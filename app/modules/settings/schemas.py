@@ -187,6 +187,7 @@ SECURITY_SETTINGS_FIELDS: frozenset[str] = frozenset(
         "api_key_auth_enabled",
         "guest_access_enabled",
         "dashboard_session_ttl_seconds",
+        "hide_upstream_quota_from_api_keys",
     }
 )
 

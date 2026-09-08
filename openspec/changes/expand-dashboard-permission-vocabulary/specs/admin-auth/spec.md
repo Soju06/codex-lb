@@ -66,7 +66,7 @@ The following routes MUST require the named permission at `all` scope, independe
 - `GET /api/dashboard/overview`, `GET /api/dashboard/projections`, `GET /api/usage/summary`, `GET /api/usage/history`, `GET /api/usage/window` → `accounts:read`
 - `GET /api/models` → `dashboard:read`
 - `POST /api/firewall/ips`, `DELETE /api/firewall/ips/{ip}`, `POST /api/dashboard-auth/guest/password`, `DELETE /api/dashboard-auth/guest/password`, `POST /api/settings/upstream-proxy/endpoints` → `security:write`
-- `PUT /api/settings` → `security:write` in addition to the generic write gate when the request body **changes** any of `totp_required_on_login`, `api_key_auth_enabled`, `guest_access_enabled`, or `dashboard_session_ttl_seconds` (a non-null value that differs from the stored setting); requests that re-send the stored values or omit these fields MUST remain authorized by the generic write gate alone, because the dashboard client submits the whole form on every save
+- `PUT /api/settings` → `security:write` in addition to the generic write gate when the request body **changes** any of `totp_required_on_login`, `api_key_auth_enabled`, `guest_access_enabled`, `dashboard_session_ttl_seconds`, or `hide_upstream_quota_from_api_keys` (a non-null value that differs from the stored setting); requests that re-send the stored values or omit these fields MUST remain authorized by the generic write gate alone, because the dashboard client submits the whole form on every save
 
 #### Scenario: Write-capable principal cannot export credentials
 

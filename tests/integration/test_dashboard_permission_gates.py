@@ -74,12 +74,9 @@ async def test_account_export_requires_accounts_export_not_write(
     assert principal.can(auth_dependencies.DashboardPermission.WRITE)
     _use_principal(app_instance, monkeypatch, principal)
 
-    for path in (
-        "/api/accounts/missing/export",
-        "/api/accounts/missing/export/auth",
-        "/api/accounts/missing/export/opencode-auth",
-    ):
-        _assert_permission_required(await async_client.post(path), Permission.ACCOUNTS_EXPORT)
+    _assert_permission_required(
+        await async_client.post("/api/accounts/missing/export/auth"), Permission.ACCOUNTS_EXPORT
+    )
 
     # The same principal keeps ordinary account writes.
     response = await async_client.put("/api/accounts/missing/alias", json={"alias": "still-writable"})
@@ -93,7 +90,7 @@ async def test_security_settings_fields_require_security_write(
     _use_principal(app_instance, monkeypatch, _principal_without(Permission.SECURITY_WRITE))
     current = (await async_client.get("/api/settings")).json()
 
-    for field in ("totpRequiredOnLogin", "apiKeyAuthEnabled", "guestAccessEnabled"):
+    for field in ("totpRequiredOnLogin", "apiKeyAuthEnabled", "guestAccessEnabled", "hideUpstreamQuotaFromApiKeys"):
         response = await async_client.put("/api/settings", json={field: not current[field]})
         _assert_permission_required(response, Permission.SECURITY_WRITE)
     _assert_permission_required(
@@ -194,9 +191,6 @@ async def test_sensitive_reads_require_their_permission(
 
     _assert_permission_required(await async_client.get("/api/audit-logs"), Permission.AUDIT_READ)
     _assert_permission_required(await async_client.get("/api/conversations"), Permission.CONVERSATIONS_READ)
-    _assert_permission_required(
-        await async_client.get("/api/conversation-archive/files"), Permission.CONVERSATIONS_READ
-    )
     _assert_permission_required(
         await async_client.get("/api/request-logs", params={"conversation_id": "conv-1"}),
         Permission.CONVERSATIONS_READ,

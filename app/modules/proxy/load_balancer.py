@@ -134,6 +134,10 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     UnboundSelectionRequest,
     run_unbound_selection_path,
 )
+from app.modules.proxy._load_balancer.usage_cap_selection import (
+    filter_usage_capped_states,
+    usage_capped_account_ids,
+)
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.account_eligibility import (
     account_access_token_expires_at,
@@ -152,7 +156,6 @@ from app.modules.proxy.fair_share import (
     evaluate_stream_fair_share,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
-from app.modules.proxy.usage_caps import filter_accounts_by_usage_caps
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
@@ -244,7 +247,7 @@ class _SelectionInputs(SelectionInputsProtocol):
     persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
     quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
-    usage_cap_filtered_account_ids: frozenset[str] = frozenset()
+    usage_capped_account_ids: frozenset[str] = frozenset()
 
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]:
@@ -618,10 +621,7 @@ class LoadBalancer:
                 authorized_accounts = [
                     account for account in selection_inputs.accounts if bool(account.security_work_authorized)
                 ]
-                pre_cap_account_ids = {account.id for account in selection_inputs.accounts} | set(
-                    selection_inputs.usage_cap_filtered_account_ids
-                )
-                if pre_cap_account_ids and not (pre_cap_account_ids & security_authorized_account_ids):
+                if selection_inputs.accounts and not authorized_accounts:
                     return _SelectionInputs(
                         accounts=[],
                         latest_primary={},
@@ -634,35 +634,14 @@ class LoadBalancer:
                         error_message="No accounts marked as authorized for security work",
                         error_code="no_security_work_authorized_accounts",
                     )
-                selection_inputs = _SelectionInputs(
+                selection_inputs = replace(
+                    selection_inputs,
                     accounts=authorized_accounts,
-                    latest_primary=selection_inputs.latest_primary,
-                    latest_secondary=selection_inputs.latest_secondary,
-                    latest_monthly=selection_inputs.latest_monthly,
                     continuity_owner_candidates=authorized_owner_candidates,
                     sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
-                    quota_planner_settings=selection_inputs.quota_planner_settings,
-                    runtime_accounts=selection_inputs.runtime_accounts,
-                    error_message=selection_inputs.error_message,
-                    error_code=selection_inputs.error_code,
-                    ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
-                    ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
-                    persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
-                    routing_policy_override=selection_inputs.routing_policy_override,
-                    quota_admitted_catalog_omission_account_ids=(
-                        selection_inputs.quota_admitted_catalog_omission_account_ids
-                    ),
-                    usage_cap_filtered_account_ids=selection_inputs.usage_cap_filtered_account_ids,
                 )
             if excluded_ids and selection_inputs.accounts:
                 filtered_accounts = [account for account in selection_inputs.accounts if account.id not in excluded_ids]
-                if not filtered_accounts and selection_inputs.usage_cap_filtered_account_ids - excluded_ids:
-                    return replace(
-                        selection_inputs,
-                        accounts=[],
-                        error_message="Account usage cap reached",
-                        error_code="account_usage_cap_reached",
-                    )
                 if require_security_work_authorized and not filtered_accounts:
                     return _SelectionInputs(
                         accounts=[],
@@ -678,27 +657,13 @@ class LoadBalancer:
                         error_message="No accounts marked as authorized for security work",
                         error_code="no_security_work_authorized_accounts",
                     )
-                selection_inputs = _SelectionInputs(
+                selection_inputs = replace(
+                    selection_inputs,
                     accounts=filtered_accounts,
-                    latest_primary=selection_inputs.latest_primary,
-                    latest_secondary=selection_inputs.latest_secondary,
-                    latest_monthly=selection_inputs.latest_monthly,
                     continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
                     sticky_mutation_authority_account_ids=(
                         selection_inputs.effective_sticky_mutation_authority_account_ids
                     ),
-                    quota_planner_settings=selection_inputs.quota_planner_settings,
-                    runtime_accounts=selection_inputs.runtime_accounts,
-                    error_message=selection_inputs.error_message,
-                    error_code=selection_inputs.error_code,
-                    ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
-                    ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
-                    persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
-                    routing_policy_override=selection_inputs.routing_policy_override,
-                    quota_admitted_catalog_omission_account_ids=(
-                        selection_inputs.quota_admitted_catalog_omission_account_ids
-                    ),
-                    usage_cap_filtered_account_ids=selection_inputs.usage_cap_filtered_account_ids,
                 )
             if required_continuity_owner:
                 assert required_account_id is not None
@@ -756,6 +721,16 @@ class LoadBalancer:
             or (sticky_key is not None and sticky_kind is not None)
         )
         if needs_owner_lookups:
+            # One shared session serves the legacy/seed/first-sticky owner
+            # lookups. The SELECTs stay separate on purpose so the per-source
+            # predicate semantics of get_account_id_and_abandonment (tombstone
+            # visibility, max_age handling) are untouched; the saving is the
+            # 2-3 extra pool checkouts + session create/teardown lifecycles
+            # per request. Each later source still starts a fresh read
+            # transaction (release_read_snapshot): on SQLite/WAL the shared
+            # session would otherwise pin one snapshot at the first SELECT
+            # and hide a hard sticky or seed owner committed concurrently
+            # between the reads, letting selection overwrite that mapping.
             async with self._repo_factory() as repos:
                 owner_snapshot_pinned = False
                 if legacy_sticky_key is not None:
@@ -778,6 +753,9 @@ class LoadBalancer:
                     if required_account_id is not None and (
                         legacy_existing_account_id is not None and legacy_existing_account_id != required_account_id
                     ):
+                        # The required owner came from a file/response/bridge index,
+                        # while the raw row may be legacy turn-state ownership. Neither
+                        # source can be discarded or rewritten to resolve a conflict.
                         return AccountSelection(
                             account=None,
                             error_message="Account-owned continuity sources conflict; retry the logical turn",
@@ -795,12 +773,20 @@ class LoadBalancer:
                 if sticky_key is not None and sticky_kind is not None:
                     if owner_snapshot_pinned:
                         await repos.sticky_sessions.release_read_snapshot()
+                    # First-iteration owner read for run_sticky_selection_path,
+                    # hoisted here so it shares this session. The selection
+                    # loop consumes it exactly once; every retry (including
+                    # post-reset attempts) still re-reads fresh ownership
+                    # evidence through its own repo bundle.
                     initial_sticky_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
                         sticky_key,
                         kind=sticky_kind,
                         max_age_seconds=sticky_max_age_seconds,
                         continuity_source=sticky_source,
                     )
+        # Resolve uniqueness from the model/API-key/security-scoped pool before
+        # runtime health, budget, or cap filtering. Transient pressure cannot
+        # prove that another candidate does not own an upstream conversation.
         if (
             require_unambiguous_account
             and sticky_key is None
@@ -812,6 +798,9 @@ class LoadBalancer:
                 error_message=_AMBIGUOUS_CONVERSATION_OWNER_MESSAGE,
                 error_code=_AMBIGUOUS_CONVERSATION_OWNER_CODE,
             )
+        # Transient routing errors are secondary to ownership ambiguity. An
+        # empty additional-quota pool cannot prove which account owns a
+        # conversation that was ambiguous before that filter ran.
         if selection_inputs.error_code is not None and not selection_inputs.accounts:
             return AccountSelection(
                 account=None,
@@ -1309,9 +1298,12 @@ class LoadBalancer:
                     _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
                 )
                 return selection_inputs
+            # These share one AsyncSession: concurrent execution on a single
+            # session is unsafe (asyncpg) and gains nothing — the driver
+            # serializes statements per connection anyway.
             standard_latest_primary = await repos.usage.latest_by_account()
             standard_latest_secondary = await repos.usage.latest_by_account(window="secondary")
-            accounts, usage_cap_filtered_account_ids = filter_accounts_by_usage_caps(
+            capped_account_ids = usage_capped_account_ids(
                 accounts, standard_latest_primary, standard_latest_secondary, now=self._clock.time()
             )
             latest_monthly = await repos.usage.latest_by_account(window="monthly")
@@ -1363,11 +1355,7 @@ class LoadBalancer:
                 persist_standard_quota_status=True,
                 routing_policy_override=routing_policy_override,
                 quota_admitted_catalog_omission_account_ids=quota_admitted_catalog_omission_account_ids,
-                usage_cap_filtered_account_ids=usage_cap_filtered_account_ids,
-                error_message="Account usage cap reached"
-                if accounts == [] and usage_cap_filtered_account_ids
-                else None,
-                error_code="account_usage_cap_reached" if accounts == [] and usage_cap_filtered_account_ids else None,
+                usage_capped_account_ids=capped_account_ids,
             )
             await self._selection_inputs_cache.set(
                 _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
@@ -1413,6 +1401,7 @@ class LoadBalancer:
                 ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
                 encryptor=self._encryptor,
             )
+            states = filter_usage_capped_states(states, selection_inputs.usage_capped_account_ids)
             selection_states = _filter_states_for_account_caps(
                 states,
                 lease_kind=lease_kind,
@@ -2985,7 +2974,7 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         quota_admitted_catalog_omission_account_ids=frozenset(
             selection_inputs.quota_admitted_catalog_omission_account_ids
         ),
-        usage_cap_filtered_account_ids=frozenset(selection_inputs.usage_cap_filtered_account_ids),
+        usage_capped_account_ids=frozenset(selection_inputs.usage_capped_account_ids),
     )
 
 

@@ -36,6 +36,11 @@ from app.modules.proxy._load_balancer.types import (
     ProbeReservation,
     RuntimeState,
 )
+from app.modules.proxy._load_balancer.usage_cap_selection import (
+    USAGE_CAP_ERROR_CODE,
+    USAGE_CAP_ERROR_MESSAGE,
+    filter_usage_capped_states,
+)
 from app.modules.proxy.account_cache import AccountSelectionCache
 from app.modules.proxy.fair_share import (
     API_KEY_STREAM_FAIR_SHARE_ERROR_CODE,
@@ -154,26 +159,28 @@ async def run_unbound_selection_path(
                 required_account_id=required_account_id,
                 redact_sensitive_details=redact_sensitive_details,
             )
+            usage_states = filter_usage_capped_states(states, selection_inputs.usage_capped_account_ids)
+            usage_cap_exhausted = bool(states and not usage_states)
             effective_routing_costs = (
                 routing_costs_by_account_id
                 if routing_costs_by_account_id is not None
                 else build_routing_costs(
                     settings=selection_inputs.quota_planner_settings,
-                    states=states,
+                    states=usage_states,
                     now=datetime.fromtimestamp(selection_now, timezone.utc),
                 )
             )
             fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
                 api_key_id=api_key_id,
                 lease_kind=lease_kind,
-                candidate_account_ids=[state.account_id for state in states],
+                candidate_account_ids=[state.account_id for state in usage_states],
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
                 threshold_pct=fair_share_threshold_pct,
                 redact_sensitive_details=redact_sensitive_details,
             )
             selection_states = _filter_states_for_account_caps(
-                states,
+                usage_states,
                 lease_kind=lease_kind,
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
@@ -184,13 +191,18 @@ async def run_unbound_selection_path(
                     traffic_class=traffic_class,
                     now=selection_now,
                 )
-            if fair_share_denial is not None:
+            if usage_cap_exhausted:
+                selection_error_code = USAGE_CAP_ERROR_CODE
+                selection_resets_at = None
+                error_message = USAGE_CAP_ERROR_MESSAGE
+                result = SelectionResult(None, error_message, error_code=USAGE_CAP_ERROR_CODE)
+            elif fair_share_denial is not None:
                 # Gate and acquire share this lock section, so the denial is
                 # atomic — no commit-phase re-check is needed on this path.
                 selection_error_code = API_KEY_STREAM_FAIR_SHARE_ERROR_CODE
                 error_message = fair_share_denial_message(fair_share_denial)
                 result = SelectionResult(None, error_message)
-            elif not selection_states and states:
+            elif not selection_states and usage_states:
                 selection_error_code = _account_cap_error_code(lease_kind)
                 selection_resets_at = None
                 error_message = _account_cap_error_message(lease_kind, caps)
@@ -199,7 +211,7 @@ async def run_unbound_selection_path(
                     "Account cap exhausted during selection lease_kind=%s reason=%s candidates=%s",
                     lease_kind,
                     selection_error_code,
-                    len(states),
+                    len(usage_states),
                 )
                 _record_account_cap_rejection(lease_kind)
             else:
@@ -220,7 +232,7 @@ async def run_unbound_selection_path(
                         ignore_standard_quota=False,
                         routing_costs_by_account_id=effective_routing_costs,
                         allow_usage_exhaustion_error=allow_usage_exhaustion_error,
-                        usage_exhaustion_states=states,
+                        usage_exhaustion_states=usage_states,
                     )
 
                 # Fresh admissions prefer accounts upstream is not currently
@@ -244,10 +256,10 @@ async def run_unbound_selection_path(
                     result.account is None
                     and result.error_code is None
                     and lease_kind is not None
-                    and len(selection_states) < len(states)
+                    and len(selection_states) < len(usage_states)
                     and any(
                         state.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
-                        for state in states
+                        for state in usage_states
                         if state not in selection_states
                     )
                 ):

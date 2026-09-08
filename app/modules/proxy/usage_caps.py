@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 from app.core import usage as usage_core
 from app.db.models import Account, UsageHistory
 from app.modules.usage.mappers import usage_history_to_window_row
@@ -44,19 +42,3 @@ def reached_usage_cap_resets(
         and entry.used_percent >= cap
         and (entry.reset_at is None or entry.reset_at > current)
     )
-
-
-def filter_accounts_by_usage_caps(
-    accounts: list[Account],
-    primary: Mapping[str, UsageHistory],
-    secondary: Mapping[str, UsageHistory],
-    *,
-    now: float,
-) -> tuple[list[Account], frozenset[str]]:
-    """Return cap-eligible accounts and the account IDs removed by caps."""
-    capped_ids = frozenset(
-        account.id
-        for account in accounts
-        if reached_usage_cap_resets(account, primary.get(account.id), secondary.get(account.id), now=now)
-    )
-    return [account for account in accounts if account.id not in capped_ids], capped_ids

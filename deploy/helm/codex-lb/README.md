@@ -597,7 +597,7 @@ HTTPRoute namespace according to the selected Gateway implementation.
 
 For application-specific Gateway setup, see the
 [Kubernetes deployment guide](../../../docs/deployment/kubernetes.md#application-specific-gateway)
-and the [owning OpenSpec change](../../../openspec/changes/create-application-gateway/).
+and the owning OpenSpec capability, [`deployment-networking`](../../../openspec/specs/deployment-networking/spec.md).
 
 ### nginx annotations and responses sticky routing
 

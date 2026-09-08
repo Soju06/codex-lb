@@ -8,10 +8,7 @@ user's experience.
 These principles are normative. Reviewers apply them as merge gates (see
 [Simplicity gates](.github/CONTRIBUTING.md#simplicity-gates)); the
 machine-checkable spec is `openspec/specs/contribution-simplicity/spec.md`
-(created when the codify-simplicity-principles change is archived; until
-then the delta spec lives under
-`openspec/changes/codify-simplicity-principles/`) and this file is its
-human-readable rendering.
+and this file is its human-readable rendering.
 
 ## P1 — One-click setup is sacred
 
@@ -64,12 +61,10 @@ human-readable rendering.
 |-----------|--------------------------|----------------------|
 | P1 defaults-off | New feature works untouched with zero config; no new required setup step | CONTRIBUTING [Simplicity gates](.github/CONTRIBUTING.md#simplicity-gates); PR template "Simplicity" |
 | P2 settings justified | PR body names each new setting and why it can't be a default | PR template "Simplicity" |
-| P3 budgets | README sections, `.env.example`, dashboard core nav within `.github/simplicity-budgets.toml` | CI budget check (CI-enforced as of the `ci-simplicity-budgets` change; reviewer-enforced before that); `simplicity-budget-approved` label for exceptions |
+| P3 budgets | README sections, `.env.example`, dashboard core nav within `.github/simplicity-budgets.toml` | CI budget check (`.github/workflows/simplicity-budgets.yml`); `simplicity-budget-approved` label for exceptions |
 | P4 docs placement | Feature docs land in `docs/` + OpenSpec, not new README sections | CONTRIBUTING [Simplicity gates](.github/CONTRIBUTING.md#simplicity-gates) |
 | P5 screenshots | Before/after screenshots for dashboard-visible changes | PR template "Screenshots / output" |
 
 Rationale, the erosion metrics that motivated codifying these rules, and a
 worked example live in
-`openspec/specs/contribution-simplicity/context.md` (change-level context
-until the change is archived:
-`openspec/changes/codify-simplicity-principles/context.md`).
+`openspec/specs/contribution-simplicity/context.md`.

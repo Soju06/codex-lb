@@ -27,9 +27,9 @@ that's the easiest first contribution.
 
 ## Code of conduct
 
-Participation in this project is governed by the
-[Contributor Covenant Code of Conduct](../CODE_OF_CONDUCT.md). By participating,
-you agree to uphold it.
+This project does not ship a formal code of conduct document. Be respectful
+and constructive in issues, discussions, and reviews; maintainers may moderate
+or remove content that is not.
 
 ## Ways to contribute
 
@@ -243,10 +243,9 @@ Before a PR is squash-merged into `main`:
 ### Simplicity gates
 
 These implement [PRINCIPLES.md](../PRINCIPLES.md); the normative spec is
-`openspec/specs/contribution-simplicity/spec.md` (created when the
-codify-simplicity-principles change is archived). Reviewers apply them to
-every PR (budget checks are enforced by CI as of the
-`ci-simplicity-budgets` change; reviewer-enforced before that):
+`openspec/specs/contribution-simplicity/spec.md`. Reviewers apply them to
+every PR (budget checks are enforced by CI via
+`.github/workflows/simplicity-budgets.yml`):
 
 1. **New features default to off or zero-config.** No new required
    setup step (env var, migration action, external account, manual
@@ -256,11 +255,9 @@ every PR (budget checks are enforced by CI as of the
    The PR body answers "why can't this be a hardcoded default?" for
    each new setting; internals-only knobs stay out of `.env.example`.
 3. **README, `.env.example`, and dashboard nav are budgeted.** The
-   caps live in `.github/simplicity-budgets.toml` (introduced by the
-   `ci-simplicity-budgets` change; until that manifest exists on
-   `main`, reviewers judge growth of these surfaces directionally
-   rather than against numeric caps). Exceeding a cap requires the
-   maintainer-applied `simplicity-budget-approved` label before merge.
+   caps live in `.github/simplicity-budgets.toml`. Exceeding a cap
+   requires the maintainer-applied `simplicity-budget-approved` label
+   before merge.
 4. **Feature docs go to `docs/` + OpenSpec, never new README
    sections.** Each spec-governed docs page links back to its
    `openspec/specs/<capability>/` entry.
@@ -371,8 +368,7 @@ dataset — they run at startup and block serving until they finish. Changelog
 titles do not reveal backfills.
 
 The normative requirements live in
-[`openspec/specs/release-management/`](../openspec/specs/release-management/)
-(delta: `openspec/changes/require-beta-soak-before-stable/`).
+[`openspec/specs/release-management/`](../openspec/specs/release-management/).
 
 ## Security issues
 

@@ -30,6 +30,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy._load_balancer.overload_backoff import (
     filter_overload_backoff_candidates,
     overload_backoff_active,
+    overload_isolation_active,
     sticky_owner_isolation_reroute_pool,
 )
 from app.modules.proxy._load_balancer.types import (
@@ -95,6 +96,7 @@ SelectionInputsT = TypeVar("SelectionInputsT", bound=SelectionInputsProtocol)
 
 class StickySelectionOwner(Protocol):
     _clock: Clock
+    _runtime: dict[str, RuntimeState]
     _runtime_lock: asyncio.Lock
     _repo_factory: ProxyRepoFactory
 
@@ -507,6 +509,11 @@ async def run_sticky_selection_path(
                 threshold_pct=fair_share_threshold_pct,
                 redact_sensitive_details=redact_sensitive_details,
             )
+            # An isolated soft owner may be released to a sibling by the
+            # overload isolation stage (see ``_run_select_with_stickiness``).
+            owner_overload_isolated = isinstance(sticky_existing_account_id, str) and overload_isolation_active(
+                owner._runtime.get(sticky_existing_account_id), owner._clock.time()
+            )
             if hard_sticky:
                 # A resolved hard Codex mapping is an ownership
                 # constraint, not a preference. Scope, exclusions,
@@ -519,6 +526,25 @@ async def run_sticky_selection_path(
                 # soft hint; the authoritative preferred-owner path
                 # normally bypasses it.
                 selection_states = states
+                if owner_overload_isolated:
+                    # The owner keeps its cap exemption, but a sibling it
+                    # may be released to must pass the caps: otherwise the
+                    # reroute could pick a saturated sibling that lease
+                    # admission then rejects while the owner had capacity.
+                    cap_eligible_ids = {
+                        state.account_id
+                        for state in _filter_states_for_account_caps(
+                            states,
+                            lease_kind=lease_kind,
+                            caps=caps,
+                            stream_reserve_slots=stream_reserve_slots,
+                        )
+                    }
+                    selection_states = [
+                        state
+                        for state in states
+                        if state.account_id == sticky_existing_account_id or state.account_id in cap_eligible_ids
+                    ]
             else:
                 selection_states = _filter_states_for_account_caps(
                     states,
@@ -538,12 +564,18 @@ async def run_sticky_selection_path(
                     stream_reserve_slots=0,
                 )
                 selection_states = response_create_states or selection_states
+            # Cap spillover is request-local (the mapping is preserved so the
+            # session returns to its owner once the cap clears) -- unless the
+            # owner is also isolated for overload, in which case the fallback
+            # is rebound like any isolation reroute instead of bouncing the
+            # session across siblings turn after turn.
             preserve_existing_mapping = (
                 bare_session_key
                 and isinstance(sticky_existing_account_id, str)
                 and (
                     (
                         cap_spillover_allowed
+                        and not owner_overload_isolated
                         and any(state.account_id == sticky_existing_account_id for state in states)
                         and not any(state.account_id == sticky_existing_account_id for state in selection_states)
                     )

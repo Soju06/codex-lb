@@ -22,3 +22,8 @@
 
 - [x] 4.1 The fresh-thread process-session preference is bypassed only when the strategy actually selects an overload-free sibling; an unselectable sibling (cooldown / exhausted) keeps the preference. Request-path regression through `LoadBalancer.select_account` with a thread affinity under `sequential_drain`.
 - [x] 4.2 The `sticky_owner_overload_isolation_reroute` diagnostic carries no account identifiers (sticky kind and overload-free pool size only), so private realtime redaction cannot be violated from a path without the privacy flag.
+
+## 5. Review follow-ups (local codex round 2)
+
+- [x] 5.1 Bare `codex_session` owner with cap spillover disabled: the owner keeps its cap exemption, but the isolation reroute may only release it to a sibling that passes the account caps (a saturated sibling would be rejected at lease admission while the owner had capacity). Request-path regression through `LoadBalancer.select_account` with a saturated sibling.
+- [x] 5.2 Bare `codex_session` owner that is both at cap (spillover enabled) and isolated: the fallback is rebound to the sibling instead of the request-local spillover that preserves the mapping, so later turns do not bounce across siblings. Request-path regression contrasting capped-only (mapping preserved) with capped-and-isolated (rebound).

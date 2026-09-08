@@ -668,3 +668,98 @@ async def test_fresh_thread_process_preference_bypass_never_fails_a_request_the_
     )
     assert moved.account is not None, moved.error_message
     assert moved.account.id == sibling.id
+
+
+def _isolate(balancer: LoadBalancer, account_id: str) -> None:
+    balancer._runtime[account_id] = _isolated_runtime(balancer._clock.time())
+
+
+@pytest.mark.asyncio
+async def test_isolated_bare_session_owner_is_kept_when_the_only_sibling_is_at_cap_and_spillover_is_off() -> None:
+    """Request path: with cap spillover disabled the owner keeps its cap
+    exemption and the isolation reroute must not pick a saturated sibling
+    that lease admission then rejects (``account_stream_cap``) while the
+    isolated owner still had capacity."""
+    from tests.unit.test_load_balancer_concurrency import (
+        _codex_session_selection_key,
+        _make_cap_spillover_balancer,
+    )
+
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("iso-cap-off")
+    assert alternate is not None
+    _isolate(balancer, owner.id)
+    saturated = [await balancer.acquire_account_lease(alternate.id, kind="stream") for _ in range(8)]
+    raw_session = "bare-session-iso-cap-off"
+    sticky_repo.account_ids_by_key = {_codex_session_selection_key(raw_session): owner.id}
+
+    selected = await balancer.select_account(
+        sticky_key=_codex_session_selection_key(raw_session),
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        spill_bare_session_on_account_cap=False,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+    assert selected.account is not None, selected.error_message
+    assert selected.account.id == owner.id
+    assert sticky_repo.upserts == []
+    for lease in [*saturated, selected.lease]:
+        await balancer.release_account_lease(lease)
+
+    # With capacity on the sibling the isolated owner is released and rebound.
+    moved = await balancer.select_account(
+        sticky_key=_codex_session_selection_key(raw_session),
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        spill_bare_session_on_account_cap=False,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+    assert moved.account is not None, moved.error_message
+    assert moved.account.id == alternate.id
+    assert any(account_id == alternate.id for _, account_id, _ in sticky_repo.upserts)
+    await balancer.release_account_lease(moved.lease)
+
+
+@pytest.mark.asyncio
+async def test_isolated_and_capped_bare_session_owner_is_rebound_instead_of_request_local_spillover() -> None:
+    """Request path: cap spillover alone preserves the mapping (the session
+    returns to its owner when the cap clears); an owner that is also isolated
+    is rebound to the sibling so later turns do not bounce across accounts."""
+    from tests.unit.test_load_balancer_concurrency import (
+        _codex_session_selection_key,
+        _make_cap_spillover_balancer,
+    )
+
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("iso-cap-spill")
+    assert alternate is not None
+    saturated = [await balancer.acquire_account_lease(owner.id, kind="stream") for _ in range(8)]
+    raw_session = "bare-session-iso-cap-spill"
+    sticky_repo.account_ids_by_key = {_codex_session_selection_key(raw_session): owner.id}
+
+    def _select():
+        return balancer.select_account(
+            sticky_key=_codex_session_selection_key(raw_session),
+            sticky_kind=StickySessionKind.CODEX_SESSION,
+            sticky_source="session_header",
+            legacy_sticky_key=raw_session,
+            spill_bare_session_on_account_cap=True,
+            routing_strategy="usage_weighted",
+            lease_kind="stream",
+        )
+
+    # Capped but not isolated: request-local spillover, mapping preserved (unchanged behavior).
+    spilled = await _select()
+    assert spilled.account is not None and spilled.account.id == alternate.id
+    assert sticky_repo.upserts == []
+    await balancer.release_account_lease(spilled.lease)
+
+    # Capped and isolated: the fallback is rebound to the sibling.
+    _isolate(balancer, owner.id)
+    rebound = await _select()
+    assert rebound.account is not None and rebound.account.id == alternate.id
+    assert any(account_id == alternate.id for _, account_id, _ in sticky_repo.upserts)
+    for lease in [*saturated, rebound.lease]:
+        await balancer.release_account_lease(lease)

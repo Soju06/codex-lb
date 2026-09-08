@@ -29,6 +29,17 @@
   Ruff, changed-file ty, architecture/cancellation/timing checks passed.
 - Strict OpenSpec delta validation passed before archival.
 
+## Integration with current main
+
+- Merged main through `9703ef9b1`, preserving the byte-bounded stream queue
+  and the scheduling opportunity after every accepted native event.
+- The large compact result regression fixes its queue capacity at 64 so it
+  continues to exercise consumer progress after the default capacity increased.
+- Combined adapter/client/shared fixture tests: 125 passed; compact route and
+  packaging/framing fixture tests: 62 passed; real-worker integration: 119 passed.
+- Release workspace tests: 21 passed. Release build, Ruff, changed-file typing,
+  architecture/cancellation/timing checks, and all 58 strict specs passed.
+
 ## Performance scope
 
 The reproducible benchmark is retained under

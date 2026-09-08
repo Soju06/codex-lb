@@ -203,6 +203,69 @@ def _stream(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("response_kind", ["sse", "json", "error"])
+async def test_buffered_native_burst_preserves_responses_result(
+    tmp_path: Path, routed: bool, response_kind: str
+) -> None:
+    handshake = json.loads(
+        (Path(__file__).resolve().parents[2] / "crates/codex-lb-protocol/tests/fixtures/handshake-v1.json").read_text()
+    )
+    terminal = {"type": "response.completed", "response": {"id": "burst-result", "output": []}}
+    expected = [{"type": "response.output_text.delta", "delta": str(index)} for index in range(256)] + [terminal]
+    error = {"error": {"message": "burst error " * 256, "type": "invalid_request_error", "code": "burst_error"}}
+    body = json.dumps(error if response_kind == "error" else terminal["response"])
+    helper = tmp_path / "buffered-helper"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import base64, json, sys\n"
+        f"handshake = {handshake!r}\n"
+        "assert json.loads(sys.stdin.readline()) == handshake['client_hello']\n"
+        "print(json.dumps(handshake['server_hello']), flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    command = json.loads(line)\n"
+        "    request_id = command['request_id']\n"
+        "    if command['type'] == 'cancel':\n"
+        "        print(json.dumps({'type': 'cancelled', 'request_id': request_id}), flush=True)\n"
+        "        continue\n"
+        f"    kind, body, payloads = {response_kind!r}, {body!r}, {expected!r}\n"
+        "    events = [{'type': 'head', 'status': 429 if kind == 'error' else 200,\n"
+        "               'http_version': 'HTTP/2.0', 'headers': [['content-type',\n"
+        "               'text/event-stream' if kind == 'sse' else 'application/json']]}]\n"
+        "    if kind == 'sse':\n"
+        "        events.extend({'type': 'sse', 'text': 'data: ' + json.dumps(payload) + '\\n\\n',\n"
+        "                       'more': False} for payload in payloads)\n"
+        "    else:\n"
+        "        body = body.encode() + b' ' * 256\n"
+        "        events.extend({'type': 'chunk', 'data': base64.b64encode(body[i:i+1]).decode()}\n"
+        "                      for i in range(len(body)))\n"
+        "    events.append({'type': 'end'})\n"
+        "    sys.stdout.write(''.join(json.dumps(dict(event, request_id=request_id)) + '\\n' for event in events))\n"
+        "    sys.stdout.flush()\n"
+    )
+    helper.chmod(0o700)
+    client = SubprocessNativeEgressClient(helper)
+    try:
+        stream = _stream(
+            "http://127.0.0.1:12345",
+            client,
+            "buffered-burst",
+            stream=response_kind != "json",
+            routed=routed,
+            raise_for_status=True,
+        )
+        if response_kind == "error":
+            with pytest.raises(ProxyResponseError) as exc_info:
+                await asyncio.wait_for(_collect(stream), timeout=5)
+            assert exc_info.value.status_code == 429
+            assert exc_info.value.payload == error
+        else:
+            result = await asyncio.wait_for(_collect(stream), timeout=5)
+            assert [_payload(event) for event in result] == (expected if response_kind == "sse" else [terminal])
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_native_proxy_frames_large_non_utf8_sse_without_python_scanning(
     monkeypatch: pytest.MonkeyPatch,
     native_worker: SubprocessNativeEgressClient,
@@ -783,6 +846,7 @@ async def test_native_compact_large_result_is_fragmented_and_stops_before_late_f
     native_worker: SubprocessNativeEgressClient,
     routed: bool,
 ) -> None:
+    monkeypatch.setattr(native_module, "_NATIVE_STREAM_QUEUE_LIMIT", 64)
     items = [{"index": i, "padding": "한글" * 4096, "integer": 10**70} for i in range(96)]
     blocks = [
         json.dumps({"type": "response.output_item.done", "output_index": i, "item": item}, ensure_ascii=False)

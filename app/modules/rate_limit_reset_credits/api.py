@@ -46,7 +46,7 @@ from app.db.models import Account, AccountStatus
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.schemas import AccountUsageResetConsumeRequest
-from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.account_cache import get_account_selection_cache, refresh_usage_cap_caches_after_write
 from app.modules.rate_limit_reset_credits.redeem_coordination import (
     RedeemClaimTimeoutError,
     acquire_redeem_claim,
@@ -461,7 +461,7 @@ def _build_refresh_usage_callback(context: AccountsContext) -> RefreshUsageFn | 
         refreshed = await usage_updater.force_refresh(account)
         if not refreshed:
             raise RuntimeError(f"Forced usage refresh returned no update for account {account.id}")
-        get_account_selection_cache().invalidate()
+        await refresh_usage_cap_caches_after_write()
 
     return refresh_usage
 

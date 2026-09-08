@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from app.core import usage as usage_core
 from app.db.models import Account, UsageHistory
 from app.modules.usage.mappers import usage_history_to_window_row
@@ -21,6 +23,8 @@ def reached_usage_cap_resets(
         usage_history_to_window_row(secondary) if secondary is not None else None,
     ):
         secondary, primary = primary, None
+    if (usage_core.capacity_for_plan(account.plan_type, "primary") or 0) <= 0:
+        primary = None
     if (
         primary is not None
         and secondary is not None
@@ -40,3 +44,19 @@ def reached_usage_cap_resets(
         and entry.used_percent >= cap
         and (entry.reset_at is None or entry.reset_at > current)
     )
+
+
+def filter_accounts_by_usage_caps(
+    accounts: list[Account],
+    primary: Mapping[str, UsageHistory],
+    secondary: Mapping[str, UsageHistory],
+    *,
+    now: float,
+) -> tuple[list[Account], bool]:
+    """Return cap-eligible accounts and whether caps removed the entire pool."""
+    available = [
+        account
+        for account in accounts
+        if not reached_usage_cap_resets(account, primary.get(account.id), secondary.get(account.id), now=now)
+    ]
+    return available, bool(accounts and not available)

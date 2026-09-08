@@ -152,7 +152,7 @@ from app.modules.proxy.fair_share import (
     evaluate_stream_fair_share,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
-from app.modules.proxy.usage_caps import reached_usage_cap_resets
+from app.modules.proxy.usage_caps import filter_accounts_by_usage_caps
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
@@ -1322,16 +1322,9 @@ class LoadBalancer:
                 return selection_inputs
             standard_latest_primary = await repos.usage.latest_by_account()
             standard_latest_secondary = await repos.usage.latest_by_account(window="secondary")
-            accounts = [
-                account
-                for account in accounts
-                if not reached_usage_cap_resets(
-                    account,
-                    standard_latest_primary.get(account.id),
-                    standard_latest_secondary.get(account.id),
-                    now=self._clock.time(),
-                )
-            ]
+            accounts, all_usage_capped = filter_accounts_by_usage_caps(
+                accounts, standard_latest_primary, standard_latest_secondary, now=self._clock.time()
+            )
             latest_monthly = await repos.usage.latest_by_account(window="monthly")
             if effective_limit_name:
                 model_allowed_plans = get_model_registry().plan_types_for_model(model) if model else None
@@ -1381,6 +1374,8 @@ class LoadBalancer:
                 persist_standard_quota_status=True,
                 routing_policy_override=routing_policy_override,
                 quota_admitted_catalog_omission_account_ids=quota_admitted_catalog_omission_account_ids,
+                error_message="Account usage cap reached" if all_usage_capped else None,
+                error_code="account_usage_cap_reached" if all_usage_capped else None,
             )
             await self._selection_inputs_cache.set(
                 _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation

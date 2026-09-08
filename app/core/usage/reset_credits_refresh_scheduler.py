@@ -25,7 +25,7 @@ from app.db.models import Account, AccountStatus
 from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.account_cache import refresh_usage_cap_caches_after_write
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
     get_rate_limit_reset_credits_store,
@@ -400,7 +400,7 @@ async def _refresh_usage_after_auto_redeem(account: Account) -> None:
         ).force_refresh(current, ignore_refresh_disabled=True)
         if not refreshed:
             raise RuntimeError(f"Forced usage refresh returned no update for account {account.id}")
-        get_account_selection_cache().invalidate()
+        await refresh_usage_cap_caches_after_write()
 
 
 def build_rate_limit_reset_credits_scheduler() -> RateLimitResetCreditsRefreshScheduler:

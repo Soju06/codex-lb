@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -17,6 +18,9 @@ from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal, close_session
 from app.modules.proxy.usage_caps import reached_usage_cap_resets
 from app.modules.usage.repository import UsageRepository
+
+logger = logging.getLogger(__name__)
+
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -236,6 +240,16 @@ def get_routing_availability_cache(*, clock: Clock | None = None) -> RoutingAvai
     if clock is not None:
         _routing_availability_cache._clock = clock
     return _routing_availability_cache
+
+
+async def refresh_usage_cap_caches_after_write() -> None:
+    """Refresh fresh and reused-turn cap admission without failing settlement."""
+    _account_selection_cache.invalidate()
+    try:
+        await _routing_availability_cache.refresh_usage_caps_from_db()
+    except Exception:
+        logger.warning("usage cap cache refresh after persisted usage failed", exc_info=True)
+    _request_account_routing_bump()
 
 
 def _request_account_routing_bump() -> None:

@@ -71,6 +71,7 @@ from app.modules.proxy.account_cache import (
     get_routing_availability_cache,
     mark_account_routing_unavailable,
     propagate_account_routing_change,
+    refresh_usage_cap_caches_after_write,
 )
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 from app.modules.usage.additional_quota_keys import (
@@ -350,7 +351,10 @@ class AccountsService:
         usage_written = False
         if upstream_response.code in ("reset", "already_redeemed") and self._usage_repo and self._usage_updater:
             usage_written = await self._usage_updater.force_refresh(account, ignore_refresh_disabled=True)
-            get_account_selection_cache().invalidate()
+            if usage_written:
+                await refresh_usage_cap_caches_after_write()
+            else:
+                get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account
         primary_after, secondary_after = await self._latest_usage_percents(account_id)

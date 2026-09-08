@@ -107,6 +107,17 @@ describe("buildDepletionView", () => {
       riskLevel: "critical",
     });
   });
+
+  it("scales the safe line to the usable capped capacity", () => {
+    const depletion: Depletion = {
+      risk: 0.5,
+      riskLevel: "warning",
+      burnRate: 1.5,
+      safeUsagePercent: 70,
+    };
+
+    expect(buildDepletionView(depletion, 100_000, 80_000)?.safePercent).toBe(87.5);
+  });
 });
 
 function remainingItem(overrides: Partial<RemainingItem> & Pick<RemainingItem, "accountId">): RemainingItem {
@@ -822,6 +833,49 @@ describe("buildDashboardView", () => {
     expect(pace?.addProAccounts).toBe(2);
     expect(pace?.status).toBe("on_track");
     expect(pace?.scheduleGapCredits).toBe(52_416);
+  });
+
+  it("keeps server analytics while adjusting weekly pace for caps", () => {
+    const resetEvents = [{ at: "2026-01-08T14:00:00+00:00", creditsReturned: 50_400 }];
+    const topApiKeys = [{
+      apiKeyId: "key_prod",
+      name: "prod",
+      requests: 10,
+      billableTokens: 1_000,
+      cachedTokens: 100,
+      dominantModel: "gpt-5.2-codex",
+    }];
+    const serverPace = serverWeeklyPace({
+      confidence: "high",
+      staleAccountCount: 2,
+      resetEvents,
+      topApiKeys,
+      runwayStatus: "runs_dry",
+    });
+    const cappedAccount = account({
+      accountId: "capped",
+      email: "capped@example.com",
+      usageCapWeeklyPercent: 80,
+      capacityCreditsSecondary: 100_000,
+      remainingCreditsSecondary: 40_000,
+      resetAtSecondary: new Date(Date.now() + 3_600_000).toISOString(),
+      windowMinutesSecondary: 10_080,
+    });
+    const overview = {
+      ...createDashboardOverview(),
+      accounts: [cappedAccount],
+      weeklyCreditPace: serverPace,
+    };
+
+    const pace = buildDashboardView(overview, createDefaultRequestLogs()).weeklyCreditPace;
+
+    expect(pace?.totalFullCredits).toBe(80_000);
+    expect(pace?.totalActualRemainingCredits).toBe(20_000);
+    expect(pace?.confidence).toBe("high");
+    expect(pace?.staleAccountCount).toBe(2);
+    expect(pace?.resetEvents).toBe(resetEvents);
+    expect(pace?.topApiKeys).toBe(topApiKeys);
+    expect(pace?.runwayStatus).toBe("runs_dry");
   });
 
   it("parses an old-backend overview payload without runway fields and keeps the legacy shape", () => {

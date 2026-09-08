@@ -96,6 +96,20 @@ async def test_caps_gate_selection_and_preserve_pinned_ownership(db_setup, prima
 
 
 @pytest.mark.asyncio
+async def test_all_fresh_candidates_capped_returns_typed_local_overload(db_setup):
+    await _seed(primary=80)
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == "fallback").values(status=AccountStatus.PAUSED))
+        await session.commit()
+    get_account_selection_cache().invalidate()
+
+    selection = await LoadBalancer(_repos).select_account()
+
+    assert selection.account is None
+    assert selection.error_code == "account_usage_cap_reached"
+
+
+@pytest.mark.asyncio
 async def test_caps_recover_only_after_both_windows_reset(db_setup):
     await _seed(primary=80, weekly=50)
     balancer = LoadBalancer(_repos)
@@ -129,6 +143,25 @@ async def test_caps_identify_weekly_primary_and_ignore_monthly(db_setup, minutes
     await _seed(primary=used, primary_minutes=minutes)
     selection = await LoadBalancer(_repos).select_account(required_account_id="capped")
     assert (selection.account is None) == blocked
+
+
+@pytest.mark.asyncio
+async def test_free_plan_ignores_stale_short_window_cap(db_setup):
+    await _seed(primary=80)
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == "capped").values(plan_type="free"))
+        await session.execute(
+            delete(UsageHistory).where(
+                UsageHistory.account_id == "capped",
+                UsageHistory.window == "secondary",
+            )
+        )
+        await session.commit()
+    get_account_selection_cache().invalidate()
+
+    selection = await LoadBalancer(_repos).select_account(required_account_id="capped")
+
+    assert selection.account is not None
 
 
 @pytest.mark.asyncio

@@ -106,9 +106,17 @@ function resolveDashboardViewOptions(optionsOrIsDark: DashboardViewOptions | boo
   };
 }
 
-export function buildDepletionView(depletion: Depletion | null | undefined): SafeLineView | null {
+export function buildDepletionView(
+  depletion: Depletion | null | undefined,
+  fullCapacity?: number,
+  usableCapacity?: number,
+): SafeLineView | null {
   if (!depletion || depletion.riskLevel === "safe") return null;
-  return { safePercent: depletion.safeUsagePercent, riskLevel: depletion.riskLevel };
+  const safePercent =
+    isPositiveFinite(fullCapacity) && isPositiveFinite(usableCapacity) && usableCapacity < fullCapacity
+      ? clamp((depletion.safeUsagePercent * fullCapacity) / usableCapacity, 0, 100)
+      : depletion.safeUsagePercent;
+  return { safePercent, riskLevel: depletion.riskLevel };
 }
 
 function buildWindowIndex(window: UsageWindow | null): Map<string, number> {
@@ -791,6 +799,34 @@ export function buildWeeklyCreditPace(
   };
 }
 
+export function mergeCapAdjustedWeeklyCreditPace(
+  server: ServerWeeklyCreditPace,
+  adjusted: ServerWeeklyCreditPace,
+): ServerWeeklyCreditPace {
+  const totalExpectedRemainingCredits =
+    adjusted.totalFullCredits * (1 - server.scheduledUsedPercent / 100);
+  const deltaPercent = adjusted.actualUsedPercent - server.scheduledUsedPercent;
+  const scheduleGapCredits = Math.max(
+    0,
+    totalExpectedRemainingCredits - adjusted.totalActualRemainingCredits,
+  );
+  return {
+    ...server,
+    ...adjusted,
+    totalExpectedRemainingCredits,
+    scheduledUsedPercent: server.scheduledUsedPercent,
+    deltaPercent,
+    scheduleGapCredits,
+    overPlanCredits: scheduleGapCredits,
+    smoothedDeltaPercent: server.smoothedDeltaPercent,
+    smoothedScheduleGapCredits: server.smoothedScheduleGapCredits,
+    paceGapSmoothingMinutes: server.paceGapSmoothingMinutes,
+    staleAccountCount: server.staleAccountCount,
+    inactiveAccountCount: server.inactiveAccountCount,
+    confidence: server.confidence,
+  };
+}
+
 export function buildDashboardView(
   overview: DashboardOverview,
   requestLogs: RequestLog[],
@@ -913,6 +949,19 @@ export function buildDashboardView(
   const primaryUsageItems = secondaryWindow
     ? applySecondaryConstraint(rawPrimaryItems, secondaryUsageItems)
     : rawPrimaryItems;
+  const primaryCapacityTotal = usableCapacityTotal(
+    overview.summary.primaryWindow.capacityCredits, overview.accounts, "primary",
+  );
+  const secondaryFullCapacity = overview.summary.secondaryWindow?.capacityCredits ?? 0;
+  const secondaryCapacityTotal = usableCapacityTotal(secondaryFullCapacity, overview.accounts, "secondary");
+  const serverWeeklyCreditPace = overview.weeklyCreditPace ?? projections?.weeklyCreditPace;
+  const adjustedWeeklyCreditPace = buildWeeklyCreditPace(overview.accounts);
+  const weeklyCreditPace =
+    overview.accounts.some((account) => account.usageCapWeeklyPercent != null) &&
+    serverWeeklyCreditPace &&
+    adjustedWeeklyCreditPace
+      ? mergeCapAdjustedWeeklyCreditPace(serverWeeklyCreditPace, adjustedWeeklyCreditPace)
+      : serverWeeklyCreditPace ?? adjustedWeeklyCreditPace;
 
   return {
     stats,
@@ -920,20 +969,19 @@ export function buildDashboardView(
     secondaryUsageItems,
     primaryTotal: sumRemaining(primaryUsageItems),
     secondaryTotal: sumRemaining(secondaryUsageItems),
-    primaryCapacityTotal: usableCapacityTotal(overview.summary.primaryWindow.capacityCredits, overview.accounts, "primary"),
-    secondaryCapacityTotal: usableCapacityTotal(overview.summary.secondaryWindow?.capacityCredits ?? 0, overview.accounts, "secondary"),
+    primaryCapacityTotal,
+    secondaryCapacityTotal,
     requestLogs,
-    safeLinePrimary: buildDepletionView(projections?.depletionPrimary ?? overview.depletionPrimary),
-    safeLineSecondary: buildDepletionView(projections?.depletionSecondary ?? overview.depletionSecondary),
-    // A present overview pace is the freshest verdict and always wins.
-    // TanStack Query retains the last successful projections payload across
-    // later failures, so a stale projections copy must never override it.
-    // Older backends serve `weeklyCreditPace: null` (they cannot compute the
-    // runway model), which is indistinguishable from a fresh backend with no
-    // eligible accounts — so null falls back to the projections copy and then
-    // to the local projection instead of hiding the card entirely.
-    weeklyCreditPace: overview.accounts.some((account) => account.usageCapWeeklyPercent != null)
-      ? buildWeeklyCreditPace(overview.accounts)
-      : overview.weeklyCreditPace ?? projections?.weeklyCreditPace ?? buildWeeklyCreditPace(overview.accounts),
+    safeLinePrimary: buildDepletionView(
+      projections?.depletionPrimary ?? overview.depletionPrimary,
+      overview.summary.primaryWindow.capacityCredits,
+      primaryCapacityTotal,
+    ),
+    safeLineSecondary: buildDepletionView(
+      projections?.depletionSecondary ?? overview.depletionSecondary,
+      secondaryFullCapacity,
+      secondaryCapacityTotal,
+    ),
+    weeklyCreditPace,
   };
 }

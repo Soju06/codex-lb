@@ -8,6 +8,7 @@
 - [x] 2.2 Remove `_assert_shim_only` and `_check_service_does_not_import_shims` (and their registrations) from `scripts/check_proxy_architecture.py`.
 - [x] 2.3 Drop the shim fixture files from `tests/unit/test_check_proxy_architecture.py`.
 - [x] 2.4 Update `openspec/specs/proxy-architecture/context.md` so the ADR tree and fitness-function list no longer describe shims.
+- [x] 2.5 Apply the MODIFIED `ProxyService remains a stable façade` requirement text to `openspec/specs/proxy-architecture/spec.md` so the main spec stays in sync with the delta.
 
 ## 3. Verification
 

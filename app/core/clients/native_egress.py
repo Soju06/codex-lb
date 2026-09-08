@@ -17,6 +17,7 @@ from typing import Protocol, cast
 from multidict import CIMultiDict
 
 from app.core.clients.stream_errors import StreamEventTooLargeError, StreamIdleTimeoutError
+from app.core.types import JsonObject
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 
 logger = logging.getLogger(__name__)
@@ -190,6 +191,7 @@ class NativeWebSocketMessage:
     responses_interpreted: bool = False
     event_type: str | None = None
     python_normalization: bool = False
+    payload: JsonObject | None = None
 
 
 class NativeEgressClient(Protocol):
@@ -568,10 +570,12 @@ class NativeEgressWebSocket:
                     text = item.get("text")
                     kind = item.get("event_type")
                     python_normalization = item.get("python_normalization")
+                    payload = item.get("payload")
                     if (
                         not isinstance(text, str)
                         or (kind is not None and not isinstance(kind, str))
                         or type(python_normalization) is not bool
+                        or not isinstance(payload, dict)
                     ):
                         raise NativeEgressProtocolError("native Responses websocket event is invalid")
                     self._queue_message(
@@ -581,6 +585,7 @@ class NativeEgressWebSocket:
                             responses_interpreted=True,
                             event_type=kind,
                             python_normalization=python_normalization,
+                            payload=cast(JsonObject, payload),
                         )
                     )
                     continue

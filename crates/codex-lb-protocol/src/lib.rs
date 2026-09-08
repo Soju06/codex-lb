@@ -149,6 +149,7 @@ pub enum NativeEvent {
         text: String,
         event_type: Option<String>,
         python_normalization: bool,
+        payload: serde_json::Value,
     },
     WebsocketBinary {
         request_id: String,

@@ -10,7 +10,9 @@ normalizes the three existing Responses aliases, and attaches `event_type` plus
 event path. Error-shaped frames stay marked for Python because public error
 conversion needs request context and controls retry/failover.
 
-The Python native adapter carries this metadata through `NativeWebSocketMessage`.
+The Python native adapter carries this metadata through `NativeWebSocketMessage`,
+including the already-decoded object payload needed by WebSocket request
+matching, sequence tracking and tool-call policy.
 The Responses stream loop trusts it for canonical and successfully normalized
 frames, directly building the existing `data: ...` event block and terminal type
 decision without another `json.loads` or alias pass. It still uses the existing

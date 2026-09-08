@@ -22,6 +22,7 @@ pub struct StreamEvent<'a> {
     pub text: Cow<'a, str>,
     pub event_type: Option<String>,
     pub python_normalization: bool,
+    pub payload: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -40,6 +41,7 @@ pub fn interpret(block: &str) -> StreamEvent<'_> {
             text: Cow::Borrowed(block),
             event_type: None,
             python_normalization: true,
+            payload: None,
         };
     };
     // Mirror Python's literal-key fast path, including escaped error keys.
@@ -54,6 +56,7 @@ pub fn interpret(block: &str) -> StreamEvent<'_> {
             text,
             event_type,
             python_normalization: false,
+            payload: None,
         };
     }
     let data = data_text(&text);
@@ -80,6 +83,7 @@ pub fn interpret(block: &str) -> StreamEvent<'_> {
         text,
         event_type,
         python_normalization,
+        payload: None,
     }
 }
 
@@ -100,6 +104,7 @@ pub fn interpret_websocket(text: &str) -> Option<StreamEvent<'static>> {
         text: Cow::Owned(payload),
         event_type: interpreted.event_type,
         python_normalization: interpreted.python_normalization,
+        payload: Some(value),
     })
 }
 

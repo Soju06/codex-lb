@@ -75,8 +75,9 @@ parses valid JSON objects, normalizes the three existing Responses aliases and
 attaches event-type metadata. Invalid/non-object frames remain opaque;
 error-shaped frames retain a Python-normalization handoff because request
 context is needed for public error conversion. Live WebSocket calls do not opt
-in. Python trusts metadata for canonical/normalized frames and keeps request
-matching, archiving, terminal lifecycle, retry/failover and account health
+in. Python trusts metadata and the decoded object payload for canonical/normalized
+frames, avoiding a second JSON decode while keeping request matching, archiving,
+terminal lifecycle, retry/failover and account health
 policy. A loopback benchmark on 2,048 frames currently shows raw Python parsing
 at 524 ms versus Rust interpretation at 539 ms median; this is a semantic
 ownership migration, not a claimed speedup. Avoiding canonical reserialization

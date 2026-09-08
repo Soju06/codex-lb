@@ -582,7 +582,8 @@ for line in sys.stdin:
             "type": "websocket_responses_text" if request_id in interpreted else "websocket_text",
             "request_id": request_id,
             "text": command["text"] if request_id in interpreted else "echo:" + command["text"],
-            **({"event_type": "response.output_text.delta", "python_normalization": False}
+            **({"event_type": "response.output_text.delta", "python_normalization": False,
+                "payload": {"type": "response.output_text.delta", "delta": "hi"}}
                if request_id in interpreted else {}),
         }), flush=True)
         print(json.dumps({
@@ -668,6 +669,7 @@ async def test_native_responses_websocket_preserves_interpretation_metadata(tmp_
         responses_interpreted=True,
         event_type="response.output_text.delta",
         python_normalization=False,
+        payload={"type": "response.output_text.delta", "delta": "hi"},
     )
     await websocket.close()
     await client.aclose()

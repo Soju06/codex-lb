@@ -213,6 +213,7 @@ pub(crate) async fn execute_websocket(
                                     text: event.text.into_owned(),
                                     event_type: event.event_type,
                                     python_normalization: event.python_normalization,
+                                    payload: event.payload.expect("websocket interpretation payload"),
                                 },
                             )
                             .await?;

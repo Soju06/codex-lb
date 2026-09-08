@@ -15,8 +15,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.audit.service import AuditService
-from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole
+from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole, Permission
 from app.core.auth.dependencies import (
+    ensure_dashboard_permission,
+    require_dashboard_permission,
     require_dashboard_write_access,
     set_dashboard_error_format,
     validate_dashboard_session,
@@ -50,6 +52,7 @@ from app.modules.proxy.account_cache import (
 )
 from app.modules.settings.repository import ModelContextWindowOverridesRepository
 from app.modules.settings.schemas import (
+    SECURITY_SETTINGS_FIELDS,
     AccountProxyBindingRequest,
     AccountProxyBindingResponse,
     AdditionalQuotaPolicy,
@@ -393,7 +396,7 @@ async def get_upstream_proxy_admin(
 @router.post("/upstream-proxy/endpoints", response_model=UpstreamProxyEndpointResponse)
 async def create_upstream_proxy_endpoint(
     payload: UpstreamProxyEndpointCreateRequest,
-    _write_access=Depends(require_dashboard_write_access),
+    _security_access=Depends(require_dashboard_permission(Permission.SECURITY_WRITE)),
     context: SettingsContext = Depends(get_settings_context),
 ) -> UpstreamProxyEndpointResponse:
     if payload.username is not None and ":" in payload.username:
@@ -931,6 +934,16 @@ async def update_settings(
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
     current = await context.service.get_settings()
+    # The dashboard client submits the whole form on every save, so a security
+    # field merely being present must not require security:write; only a value
+    # that differs from what is stored does.
+    security_changes = {
+        name
+        for name in payload.model_fields_set & SECURITY_SETTINGS_FIELDS
+        if getattr(payload, name) is not None and getattr(payload, name) != getattr(current, name)
+    }
+    if security_changes:
+        ensure_dashboard_permission(principal, Permission.SECURITY_WRITE)
     if payload.expected_version is not None and payload.expected_version != current.version:
         raise DashboardSettingsConflictError(
             "Settings were modified since this form was loaded; reload and retry",

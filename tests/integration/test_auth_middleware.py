@@ -130,7 +130,8 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
 
     blocked_auth_export = await client.post("/api/accounts/missing/export/auth")
     assert blocked_auth_export.status_code == 403
-    assert blocked_auth_export.json()["error"]["code"] == "read_only_access"
+    assert blocked_auth_export.json()["error"]["code"] == "permission_required"
+    assert blocked_auth_export.json()["error"]["param"] == "accounts:export"
 
     blocked_alias = await client.put("/api/accounts/missing/alias", json={"alias": "Guest Alias"})
     assert blocked_alias.status_code == 403
@@ -149,7 +150,8 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
         json={"name": "Guest Proxy", "scheme": "http", "host": "proxy.internal", "port": 8080},
     )
     assert blocked_proxy_endpoint.status_code == 403
-    assert blocked_proxy_endpoint.json()["error"]["code"] == "read_only_access"
+    assert blocked_proxy_endpoint.json()["error"]["code"] == "permission_required"
+    assert blocked_proxy_endpoint.json()["error"]["param"] == "security:write"
 
     blocked_proxy_probe = await client.post("/api/settings/upstream-proxy/endpoints/missing-endpoint/test")
     assert blocked_proxy_probe.status_code == 403
@@ -191,6 +193,28 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
     assert blocked_quota_planner_cancel.status_code == 403
     assert blocked_quota_planner_cancel.json()["error"]["code"] == "read_only_access"
 
+    blocked_firewall_add = await client.post("/api/firewall/ips", json={"ipAddress": "203.0.113.9"})
+    assert blocked_firewall_add.status_code == 403
+    assert blocked_firewall_add.json()["error"]["code"] == "permission_required"
+    assert blocked_firewall_add.json()["error"]["param"] == "security:write"
+
+    blocked_firewall_delete = await client.delete("/api/firewall/ips/203.0.113.9")
+    assert blocked_firewall_delete.status_code == 403
+    assert blocked_firewall_delete.json()["error"]["code"] == "permission_required"
+    assert blocked_firewall_delete.json()["error"]["param"] == "security:write"
+
+    blocked_guest_password_set = await client.post(
+        "/api/dashboard-auth/guest/password", json={"password": "guest-secret-1"}
+    )
+    assert blocked_guest_password_set.status_code == 403
+    assert blocked_guest_password_set.json()["error"]["code"] == "permission_required"
+    assert blocked_guest_password_set.json()["error"]["param"] == "security:write"
+
+    blocked_guest_password_remove = await client.delete("/api/dashboard-auth/guest/password")
+    assert blocked_guest_password_remove.status_code == 403
+    assert blocked_guest_password_remove.json()["error"]["code"] == "permission_required"
+    assert blocked_guest_password_remove.json()["error"]["param"] == "security:write"
+
 
 async def _assert_guest_archive_read_denied(client: AsyncClient) -> None:
     blocked_archive_records = await client.get(
@@ -199,7 +223,7 @@ async def _assert_guest_archive_read_denied(client: AsyncClient) -> None:
     )
     assert blocked_archive_records.status_code == 403
     blocked_archive_payload = blocked_archive_records.json()
-    assert blocked_archive_payload["error"]["code"] == "admin_access_required"
+    assert blocked_archive_payload["error"]["code"] == "permission_required"
     assert not {"records", "payload", "headers"} & blocked_archive_payload.keys()
     # M5 conversation archive: a guest may read the settings page (and the
     # effective toggle) but not the filesystem path of this replica's shard.

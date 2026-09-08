@@ -10,6 +10,7 @@ from app.core.auth.dashboard_access import (
     GUEST_PERMISSIONS,
     DashboardPrincipal,
     DashboardRole,
+    Permission,
 )
 from app.core.auth.dashboard_mode import (
     DashboardAuthMode,
@@ -17,7 +18,7 @@ from app.core.auth.dashboard_mode import (
     password_management_enabled,
 )
 from app.core.auth.dashboard_session_ttl import resolve_dashboard_session_ttl_seconds
-from app.core.auth.dependencies import require_dashboard_write_access, set_dashboard_error_format
+from app.core.auth.dependencies import require_dashboard_permission, set_dashboard_error_format
 from app.core.bootstrap import (
     ensure_auto_bootstrap_token,
     get_bootstrap_validation_status,
@@ -445,7 +446,7 @@ async def change_password(
 async def set_guest_password(
     payload: GuestPasswordSetRequest = Body(...),
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
-    _principal: DashboardPrincipal = Depends(require_dashboard_write_access),
+    _principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.SECURITY_WRITE)),
 ) -> JSONResponse:
     password = payload.password.strip()
     _validate_password_length(password)
@@ -457,7 +458,7 @@ async def set_guest_password(
 @router.delete("/guest/password")
 async def remove_guest_password(
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
-    _principal: DashboardPrincipal = Depends(require_dashboard_write_access),
+    _principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.SECURITY_WRITE)),
 ) -> JSONResponse:
     await context.service.clear_guest_password()
     await get_settings_cache().invalidate()

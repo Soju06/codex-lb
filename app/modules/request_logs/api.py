@@ -4,10 +4,10 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole
+from app.core.auth.dashboard_access import DashboardPrincipal, Permission
 from app.core.auth.dependencies import (
-    ensure_dashboard_admin_access,
-    require_dashboard_admin_access,
+    ensure_dashboard_permission,
+    require_dashboard_permission,
     set_dashboard_error_format,
     validate_dashboard_session,
 )
@@ -36,7 +36,10 @@ router = APIRouter(
 conversations_router = APIRouter(
     prefix="/api/conversations",
     tags=["dashboard"],
-    dependencies=[Depends(require_dashboard_admin_access), Depends(set_dashboard_error_format)],
+    dependencies=[
+        Depends(require_dashboard_permission(Permission.CONVERSATIONS_READ)),
+        Depends(set_dashboard_error_format),
+    ],
 )
 
 _MODEL_OPTION_DELIMITER = ":::"
@@ -87,7 +90,7 @@ async def list_request_logs(
     context: RequestLogsContext = Depends(get_request_logs_context),
 ) -> RequestLogsResponse:
     if conversation_id is not None:
-        ensure_dashboard_admin_access(principal)
+        ensure_dashboard_permission(principal, Permission.CONVERSATIONS_READ)
 
     parsed_options: list[ServiceRequestLogModelOption] | None = None
     if model_option:
@@ -109,7 +112,7 @@ async def list_request_logs(
         status=status,
         cache_mode="timeframe" if cache_timeframe is not None else "since",
         timeframe=cache_timeframe,
-        include_sensitive_metadata=principal.role == DashboardRole.ADMIN,
+        include_sensitive_metadata=principal.has(Permission.CONVERSATIONS_READ),
     )
     return RequestLogsResponse(
         requests=page.requests,

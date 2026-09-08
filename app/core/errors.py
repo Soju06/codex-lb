@@ -69,6 +69,7 @@ class OpenAIErrorEnvelope(TypedDict):
 class DashboardErrorDetail(TypedDict):
     code: str
     message: str
+    param: NotRequired[str]
 
 
 class DashboardErrorEnvelope(TypedDict):
@@ -133,8 +134,11 @@ def openai_error(
     return {"error": detail}
 
 
-def dashboard_error(code: str, message: str) -> DashboardErrorEnvelope:
-    return {"error": {"code": code, "message": message}}
+def dashboard_error(code: str, message: str, *, param: str | None = None) -> DashboardErrorEnvelope:
+    detail: DashboardErrorDetail = {"code": code, "message": message}
+    if param is not None:
+        detail["param"] = param
+    return {"error": detail}
 
 
 def previous_response_stream_incomplete_error() -> OpenAIErrorEnvelope:

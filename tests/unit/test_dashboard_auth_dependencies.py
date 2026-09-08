@@ -70,10 +70,10 @@ async def test_require_dashboard_admin_access_rejects_guest(monkeypatch):
         AsyncMock(return_value=guest_principal()),
     )
 
-    with pytest.raises(DashboardPermissionError, match="Admin dashboard access is required") as exc_info:
+    with pytest.raises(DashboardPermissionError, match="conversations:read") as exc_info:
         await auth_dependencies.require_dashboard_admin_access(request)
 
-    assert exc_info.value.code == "admin_access_required"
+    assert exc_info.value.code == "permission_required"
 
 
 @pytest.mark.asyncio

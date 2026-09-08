@@ -22,6 +22,18 @@ If the trusted header is missing and no fallback password is configured, the das
 
 Ready-to-run Docker commands for both non-default modes are in [Docker deployment — auth mode examples](deployment/docker.md#auth-mode-examples). For Helm, pass the same values through `extraEnv`.
 
+## Roles and permissions
+
+The dashboard has two built-in roles. **Admin** (the password, trusted-header, disabled-auth, or local-bootstrap principal) holds every permission. **Guest** (the optional read-only role) holds only `dashboard:read` and `accounts:read`: it can read dashboard overview and usage data and account status, but cannot read conversations, conversation archives, or the audit log, cannot export account credentials, and cannot change state.
+
+Internally, authorization is expressed as fine-grained permissions such as `accounts:export`, `security:write`, `conversations:read`, and `audit:read`, each granted with an `all` or `own` scope. The session API still reports only the coarse `read` / `write` values. When a request lacks a specific permission the API answers `403` with error code `permission_required` and names the missing permission in `param`:
+
+```json
+{"error": {"code": "permission_required", "message": "Dashboard permission 'accounts:export' is required", "param": "accounts:export"}}
+```
+
+Mutations gated only by the generic write check keep returning `read_only_access`; routes gated by a specific permission (account credential export, security settings, firewall rules, guest password, upstream-proxy endpoint creation) return `permission_required` instead. The full permission list, the built-in grant table, and the per-route requirements are normative in the [admin-auth spec](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/admin-auth).
+
 ## First-time remote access
 
 Setting the initial dashboard password from a remote machine requires a one-time bootstrap token — see [Getting Started](getting-started.md#remote-setup-bootstrap-token).

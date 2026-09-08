@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import dataclass
+from functools import lru_cache
 from ipaddress import ip_address, ip_network
 from typing import cast
 
@@ -15,6 +17,8 @@ from app.core.auth.dashboard_access import (
     DashboardPermission,
     DashboardPrincipal,
     DashboardRole,
+    Permission,
+    Scope,
     admin_principal,
     guest_principal,
 )
@@ -256,18 +260,86 @@ async def require_dashboard_write_access(request: Request) -> DashboardPrincipal
     return principal
 
 
-def ensure_dashboard_admin_access(principal: DashboardPrincipal) -> None:
-    if principal.role != DashboardRole.ADMIN:
-        raise DashboardPermissionError(
-            "Admin dashboard access is required to view sensitive data",
-            code="admin_access_required",
+@dataclass(frozen=True, slots=True)
+class PermissionRequirement:
+    """Declares the permission a route dependency enforces.
+
+    Attached to the dependency callables produced by
+    :func:`require_dashboard_permission` so route-authorization audits can read
+    the requirement without invoking the dependency.
+    """
+
+    permission: Permission
+    minimum_scope: Scope = Scope.ALL
+
+
+def ensure_dashboard_permission(
+    principal: DashboardPrincipal,
+    permission: Permission,
+    *,
+    minimum_scope: Scope = Scope.ALL,
+) -> None:
+    if principal.has(permission, minimum_scope=minimum_scope):
+        return
+    raise DashboardPermissionError(
+        f"Dashboard permission '{permission.value}' is required",
+        code="permission_required",
+        param=permission.value,
+    )
+
+
+class DashboardPermissionDependency:
+    """Route dependency: validate the dashboard session, then enforce one permission.
+
+    Instances are callable so FastAPI can resolve them with ``Depends`` while
+    route-authorization audits read :attr:`requirement` without invoking them.
+    """
+
+    __slots__ = ("requirement",)
+
+    def __init__(self, requirement: PermissionRequirement) -> None:
+        self.requirement = requirement
+
+    async def __call__(self, request: Request) -> DashboardPrincipal:
+        principal = await validate_dashboard_session(request)
+        ensure_dashboard_permission(
+            principal,
+            self.requirement.permission,
+            minimum_scope=self.requirement.minimum_scope,
         )
+        return principal
+
+
+@lru_cache(maxsize=None)
+def _dependency_for(requirement: PermissionRequirement) -> DashboardPermissionDependency:
+    return DashboardPermissionDependency(requirement)
+
+
+def require_dashboard_permission(
+    permission: Permission,
+    *,
+    minimum_scope: Scope = Scope.ALL,
+) -> DashboardPermissionDependency:
+    """Return the shared dependency enforcing ``permission`` at ``minimum_scope``.
+
+    Cached per :class:`PermissionRequirement` (not per call spelling) so every
+    router shares one callable per requirement, keeping dependency overrides
+    and OpenAPI stable.
+    """
+
+    return _dependency_for(PermissionRequirement(permission=permission, minimum_scope=minimum_scope))
+
+
+def ensure_dashboard_admin_access(principal: DashboardPrincipal) -> None:
+    """Backward-compatible alias for the ``conversations:read`` requirement."""
+
+    ensure_dashboard_permission(principal, Permission.CONVERSATIONS_READ)
 
 
 async def require_dashboard_admin_access(request: Request) -> DashboardPrincipal:
-    principal = await validate_dashboard_session(request)
-    ensure_dashboard_admin_access(principal)
-    return principal
+    """Backward-compatible alias for ``require_dashboard_permission(CONVERSATIONS_READ)``."""
+
+    return await require_dashboard_permission(Permission.CONVERSATIONS_READ)(request)
 
 
 def get_dashboard_request_auth_mode() -> DashboardAuthMode:

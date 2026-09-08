@@ -778,9 +778,6 @@ class LoadBalancer:
                     if required_account_id is not None and (
                         legacy_existing_account_id is not None and legacy_existing_account_id != required_account_id
                     ):
-                        # The required owner came from a file/response/bridge index,
-                        # while the raw row may be legacy turn-state ownership. Neither
-                        # source can be discarded or rewritten to resolve a conflict.
                         return AccountSelection(
                             account=None,
                             error_message="Account-owned continuity sources conflict; retry the logical turn",
@@ -804,9 +801,6 @@ class LoadBalancer:
                         max_age_seconds=sticky_max_age_seconds,
                         continuity_source=sticky_source,
                     )
-        # Resolve uniqueness from the model/API-key/security-scoped pool before
-        # runtime health, budget, or cap filtering. Transient pressure cannot
-        # prove that another candidate does not own an upstream conversation.
         if (
             require_unambiguous_account
             and sticky_key is None
@@ -818,9 +812,6 @@ class LoadBalancer:
                 error_message=_AMBIGUOUS_CONVERSATION_OWNER_MESSAGE,
                 error_code=_AMBIGUOUS_CONVERSATION_OWNER_CODE,
             )
-        # Transient routing errors are secondary to ownership ambiguity. An
-        # empty additional-quota pool cannot prove which account owns a
-        # conversation that was ambiguous before that filter ran.
         if selection_inputs.error_code is not None and not selection_inputs.accounts:
             return AccountSelection(
                 account=None,

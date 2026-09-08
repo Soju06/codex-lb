@@ -4791,7 +4791,9 @@ async def _source_embeddings_response(
             error_message=_source_error_message(exc.payload),
             upstream_status_code=exc.upstream_status_code,
         )
-        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+        return _logged_error_json_response(
+            request, exc.status_code, exc.payload, headers=_source_error_response_headers(rate_limit_headers, exc)
+        )
     if result.usage is None and _reservation_requires_usage(reservation):
         await _release_reservation(reservation)
         error = openai_error(
@@ -4895,7 +4897,9 @@ async def _source_audio_transcription_response(
             error_message=_source_error_message(exc.payload),
             upstream_status_code=exc.upstream_status_code,
         )
-        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+        return _logged_error_json_response(
+            request, exc.status_code, exc.payload, headers=_source_error_response_headers(rate_limit_headers, exc)
+        )
 
     # ASR billing prefers audio duration: when the source model has a
     # per-minute rate and the response carries a duration, settle cost from
@@ -5438,7 +5442,9 @@ async def _source_chat_completion_response(
                 error_message=_source_error_message(exc.payload),
                 upstream_status_code=exc.upstream_status_code,
             )
-            return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+            return _logged_error_json_response(
+                request, exc.status_code, exc.payload, headers=_source_error_response_headers(rate_limit_headers, exc)
+            )
         except asyncio.CancelledError:
             release_exc: BaseException | None = None
             if reservation is not None:
@@ -5509,7 +5515,9 @@ async def _source_chat_completion_response(
             error_message=_source_error_message(exc.payload),
             upstream_status_code=exc.upstream_status_code,
         )
-        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+        return _logged_error_json_response(
+            request, exc.status_code, exc.payload, headers=_source_error_response_headers(rate_limit_headers, exc)
+        )
     except asyncio.CancelledError:
         release_exc: BaseException | None = None
         if reservation is not None:
@@ -5709,7 +5717,9 @@ async def _buffered_limited_source_chat_stream_response(
             error_message=_source_error_message(exc.payload),
             upstream_status_code=exc.upstream_status_code,
         )
-        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+        return _logged_error_json_response(
+            request, exc.status_code, exc.payload, headers=_source_error_response_headers(rate_limit_headers, exc)
+        )
     except Exception as exc:
         await _release_reservation(reservation)
         error = openai_error(

@@ -410,6 +410,56 @@ async def test_source_audio_transcription_raw_alias_lookup_requires_exact_allowl
     assert called is False
 
 
+_SOURCE_RATE_LIMITED = {"error": {"message": "slow down", "type": "rate_limit_error", "code": "rate_limit_exceeded"}}
+
+
+async def _post_source_family_request(async_client, family: str, model: str):
+    if family == "chat_stream":
+        return await async_client.post(
+            "/v1/chat/completions",
+            json={"model": model, "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+    if family == "chat":
+        return await async_client.post(
+            "/v1/chat/completions",
+            json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+        )
+    if family == "embeddings":
+        return await async_client.post("/v1/embeddings", json={"model": model, "input": "hello"})
+    assert family == "transcription"
+    return await async_client.post(
+        "/v1/audio/transcriptions",
+        files=[("model", (None, model)), ("file", ("sample.wav", b"\x01\x02\x03", "audio/wav"))],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", ["chat_stream", "chat", "embeddings", "transcription"])
+async def test_every_source_route_relays_the_source_retry_after(async_client, source_upstream, family: str) -> None:
+    """Honest passthrough (outbound-http-clients): a source ``429`` reaches the client with the source's status, its
+    envelope and its ``Retry-After`` on every source route, not only on Responses dispatch."""
+
+    async def limited(_request: web.Request) -> web.Response:
+        return web.json_response(_SOURCE_RATE_LIMITED, status=429, headers={"Retry-After": "7"})
+
+    base_url = await source_upstream(limited)
+    model = f"source-retry-after-{family.replace('_', '-')}"
+    await _create_model_source(
+        async_client,
+        name=f"retry-after-{family.replace('_', '-')}",
+        model=model,
+        base_url=base_url,
+        supports_embeddings=family == "embeddings",
+        supports_audio_transcriptions=family == "transcription",
+    )
+
+    response = await _post_source_family_request(async_client, family, model)
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "7"
+    assert response.json() == _SOURCE_RATE_LIMITED
+
+
 @pytest.mark.asyncio
 async def test_source_stream_upstream_error_maps_to_error_response(async_client, source_upstream):
     async def unauthorized(_request: web.Request) -> web.Response:

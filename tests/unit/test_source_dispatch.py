@@ -399,7 +399,7 @@ async def test_success_without_usage_on_an_unlimited_key_releases(recorder: _Rec
 async def test_cancel_after_the_first_output_item_on_a_limited_key_settles_at_the_estimate(
     recorder: _Recorder,
 ) -> None:
-    owner = _owner(recorder, reservation=_reservation(limited=True))
+    owner = _owner(recorder, reservation=_reservation(limited=True), content_delivered=True)
     _attach_stream(
         owner, holder=SourceUsageHolder(first_output_item_seen=True, content_delivered=True, delta_chars=400)
     )
@@ -426,10 +426,11 @@ async def test_cancel_before_the_first_output_item_releases(recorder: _Recorder)
 async def test_cancel_after_delivered_content_without_an_output_item_settles_at_the_estimate(
     recorder: _Recorder,
 ) -> None:
-    """A ``*.delta``-only or completed-only answer carries no ``response.output_item.added``; once its bytes were
-    handed to the client the cancel policy keys on that delivery, not on the parser's item observation."""
+    """A ``*.delta``-only or completed-only answer carries no ``response.output_item.added``; once the settlement
+    layer handed its frame to the transport the cancel policy keys on that delivery, not on the parser's item
+    observation."""
 
-    owner = _owner(recorder, reservation=_reservation(limited=True))
+    owner = _owner(recorder, reservation=_reservation(limited=True), content_delivered=True)
     _attach_stream(
         owner,
         holder=SourceUsageHolder(
@@ -465,8 +466,29 @@ async def test_cancel_with_an_output_item_observed_but_nothing_delivered_release
 
 
 @pytest.mark.asyncio
+async def test_cancel_with_the_body_flush_flag_but_no_relayed_content_releases(recorder: _Recorder) -> None:
+    """``SourceUsageHolder.content_delivered`` is the body's flush-point evidence; the public wrapper above it can
+    still drop or park the frame it counted, so the owner never mirrors it. Only the settlement layer, which hands
+    frames to the transport, marks delivery."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    _attach_stream(
+        owner,
+        holder=SourceUsageHolder(
+            first_content_seen=True, first_output_item_seen=True, content_delivered=True, delta_chars=400
+        ),
+    )
+    await owner.finish(status="cancelled", error_code="client_disconnected")
+
+    assert owner.content_delivered is False
+    assert recorder.settle_calls == []
+    assert recorder.release_calls == [owner.reservation]
+    assert recorder.rows[0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_cancel_after_the_first_output_item_on_an_unlimited_key_releases(recorder: _Recorder) -> None:
-    owner = _owner(recorder, reservation=_reservation(limited=False))
+    owner = _owner(recorder, reservation=_reservation(limited=False), content_delivered=True)
     _attach_stream(
         owner, holder=SourceUsageHolder(first_output_item_seen=True, content_delivered=True, delta_chars=9_000)
     )
@@ -854,7 +876,7 @@ async def test_settlement_stream_task_cancellation_after_the_first_item_settles_
         holder.first_output_item_seen = True
         holder.content_delivered = True
         holder.delta_chars = 12_000
-        yield "data: item\n\n"
+        yield "event: response.output_item.added\ndata: {}\n\n"
         await gate
         yield "data: never\n\n"
 
@@ -910,6 +932,90 @@ async def test_settlement_stream_task_cancellation_after_delivered_deltas_withou
     assert recorder.release_calls == []
     assert recorder.settle_calls[0]["usage"] == SourceUsage(
         input_tokens=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS, output_tokens=3_000
+    )
+    assert recorder.rows[0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_cancel_after_frames_the_wrapper_dropped_releases_despite_the_body_flag(
+    recorder: _Recorder,
+) -> None:
+    """The body flushed a chunk the parser classified as content (a vendor event, a delta parked ahead of
+    ``response.created``), but the public wrapper never relayed it: only bookkeeping frames reached the transport,
+    so a client that leaves is released, whatever the holder's flush-point flag says."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder()
+    _attach_stream(owner, holder=holder)
+    gate: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    async def inner() -> AsyncIterator[str]:
+        holder.first_content_seen = True
+        holder.content_delivered = True
+        holder.delta_chars = 12_000
+        yield "event: response.created\ndata: {}\n\n"
+        yield "event: response.in_progress\ndata: {}\n\n"
+        await gate
+        yield "event: response.output_text.delta\ndata: {}\n\n"
+
+    body = settlement_stream(owner, inner())
+
+    async def consume() -> list[str]:
+        return [chunk async for chunk in body]
+
+    consumer = asyncio.create_task(consume())
+    for _ in range(4):
+        await asyncio.sleep(0)
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert owner.content_delivered is False
+    assert recorder.settle_calls == []
+    assert recorder.release_calls == [owner.reservation]
+    assert recorder.rows[0]["status"] == "cancelled"
+    assert recorder.rows[0]["error_code"] == "client_disconnected"
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_relayed_content_frame_marks_delivery_without_the_body_flag(
+    recorder: _Recorder,
+) -> None:
+    """Delivery is derived from the frames the settlement layer hands to the transport, not read off the holder: a
+    relayed ``response.output_item.added`` charges the cancel estimate even when the body never set its flag."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder()
+    _attach_stream(owner, holder=holder)
+    gate: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        assert owner.content_delivered is False
+        holder.first_content_seen = True
+        holder.first_output_item_seen = True
+        yield "event: response.output_item.added\ndata: {}\n\n"
+        await gate
+        yield "data: never\n\n"
+
+    body = settlement_stream(owner, inner())
+
+    async def consume() -> list[str]:
+        return [chunk async for chunk in body]
+
+    consumer = asyncio.create_task(consume())
+    for _ in range(4):
+        await asyncio.sleep(0)
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert holder.content_delivered is False
+    assert owner.content_delivered is True
+    assert recorder.release_calls == []
+    assert recorder.settle_calls[0]["usage"] == SourceUsage(
+        input_tokens=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
+        output_tokens=API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
     )
     assert recorder.rows[0]["status"] == "cancelled"
 
@@ -1246,6 +1352,41 @@ async def test_settlement_stream_success_terminal_relayed_as_a_success_stays_a_s
 )
 def test_relayed_terminal_kind_table(frame: str | None, kind: str | None) -> None:
     assert dispatch_module.relayed_terminal_kind(frame) == kind
+
+
+@pytest.mark.parametrize(
+    ("frame", "delivers"),
+    [
+        ("event: response.created\ndata: {}\n\n", False),
+        ("event: response.in_progress\ndata: {}\n\n", False),
+        ("event: response.queued\ndata: {}\n\n", False),
+        ("event: response.output_item.added\ndata: {}\n\n", True),
+        ("event: response.output_text.delta\r\ndata: {}\r\n\r\n", True),
+        ("event: response.reasoning_summary_text.delta\ndata: {}\n\n", True),
+        ("event: response.completed\ndata: {}\n\n", True),
+        ("event: response.incomplete\ndata: {}\n\n", True),
+        ("event: codex.rate_limits\ndata: {}\n\n", True),
+        ("event: response.failed\ndata: {}\n\n", False),
+        ("event: error\ndata: {}\n\n", False),
+        ('data: {"type":"response.output_item.added"}\n\n', True),
+        ('data: {"type":"response.created"}\n\n', False),
+        ('data: {"type":"response.failed"}\n\n', False),
+        ('data: {"type":"response.completed"}\n\n', True),
+        ('data: {"delta":"no type"}\n\n', False),
+        ("data: [1,2]\n\n", False),
+        ("data: not json\n\n", False),
+        ("data: [DONE]\n\n", False),
+        (": keepalive\n\n", False),
+        ('event: codex.keepalive\ndata: {"type":"codex.keepalive"}\n\n', False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_relayed_frame_delivers_content_table(frame: str | None, delivers: bool) -> None:
+    """Parity with ``classify_responses_frame``: content, success terminals and unknown event types deliver;
+    bookkeeping, failure terminals and frames without a typed event do not."""
+
+    assert dispatch_module.relayed_frame_delivers_content(frame) is delivers
 
 
 @pytest.mark.asyncio

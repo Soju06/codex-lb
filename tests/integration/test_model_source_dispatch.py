@@ -481,6 +481,114 @@ async def test_limited_key_cancel_after_delivered_deltas_without_an_output_item_
 
 
 @pytest.mark.asyncio
+async def test_limited_key_cancel_after_a_vendor_event_the_public_contract_dropped_releases(
+    async_client, source_upstream
+) -> None:
+    """The source emits a vendor event outside ``response.*`` (the frame parser classifies any unknown type as
+    content and the stream body flushes it), but the public SDK contract drops it: the wire carried only
+    ``response.created`` and ``response.in_progress``, so a client that leaves owes nothing."""
+
+    await _enable_api_key_auth(async_client)
+    state = _StubState()
+    hold = asyncio.Event()
+    vendor_event = _sse({"type": "codex.rate_limits", "rate_limits": {"primary": {"used_percent": 12}}})
+    in_progress = _sse(
+        {
+            "type": "response.in_progress",
+            "sequence_number": 1,
+            "response": {"id": "resp_dispatch_1", "object": "response", "status": "in_progress", "output": []},
+        }
+    )
+    base_url = await source_upstream(
+        _sse_handler(
+            state,
+            before_hold=[_created(), vendor_event, in_progress],
+            hold=hold,
+            after_hold=[_ITEM_ADDED, _completed(_USAGE)],
+        ),
+        handler_cancellation=True,
+        shutdown_timeout=1.0,
+    )
+    model = "dispatch-cancel-after-dropped-vendor-event"
+    source_id = await _create_model_source(
+        async_client, name=model, model=model, base_url=base_url, supports_responses=True
+    )
+    key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
+
+    stream = _AsgiStream(
+        app=_app(async_client),
+        path="/v1/responses",
+        headers={"authorization": f"Bearer {key}"},
+        body=json.dumps(_request_body(model)).encode(),
+    )
+    runner = asyncio.create_task(stream.run())
+    await stream.wait_for_text("response.in_progress")
+    received = stream.received().decode()
+    assert "response.created" in received
+    assert "codex.rate_limits" not in received
+    assert "response.output_item.added" not in received
+    stream.disconnect()
+    await asyncio.wait_for(runner, timeout=10)
+    await _drain(async_client)
+    hold.set()
+
+    reservations = await _reservations(key_id)
+    assert [reservation.status for reservation in reservations] == ["released"]
+    rows = await _source_rows(source_id)
+    assert [(row.status, row.error_code) for row in rows] == [("cancelled", "client_disconnected")]
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_limited_key_cancel_while_content_is_parked_ahead_of_response_created_releases(
+    async_client, source_upstream
+) -> None:
+    """A ``response.output_text.delta`` that arrives before any ``response.created`` is parked in the public
+    wrapper's pre-created buffer (the stream body already flushed it, so its flush-point flag is set); the SSE
+    comment the source sends next is relayed, so the client received no event frame at all when it leaves."""
+
+    await _enable_api_key_auth(async_client)
+    state = _StubState()
+    hold = asyncio.Event()
+    base_url = await source_upstream(
+        _sse_handler(
+            state,
+            before_hold=[_DELTA, b": parked\n\n"],
+            hold=hold,
+            after_hold=[_created(), _completed(_USAGE)],
+        ),
+        handler_cancellation=True,
+        shutdown_timeout=1.0,
+    )
+    model = "dispatch-cancel-parked-pre-created-delta"
+    source_id = await _create_model_source(
+        async_client, name=model, model=model, base_url=base_url, supports_responses=True
+    )
+    key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
+
+    stream = _AsgiStream(
+        app=_app(async_client),
+        path="/v1/responses",
+        headers={"authorization": f"Bearer {key}"},
+        body=json.dumps(_request_body(model)).encode(),
+    )
+    runner = asyncio.create_task(stream.run())
+    await stream.wait_for_text(": parked")
+    received = stream.received()
+    assert b"event:" not in received and b"data:" not in received, received
+    stream.disconnect()
+    await asyncio.wait_for(runner, timeout=10)
+    await _drain(async_client)
+    hold.set()
+
+    reservations = await _reservations(key_id)
+    assert [reservation.status for reservation in reservations] == ["released"]
+    rows = await _source_rows(source_id)
+    assert [(row.status, row.error_code) for row in rows] == [("cancelled", "client_disconnected")]
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+@pytest.mark.asyncio
 async def test_limited_key_disconnect_after_the_relayed_success_terminal_is_a_success(
     async_client, source_upstream
 ) -> None:

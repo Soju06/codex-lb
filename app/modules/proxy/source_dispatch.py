@@ -28,9 +28,11 @@ Composition rules:
 Settle policy (design §6.1, CL-8/P4/CP-16): ``success`` with usage finalizes
 at the source's usage and cost; ``success`` without usage on a limited key
 settles at an estimate (never at zero, never released); a cancel *after*
-content was delivered to the client (the body's flush point, not the parser's
-observation) on a limited key settles at the estimate (a key must not consume
-most of an answer and disconnect unmetered); a cancel before it, and every
+content was delivered to the client (an event frame ``settlement_stream``
+handed to the transport -- not the parser's observation, nor the body's flush
+point, which sits below wrapper layers that can still drop or park a frame)
+on a limited key settles at the estimate (a key must not consume most of an
+answer and disconnect unmetered); a cancel before it, and every
 ``error``, release. A stream the source ends with a failure terminal, or
 closes without any terminal the client could complete on, is an ``error``
 (``model_source_response_failed`` / ``model_source_stream_truncated``) and
@@ -91,6 +93,7 @@ from app.modules.model_sources.forwarding import (
     SourceUsage,
     SourceUsageHolder,
     TimeoutPhase,
+    classify_responses_frame,
 )
 from app.modules.proxy._service.support import _request_log_client_fields
 from app.modules.proxy.affinity import _owner_lookup_session_id_from_headers
@@ -146,6 +149,11 @@ _RELAYED_TERMINAL_KINDS: Mapping[str, str] = {
 # Frames the settlement layer never takes as the stream's last event: SSE
 # comments (``: keepalive``), the ``[DONE]`` sentinel and the Codex keepalive.
 _NON_EVENT_FRAME_PREFIXES = ("data: [DONE]", "event: codex.keepalive")
+# ``classify_responses_frame`` kinds that deliver response content to the
+# client (the api-keys delta: an output item, a ``*.delta``, a success terminal
+# or any event type this proxy does not know); bookkeeping and failure
+# terminals do not.
+_DELIVERING_FRAME_KINDS = frozenset({"content", "success_terminal"})
 CANCELLED_CLIENT_DISCONNECTED = "client_disconnected"
 # The overflow decision (WP-C2) overrides these with its own codes; a pin
 # intent is never armed by direct routing, so they are unreachable in
@@ -222,9 +230,38 @@ def relayed_terminal_kind(frame: str | None) -> str | None:
 
     if not frame:
         return None
+    event_type = _relayed_event_type(frame)
+    return _RELAYED_TERMINAL_KINDS.get(event_type) if event_type is not None else None
+
+
+def relayed_frame_delivers_content(frame: str | None) -> bool:
+    """``True`` when a relayed event frame carries response content the client can use.
+
+    Classified with the parser's own ``classify_responses_frame`` so the body
+    and the settlement layer agree on what content is: an output item, a
+    ``*.delta``, a success terminal or any event type this proxy does not know
+    delivers content; ``response.created`` / ``in_progress`` / ``queued``, a
+    failure terminal and a frame without a typed event (a comment, ``[DONE]``,
+    the Codex keepalive, unparseable ``data``) do not.
+    """
+
+    if not frame or not _is_event_frame(frame):
+        return False
+    return classify_responses_frame(_relayed_event_type(frame)) in _DELIVERING_FRAME_KINDS
+
+
+def _is_event_frame(chunk: str) -> bool:
+    """An SSE block that carries an event: not a comment, not ``[DONE]``, not the Codex keepalive."""
+
+    return bool(chunk) and chunk[0] != ":" and not chunk.startswith(_NON_EVENT_FRAME_PREFIXES)
+
+
+def _relayed_event_type(frame: str) -> str | None:
+    """Event type of a relayed frame: the ``event:`` line the public wrapper frames every typed event with, else the
+    ``type`` of a raw pass-through block's ``data:`` JSON; ``None`` when neither names one."""
+
     if frame.startswith("event: "):
-        event_type = frame[7:].split("\n", 1)[0].rstrip("\r")
-        return _RELAYED_TERMINAL_KINDS.get(event_type)
+        return frame[7:].split("\n", 1)[0].rstrip("\r")
     for line in frame.splitlines():
         stripped = line.strip()
         if not stripped.startswith("data:"):
@@ -239,7 +276,7 @@ def relayed_terminal_kind(frame: str | None) -> str | None:
         if not isinstance(parsed, Mapping):
             return None
         event_type = parsed.get("type")
-        return _RELAYED_TERMINAL_KINDS.get(event_type) if isinstance(event_type, str) else None
+        return event_type if isinstance(event_type, str) else None
     return None
 
 
@@ -364,8 +401,13 @@ class SourceDispatch:
     sent_at: float = 0.0
     first_frame_at: float | None = None
     first_output_item_seen: bool = False
-    # Content reached the consumer (the body's flush point), as opposed to
-    # having merely been parsed; the cancel settlement policy keys on this.
+    # Set by ``settlement_stream`` when it hands the transport an event frame
+    # that carries content (``relayed_frame_delivers_content``); the cancel
+    # settlement policy keys on this alone. It is never mirrored from
+    # ``SourceUsageHolder.content_delivered`` (the body's flush point): the
+    # public wrapper above that point still drops vendor events, parks
+    # ``response.*`` frames ahead of ``response.created`` and holds reasoning
+    # deltas, so a chunk the body counted may never reach the client.
     content_delivered: bool = False
     delta_chars: int = 0
     body_started: bool = False
@@ -402,7 +444,12 @@ class SourceDispatch:
         return self.stream.usage_holder if self.stream is not None else None
 
     def observe_stream(self) -> SourceUsageHolder | None:
-        """Mirror the stream's observations (first frame, first output item, delivered content, delta chars)."""
+        """Mirror the parser's observations (first frame, first output item, delta chars).
+
+        ``content_delivered`` is deliberately not mirrored: the holder's flag is
+        the body's flush-point evidence, delivery is decided by
+        ``settlement_stream`` from the frames it hands to the transport.
+        """
 
         holder = self.usage_holder
         if holder is None:
@@ -410,7 +457,6 @@ class SourceDispatch:
         if self.first_frame_at is None and holder.first_frame_at is not None:
             self.first_frame_at = holder.first_frame_at
         self.first_output_item_seen = self.first_output_item_seen or holder.first_output_item_seen
-        self.content_delivered = self.content_delivered or holder.content_delivered
         self.delta_chars = max(self.delta_chars, holder.delta_chars)
         return holder
 
@@ -483,10 +529,13 @@ class SourceDispatch:
             await self._settle_reservation_step(reservation, self._estimate(), cause="missing_usage")
             return
         if status == "cancelled" and self.content_delivered and _reservation_requires_usage(reservation):
-            # Keyed on content the client actually received, not on the parser
-            # having seen an output item: a delta-only or completed-only answer
-            # that was flushed is charged, an output item still withheld ahead of
-            # an unfinished pin write is not.
+            # Keyed on a content frame the settlement layer handed to the
+            # transport, not on the parser having seen an output item nor on
+            # the body having flushed a chunk: a delta-only or completed-only
+            # answer that was relayed is charged; an output item still withheld
+            # ahead of an unfinished pin write, a vendor event the public
+            # contract dropped or a delta parked ahead of ``response.created``
+            # is not.
             await self._settle_reservation_step(reservation, self._estimate(), cause="client_cancel")
             return
         await self._release_reservation_step(reservation)
@@ -860,6 +909,16 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
     terminal a ``success``. A verified pin non-write yields the
     synthesized ``response.created`` + ``response.failed`` pair after the
     reservation was released and the source closed.
+
+    Delivery is decided here as well: ``owner.content_delivered`` is set when
+    an event frame ``relayed_frame_delivers_content`` classifies as content is
+    handed to the transport, so the cancel estimate charges only for frames
+    that left the proxy. The body's flush point sits below the public wrapper,
+    which drops events outside ``response.*`` / ``error`` under the SDK
+    contract, parks ``response.*`` frames ahead of ``response.created`` and
+    holds reasoning-summary deltas; a chunk the body flushed may therefore
+    never reach the client (the one ``send()`` in flight when the client
+    leaves is the residual ambiguity, resolved as delivered).
     """
 
     status: DispatchStatus = "success"
@@ -871,8 +930,10 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
     owner.body_started = True
     try:
         async for chunk in wrapped:
-            if chunk and chunk[0] != ":" and not chunk.startswith(_NON_EVENT_FRAME_PREFIXES):
+            if _is_event_frame(chunk):
                 last_event_frame = chunk
+                if not owner.content_delivered and relayed_frame_delivers_content(chunk):
+                    owner.content_delivered = True
             yield chunk
         completed_normally = True
         holder = owner.observe_stream()

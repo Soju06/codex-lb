@@ -175,10 +175,12 @@ class SourceUsageHolder:
     first_content_seen: bool = False
     first_output_item_seen: bool = False
     # Set at the flush point of ``_source_stream_body``: a chunk carrying
-    # content (``first_content_seen``) has been handed to the consumer. The
-    # settlement's cancel policy keys on this, not on the parser's observation,
-    # so bytes withheld ahead of a pin write the client did not wait for are
-    # never billed, and delivered content without an output item is.
+    # content (``first_content_seen``) has been handed to the consumer, after
+    # the pre-content hook and never before it. This is the body's evidence for
+    # the hook ordering (I11); it is not the billing signal. The consumer is the
+    # public wrapper chain, which may still drop, park or hold the frame, so
+    # ``SourceDispatch.content_delivered`` is derived by the settlement layer
+    # from the frames it hands to the transport and never mirrored from here.
     content_delivered: bool = False
     terminal_kind: Literal["completed", "incomplete", "failed", "error"] | None = None
     delta_chars: int = 0
@@ -574,9 +576,11 @@ async def _source_stream_body(
     whole total budget. A hook exception propagates and the withheld bytes are
     dropped -- the client must not receive content whose continuity was not
     secured. ``usage_holder.content_delivered`` is set exactly where a chunk
-    carrying content is handed to the consumer (after the hook, never before),
-    so the settlement policy can tell delivered content from content the
-    parser merely observed.
+    carrying content is handed to the consumer (after the hook, never before)
+    as the body's hook-ordering evidence; the consumer is the public wrapper
+    chain, which can still drop or park that chunk, so the billing decision
+    (``SourceDispatch.content_delivered``) is made by the settlement layer from
+    the frames it hands to the transport, not from this flag.
     """
 
     withheld: list[bytes] | None = [] if on_first_content is not None else None

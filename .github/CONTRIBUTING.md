@@ -236,8 +236,8 @@ Before a PR is squash-merged into `main`:
    resolves an issue, so the issue close stays automatic and the merge
    stays traceable. Use `Refs #N` / `Related to #N` for partial cover.
 6. **Simplicity gates must pass** (see
-   [Simplicity gates](#simplicity-gates)): the five simplicity rules
-   (PRINCIPLES.md P1-P5). Budget exceptions need the
+   [Simplicity gates](#simplicity-gates)): the six simplicity rules
+   (PRINCIPLES.md P1-P6). Budget exceptions need the
    maintainer-applied `simplicity-budget-approved` label.
 
 ### Simplicity gates
@@ -266,6 +266,15 @@ every PR (budget checks are enforced by CI as of the
    `openspec/specs/<capability>/` entry.
 5. **Dashboard-visible PRs include before/after screenshots** (or a
    short recording) in the PR body.
+6. **The dashboard is the primary configuration surface** (PRINCIPLES.md
+   P6). Every new setting names its tier (T0 bootstrap / T1 instance
+   topology / T2 secret / T3 behaviour tunable / T4 incident debug) in the
+   PR body; a T3 setting has a `dashboard_settings` column, not an
+   env-only home; precedence stays code default < env < dashboard with no
+   env-wins paths. Machine-checked by the CI check
+   `check_settings_tiers.py` (introduced by the codify-configuration-tiers
+   change; reviewer-enforced before that). Normative spec:
+   `openspec/specs/configuration-tiers/spec.md`.
 
 ### Collaborator rules
 

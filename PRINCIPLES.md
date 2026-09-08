@@ -58,6 +58,25 @@ human-readable rendering.
 - "It's a small CSS tweak" is not an exemption; small tweaks make small
   screenshots.
 
+## P6 — The dashboard is the primary configuration surface
+
+- A value an operator may want to change while the proxy is running belongs
+  in the dashboard (the database), not in an environment variable. The
+  environment is for **bootstrap** (what is needed before the database is
+  reachable) and **instance topology** (what legitimately differs between
+  replicas). One question decides: *may this value legitimately differ
+  between two replicas?* Yes → env. No → dashboard.
+- Precedence is fixed: code default < environment < dashboard. A non-NULL
+  dashboard value is never overridden by the environment, and the
+  environment is never copied into the dashboard row as a seed — it is a
+  fallback for a NULL dashboard value only.
+- Every new setting names its tier (T0 bootstrap, T1 instance topology,
+  T2 secret, T3 behaviour tunable, T4 incident debug) in the PR body; a T3
+  setting names its `dashboard_settings` column. The normative contract is
+  `openspec/specs/configuration-tiers/spec.md` (created when the
+  codify-configuration-tiers change is archived; until then the delta spec
+  lives under `openspec/changes/codify-configuration-tiers/`).
+
 ## Applying these principles
 
 | Principle | What the reviewer checks | Where the gate lives |
@@ -67,6 +86,7 @@ human-readable rendering.
 | P3 budgets | README sections, `.env.example`, dashboard core nav within `.github/simplicity-budgets.toml` | CI budget check (CI-enforced as of the `ci-simplicity-budgets` change; reviewer-enforced before that); `simplicity-budget-approved` label for exceptions |
 | P4 docs placement | Feature docs land in `docs/` + OpenSpec, not new README sections | CONTRIBUTING [Simplicity gates](.github/CONTRIBUTING.md#simplicity-gates) |
 | P5 screenshots | Before/after screenshots for dashboard-visible changes | PR template "Screenshots / output" |
+| P6 dashboard-primary configuration | Each new setting has a tier; T3 settings live in `dashboard_settings`, not env-only; precedence default < env < dashboard is not inverted | CI check `check_settings_tiers.py` (introduced by the codify-configuration-tiers change; reviewer-enforced before that); PR template "Simplicity" |
 
 Rationale, the erosion metrics that motivated codifying these rules, and a
 worked example live in

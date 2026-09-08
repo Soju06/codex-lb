@@ -33,6 +33,31 @@ keeps the egress implementation usable from a future in-process Rust server;
 the transport will not need to be extracted from a subprocess executable when
 that migration reaches the application shell.
 
+Direct and account-routed streaming Responses requests delegate SSE byte framing to egress.
+The adapter requires `http_sse_v1` and supplies the existing idle timeout and
+event byte limit as per-request options. Rust owns the deadline between body
+reads, including partial events; Python consumes framed text and retains event
+normalization, terminal detection, archives, and public error mapping. HTTP
+error bodies and non-streaming requests keep the raw chunk contract. Compact
+responses retain Python framing until their own cutover.
+
+Routed requests carry typed `native_sse` options through `CodexClient` with
+`buffer_response=False`. Python selects each concrete endpoint and records
+fallback metadata, while preserving the returned native response for framed
+consumption. A confirmed pre-dispatch connect failure may use the next endpoint;
+body errors and cancellation cannot replay a dispatched POST. If the helper is
+unavailable before dispatch, the resolved Python transport uses ordinary byte
+framing, and receives no native-only option. A locally created routed client
+finishes closing its session even in an already cancelled scope.
+
+SSE text crosses IPC in fragments of at most 16 KiB of UTF-8, with an explicit
+continuation flag. This keeps individual JSON lines and the existing bounded
+queue small even for large events or escaped control characters. The adapter
+joins text fragments without scanning or decoding the SSE bytes again.
+The framing contract and cancellation behavior are specified by
+[outbound HTTP clients](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/outbound-http-clients/spec.md) and
+[Responses compatibility](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/responses-api-compat/spec.md).
+
 ## Compatibility contract
 
 Every new helper process completes `client_hello` / `server_hello` negotiation

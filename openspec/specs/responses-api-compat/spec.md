@@ -5536,15 +5536,17 @@ captured when the connection began.
 - **GIVEN** `prohibitFastMode` is enabled
 - **WHEN** an internal owner-forwarded payload carries a priority service tier
 - **THEN** the receiving preparation boundary omits `service_tier` before upstream forwarding
+
 ### Requirement: Native direct HTTP egress preserves Responses streaming semantics
 
 Direct Responses HTTP/SSE requests sent through native egress MUST preserve the existing normalized upstream payload and headers, rate-limit header ingestion, maximum SSE event size, idle and total request deadlines, terminal-event requirements, downstream event normalization, archives, and error envelope behavior. Downstream cancellation MUST cancel and await only the owned native request task, unregister its event stream, and leave unrelated multiplexed requests usable. Native transport selection MUST NOT change the public HTTP status or SSE framing contract.
 
 #### Scenario: Native SSE response uses the ordinary parser
 
-- **GIVEN** native direct egress returns an HTTP success and streamed SSE chunks
+- **GIVEN** native direct egress returns an HTTP success for a streaming Responses request
 - **WHEN** the proxy consumes the response
-- **THEN** chunks pass through the ordinary SSE parser, normalizer, terminal-event detection, and archive path
+- **THEN** Rust frames body bytes into SSE blocks with the existing CR/LF, UTF-8 replacement, whitespace, EOF, and size-limit behavior
+- **AND** Python applies the ordinary normalizer, terminal-event detection, and archive path without byte reframing
 - **AND** the downstream event sequence matches the Python transport contract
 
 #### Scenario: Downstream cancellation owns helper cleanup
@@ -5554,6 +5556,12 @@ Direct Responses HTTP/SSE requests sent through native egress MUST preserve the 
 - **THEN** only that native request task is cancelled and awaited
 - **AND** the helper and unrelated request streams remain usable
 - **AND** the cancelled POST is not replayed through another HTTP client
+
+#### Scenario: Framing failures retain public error behavior
+
+- **WHEN** native SSE framing exceeds the configured event byte limit or receives no body bytes within the idle deadline
+- **THEN** the public response uses the existing stream-event-too-large or stream-idle-timeout error behavior
+- **AND** idle timeout remains account-neutral
 
 ### Requirement: HTTP session bridge admission obeys downstream transport policy
 
@@ -5731,3 +5739,37 @@ rule. A missing or invalid value MUST remain absent.
 - **WHEN** an upstream retry hint contains a line break or exceeds the bounded
   field length
 - **THEN** codex-lb does not copy that value downstream
+
+### Requirement: Routed native Responses streams consume Rust-framed SSE
+
+Account-routed streaming Responses HTTP requests using native egress MUST
+delegate byte framing, event byte limits, and body-read idle deadlines to the
+existing Rust SSE transport contract. Python MUST consume the framed events
+without byte reframing, preserving normalization, terminal detection, rate-limit
+headers, archives, route trace, and public error envelopes. Non-streaming HTTP
+responses and HTTP errors MUST retain raw body consumption. Body failures and
+cancellation MUST NOT replay a dispatched POST or switch its proxy endpoint.
+
+#### Scenario: Routed native success skips Python byte framing
+
+- **WHEN** the selected proxy endpoint returns a successful streaming Responses body
+- **THEN** Rust emits the same SSE event contract as direct native streaming
+- **AND** Python performs ordinary downstream event processing without scanning bytes
+
+#### Scenario: Framing failure preserves route and error behavior
+
+- **WHEN** a routed body exceeds its byte limit or goes idle
+- **THEN** the existing stream-event-too-large or stream-idle-timeout envelope is produced
+- **AND** route metadata remains associated with that attempt without endpoint replay
+
+#### Scenario: Routed cancellation isolates the owned stream
+
+- **WHEN** a routed native SSE stream closes or is cancelled, including in an already cancelled scope
+- **THEN** its owned native request is cancelled and unregistered
+- **AND** a locally created routed client finishes closing its session before cancellation propagates
+- **AND** another active request in the same helper remains usable
+
+#### Scenario: Routed error or non-streaming response remains raw
+
+- **WHEN** the routed response is an HTTP error or the request disables streaming
+- **THEN** the ordinary JSON/error body path and public response envelope are preserved

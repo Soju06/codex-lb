@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import stat
 from pathlib import Path
 
+import anyio
 import pytest
 
 from app.core.clients.native_egress import (
@@ -13,12 +15,14 @@ from app.core.clients.native_egress import (
     NativeEgressRequest,
     NativeEgressTransportError,
     NativeEgressUnavailable,
+    NativeSseOptions,
     NativeWebSocketMessage,
     NativeWebSocketRequest,
     SubprocessNativeEgressClient,
     close_discovered_native_egress_client,
     discover_native_egress_client,
 )
+from app.core.clients.stream_errors import StreamEventTooLargeError, StreamIdleTimeoutError
 
 _HELPER_PROTOCOL_PREAMBLE = r"""
 import json
@@ -37,6 +41,7 @@ print(json.dumps({
         "failure_provenance_v1",
         "http",
         "http2_profile_v1",
+        "http_sse_v1",
         "websocket",
         "websocket_send_ack",
     ],
@@ -786,3 +791,136 @@ os._exit(9)
 
     assert client._generation == 1
     await client.aclose()
+
+
+def _sse_helper_source(events: list[dict[str, object]]) -> str:
+    return f"""#!/usr/bin/env python3
+import json
+import sys
+for line in sys.stdin:
+    command = json.loads(line)
+    request_id = command["request_id"]
+    if command["type"] == "cancel":
+        print(json.dumps({{"type": "cancelled", "request_id": request_id}}), flush=True)
+        continue
+    assert command["sse"] == {{"idle_timeout_ms": 1000, "max_event_bytes": 1024}}
+    print(json.dumps({{"type": "head", "request_id": request_id, "status": 200,
+                       "http_version": "HTTP/1.1", "headers": []}}), flush=True)
+    for event in {events!r}:
+        print(json.dumps({{**event, "request_id": request_id}}), flush=True)
+"""
+
+
+@pytest.mark.asyncio
+async def test_native_sse_joins_fragments_and_yields_small_event_bursts(tmp_path: Path) -> None:
+    blocks = [f"data: {i}\n\n" for i in range(200)]
+    events: list[dict[str, object]] = [
+        {"type": "sse", "text": "data: ", "more": True},
+        {"type": "sse", "text": "한글\n\n", "more": False},
+    ]
+    for block in blocks:
+        events.append({"type": "sse", "text": block, "more": False})
+    events.append({"type": "end"})
+    helper = tmp_path / "native-helper"
+    _write_helper(helper, _sse_helper_source(events))
+    client = SubprocessNativeEgressClient(helper)
+    try:
+        response = await client.request(
+            NativeEgressRequest("GET", "https://example.test", {}, sse=NativeSseOptions(1, 1024))
+        )
+        async with response:
+            assert [block async for block in response.iter_sse_events()] == ["data: 한글\n\n", *blocks]
+        assert not client._streams
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("events", "error_type"),
+    [
+        ([{"type": "chunk", "data": "eA=="}], NativeEgressProtocolError),
+        ([{"type": "sse", "text": 4, "more": False}], NativeEgressProtocolError),
+        ([{"type": "sse", "text": "x", "more": "false"}], NativeEgressProtocolError),
+        ([{"type": "sse", "text": "unfinished", "more": True}, {"type": "end"}], NativeEgressProtocolError),
+        ([{"type": "sse_event_too_large", "size_bytes": True, "limit_bytes": 1}], NativeEgressProtocolError),
+        ([{"type": "sse_event_too_large", "size_bytes": 1025, "limit_bytes": 1024}], StreamEventTooLargeError),
+        ([{"type": "error", "failure_phase": "stream_idle_timeout"}], StreamIdleTimeoutError),
+    ],
+)
+async def test_native_sse_failure_releases_owned_stream(
+    tmp_path: Path, events: list[dict[str, object]], error_type: type[Exception]
+) -> None:
+    helper = tmp_path / "native-helper"
+    _write_helper(helper, _sse_helper_source(events))
+    client = SubprocessNativeEgressClient(helper)
+    try:
+        response = await client.request(
+            NativeEgressRequest("GET", "https://example.test", {}, sse=NativeSseOptions(1, 1024))
+        )
+        async with response, contextlib.aclosing(response.iter_sse_events()) as stream:
+            with pytest.raises(error_type):
+                await anext(stream)
+        assert not client._streams
+        assert client._process is not None and client._process.returncode is None
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_native_sse_capability_is_required_before_dispatch(tmp_path: Path) -> None:
+    helper = tmp_path / "native-helper"
+    preamble = _HELPER_PROTOCOL_PREAMBLE.replace('        "http_sse_v1",\n', "")
+    source = "#!/usr/bin/env python3\n" + preamble + "\nassert sys.stdin.readline() == ''\n"
+    helper.write_text(source, encoding="utf-8")
+    helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
+    client = SubprocessNativeEgressClient(helper)
+    try:
+        with pytest.raises(NativeEgressProtocolError, match="http_sse_v1"):
+            await client.request(NativeEgressRequest("GET", "https://example.test", {}, sse=NativeSseOptions(1, 1024)))
+        assert client._process is None
+        assert not client._streams
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "options",
+    [
+        NativeSseOptions(0, 1),
+        NativeSseOptions(float("nan"), 1),
+        NativeSseOptions(float("inf"), 1),
+        NativeSseOptions(1, 0),
+        NativeSseOptions(1, True),
+    ],
+)
+async def test_native_sse_options_are_validated_before_start(tmp_path: Path, options: NativeSseOptions) -> None:
+    helper = tmp_path / "native-helper"
+    _write_helper(helper, _sse_helper_source([]))
+    client = SubprocessNativeEgressClient(helper)
+    try:
+        with pytest.raises(ValueError):
+            await client.request(NativeEgressRequest("GET", "https://example.test", {}, sse=options))
+        assert client._process is None
+        assert not client._streams
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_native_sse_close_finishes_in_cancelled_scope(tmp_path: Path) -> None:
+    helper = tmp_path / "native-helper"
+    _write_helper(helper, _sse_helper_source([]))
+    client = SubprocessNativeEgressClient(helper)
+    try:
+        response = await client.request(
+            NativeEgressRequest("GET", "https://example.test", {}, sse=NativeSseOptions(1, 1024))
+        )
+        with anyio.CancelScope() as scope:
+            scope.cancel()
+            await response.aclose()
+        assert not client._streams
+        assert client._process is not None and client._process.returncode is None
+    finally:
+        await client.aclose()

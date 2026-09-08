@@ -1054,14 +1054,61 @@ def _mapping_has_account_scoped_reference(value: Mapping[str, JsonValue]) -> boo
 
 # --- Provider portability (#2123 WP-C1, design v3 §4.4) -------------------------
 #
-# Evaluated on the allowlisted ``PortabilityView`` (never the raw body). Steps,
-# in order: (1) account-neutral fresh replay -> ``not_portable_history``;
-# (2) no ``reasoning``/``compaction`` items; (3) no ``additional_tools`` ->
-# ``not_portable_lite_namespace``; (4) every input item type provider-universal
-# or its tool type declared -> ``not_portable_items``; (5) every ``tools[].type``
-# ``function`` or declared, ``namespace`` never -> ``not_portable_tools``;
-# (6) ``input_image`` requires vision -> ``not_portable_vision``; (7) binding
-# ``x-codex-turn-state`` -> ``turn_state_bound``.
+# Evaluated on the allowlisted ``PortabilityView`` (never the raw body) and
+# returns ``portable`` or exactly one closed reason. The design numbers the
+# checks 1-7; they are *evaluated* configuration-class first because the
+# account-neutral predicate (step 1) subsumes the tool/item vocabulary: run
+# first, it would report every undeclared tool type, every ``namespace`` tool
+# and every unsupported item as ``not_portable_history`` -- the one reason that
+# earns the client "start a new conversation" hint, which would be false for a
+# body a new conversation reproduces identically (design §8.7).
+#
+# Evaluation order and reasons:
+#   step 3  ``additional_tools`` input item          -> ``not_portable_lite_namespace``
+#   step 5  ``tools[].type`` not ``function``/declared, ``namespace`` never
+#                                                    -> ``not_portable_tools``
+#   step 4  input item type not provider-universal and its tool type undeclared
+#                                                    -> ``not_portable_items``
+#   step 6  ``input_image`` part without vision      -> ``not_portable_vision``
+#   step 1  account-neutral fresh replay of the classification view
+#   step 2  no ``reasoning``/``compaction`` item     -> ``not_portable_history``
+#   step 7  binding ``x-codex-turn-state``           -> ``turn_state_bound``
+# ``transcript_is_source_free`` is steps 1-2 alone.
+
+# Fields the view admits that ``responses_payload_is_account_neutral_fresh_replay``
+# has no dedicated validation for: provider-neutral generation knobs with no
+# account-scoped state. The classification view drops them; everything else in
+# the view is validated by the predicate (pinned by a unit test so the two
+# allowlists cannot drift).
+_PORTABILITY_VIEW_ONLY_FIELDS = frozenset(
+    {"max_output_tokens", "prompt_cache_retention", "safety_identifier", "temperature", "top_p", "user"}
+)
+# Items every OpenAI-compatible Responses source accepts without a tool declaration.
+_PROVIDER_UNIVERSAL_ITEM_TYPES = frozenset({"message", "function_call", "function_call_output"})
+# Items a source serves only when the model declares the tool type
+# (``source_model_supported_tool_types``): ``custom``/``apply_patch`` for the
+# Codex freeform tools, the rest same-named as the hosted tool.
+_DECLARED_TOOL_TYPE_BY_ITEM_TYPE = {
+    "custom_tool_call": "custom",
+    "custom_tool_call_output": "custom",
+    "apply_patch_call": "apply_patch",
+    "apply_patch_call_output": "apply_patch",
+    "web_search_call": "web_search",
+    "tool_search_call": "tool_search",
+    "tool_search_output": "tool_search",
+    "local_shell_call": "local_shell",
+    "local_shell_call_output": "local_shell",
+    "shell_call": "shell",
+    "shell_call_output": "shell",
+}
+# Response-owned history the account-neutral predicate declines (``history``):
+# the vocabulary check defers them so a stored reasoning item or an item
+# reference is never misreported as an undeclared tool type.
+_HISTORY_ITEM_TYPES = frozenset({"compaction", "reasoning"}) | _ACCOUNT_SCOPED_HOSTED_INPUT_TYPES
+_LITE_BUNDLE_ITEM_TYPE = "additional_tools"
+_NAMESPACE_TOOL_TYPE = "namespace"
+_FUNCTION_TOOL_TYPE = "function"
+_INPUT_IMAGE_PART_TYPE = "input_image"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1078,16 +1125,136 @@ def responses_payload_is_provider_portable(
     supported_tool_types: frozenset[str],
     supports_vision: bool,
 ) -> PortabilityVerdict:
-    raise NotImplementedError
+    """Whether the viewed body can be served by a standard OpenAI-compatible source.
+
+    ``supported_tool_types`` are the non-function tool types the source model
+    declares (``source_model_supported_tool_types``); ``supports_vision`` is the
+    source model's ``supports_vision``. Pure: touches no account or source state.
+    """
+
+    input_items = _view_input_items(view)
+    if any(_item_type(item) == _LITE_BUNDLE_ITEM_TYPE for item in input_items):
+        return PortabilityVerdict(False, "not_portable_lite_namespace", _LITE_BUNDLE_ITEM_TYPE)
+    undeclared_tool = _undeclared_tool_type(view.body.get("tools"), supported_tool_types)
+    if undeclared_tool is not None:
+        return PortabilityVerdict(False, "not_portable_tools", undeclared_tool)
+    unportable_item = _unportable_item_type(input_items, supported_tool_types)
+    if unportable_item is not None:
+        return PortabilityVerdict(False, "not_portable_items", unportable_item)
+    if not supports_vision and _input_carries_image_parts(input_items):
+        return PortabilityVerdict(False, "not_portable_vision", _INPUT_IMAGE_PART_TYPE)
+    if not transcript_is_source_free(view):
+        return PortabilityVerdict(False, "not_portable_history")
+    if is_binding_turn_state(headers):
+        return PortabilityVerdict(False, "turn_state_bound")
+    return PortabilityVerdict(True)
 
 
 def transcript_is_source_free(view: PortabilityView) -> bool:
-    """Steps 1-2 of ``responses_payload_is_provider_portable`` only."""
+    """Steps 1-2 of ``responses_payload_is_provider_portable`` only.
 
-    raise NotImplementedError
+    True when the viewed transcript carries no account-scoped upstream state:
+    it is an account-neutral fresh replay and holds no ``reasoning`` or
+    ``compaction`` item (implied by the predicate, kept explicit).
+    """
+
+    if not responses_payload_is_account_neutral_fresh_replay(_classification_view(view)):
+        return False
+    return not any(_item_type(item) in ("compaction", "reasoning") for item in _view_input_items(view))
 
 
 def is_binding_turn_state(headers: Mapping[str, str]) -> bool:
     """Non-blank ``x-codex-turn-state`` that does not match ``_SYNTHESIZED_TURN_STATE_PATTERN``."""
 
-    raise NotImplementedError
+    # ``affinity`` imports this module; resolve its helpers at call time.
+    from app.modules.proxy.affinity import _is_synthesized_turn_state, _sticky_key_from_turn_state_header
+
+    turn_state = _sticky_key_from_turn_state_header(headers)
+    return turn_state is not None and not _is_synthesized_turn_state(turn_state)
+
+
+def _classification_view(view: PortabilityView) -> dict[str, JsonValue]:
+    """The view restricted to the fields the account-neutral predicate validates.
+
+    Only the provider-neutral knobs are dropped; anything else the view carries
+    reaches the predicate, which rejects fields it has no validation for -- a
+    hand-built view with an unknown field fails closed as history.
+    """
+
+    return {key: value for key, value in view.body.items() if key not in _PORTABILITY_VIEW_ONLY_FIELDS}
+
+
+def _view_input_items(view: PortabilityView) -> list[JsonValue]:
+    input_value = view.body.get("input")
+    return cast(list[JsonValue], input_value) if isinstance(input_value, list) else []
+
+
+def _item_type(item: JsonValue) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    return item_type if isinstance(item_type, str) else None
+
+
+def _undeclared_tool_type(tools: JsonValue | None, supported_tool_types: frozenset[str]) -> str | None:
+    """First ``tools[]`` entry a standard source cannot serve, or ``None``."""
+
+    if tools is None:
+        return None
+    if not isinstance(tools, list):
+        return "tools"
+    for tool in tools:
+        if not isinstance(tool, dict):
+            return "tools[]"
+        tool_type = tool.get("type")
+        if not isinstance(tool_type, str) or not tool_type:
+            return "tools[].type"
+        if tool_type == _FUNCTION_TOOL_TYPE:
+            continue
+        # The reserved ``collaboration``/code-mode namespace is never declarable.
+        if tool_type == _NAMESPACE_TOOL_TYPE or tool_type not in supported_tool_types:
+            return tool_type
+    return None
+
+
+def _unportable_item_type(input_items: list[JsonValue], supported_tool_types: frozenset[str]) -> str | None:
+    """First input item type a standard source cannot serve, or ``None``.
+
+    Typeless role messages and ``_PROVIDER_UNIVERSAL_ITEM_TYPES`` pass; mapped
+    tool items pass when their tool type is declared; history-class items are
+    left to the account-neutral predicate; anything else (bare content parts,
+    unknown types) is declined here.
+    """
+
+    for item in input_items:
+        if not isinstance(item, dict):
+            return "input[]"
+        item_type = item.get("type")
+        if item_type is None:
+            continue
+        if not isinstance(item_type, str) or not item_type:
+            return "input[].type"
+        if item_type in _PROVIDER_UNIVERSAL_ITEM_TYPES:
+            continue
+        declared_tool_type = _DECLARED_TOOL_TYPE_BY_ITEM_TYPE.get(item_type)
+        if declared_tool_type is not None:
+            if declared_tool_type not in supported_tool_types:
+                return item_type
+            continue
+        if item_type in _HISTORY_ITEM_TYPES or item_type.startswith("mcp_"):
+            continue
+        return item_type
+    return None
+
+
+def _input_carries_image_parts(input_items: list[JsonValue]) -> bool:
+    """Whether any message ``content`` or tool ``output`` part is an ``input_image``."""
+
+    for item in input_items:
+        if not isinstance(item, dict):
+            continue
+        for field in ("content", "output"):
+            parts = item.get(field)
+            if isinstance(parts, list) and any(_item_type(part) == _INPUT_IMAGE_PART_TYPE for part in parts):
+                return True
+    return False

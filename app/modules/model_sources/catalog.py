@@ -301,4 +301,5 @@ def _raw_metadata(source_model: ModelSourceModel) -> dict[str, JsonValue]:
 def source_model_supports_vision(source: ModelSource, model: str) -> bool:
     """Whether the enabled ``ModelSourceModel`` entry for ``model`` declares ``supports_vision`` (#2123 WP-C1)."""
 
-    raise NotImplementedError
+    entry = _enabled_source_model(source, model)
+    return entry is not None and bool(entry.supports_vision)

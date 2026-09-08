@@ -20,7 +20,6 @@ _INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
 _INTERNAL_WARMUP_REQUEST_KINDS = ("warmup", "limit_warmup")
 _SQLITE_COMPOUND_SELECT_LIMIT = 500
 MAX_DAILY_REPORT_DAYS = 730
-UNKNOWN_USERAGENT_GROUP = "Unknown"
 MISSING_USERAGENT_GROUP = "Missing User-Agent"
 
 
@@ -352,25 +351,6 @@ class ReportsRepository:
             )
             for row in result.all()
         ]
-
-    async def count_active_accounts(
-        self,
-        start_date: datetime,
-        end_date: datetime,
-        account_ids: list[str] | None = None,
-        model: str | None = None,
-        useragent_group: str | None = None,
-        api_key_ids: list[str] | None = None,
-    ) -> int:
-        conditions = [
-            *_report_conditions(start_date, end_date, account_ids, model, useragent_group, api_key_ids),
-            RequestLog.account_id.is_not(None),
-        ]
-
-        result = await self._session.execute(
-            select(func.count(func.distinct(RequestLog.account_id))).where(and_(*conditions))
-        )
-        return int(result.scalar_one() or 0)
 
     async def earliest_report_activity_at(
         self,

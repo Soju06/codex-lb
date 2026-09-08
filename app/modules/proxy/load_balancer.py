@@ -1648,23 +1648,6 @@ class LoadBalancer:
                 self._account_locks[account_id] = lock
             return lock
 
-    async def _sync_runtime_state_for_account(
-        self,
-        account: Account,
-        state: AccountState,
-        *,
-        selected: bool = False,
-        expected_version: int | None = None,
-    ) -> bool:
-        lock = await self._get_account_lock(account.id)
-        async with lock:
-            return self._sync_runtime_state(
-                account,
-                state,
-                selected=selected,
-                expected_version=expected_version,
-            )
-
     async def _select_with_stickiness(
         self,
         *,

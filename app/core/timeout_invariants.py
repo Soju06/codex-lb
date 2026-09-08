@@ -95,22 +95,15 @@ def _expr(label: str, anchor: str, evaluate: Callable[[TimeoutSettings], float])
     return TimeoutOperand(label, evaluate, anchor)
 
 
-UPSTREAM_CONNECT = _field("upstream_connect_timeout_seconds", "app/core/clients/proxy.py:2720")
 PROXY_BUDGET = _field("proxy_request_budget_seconds", "app/core/config/settings.py:260")
 STREAM_BUDGET = _field(
     "http_responses_stream_request_budget_seconds",
     "app/modules/proxy/_service/streaming/helpers.py:724",
 )
 COMPACT_BUDGET = _field("compact_request_budget_seconds", "app/modules/proxy/_service/compact.py:585")
-SSE_KEEPALIVE = _field("sse_keepalive_interval_seconds", "app/modules/proxy/api.py:3930")
-TOKEN_REFRESH = _field("token_refresh_timeout_seconds", "app/modules/accounts/auth_manager.py:1123")
 BRIDGE_BUDGET = _field(
     "http_responses_session_bridge_request_budget_seconds",
     "app/modules/proxy/_service/http_bridge/helpers.py:2469",
-)
-BRIDGE_CLEAN_CLOSE_JITTER = _field(
-    "http_responses_session_bridge_clean_close_retry_jitter_max_seconds",
-    "app/modules/proxy/_service/http_bridge/request_submit.py:294",
 )
 ADMISSION_WAIT = _field("proxy_admission_wait_timeout_seconds", "app/modules/proxy/service.py:768")
 ACCOUNT_LEASE_TTL = _field("proxy_account_lease_ttl_seconds", "app/modules/proxy/load_balancer.py:1993")

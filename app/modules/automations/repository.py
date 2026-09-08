@@ -807,25 +807,6 @@ class AutomationsRepository:
             for run, job_name, model, reasoning_effort in result.all()
         ]
 
-    async def list_runs_for_manual_cycle(
-        self,
-        *,
-        job_id: str,
-        slot_key_prefix: str,
-    ) -> list[AutomationRunRecord]:
-        result = await self._session.execute(
-            select(AutomationRun, AutomationJob.name, AutomationJob.model, AutomationJob.reasoning_effort)
-            .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
-            .where(AutomationRun.job_id == job_id)
-            .where(AutomationRun.trigger == "manual")
-            .where(AutomationRun.slot_key.like(f"{slot_key_prefix}%"))
-            .order_by(AutomationRun.started_at.desc(), AutomationRun.id.desc())
-        )
-        return [
-            self._run_from_model(run, job_name=job_name, model=model, reasoning_effort=reasoning_effort)
-            for run, job_name, model, reasoning_effort in result.all()
-        ]
-
     async def list_due_manual_runs(
         self,
         *,
@@ -1066,37 +1047,6 @@ class AutomationsRepository:
             count_stmt = count_stmt.where(and_(*conditions))
         total = int((await self._session.execute(count_stmt)).scalar_one() or 0)
         return runs, total
-
-    async def list_runs_filtered(
-        self,
-        *,
-        search: str | None = None,
-        account_ids: Sequence[str] | None = None,
-        models: Sequence[str] | None = None,
-        statuses: Sequence[str] | None = None,
-        triggers: Sequence[str] | None = None,
-        job_ids: Sequence[str] | None = None,
-    ) -> list[AutomationRunRecord]:
-        conditions = self._build_run_conditions(
-            search=search,
-            account_ids=account_ids,
-            models=models,
-            statuses=statuses,
-            triggers=triggers,
-            job_ids=job_ids,
-        )
-        stmt = (
-            select(AutomationRun, AutomationJob.name, AutomationJob.model, AutomationJob.reasoning_effort)
-            .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
-            .order_by(AutomationRun.started_at.desc(), AutomationRun.id.desc())
-        )
-        if conditions:
-            stmt = stmt.where(and_(*conditions))
-        result = await self._session.execute(stmt)
-        return [
-            self._run_from_model(run, job_name=job_name, model=model, reasoning_effort=reasoning_effort)
-            for run, job_name, model, reasoning_effort in result.all()
-        ]
 
     def _build_grouped_run_candidates(
         self,

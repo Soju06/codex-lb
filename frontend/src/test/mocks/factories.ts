@@ -502,7 +502,7 @@ export function createDashboardSettings(
 ): DashboardSettings {
 	return DashboardSettingsSchema.parse({
 		stickyThreadsEnabled: true,
-		upstreamStreamTransport: "default",
+		upstreamStreamTransport: "auto",
 		httpDownstreamTransportPolicy: "smart",
 		upstreamProxyRoutingEnabled: false,
 		upstreamProxyDefaultPoolId: null,

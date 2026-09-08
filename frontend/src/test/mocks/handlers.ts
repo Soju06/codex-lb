@@ -111,7 +111,7 @@ const SettingsPayloadSchema = z.looseObject({
   stickyThreadsEnabled: z.boolean().optional(),
   subscriptionOverflowSourceId: z.string().nullable().optional(),
   upstreamStreamTransport: z
-    .enum(["default", "auto", "http", "websocket"])
+    .enum(["auto", "http", "websocket"])
     .optional(),
   httpDownstreamTransportPolicy: z
     .enum(["smart", "always_http", "always_websocket", "pinned"])

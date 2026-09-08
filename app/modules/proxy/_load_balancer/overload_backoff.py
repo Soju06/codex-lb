@@ -39,9 +39,9 @@ sessions but rejects fresh admissions is exactly the case this exists for.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 from app.core.balancer.logic import AccountState
 from app.core.config.settings import get_settings
@@ -70,13 +70,6 @@ OVERLOAD_LEVEL_DECAY_SECONDS = 1800.0
 # (60, 120, 240, 480, then 600), so the stored level and the exponent are
 # both bounded and sustained overload can never overflow or inflate the log.
 OVERLOAD_MAX_LEVEL = 5
-
-
-class _OverloadBalancerLike(Protocol):
-    _runtime: dict[str, RuntimeState]
-    _clock: Any
-
-    async def _get_account_lock(self, account_id: str) -> Any: ...
 
 
 # The trip level at which sustained overload escalates from soft backoff to
@@ -248,16 +241,3 @@ def sticky_owner_isolation_reroute_pool(
     if pool is states:
         return None
     return pool
-
-
-def overload_backed_off_account_ids(
-    states: Iterable[AccountState],
-    runtime_by_account_id: Mapping[str, RuntimeState],
-    *,
-    now: float,
-) -> list[str]:
-    return [
-        state.account_id
-        for state in states
-        if overload_backoff_active(runtime_by_account_id.get(state.account_id), now)
-    ]

@@ -306,32 +306,6 @@ def canonicalize_additional_quota_key(
     return _normalize_identifier(limit_name) or _normalize_identifier(metered_feature) or normalized_quota_key
 
 
-def get_additional_quota_lookup_keys(
-    *,
-    quota_key: str | None = None,
-    limit_name: str | None = None,
-    metered_feature: str | None = None,
-) -> frozenset[str] | None:
-    (
-        by_quota_key,
-        _model_to_quota_key,
-        _model_to_definition,
-        _alias_to_quota_key,
-        _quota_key_alias_to_quota_key,
-    ) = _definition_maps_for_path(str(_registry_path()))
-    resolved_key = canonicalize_additional_quota_key(
-        quota_key=quota_key,
-        limit_name=limit_name,
-        metered_feature=metered_feature,
-    )
-    if resolved_key is None:
-        return None
-    definition = by_quota_key.get(resolved_key)
-    if definition is None:
-        return frozenset({resolved_key})
-    return frozenset({resolved_key, *definition.quota_key_aliases})
-
-
 def get_additional_quota_key_for_model(model: str | None) -> str | None:
     return canonicalize_additional_quota_key(model=model)
 
@@ -392,16 +366,3 @@ def get_additional_display_label_for_quota_key(quota_key: str | None) -> str | N
         return None
     definition = by_quota_key.get(resolved_key)
     return definition.display_label if definition is not None else None
-
-
-def get_additional_display_label(
-    *,
-    quota_key: str | None = None,
-    limit_name: str | None = None,
-    metered_feature: str | None = None,
-) -> str | None:
-    resolved_key = canonicalize_additional_quota_key(
-        limit_name=limit_name,
-        metered_feature=metered_feature,
-    )
-    return get_additional_display_label_for_quota_key(quota_key or resolved_key)

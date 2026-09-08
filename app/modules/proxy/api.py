@@ -8423,15 +8423,13 @@ async def _websocket_upstream_transport_denial() -> JSONResponse | None:
     # operator pin of the upstream transport to "http" — must deny the
     # handshake instead of accepting and erroring in-band.
     from app.modules.proxy._service.support import (
+        configured_upstream_stream_transport,
         upstream_websocket_transport_recently_failed,
     )
 
     if not upstream_websocket_transport_recently_failed():
         dashboard_settings = await get_settings_cache().get()
-        configured_transport = getattr(dashboard_settings, "upstream_stream_transport", "default")
-        if configured_transport == "default":
-            configured_transport = getattr(get_settings(), "upstream_stream_transport", "auto")
-        if configured_transport != "http":
+        if configured_upstream_stream_transport(dashboard_settings) != "http":
             return None
     return JSONResponse(
         status_code=426,

@@ -1478,6 +1478,25 @@ def test_check_schema_drift_ignores_legacy_live_extra_request_log_column(tmp_pat
     assert check_schema_drift(url) == ()
 
 
+def test_check_schema_drift_ignores_retired_prewarm_canary_columns_kept_for_rolling_upgrade(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "retired-prewarm-columns.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    retired_columns = {"prewarm_canary_bucket", "prewarm_eligible_reason"}
+    assert not (retired_columns & set(Base.metadata.tables["request_logs"].columns.keys()))
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        head_columns = {column["name"] for column in inspect(connection).get_columns("request_logs")}
+    assert retired_columns <= head_columns
+
+    assert check_schema_drift(url) == ()
+
+
 def test_check_schema_drift_ignores_sqlite_real_float_reflection_for_sticky_thresholds(
     monkeypatch,
     tmp_path: Path,

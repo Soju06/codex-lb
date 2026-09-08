@@ -28,6 +28,12 @@ The remaining settings (timeouts, connection pools, bulkheads, session bridge, l
 
 Runtime behavior such as the routing strategy, upstream stream transport, and per-account limits is configured live in the dashboard under **Settings** — no restart required.
 
+## Where settings live
+
+The dashboard is the primary configuration surface. Environment variables are for two things only: values needed before the database is reachable (data directory, database URL, encryption key, port) and values that legitimately differ between replicas (advertise URLs, trusted-proxy CIDRs, bind hosts). Everything an operator might change while the proxy is running — caps, timeouts, retries, feature toggles, retention — belongs in the dashboard and takes effect on every replica without a restart. Where a dashboard setting also has an environment fallback, precedence is fixed: code default, then environment, then a value set in the dashboard; the environment never overrides a value you set in the dashboard, and clearing the dashboard value returns to the environment (or default).
+
+This is the placement rule for new and migrated settings; not every existing setting follows it yet. Some tunables are still environment-only, and two variables still override or gate a dashboard value (`CODEX_LB_TELEMETRY_ENABLED` overrides the persisted telemetry consent; `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED=false` blocks enabling automatic reset-credit redemption). The [settings reference](reference/settings.md) lists what is currently read from the environment; the remaining moves are tracked in the `codify-configuration-tiers` change. The rule, the tier of each setting, and the deprecation path for environment variables are specified in [configuration-tiers](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/configuration-tiers) (delta under `openspec/changes/codify-configuration-tiers/` until archived).
+
 ---
 
-*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [replica-operations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/replica-operations)*
+*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [replica-operations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/replica-operations) · [configuration-tiers](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/configuration-tiers)*

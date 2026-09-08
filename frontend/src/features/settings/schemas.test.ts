@@ -14,7 +14,7 @@ describe("DashboardSettingsSchema", () => {
   it("parses settings payload", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
+      upstreamStreamTransport: "auto",
       upstreamProxyRoutingEnabled: true,
       upstreamProxyDefaultPoolId: "pool_1",
       preferEarlierResetAccounts: false,
@@ -57,7 +57,7 @@ describe("DashboardSettingsSchema", () => {
     });
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
-    expect(parsed.upstreamStreamTransport).toBe("default");
+    expect(parsed.upstreamStreamTransport).toBe("auto");
     expect(parsed.upstreamProxyRoutingEnabled).toBe(true);
     expect(parsed.upstreamProxyDefaultPoolId).toBe("pool_1");
     expect(parsed.routingStrategy).toBe("relative_availability");
@@ -105,7 +105,7 @@ describe("DashboardSettingsSchema", () => {
       hideUpstreamQuotaFromApiKeys: false,
     });
 
-    expect(parsed.upstreamStreamTransport).toBe("default");
+    expect(parsed.upstreamStreamTransport).toBe("auto");
     expect(parsed.upstreamProxyRoutingEnabled).toBe(false);
     expect(parsed.upstreamProxyDefaultPoolId).toBeNull();
     expect(parsed.routingStrategy).toBe("usage_weighted");
@@ -138,7 +138,7 @@ describe("DashboardSettingsSchema", () => {
   it("falls back to the legacy sticky threshold during mixed-version rollout", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
+      upstreamStreamTransport: "auto",
       preferEarlierResetAccounts: false,
       routingStrategy: "round_robin",
       openaiCacheAffinityMaxAgeSeconds: 300,
@@ -157,7 +157,7 @@ describe("DashboardSettingsSchema", () => {
   it("uses local defaults when mixed-version settings omit sticky thresholds", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
+      upstreamStreamTransport: "auto",
       preferEarlierResetAccounts: false,
       routingStrategy: "round_robin",
       openaiCacheAffinityMaxAgeSeconds: 300,

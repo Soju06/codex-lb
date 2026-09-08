@@ -498,12 +498,6 @@ def _stream_iterator_after_capacity_admission(
 _REQUEST_TRANSPORT_HTTP = "http"
 
 
-def _resolve_upstream_stream_transport(upstream_stream_transport: str) -> str | None:
-    if upstream_stream_transport == "default":
-        return None
-    return upstream_stream_transport
-
-
 def _should_penalize_stream_error(code: str | None) -> bool:
     if code is None:
         return False

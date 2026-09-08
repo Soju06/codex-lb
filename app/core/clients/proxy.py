@@ -29,7 +29,6 @@ from typing import (
     Protocol,
     Sequence,
     TypeAlias,
-    TypeVar,
     cast,
 )
 from urllib.parse import ParseResult, urlparse, urlunparse
@@ -332,8 +331,6 @@ _TRANSCRIBE_TOTAL_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = conte
     default=None,
 )
 
-R = TypeVar("R")
-
 
 @dataclass(slots=True)
 class UpstreamProxyRouteTrace:
@@ -366,21 +363,6 @@ def _codex_route_transport_error_message(
         return str(exc) or "Request to upstream failed"
     endpoint_id = route_trace.endpoint_id if route_trace is not None and route_trace.endpoint_id else route.endpoint_id
     return codex_transport_error_message(operation, endpoint_id, exc)
-
-
-async def _call_with_service_circuit_breaker(
-    request: Awaitable[R],
-    *,
-    settings: Settings | None = None,
-    account_id: str | None = None,
-) -> R:
-    if not account_id:
-        return await request
-    effective_settings = settings or get_settings()
-    circuit_breaker = get_circuit_breaker_for_account(account_id, effective_settings)
-    if circuit_breaker is None:
-        return await request
-    return await circuit_breaker.call(request)
 
 
 @asynccontextmanager
@@ -1855,12 +1837,6 @@ async def _error_response_body(resp: ErrorResponse) -> tuple[object | None, str 
         return None, await resp.text()
 
 
-def _error_archive_payload(data: object | None, text: str | None) -> object:
-    if data is not None:
-        return data
-    return {"text": text or ""}
-
-
 def _error_event_from_response_body(
     resp: ErrorResponse,
     *,
@@ -2230,6 +2206,12 @@ def _to_websocket_upstream_url(url: str) -> str:
     else:
         scheme = parsed.scheme
     return urlunparse((scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+
+
+# The upstream stream transport is dashboard-owned; the proxy service resolves
+# the operator's choice and passes it as ``transport_override``. Callers that
+# do not pass one (warmup probes, bridge owner forwarding) get "auto".
+_DEFAULT_UPSTREAM_STREAM_TRANSPORT = "auto"
 
 
 def _configured_stream_transport(
@@ -3505,13 +3487,6 @@ def _parse_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Addres
         return None
 
 
-def _is_blocked_ip_literal(host: str) -> bool:
-    ip = _parse_ip_literal(host)
-    if ip is None:
-        return False
-    return _is_disallowed_ip(ip)
-
-
 async def _resolve_global_ips(host: str, *, timeout_seconds: float) -> list[str] | None:
     loop = asyncio.get_running_loop()
     try:
@@ -3544,11 +3519,6 @@ async def _resolve_global_ips(host: str, *, timeout_seconds: float) -> list[str]
         seen.add(normalized_ip)
         resolved_ips.append(normalized_ip)
     return resolved_ips or None
-
-
-async def _resolves_to_blocked_ip(host: str, *, timeout_seconds: float) -> bool:
-    resolved_ips = await _resolve_global_ips(host, timeout_seconds=timeout_seconds)
-    return resolved_ips is None
 
 
 def _is_disallowed_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -3732,7 +3702,7 @@ async def _stream_responses_with_session(
         "http"
         if non_streaming_http
         else _configured_stream_transport(
-            transport=settings.upstream_stream_transport,
+            transport=_DEFAULT_UPSTREAM_STREAM_TRANSPORT,
             transport_override=upstream_stream_transport_override,
         )
     )
@@ -3741,7 +3711,7 @@ async def _stream_responses_with_session(
         if non_streaming_http
         else _resolve_stream_transport(
             settings=settings,
-            transport=settings.upstream_stream_transport,
+            transport=_DEFAULT_UPSTREAM_STREAM_TRANSPORT,
             transport_override=upstream_stream_transport_override,
             model=payload.model,
             headers=headers,

@@ -66,6 +66,6 @@ The July settings-surface reduction (#1340, 164 → ~114 fields) came with a tes
 
 ## Failure modes
 
-- **Tier assigned but never enforced**: without the CI check the `tier` metadata is decoration. Mitigation: B4 wires `check_settings_tiers.py` into CI before any tier-driven cleanup is merged.
-- **`migrating_until` used as a permanent escape hatch**: an expired marker fails CI, so a marker cannot silently outlive the release it names.
+- **Tier assigned but never enforced**: without the CI check the `SETTING_TIERS` registry is decoration. Mitigation: B4 (`enforce-configuration-tiers`) runs `check_settings_tiers.py` from `make lint` before any tier-driven cleanup is merged.
+- **`MIGRATING` used as a permanent escape hatch**: the registry has no expiry, so it can only be held to "shrink only" by review. Mitigation: every entry names its target column or `backlog` so the remaining work is enumerable, redundant entries warn, and a new T3 field may only be added to `MIGRATING` when its PR names the follow-up that adds the column. The same applies to `ENV_READ_ALLOWLIST` caps, which the check lets fall but never rise silently.
 - **Provenance shape drift**: if the API exposes `source` but the UI ignores it, S1-style lies return. Mitigation: the spec requires the badge; B5 owns it.

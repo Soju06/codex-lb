@@ -72,10 +72,11 @@ human-readable rendering.
   fallback for a NULL dashboard value only.
 - Every new setting names its tier (T0 bootstrap, T1 instance topology,
   T2 secret, T3 behaviour tunable, T4 incident debug) in the PR body; a T3
-  setting names its `dashboard_settings` column. The normative contract is
-  `openspec/specs/configuration-tiers/spec.md` (created when the
-  codify-configuration-tiers change is archived; until then the delta spec
-  lives under `openspec/changes/codify-configuration-tiers/`).
+  setting names its `dashboard_settings` column. Tiers are declared in
+  `app/core/config/tiers.py` and checked by `scripts/check_settings_tiers.py`
+  under `make lint`. Normative spec:
+  `openspec/changes/codify-configuration-tiers/specs/configuration-tiers/spec.md`
+  (moves to `openspec/specs/configuration-tiers/` on archive).
 
 ## Applying these principles
 
@@ -86,7 +87,7 @@ human-readable rendering.
 | P3 budgets | README sections, `.env.example`, dashboard core nav within `.github/simplicity-budgets.toml` | CI budget check (CI-enforced as of the `ci-simplicity-budgets` change; reviewer-enforced before that); `simplicity-budget-approved` label for exceptions |
 | P4 docs placement | Feature docs land in `docs/` + OpenSpec, not new README sections | CONTRIBUTING [Simplicity gates](.github/CONTRIBUTING.md#simplicity-gates) |
 | P5 screenshots | Before/after screenshots for dashboard-visible changes | PR template "Screenshots / output" |
-| P6 dashboard-primary configuration | Each new setting has a tier; T3 settings live in `dashboard_settings`, not env-only; precedence default < env < dashboard is not inverted | CI check `check_settings_tiers.py` (introduced by the codify-configuration-tiers change; reviewer-enforced before that); PR template "Simplicity" |
+| P6 dashboard-primary configuration | Each new setting has a tier; T3 settings live in `dashboard_settings`, not env-only; precedence default < env < dashboard is not inverted | `make lint` (`scripts/check_settings_tiers.py`, see P6 for the spec pointer); PR template "Simplicity" |
 
 Rationale, the erosion metrics that motivated codifying these rules, and a
 worked example live in

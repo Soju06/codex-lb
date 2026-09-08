@@ -12,25 +12,31 @@ Every configurable value SHALL belong to exactly one tier, chosen with the discr
 | T3 | Behaviour tunable | `dashboard_settings` (or another database configuration table) | no | no | routing strategy, caps, timeouts, retries, circuit breakers, retention, feature toggles, image and model policy |
 | T4 | Incident debug | environment permitted; dashboard toggle recommended | no | yes | trace channels |
 
-The tier is decided in order: a value that is needed before the database is reachable is T0; otherwise a value that may legitimately differ between two replicas is T1 (or T4 for a debug-only channel); otherwise a credential or token is T2; every other operator-changeable value is T3. Every field of `Settings` in `app/core/config/settings.py` MUST declare its tier in field metadata (`json_schema_extra={"tier": "T0" | "T1" | "T2" | "T3" | "T4"}`), and the CI check `check_settings_tiers.py` (introduced by the slop-removal B4 change) MUST fail when a field declares no tier.
+The tier is decided in order: a value that is needed before the database is reachable is T0; otherwise a value that may legitimately differ between two replicas is T1 (or T4 for a debug-only channel); otherwise a credential or token is T2; every other operator-changeable value is T3. The tier of every field of `Settings` in `app/core/config/settings.py` MUST be declared in the tier registry `SETTING_TIERS` in `app/core/config/tiers.py` (field name → `"T0"` | `"T1"` | `"T2"` | `"T3"` | `"T4"`), which is the single source of the tier for the CI check (`scripts/check_settings_tiers.py`, run by `make lint`), the generated settings reference and reviewers; the tier MUST NOT be encoded in field metadata or elsewhere. A PR that adds a `Settings` field MUST add its registry entry in the same diff; a PR that removes a field SHOULD drop the entry in the same diff (a stale entry is tolerated as a warning so removals can land in either order). The number of `Settings` fields is budgeted by `[settings_fields].max` in `.github/simplicity-budgets.toml`: a PR that removes a field SHOULD lower `max` in the same diff, and a PR that adds a field MUST raise `max` in the same diff together with the P2 "why not a default" justification in its body — `max` is never raised ahead of the field it admits.
 
 #### Scenario: Replica question places a per-instance value in the environment
 
 - **GIVEN** a new setting whose correct value differs between two replicas (for example an advertise URL)
 - **WHEN** the setting is added to `Settings`
-- **THEN** it is declared T1 and lives only in the environment
+- **THEN** it is declared T1 in `SETTING_TIERS` and lives only in the environment
 
 #### Scenario: Replica question places a shared runtime knob in the dashboard
 
 - **GIVEN** a new setting that must hold the same value on every replica and does not need to exist before the database is reachable (for example a stream idle timeout)
 - **WHEN** the setting is added
-- **THEN** it is declared T3 and is stored in `dashboard_settings` (or another database configuration table)
+- **THEN** it is declared T3 in `SETTING_TIERS` and is stored in `dashboard_settings` (or another database configuration table)
 
-#### Scenario: Field without a tier fails CI
+#### Scenario: Registry entry travels with the field
 
-- **WHEN** a `Settings` field is added without a `tier` in its field metadata
-- **THEN** `check_settings_tiers.py` fails and the PR is blocked until the tier is declared
+- **GIVEN** a PR that adds a `Settings` field
+- **WHEN** the PR is reviewed
+- **THEN** the same diff adds the field's `SETTING_TIERS` entry and raises `[settings_fields].max` by one with the P2 justification; a diff that raises `max` without adding a field, or adds a field without its registry entry, is rejected
 
+#### Scenario: Field removal lowers the budget
+
+- **GIVEN** a PR that deletes a `Settings` field
+- **WHEN** the PR is reviewed
+- **THEN** the same diff drops the field's `SETTING_TIERS` (and, if present, `MIGRATING`) entry and lowers `[settings_fields].max` by one; if the entries are dropped in a later PR instead, the interim state is a warning, not a failure
 ### Requirement: Precedence is code default, then environment, then dashboard
 
 For every T3 setting the effective value MUST be resolved as: the dashboard value when it is non-NULL; otherwise the environment value when the setting has an environment fallback and the variable is set; otherwise the code default. An environment value MUST NOT override a non-NULL dashboard value, and no code path MAY invert this order (environment-wins kill switches, environment values that gate whether a dashboard value is honoured, sentinel dashboard values that defer to the environment, or `max()`/`min()` merges of environment and dashboard values are all prohibited). Where another capability specification currently mandates such an inversion (the `telemetry` environment kill switch, the `rate-limit-reset-credits` polling toggle that gates `auto_redeem_reset_credits_before_expiry`), that specification MUST be amended to this precedence in the same change that removes the inversion from code; until then the inversion is a tracked defect, not an exception to this requirement.
@@ -120,48 +126,57 @@ For every T3 setting, `GET /api/settings` MUST expose an object with `value` (th
 
 ### Requirement: T3 settings have a database home
 
-Every `Settings` field declared T3 MUST have a corresponding `dashboard_settings` column (or a column in another database configuration table), or MUST carry an explicit `migrating_until: "<version>"` marker in its field metadata naming the release by which the migration completes. `check_settings_tiers.py` MUST fail for a T3 field with neither, and for a `migrating_until` marker whose version is at or below the version being built. A PR MUST NOT add a new T3 field that lives only in the environment.
+Every `Settings` field declared T3 MUST have a `dashboard_settings` column of the same name (or a column in another database configuration table) or MUST be listed in the `MIGRATING` registry in `app/core/config/tiers.py`. A `MIGRATING` entry maps the field name to its target dashboard home — the column, table or existing setting the field folds into — or to the literal `"backlog"` when no home has been designed yet; an entry with any other value or an empty value is invalid. `MIGRATING` is the backlog of the environment-to-dashboard migration: the change that gives the field its column MUST delete the entry in the same diff, and the CI check reports an entry that is redundant (the column exists, the field is not T3, or the field no longer exists) as a warning until it is deleted. A PR MUST NOT add a new T3 field that lives only in the environment: a new T3 field ships with its dashboard column, and a `MIGRATING` entry for a new field is accepted only when the PR body names the follow-up change that adds the column. The initial `MIGRATING` content is the set of T3 fields that were environment-only when the registry was created; it only shrinks thereafter.
 
 #### Scenario: New environment-only tunable is rejected
 
-- **WHEN** a PR adds a `Settings` field declared T3 without a database column and without `migrating_until`
-- **THEN** `check_settings_tiers.py` fails
+- **WHEN** a PR adds a `Settings` field declared T3 with no `dashboard_settings` column of the same name and no `MIGRATING` entry
+- **THEN** `make lint` fails and the PR is not merged until the column exists or the field is re-tiered
 
-#### Scenario: Migration marker expires
+#### Scenario: Migration entry names its target
 
-- **GIVEN** a T3 field carrying `migrating_until: "1.26.0"`
-- **WHEN** the version being built is `1.26.0` or later and the field still has no database column
-- **THEN** `check_settings_tiers.py` fails
+- **GIVEN** a T3 field that is still environment-only
+- **WHEN** it is listed in `MIGRATING`
+- **THEN** the entry's value is the target dashboard column, table or setting it folds into (for example `telemetry_enabled → dashboard_settings.telemetry_consent`), or `"backlog"` when none has been designed
 
+#### Scenario: Column lands and the entry is deleted
+
+- **GIVEN** a T3 field listed in `MIGRATING`
+- **WHEN** the change that adds its `dashboard_settings` column is merged
+- **THEN** the same diff deletes the `MIGRATING` entry; if it does not, `make lint` warns that the entry is redundant until a follow-up deletes it
 ### Requirement: Process environment is read only in the settings module
 
-Under `app/`, `os.environ`, `os.getenv` and `dotenv_values` MUST be accessed only in `app/core/config/settings.py`. Any environment variable the application consumes MUST be a `Settings` field with a declared tier, so that it appears in the generated settings reference and is covered by the removed-settings warning when retired.
+Under `app/`, `os.environ`, `os.getenv` and `dotenv_values` MUST be referenced only in `app/core/config/settings.py`. Every `CODEX_LB_*` variable the application consumes MUST be a `Settings` field with a declared tier, so that it appears in the generated settings reference and is covered by the removed-settings warning when retired. The only exception is the allowlist `ENV_READ_ALLOWLIST` in `scripts/check_settings_tiers.py`, which names, per file, the number of lines that read the environment and the variables they read; it exists for two kinds of read: pre-existing sites awaiting promotion to `Settings` fields (including the `CODEX_LB_*` names read outside `Settings` when the allowlist was created), and reads of variables the application does not define — third-party and POSIX conventions (`HTTP_PROXY`/`NO_PROXY`, `TZ`, `KUBERNETES_SERVICE_HOST`, `PROMETHEUS_MULTIPROC_DIR`, `GITHUB_TOKEN`) and the uvicorn launcher knobs (`HOST`, `PORT`, `SSL_*`, `UVICORN_*`) consumed before `Settings` is constructed. Each allowlist cap is a hard per-file ceiling that MAY only shrink: a PR MUST NOT add a file to the allowlist or raise a cap, and a PR that removes the last read from a file or promotes a variable to a `Settings` field MUST lower or delete the entry in the same diff (a cap left above the actual count is tolerated as a warning so the promotion and the allowlist edit can land in either order).
 
 #### Scenario: Ad-hoc environment read fails lint
 
-- **WHEN** a module under `app/` other than `app/core/config/settings.py` calls `os.environ`, `os.getenv` or `dotenv_values`
-- **THEN** the architecture check in `make lint` fails
+- **WHEN** a module under `app/` other than `app/core/config/settings.py` that is not in `ENV_READ_ALLOWLIST` references `os.environ`, `os.getenv` or `dotenv_values`
+- **THEN** `make lint` fails and the variable is added as a `Settings` field with a tier instead
+
+#### Scenario: Allowlist only shrinks
+
+- **GIVEN** a file in `ENV_READ_ALLOWLIST` with a cap of one reading line
+- **WHEN** a PR adds a second environment read to that file, adds a new file to the allowlist, or raises the cap
+- **THEN** the PR is rejected; the new value is read through a `Settings` field
 
 #### Scenario: Promoted variable appears in the reference
 
-- **GIVEN** an environment variable previously read outside `Settings`
+- **GIVEN** a `CODEX_LB_*` variable previously read through an allowlisted site
 - **WHEN** it is promoted to a `Settings` field with a tier
-- **THEN** `scripts/generate_settings_reference.py` lists it with its tier and the reference test passes
-
+- **THEN** the same diff lowers or deletes the file's allowlist entry, and `scripts/generate_settings_reference.py` lists the variable with its tier
 ### Requirement: Operator-facing environment documentation lists T0 and T1 only
 
-`.env.example` and `docs/configuration.md` MUST list only T0 and T1 settings. The generated `docs/reference/settings.md` SHALL list every `Settings` field with its tier. `check_settings_tiers.py` MUST fail when `.env.example` contains a variable whose tier is T2, T3 or T4.
+`.env.example` and `docs/configuration.md` MUST list only T0 and T1 settings; a `CODEX_LB_*` variable whose tier is T2, T3 or T4 MUST NOT appear in `.env.example`, commented or not. The generated `docs/reference/settings.md` SHALL list every `Settings` field with the tier taken from `SETTING_TIERS` and SHALL carry a legend of the five tiers, so the reference is the operator-facing rendering of the registry.
 
 #### Scenario: Tunable added to the sample env file
 
 - **WHEN** a PR adds a T3 variable to `.env.example`
-- **THEN** `check_settings_tiers.py` fails and the value is documented as a dashboard setting instead
+- **THEN** `make lint` fails and the value is documented as a dashboard setting instead
 
 #### Scenario: Reference shows the tier
 
 - **WHEN** `scripts/generate_settings_reference.py` runs
-- **THEN** every listed variable carries its tier
-
+- **THEN** every listed variable carries the tier recorded for it in `SETTING_TIERS` and the page contains the tier legend
 ### Requirement: Environment settings are retired through one release of warnings
 
 When a T3 setting gains a database home, its environment field SHALL be removed from `Settings` and its name added to the removed-settings registry (`_REMOVED_SETTINGS`, surfaced by `warn_removed_settings` at startup) so that operators who still set the variable receive a startup WARN for one stable release; the registry entry is deleted in the following stable release. An environment field with zero readers under `app/` SHALL be deleted in the change that discovers it, without a deprecation release.

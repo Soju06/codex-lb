@@ -271,10 +271,9 @@ every PR (budget checks are enforced by CI as of the
    topology / T2 secret / T3 behaviour tunable / T4 incident debug) in the
    PR body; a T3 setting has a `dashboard_settings` column, not an
    env-only home; precedence stays code default < env < dashboard with no
-   env-wins paths. Machine-checked by the CI check
-   `check_settings_tiers.py` (introduced by the codify-configuration-tiers
-   change; reviewer-enforced before that). Normative spec:
-   `openspec/specs/configuration-tiers/spec.md`.
+   env-wins paths. Machine-checked by `scripts/check_settings_tiers.py`
+   under `make lint`; the normative spec is linked from
+   [PRINCIPLES.md P6](../PRINCIPLES.md#p6--the-dashboard-is-the-primary-configuration-surface).
 
 ### Collaborator rules
 

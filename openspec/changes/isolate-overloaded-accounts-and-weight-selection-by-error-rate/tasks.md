@@ -17,3 +17,8 @@
 
 - [x] 3.1 Unit tests: isolation trip/interval/disable, decay-from-deadline, isolation log, reroute pool predicate, sticky owner release per kind, soft-backoff-keeps-owner, lone/rate-limited sibling keeps owner, expiry, process-session preference; window pruning, multiplier thresholds/floor/disable, weighted draws honor and clamp the multiplier, balancer-level steering with `error_count` latch reset.
 - [x] 3.2 ruff, ty, proxy architecture check (load_balancer.py at the 3021 ratchet), settings reference regenerated and ratchet raised to 135, strict OpenSpec validation.
+
+## 4. Review follow-ups (local codex round 1)
+
+- [x] 4.1 The fresh-thread process-session preference is bypassed only when the strategy actually selects an overload-free sibling; an unselectable sibling (cooldown / exhausted) keeps the preference. Request-path regression through `LoadBalancer.select_account` with a thread affinity under `sequential_drain`.
+- [x] 4.2 The `sticky_owner_overload_isolation_reroute` diagnostic carries no account identifiers (sticky kind and overload-free pool size only), so private realtime redaction cannot be violated from a path without the privacy flag.

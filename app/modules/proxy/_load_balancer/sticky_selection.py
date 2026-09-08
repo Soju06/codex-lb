@@ -1280,14 +1280,24 @@ async def _select_with_stickiness(
         )
         # The process-session preference is a fresh upstream admission on that
         # account: do not honor it while the account is in overload backoff and
-        # the pool still offers an overload-free candidate.
-        initial_preferred_backed_off = (
+        # the strategy can actually select an overload-free candidate. A pool
+        # whose only alternatives are unselectable (cooldown, exhausted) keeps
+        # the preference, so the bypass can never fail a request the
+        # preferred account would have served.
+        if (
             initial_preferred is not None
             and overload_backoff_runtime is not None
             and overload_backoff_active(overload_backoff_runtime.get(initial_preferred.account_id), clock.time())
-            and filter_overload_backoff_candidates(states, overload_backoff_runtime, now=clock.time()) is not states
-        )
-        if initial_preferred is not None and not initial_preferred_backed_off:
+        ):
+            preference_free_pool = filter_overload_backoff_candidates(
+                states, overload_backoff_runtime, now=clock.time()
+            )
+            if preference_free_pool is not states:
+                alternative = _choose_from(preference_free_pool)
+                if alternative.account is not None and alternative.account.account_id != initial_preferred.account_id:
+                    overload_reroute = alternative
+                    overload_reroute_pool = preference_free_pool
+        if initial_preferred is not None and overload_reroute is None:
             initial_result = select_account(
                 [initial_preferred],
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -1389,11 +1399,14 @@ async def _select_with_stickiness(
                 candidate = _choose_from(overload_reroute_pool)
                 if candidate.account is not None and candidate.account.account_id != pinned.account_id:
                     overload_reroute = candidate
+                    # Account identifiers are deliberately omitted: this path
+                    # has no privacy flag and private realtime diagnostics
+                    # must not expose them. The isolation-engaged warning
+                    # already names the account under the redaction policy.
                     logger.info(
-                        "sticky_owner_overload_isolation_reroute old_account_id=%s new_account_id=%s sticky_kind=%s",
-                        pinned.account_id,
-                        candidate.account.account_id,
+                        "sticky_owner_overload_isolation_reroute sticky_kind=%s overload_free_candidates=%d",
                         sticky_kind.value,
+                        len(overload_reroute_pool),
                     )
                 else:
                     overload_reroute_pool = None

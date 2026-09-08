@@ -615,3 +615,56 @@ async def test_backed_off_process_session_preference_is_skipped_for_a_fresh_thre
         initial_preferred_account_id="hot",
     )
     assert alone.selection.account is not None and alone.selection.account.account_id == "hot"
+
+
+@pytest.mark.asyncio
+async def test_fresh_thread_process_preference_bypass_never_fails_a_request_the_preference_would_serve() -> None:
+    """Request path (``LoadBalancer.select_account`` with a thread affinity):
+    the backed-off process preference is skipped only when the strategy can
+    actually select an overload-free sibling; an unselectable sibling
+    (cooldown) keeps the preference instead of surfacing its rate-limit error."""
+    from app.modules.proxy.affinity import _thread_codex_session_affinity
+    from tests.unit.test_load_balancer_concurrency import (
+        _StubStickySessionsRepository,
+        _usage_row_with_percent,
+    )
+
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    now = int(clock.time())
+    preferred = _make_account("acc-preferred")
+    sibling = _make_account("acc-sibling")
+    affinity = _thread_codex_session_affinity(
+        {"session_id": "process", "thread-id": "fresh"}, enabled=True, max_age_seconds=600
+    )
+    assert affinity is not None
+
+    def _balancer(*, sibling_in_cooldown: bool) -> LoadBalancer:
+        sticky_repo = _StubStickySessionsRepository()
+        sticky_repo.account_ids_by_key = {affinity.seed_selection_key: preferred.id}
+        usage = _StubUsageRepository(
+            {
+                preferred.id: _usage_row_with_percent(1, preferred.id, used_percent=96.0, reset_at=now + 3600),
+                sibling.id: _usage_row_with_percent(2, sibling.id, used_percent=0.0, reset_at=now + 3600),
+            },
+            {},
+        )
+        balancer = LoadBalancer(
+            lambda: _repo_factory(_StubAccountsRepository([preferred, sibling]), usage, sticky_repo),
+            clock=clock,
+        )
+        balancer._runtime[preferred.id] = RuntimeState(overload_backoff_until=clock.time() + 60.0)
+        if sibling_in_cooldown:
+            balancer._runtime[sibling.id] = RuntimeState(cooldown_until=clock.time() + 3600.0)
+        return balancer
+
+    kept = await _balancer(sibling_in_cooldown=True).select_account(
+        **affinity.selection_kwargs(), routing_strategy="sequential_drain"
+    )
+    assert kept.account is not None, kept.error_message
+    assert kept.account.id == preferred.id
+
+    moved = await _balancer(sibling_in_cooldown=False).select_account(
+        **affinity.selection_kwargs(), routing_strategy="sequential_drain"
+    )
+    assert moved.account is not None, moved.error_message
+    assert moved.account.id == sibling.id

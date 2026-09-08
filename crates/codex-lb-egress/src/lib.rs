@@ -7,6 +7,7 @@
 
 mod http;
 mod runtime;
+mod sse;
 mod websocket;
 
 pub use runtime::{RequestError, run_stdio};

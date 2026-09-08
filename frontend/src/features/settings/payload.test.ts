@@ -285,3 +285,22 @@ describe("buildSettingsUpdateRequest", () => {
     expect(payload).not.toHaveProperty("proxyApiKeyFairShareCongestionThresholdPct");
   });
 });
+
+describe("buildSettingsUpdateRequest subscription overflow", () => {
+  it("always carries the designation so Off reaches the backend as an explicit null", () => {
+    const off = buildSettingsUpdateRequest(createDashboardSettings(), {});
+    expect(off.subscriptionOverflowSourceId).toBeNull();
+
+    const designated = buildSettingsUpdateRequest(
+      createDashboardSettings({ subscriptionOverflowSourceId: "src_1" }),
+      {},
+    );
+    expect(designated.subscriptionOverflowSourceId).toBe("src_1");
+
+    const cleared = buildSettingsUpdateRequest(
+      createDashboardSettings({ subscriptionOverflowSourceId: "src_1" }),
+      { subscriptionOverflowSourceId: null },
+    );
+    expect(cleared.subscriptionOverflowSourceId).toBeNull();
+  });
+});

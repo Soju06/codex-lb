@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings } from "@/features/settings/schemas";
-import { createAccountSummary, createDashboardSettings } from "@/test/mocks/factories";
+import { createAccountSummary, createDashboardSettings, createModelSource } from "@/test/mocks/factories";
 
 if (!HTMLElement.prototype.hasPointerCapture) {
   HTMLElement.prototype.hasPointerCapture = () => false;
@@ -783,5 +783,22 @@ describe("RoutingSettings", () => {
         { limitWarmupEnabled: true, limitWarmupStaggeredIdleEnabled: true },
       ),
     );
+  });
+});
+
+describe("RoutingSettings subscription overflow", () => {
+  it("renders the overflow designation inside the routing card", () => {
+    render(
+      <RoutingSettings
+        settings={BASE_SETTINGS}
+        modelSources={[createModelSource({ id: "src_responses", name: "Responses source", supportsResponses: true })]}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(
+      screen.getByRole("combobox", { name: "Overflow to model source when all subscription accounts are exhausted" }),
+    ).toHaveTextContent("Off");
   });
 });

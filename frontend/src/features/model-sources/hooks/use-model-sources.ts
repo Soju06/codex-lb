@@ -55,6 +55,9 @@ export function useModelSources() {
     onSuccess: () => {
       toast.success(t("modelSources.toasts.deleted"));
       void queryClient.invalidateQueries({ queryKey: ["model-sources", "list"] });
+      // Deleting the designated subscription-overflow source clears that
+      // setting server-side; refetch so the routing card reflects it.
+      void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["models"] });
     },

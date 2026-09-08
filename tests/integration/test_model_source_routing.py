@@ -1900,7 +1900,9 @@ async def test_source_stream_body_teardown_survives_repeated_cancellation(monkey
         content = _FakeContent()
 
     async def fake_open(*_args: object, **_kwargs: object) -> object:
-        return stack, _FakeResponse()
+        # The open hands back the first chunk it already read (P2 first-frame
+        # deadline); the body yields it before reading further.
+        return stack, _FakeResponse(), b"data: first\n\n"
 
     monkeypatch.setattr(forwarding_module, "_open_source_stream", fake_open)
 
@@ -1969,7 +1971,7 @@ async def test_open_source_stream_cleanup_finishes_after_cancellation(monkeypatc
             cleanup_finished.set()
             return False
 
-    monkeypatch.setattr(forwarding_module, "lease_http_session", lambda: _SessionLease())
+    monkeypatch.setattr(forwarding_module, "lease_model_source_session", lambda: _SessionLease())
 
     source = ModelSource(
         id="src_open_cancelled_cleanup",
@@ -2041,7 +2043,7 @@ async def test_forward_chat_completion_cleanup_finishes_after_cancellation(monke
             cleanup_finished.set()
             return False
 
-    monkeypatch.setattr(forwarding_module, "lease_http_session", lambda: _SessionLease())
+    monkeypatch.setattr(forwarding_module, "lease_model_source_session", lambda: _SessionLease())
 
     source = ModelSource(
         id="src_forward_cancelled_cleanup",

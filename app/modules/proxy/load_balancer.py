@@ -63,6 +63,7 @@ from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
+from app.modules.proxy._load_balancer.error_rate import error_rate_weight_multiplier, record_outcome_locked
 from app.modules.proxy._load_balancer.model_eligibility import (
     _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES,
     CatalogOmissionQuotaAdmission,
@@ -1811,6 +1812,7 @@ class LoadBalancer:
             state.last_error_at = self._clock.time()
             self._sync_runtime_state(account, state)
             runtime = self._runtime.get(account.id)
+            record_outcome_locked(self._runtime[account.id], state.last_error_at, success=False, count=count)
             if runtime and runtime.health_tier == HEALTH_TIER_PROBING:
                 runtime.probe_success_streak = 0
             async with self._repo_factory() as repos:
@@ -1820,7 +1822,8 @@ class LoadBalancer:
         """Clear transient error state after a successful upstream request."""
         lock = await self._get_account_lock(account.id)
         async with lock:
-            runtime = self._runtime.get(account.id)
+            runtime = self._runtime.setdefault(account.id, RuntimeState())
+            record_outcome_locked(runtime, self._clock.time(), success=True)
             if runtime and runtime.error_count > 0:
                 runtime.error_count = 0
                 runtime.last_error_at = None
@@ -2333,9 +2336,8 @@ def _state_from_account(
     ignore_zero_capacity_primary_runtime_reset = False
     status_seed = account.status
     long_window_quota_available = _usage_entry_is_recent_available(effective_secondary_entry, now=now)
-    # Actual 429s carry blocked_at; stale window-derived rate limits do not.
-    # Preserve the original persisted cooldown before zero-primary-capacity
-    # recovery below can rewrite status from fresh long-window usage.
+    # Preserve actual 429 cooldowns (marked by blocked_at) before zero-primary
+    # recovery can rewrite status from fresh long-window usage.
     rate_limited_cooldown_deadline: float | None = None
     if account.status == AccountStatus.RATE_LIMITED and effective_blocked_at is not None:
         persisted_deadline = plausible_rate_limit_reset_at(account.reset_at, now=now) or (
@@ -2350,8 +2352,7 @@ def _state_from_account(
             and runtime.blocked_at is not None
             and runtime.blocked_at >= effective_blocked_at
         ):
-            # Only the replica that observed this block may recover early.
-            # Peers and stale runtime blocks honor the persisted deadline.
+            # Only the replica that observed this block may recover before its persisted deadline.
             early_freshness_entry = _rate_limited_freshness_entry(
                 account=account,
                 primary_entry=primary_entry,
@@ -2409,9 +2410,8 @@ def _state_from_account(
     else:
         effective_runtime_reset = None
 
-    # Persisted rate limits without reset metadata retain a minimum hold
-    # after blocked_at, including across restarts. After this floor, recovery
-    # uses the normal compare-and-set persistence path.
+    # Resetless rate limits retain a minimum hold after blocked_at across restarts;
+    # after this floor, recovery uses the normal compare-and-set persistence path.
     if (
         status_seed == AccountStatus.RATE_LIMITED
         and effective_runtime_reset is None
@@ -2433,9 +2433,8 @@ def _state_from_account(
     ):
         effective_runtime_reset = None
 
-    # Post-block evidence can clear the reset only after its debounce.
-    # Quota recovery uses persisted markers across restarts; early rate-limit
-    # recovery requires runtime evidence that this replica observed the block.
+    # Post-block evidence clears resets after debounce. Quota recovery uses persisted
+    # markers; early rate-limit recovery requires this replica's runtime block evidence.
     cooldown_ready = False
     if account.status == AccountStatus.QUOTA_EXCEEDED:
         cooldown_ready = (
@@ -2598,6 +2597,7 @@ def _state_from_account(
         inflight_streams=runtime.inflight_streams,
         leased_tokens=runtime.leased_tokens,
         routing_policy=routing_policy,
+        selection_weight_multiplier=error_rate_weight_multiplier(runtime, now),
     )
 
 

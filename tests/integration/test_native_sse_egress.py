@@ -820,6 +820,30 @@ async def test_native_compact_large_result_is_fragmented_and_stops_before_late_f
 
 
 @pytest.mark.asyncio
+async def test_native_compact_escaped_surrogate_key_preserves_python_result(
+    monkeypatch: pytest.MonkeyPatch,
+    native_worker: SubprocessNativeEgressClient,
+    routed: bool,
+) -> None:
+    body = (
+        b'data: {"type":"response.output_item.done","item":{}}\n\n'
+        b'data: {"type":"response.completed","response":{"object":"response.compact","\\ud800":1}}\n\n'
+    )
+
+    async def handler(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, _body: bytes) -> None:
+        await _start_chunked_response(writer)
+        await _write_chunk(writer, body)
+        await _finish_chunks(writer)
+
+    async with _serve_http(handler) as base_url:
+        result = await asyncio.wait_for(_compact(base_url, native_worker, monkeypatch, routed=routed), 2)
+        assert result.model_extra is not None
+        assert result.model_extra["\ud800"] == 1
+        assert result.model_extra["output"] == [{}]
+    assert not native_worker._streams
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("content_type", ["text/event-stream", "Text/Event-Stream; charset=utf-8", None, ""])
 async def test_native_compact_frames_and_returns_before_body_eof(
     monkeypatch: pytest.MonkeyPatch,

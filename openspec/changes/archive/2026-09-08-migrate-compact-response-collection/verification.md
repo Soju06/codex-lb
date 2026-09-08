@@ -14,6 +14,9 @@
   precedence, framing limits, resource ownership, and replay-safe endpoint use.
 - Malformed, truncated, duplicate, oversized, or wrong-kind IPC results fail
   without replay. An installed helper lacking the new capability fails closed.
+- Escaped surrogate keys remain opaque during assembly rather than panicking a
+  worker task. Rust and direct/routed integration regressions verify preservation.
+
 
 ## Local validation
 
@@ -21,7 +24,7 @@
   integration group: 249 passed; the invalid-option group also passed all six cases after adding
   the collection/content-type constraint.
 - Existing compact client regressions: 101 passed.
-- Rust workspace tests: 20 passed, including the 20-case collector fixture test.
+- Rust workspace tests: 21 passed, including the 20-case collector fixture test.
 - Locked release build, formatting, Clippy with denied warnings, cargo-deny,
   Ruff, changed-file ty, architecture/cancellation/timing checks passed.
 - Strict OpenSpec delta validation passed before archival.

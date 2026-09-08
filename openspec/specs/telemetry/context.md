@@ -156,9 +156,10 @@ Field notes:
 
 ## Consent resolution precedence
 
-`CODEX_LB_TELEMETRY_ENABLED` env (when set) > persisted decision > default
-(`undecided` ⇒ active). The dialog is only shown while persisted state is `undecided` and
-no env override exists.
+persisted decision > `CODEX_LB_TELEMETRY_ENABLED` env (when set) > default
+(`undecided` ⇒ active). The env value only decides while the persisted state is `undecided`
+(headless opt-out before first boot); a saved dashboard decision always wins. The dialog is
+only shown while persisted state is `undecided` and no env value is set.
 
 ## Consent API and preview cost
 

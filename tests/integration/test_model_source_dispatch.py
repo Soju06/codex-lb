@@ -31,6 +31,7 @@ from app.modules.proxy import api as proxy_api
 from app.modules.proxy import source_dispatch as dispatch_module
 from app.modules.proxy.source_admission import get_source_bulkhead
 from tests.integration.model_source_helpers import (
+    _AsgiStream,
     _create_model_source,
     _enable_api_key_auth,
     stub_source_upstreams,
@@ -148,79 +149,6 @@ def _sse_handler(
 
 
 # -- ASGI harness ---------------------------------------------------------------------------------
-
-
-@dataclass(slots=True)
-class _AsgiStream:
-    """Drive the ASGI app for one request while owning ``receive``/``send``."""
-
-    app: Any
-    path: str
-    headers: dict[str, str]
-    body: bytes
-    status: int | None = None
-    response_headers: dict[str, str] = field(default_factory=dict)
-    chunks: list[bytes] = field(default_factory=list)
-    _disconnect: asyncio.Event = field(default_factory=asyncio.Event)
-    _chunk_arrived: asyncio.Event = field(default_factory=asyncio.Event)
-    _body_sent: bool = False
-
-    def disconnect(self) -> None:
-        self._disconnect.set()
-
-    def received(self) -> bytes:
-        return b"".join(self.chunks)
-
-    async def wait_for_text(self, needle: str, *, timeout: float = 10.0) -> None:
-        deadline = time.monotonic() + timeout
-        while needle.encode() not in self.received():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise AssertionError(f"{needle!r} not received; got {self.received()!r}")
-            self._chunk_arrived.clear()
-            try:
-                await asyncio.wait_for(self._chunk_arrived.wait(), timeout=remaining)
-            except TimeoutError:
-                raise AssertionError(f"{needle!r} not received; got {self.received()!r}") from None
-
-    async def _receive(self) -> dict[str, Any]:
-        if not self._body_sent:
-            self._body_sent = True
-            return {"type": "http.request", "body": self.body, "more_body": False}
-        await self._disconnect.wait()
-        return {"type": "http.disconnect"}
-
-    async def _send(self, message: dict[str, Any]) -> None:
-        await asyncio.sleep(0)
-        if message["type"] == "http.response.start":
-            self.status = message["status"]
-            self.response_headers = {key.decode().lower(): value.decode() for key, value in message.get("headers", [])}
-        elif message["type"] == "http.response.body":
-            body = message.get("body", b"")
-            if body:
-                self.chunks.append(bytes(body))
-                self._chunk_arrived.set()
-
-    async def run(self) -> None:
-        raw_headers = [(key.lower().encode(), value.encode()) for key, value in self.headers.items()]
-        raw_headers.append((b"host", b"testserver"))
-        raw_headers.append((b"content-type", b"application/json"))
-        raw_headers.append((b"content-length", str(len(self.body)).encode()))
-        scope = {
-            "type": "http",
-            "asgi": {"version": "3.0", "spec_version": "2.3"},
-            "http_version": "1.1",
-            "method": "POST",
-            "scheme": "http",
-            "path": self.path,
-            "raw_path": self.path.encode(),
-            "query_string": b"",
-            "root_path": "",
-            "headers": raw_headers,
-            "client": ("127.0.0.1", 41000),
-            "server": ("testserver", 80),
-        }
-        await self.app(scope, self._receive, self._send)
 
 
 def _app(async_client: Any) -> Any:

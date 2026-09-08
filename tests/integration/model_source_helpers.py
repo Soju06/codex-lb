@@ -7,10 +7,13 @@ dashboard helpers without importing a test module.
 
 from __future__ import annotations
 
+import asyncio
 import socket
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import TypeAlias
+from dataclasses import dataclass, field
+from typing import Any, TypeAlias
 
 from aiohttp import web
 
@@ -121,3 +124,91 @@ async def stub_source_upstreams() -> AsyncIterator[Callable[..., Awaitable[str]]
     finally:
         for runner in runners:
             await runner.cleanup()
+
+
+@dataclass(slots=True)
+class _AsgiStream:
+    """Drive the ASGI app for one request while owning ``receive``/``send``.
+
+    ``disconnect()`` queues the ``http.disconnect`` message a departing client
+    produces, so a route's reaction to a real client departure can be asserted
+    without an HTTP client in between.
+    """
+
+    app: Any
+    path: str
+    headers: dict[str, str]
+    body: bytes
+    status: int | None = None
+    response_headers: dict[str, str] = field(default_factory=dict)
+    chunks: list[bytes] = field(default_factory=list)
+    _disconnect: asyncio.Event = field(default_factory=asyncio.Event)
+    _chunk_arrived: asyncio.Event = field(default_factory=asyncio.Event)
+    _started: asyncio.Event = field(default_factory=asyncio.Event)
+    _body_sent: bool = False
+
+    def disconnect(self) -> None:
+        self._disconnect.set()
+
+    def received(self) -> bytes:
+        return b"".join(self.chunks)
+
+    async def wait_for_response_start(self, *, timeout: float = 10.0) -> None:
+        """Block until the route sent ``http.response.start`` (status and headers)."""
+
+        try:
+            await asyncio.wait_for(self._started.wait(), timeout=timeout)
+        except TimeoutError:
+            raise AssertionError("the response status and headers were not sent") from None
+
+    async def wait_for_text(self, needle: str, *, timeout: float = 10.0) -> None:
+        deadline = time.monotonic() + timeout
+        while needle.encode() not in self.received():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(f"{needle!r} not received; got {self.received()!r}")
+            self._chunk_arrived.clear()
+            try:
+                await asyncio.wait_for(self._chunk_arrived.wait(), timeout=remaining)
+            except TimeoutError:
+                raise AssertionError(f"{needle!r} not received; got {self.received()!r}") from None
+
+    async def _receive(self) -> dict[str, Any]:
+        if not self._body_sent:
+            self._body_sent = True
+            return {"type": "http.request", "body": self.body, "more_body": False}
+        await self._disconnect.wait()
+        return {"type": "http.disconnect"}
+
+    async def _send(self, message: dict[str, Any]) -> None:
+        await asyncio.sleep(0)
+        if message["type"] == "http.response.start":
+            self.status = message["status"]
+            self.response_headers = {key.decode().lower(): value.decode() for key, value in message.get("headers", [])}
+            self._started.set()
+        elif message["type"] == "http.response.body":
+            body = message.get("body", b"")
+            if body:
+                self.chunks.append(bytes(body))
+                self._chunk_arrived.set()
+
+    async def run(self) -> None:
+        raw_headers = [(key.lower().encode(), value.encode()) for key, value in self.headers.items()]
+        raw_headers.append((b"host", b"testserver"))
+        raw_headers.append((b"content-type", b"application/json"))
+        raw_headers.append((b"content-length", str(len(self.body)).encode()))
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": self.path,
+            "raw_path": self.path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": raw_headers,
+            "client": ("127.0.0.1", 41000),
+            "server": ("testserver", 80),
+        }
+        await self.app(scope, self._receive, self._send)

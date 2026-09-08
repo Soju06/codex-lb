@@ -37,8 +37,9 @@ SOURCE_CONNECT_DEADLINE_SECONDS = 10.0
 # queue is exactly what these two catch. Chat-completions streams have no
 # bookkeeping frame -- the first byte is the first token, and OpenAI-compatible
 # local servers (llama.cpp, vLLM, Ollama) send it, often together with their
-# headers, only after prompt processing -- so their pre-first-token phases stay
-# bounded by the source's total budget alone, as before the hardening.
+# headers, only after prompt processing -- so their open returns at the headers
+# as before the hardening and the body reads the first token under the
+# source's total budget alone.
 SOURCE_HEADER_DEADLINE_SECONDS = 20.0
 # Time from response headers to the first body chunk.
 SOURCE_FIRST_FRAME_DEADLINE_SECONDS = 30.0
@@ -328,10 +329,14 @@ async def stream_chat_completion(
     usage_holder = SourceUsageHolder()
     usage_parser = SourceStreamUsageParser(usage_holder, response_shape="chat")
     # Chat completions keep the source's own 401/403 envelope (recode is a
-    # Responses-dispatch decision) and bound their pre-first-token phases by
-    # the source's total budget alone: the first byte is the first token, which
-    # a local source produces only after prompt processing. The connect bound,
-    # the dedicated connector and the mid-stream idle cap apply.
+    # Responses-dispatch decision) and return at the source's headers exactly
+    # as before the hardening: the first byte is the first token, which a local
+    # source produces only after prompt processing, so the body reads it under
+    # the source's total budget alone while the client already holds the
+    # ``200`` -- a client that leaves during prompt processing cancels the body
+    # and releases the connection, the pooled lease and the reservation at
+    # once instead of holding all of them until the first token. The connect
+    # bound, the dedicated connector and the mid-stream idle cap apply.
     stack, response, first_chunk = await _open_source_stream(
         source,
         "/chat/completions",
@@ -342,7 +347,6 @@ async def stream_chat_completion(
         header_deadline_seconds=None,
         first_frame_deadline_seconds=None,
     )
-    usage_holder.first_frame_at = clock.monotonic()
     transport = SourceStreamTransport(stack, scheduler=scheduler)
     body = _source_stream_body(
         response,
@@ -353,6 +357,7 @@ async def stream_chat_completion(
         on_first_content=None,
         idle_seconds=source_stream_idle_seconds(),
         scheduler=scheduler,
+        clock=clock,
     )
     return SourceChatStream(body=body, usage_holder=usage_holder, upstream_status_code=response.status)
 
@@ -508,6 +513,7 @@ async def stream_responses(
         on_first_content=on_first_content,
         idle_seconds=source_stream_idle_seconds(),
         scheduler=scheduler,
+        clock=clock,
     )
     return SourceResponsesStream(
         body=body,
@@ -536,9 +542,27 @@ async def _next_source_chunk(chunks: AsyncIterator[bytes]) -> bytes | None:
         raise _SourceBudgetExpired(exc) from exc
 
 
+async def _first_source_chunk(chunks: AsyncIterator[bytes], response_status: int) -> bytes:
+    """The first chunk of a stream whose open returned at the headers, read under the source's total budget alone.
+
+    Same verdicts the open gives the first-frame phase when no deadline is
+    armed for it: a budget or transport failure is ``502
+    model_source_unreachable`` and a ``2xx`` stream that ends before its first
+    chunk is ``502 invalid_upstream_response``. No idle timer: the pre-first-
+    token silence of a chat-completions source is prompt processing.
+    """
+
+    try:
+        return await anext(chunks)
+    except StopAsyncIteration:
+        raise _empty_stream_error(response_status) from None
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        raise _unreachable_error(exc) from exc
+
+
 async def _source_stream_body(
     response: aiohttp.ClientResponse,
-    first_chunk: bytes,
+    first_chunk: bytes | None,
     usage_parser: SourceStreamUsageParser,
     usage_holder: SourceUsageHolder,
     transport: SourceStreamTransport,
@@ -546,16 +570,22 @@ async def _source_stream_body(
     on_first_content: OnFirstContent | None,
     idle_seconds: float,
     scheduler: Scheduler,
+    clock: Clock,
 ) -> AsyncIterator[bytes]:
     """Relay source bytes chunk by chunk; the transport is released exactly once.
 
-    Every chunk read after the first frame is bounded by ``idle_seconds``
+    ``first_chunk`` is the chunk the open already read (Responses streams,
+    yielded before reading further) or ``None`` when the open returned at the
+    headers (chat-completions streams): then the first chunk is read here,
+    under the source's total budget alone and without the idle timer, and
+    ``usage_holder.first_frame_at`` is stamped when it arrives. Every chunk
+    read after the first frame is bounded by ``idle_seconds``
     (``source_stream_idle_seconds()``) through the scheduler seam rather than
     aiohttp's ``sock_read``: the socket timer is armed from request send and a
     low configured idle window would pre-empt the header and first-frame
-    deadlines, whereas this timer starts only once the open has proved the
-    source is producing. Expiry raises ``model_source_idle_timeout``; the
-    source's own total budget (aiohttp ``total``) keeps propagating as today.
+    deadlines, whereas this timer starts only once the source has proved it is
+    producing. Expiry raises ``model_source_idle_timeout``; the source's own
+    total budget (aiohttp ``total``) keeps propagating as today.
 
     Without a hook every chunk is yielded as soon as it is parsed (the direct
     routing path adds no buffering). With ``on_first_content`` armed, chunks
@@ -586,8 +616,14 @@ async def _source_stream_body(
     withheld: list[bytes] | None = [] if on_first_content is not None else None
     withheld_bytes = 0
     chunks = response.content.iter_chunked(_SOURCE_STREAM_CHUNK_BYTES)
-    chunk: bytes | None = first_chunk or None
+    chunk: bytes | None = first_chunk
     try:
+        if chunk is None:
+            # The open returned at the headers: a client that leaves during
+            # prompt processing cancels this wait, and the ``finally`` below
+            # releases the connection and the pooled lease at once.
+            chunk = await _first_source_chunk(chunks, response.status)
+            usage_holder.first_frame_at = clock.monotonic()
         while True:
             if chunk is None:
                 try:
@@ -648,7 +684,7 @@ async def _open_source_stream(
     clock: Clock = REAL_CLOCK,
     header_deadline_seconds: float | None = SOURCE_HEADER_DEADLINE_SECONDS,
     first_frame_deadline_seconds: float | None = SOURCE_FIRST_FRAME_DEADLINE_SECONDS,
-) -> tuple[AsyncExitStack, aiohttp.ClientResponse, bytes]:
+) -> tuple[AsyncExitStack, aiohttp.ClientResponse, bytes | None]:
     """Open the upstream request eagerly so errors surface before headers.
 
     Streaming callers wrap the returned response in a ``StreamingResponse``;
@@ -659,13 +695,19 @@ async def _open_source_stream(
     open is bounded per phase (design v3 §8.2): connect establishment by
     ``ClientTimeout``, the header wait by ``header_deadline_seconds`` and the
     first body chunk by ``first_frame_deadline_seconds``, both through
-    ``scheduler.fail_after`` so virtual time can expire them; ``None`` leaves
-    that phase to the source's total budget (chat-completions streams, whose
-    first byte is the first token). The mid-stream idle cap is the body's
-    (``_source_stream_body``). The returned exit stack owns the session lease
-    and response and must be closed by the stream body (or
-    ``SourceResponsesStream.aclose``); the returned bytes are the first chunk,
-    which the body yields before reading further.
+    ``scheduler.fail_after`` so virtual time can expire them. ``None`` leaves
+    the header wait to the source's total budget; ``None`` for the first-frame
+    deadline means the open does not read the first chunk at all and returns
+    at the headers, as it did before the hardening (chat-completions streams,
+    whose first byte is the first token): the body reads it under the total
+    budget while the client already holds the ``200``, so a client that leaves
+    during prompt processing frees the connection, the pooled lease and the
+    reservation instead of holding them until the first token. The mid-stream
+    idle cap is the body's (``_source_stream_body``). The returned exit stack
+    owns the session lease and response and must be closed by the stream body
+    (or ``SourceResponsesStream.aclose``); the returned bytes are the first
+    chunk, which the body yields before reading further, or ``None`` when the
+    body reads it.
     """
     stack = AsyncExitStack()
     opened_at = clock.monotonic()
@@ -697,12 +739,12 @@ async def _open_source_stream(
                 raise _credentials_rejected_error(response, source)
             data = await _read_error_body(response, scheduler=scheduler)
             raise _upstream_status_error(response, source, encryptor=encryptor, error_payload=_error_payload(data))
+        if first_frame_deadline_seconds is None:
+            return stack, response, None
         try:
             with _phase_deadline(scheduler, first_frame_deadline_seconds):
                 first_chunk = await response.content.readany()
         except TimeoutError as exc:
-            if first_frame_deadline_seconds is None:
-                raise _unreachable_error(exc) from exc
             # anyio's deadline (or the source's total budget, a ``TimeoutError``
             # too) -- either way the source accepted the request and produced
             # nothing.

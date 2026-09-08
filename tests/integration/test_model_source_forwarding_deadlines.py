@@ -225,7 +225,8 @@ async def test_chat_stream_slow_prompt_processing_outlives_the_responses_deadlin
     http_client: HttpClient, source_upstream
 ) -> None:
     """A chat-completions source that sends its headers and first token only after prompt processing is not cut
-    at the Responses header / first-frame deadlines (design v3 §2: chat completions are out of the hardening)."""
+    at the Responses header / first-frame deadlines (design v3 §2: chat completions are out of the hardening): the
+    open returns at the headers, as on ``main``, and the body reads the first token under the total budget."""
 
     release_headers = asyncio.Event()
     release_token = asyncio.Event()
@@ -261,20 +262,71 @@ async def test_chat_stream_slow_prompt_processing_outlives_the_responses_deadlin
 
     release_headers.set()
     await asyncio.wait_for(prepared.wait(), timeout=5)
+    # The open completes at the headers: nothing of the body has been read yet.
+    stream = await asyncio.wait_for(task, timeout=5)
+    assert stream.upstream_status_code == 200
+    assert stream.usage_holder.first_frame_at is None
+    assert _acquired(http_client, model_source=True) == 1
+
+    first_read = asyncio.ensure_future(anext(stream.body))
     for _ in range(50):
         await asyncio.sleep(0.01)
     await scheduler.advance(SOURCE_FIRST_FRAME_DEADLINE_SECONDS + 5)
-    assert not task.done()
+    assert not first_read.done()
 
     release_token.set()
-    stream = await asyncio.wait_for(task, timeout=5)
-    delivered = b"".join([chunk async for chunk in stream.body])
+    # One socket read may carry the token and the tail the stub wrote right behind it.
+    first = await asyncio.wait_for(first_read, timeout=5)
+    assert first.startswith(token)
+    assert stream.usage_holder.first_frame_at is not None
+    delivered = first + b"".join([chunk async for chunk in stream.body])
 
     assert delivered == token + final
     assert stream.usage_holder.usage is not None
     assert stream.usage_holder.usage.input_tokens == 4
     assert _acquired(http_client, model_source=True) == 0
     await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_client_leaving_during_prompt_processing_closes_the_source_connection(
+    http_client: HttpClient, source_upstream
+) -> None:
+    """Cancelling the body's first read (a client that left while the source still processes the prompt) closes the
+    source connection and returns the pooled lease at once instead of holding both until the first token."""
+
+    prepared = asyncio.Event()
+    client_gone = asyncio.Event()
+
+    async def headers_then_prompt_processing(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        prepared.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            client_gone.set()
+            raise
+        return response
+
+    base_url = await source_upstream(headers_then_prompt_processing, handler_cancellation=True, shutdown_timeout=1.0)
+    stream = await asyncio.wait_for(
+        forwarding_module.stream_chat_completion(_source(base_url), {"model": "m", "stream": True}), timeout=5
+    )
+    await asyncio.wait_for(prepared.wait(), timeout=5)
+    assert _acquired(http_client, model_source=True) == 1
+
+    first_read = asyncio.ensure_future(anext(stream.body))
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+    assert not first_read.done()
+    first_read.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_read
+
+    await asyncio.wait_for(client_gone.wait(), timeout=5)
+    assert _acquired(http_client, model_source=True) == 0
+    assert stream.usage_holder.first_frame_at is None
 
 
 @pytest.mark.asyncio

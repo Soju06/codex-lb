@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from tempfile import SpooledTemporaryFile
 from typing import cast
@@ -11,12 +13,14 @@ from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 from sqlalchemy import select
 
+from app.core.clients.http import get_http_client
 from app.core.utils.time import utcnow
 from app.db.models import ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
 from tests.integration.model_source_helpers import (
+    _AsgiStream,
     _create_model_source,
     _enable_api_key_auth,
     _free_port,
@@ -430,6 +434,82 @@ async def test_source_stream_upstream_error_maps_to_error_response(async_client,
     assert response.status_code == 401
     body = response.json()
     assert body["error"]["code"] == "invalid_api_key"
+
+
+def _model_source_connections_acquired() -> int:
+    session = get_http_client().model_source_session
+    assert session is not None
+    connector = session.connector
+    assert connector is not None
+    return len(connector._acquired)
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_client_leaving_during_prompt_processing_releases_the_source(async_client, source_upstream):
+    """Direct chat route: the ``200`` and headers reach the client at the source's headers (as on ``main``), so a
+    client that leaves while the source is still processing the prompt cancels the body -- the handler returns, the
+    source connection closes and the request is recorded as cancelled -- instead of everything being held until the
+    first token or the source's total budget."""
+
+    prepared = asyncio.Event()
+    release_token = asyncio.Event()
+    upstream: dict[str, int] = {"cancelled": 0, "finished": 0}
+
+    async def slow_prompt_processing(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        prepared.set()
+        try:
+            await release_token.wait()
+            await response.write(b'data: {"id":"chatcmpl_late","choices":[{"index":0,"delta":{"content":"x"}}]}\n\n')
+            await response.write_eof()
+        except asyncio.CancelledError:
+            upstream["cancelled"] += 1
+            raise
+        upstream["finished"] += 1
+        return response
+
+    base_url = await source_upstream(slow_prompt_processing, handler_cancellation=True, shutdown_timeout=1.0)
+    model = "source-slow-prompt-model"
+    source_id = await _create_model_source(async_client, name="slow-prompt", model=model, base_url=base_url)
+
+    stream = _AsgiStream(
+        app=async_client._transport.app,
+        path="/v1/chat/completions",
+        headers={},
+        body=json.dumps({"model": model, "messages": [{"role": "user", "content": "hi"}], "stream": True}).encode(),
+    )
+    runner = asyncio.create_task(stream.run())
+    try:
+        await asyncio.wait_for(prepared.wait(), timeout=5)
+        # ``main`` parity: the client holds the 200 and headers while the source processes the prompt.
+        await stream.wait_for_response_start(timeout=5)
+        assert stream.status == 200
+        assert stream.received() == b""
+        assert _model_source_connections_acquired() == 1
+
+        left_at = time.monotonic()
+        stream.disconnect()
+        await asyncio.wait_for(runner, timeout=5)
+        assert time.monotonic() - left_at < 2.0
+
+        deadline = time.monotonic() + 5
+        while upstream["cancelled"] == 0 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert upstream["cancelled"] == 1, "the source connection was not closed when the client left"
+        assert upstream["finished"] == 0
+        assert _model_source_connections_acquired() == 0
+    finally:
+        release_token.set()
+        if not runner.done():
+            runner.cancel()
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        log = result.scalar_one()
+        assert log.model_source_id == source_id
+        assert log.status == "cancelled"
+        assert log.error_code == "client_disconnected"
 
 
 @pytest.mark.asyncio

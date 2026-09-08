@@ -338,7 +338,13 @@ def _forever() -> Awaitable[bool]:
 
 
 class _FakeContent:
-    """Minimal ``aiohttp.StreamReader`` double: ``readany`` for the open, ``iter_chunked`` for the body."""
+    """Minimal ``aiohttp.StreamReader`` double: ``readany`` for the open, ``iter_chunked`` for the body.
+
+    Like the real reader, both draw from one stream: when the open returned at
+    the headers without ``readany`` (chat completions), the body's first
+    ``iter_chunked`` read delivers ``first`` -- behind ``first_gate`` -- and a
+    stream whose ``first`` is empty is at EOF.
+    """
 
     def __init__(
         self,
@@ -362,6 +368,12 @@ class _FakeContent:
 
     def iter_chunked(self, _size: int) -> AsyncIterator[bytes]:
         async def gen() -> AsyncIterator[bytes]:
+            if self.readany_calls == 0:
+                if self._first_gate is not None:
+                    await self._first_gate()
+                if not self._first:
+                    return
+                yield self._first
             for item in self._rest:
                 if isinstance(item, BaseException):
                     raise item
@@ -1450,16 +1462,98 @@ async def test_stream_chat_completion_keeps_the_source_401_envelope(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_stream_chat_completion_yields_the_first_chunk_first(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_stream_chat_completion_returns_at_the_headers_and_reads_the_first_token_in_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The chat open completes at the source's headers, as on ``main``: the first token is the body's first read."""
+
+    first_token = asyncio.Event()
     first = b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
-    response = _FakeResponse(content=_FakeContent(first, stall_after_rest=True))
+    response = _FakeResponse(content=_FakeContent(first, first_gate=first_token.wait, stall_after_rest=True))
     _session, _context, lease = _install_session(monkeypatch, response)
 
-    stream = await forwarding_module.stream_chat_completion(_responses_source(), {"model": "m"})
-    assert await asyncio.wait_for(anext(stream.body), timeout=1) == first
+    stream = await asyncio.wait_for(
+        forwarding_module.stream_chat_completion(_responses_source(), {"model": "m"}), timeout=1
+    )
+    assert response.content.readany_calls == 0
+    assert stream.usage_holder.first_frame_at is None
+
+    first_read = asyncio.ensure_future(anext(stream.body))
+    await asyncio.sleep(0)
+    assert not first_read.done()
+    first_token.set()
+    assert await asyncio.wait_for(first_read, timeout=1) == first
     assert stream.usage_holder.first_frame_at is not None
 
     await cast(AsyncGenerator[bytes, None], stream.body).aclose()
+    assert lease.released == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_completion_cancelled_during_prompt_processing_releases_the_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client that leaves while the source is still processing the prompt frees the connection and the lease."""
+
+    response = _FakeResponse(content=_FakeContent(b"never", first_gate=_forever))
+    _session, context, lease = _install_session(monkeypatch, response)
+
+    stream = await asyncio.wait_for(
+        forwarding_module.stream_chat_completion(_responses_source(), {"model": "m"}), timeout=1
+    )
+    first_read = asyncio.ensure_future(anext(stream.body))
+    await asyncio.sleep(0)
+    assert not first_read.done()
+    first_read.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_read
+
+    assert context.exited == 1
+    assert lease.released == 1
+    assert stream.usage_holder.first_frame_at is None
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_completion_empty_2xx_stream_fails_in_the_body_as_invalid_upstream_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _FakeResponse(status=200, content=_FakeContent(b""))
+    _session, context, lease = _install_session(monkeypatch, response)
+
+    stream = await forwarding_module.stream_chat_completion(_responses_source(), {"model": "m"})
+    with pytest.raises(ModelSourceForwardingError) as excinfo:
+        await anext(stream.body)
+
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.upstream_status_code == 200
+    assert cast(dict[str, object], excinfo.value.payload["error"])["code"] == "invalid_upstream_response"
+    assert context.exited == 1
+    assert lease.released == 1
+
+
+@pytest.mark.asyncio
+async def test_open_source_stream_without_a_first_frame_deadline_does_not_read_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _FakeResponse(content=_FakeContent(b"data: late\n\n", first_gate=_forever))
+    _session, _context, lease = _install_session(monkeypatch, response)
+
+    stack, opened, first_chunk = await asyncio.wait_for(
+        forwarding_module._open_source_stream(
+            _responses_source(),
+            "/chat/completions",
+            {"model": "m"},
+            encryptor=None,
+            header_deadline_seconds=None,
+            first_frame_deadline_seconds=None,
+        ),
+        timeout=1,
+    )
+
+    assert opened is response
+    assert first_chunk is None
+    assert response.content.readany_calls == 0
+    await stack.aclose()
     assert lease.released == 1
 
 
@@ -1992,7 +2086,8 @@ async def test_stream_body_oversized_content_frame_wins_over_the_withheld_cap(mo
 async def test_stream_chat_completion_pre_first_token_phases_outlive_the_responses_deadlines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A chat stream has no bookkeeping frame: headers and the first token arrive after prompt processing."""
+    """A chat stream has no bookkeeping frame: the open returns at the headers, however late they come, and the
+    body's first read waits for the first token past the Responses first-frame deadline."""
 
     clock, scheduler = _virtual()
     first = b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
@@ -2009,14 +2104,21 @@ async def test_stream_chat_completion_pre_first_token_phases_outlive_the_respons
     await scheduler.advance(SOURCE_HEADER_DEADLINE_SECONDS + 4.9)
     assert not task.done()
     await scheduler.advance(0.1)
-    assert not task.done()
-    await scheduler.advance(SOURCE_FIRST_FRAME_DEADLINE_SECONDS + 14.9)
-    assert not task.done()
-    await scheduler.advance(0.1)
     assert task.done()
-
     stream = task.result()
-    assert await asyncio.wait_for(anext(stream.body), timeout=1) == first
+    assert stream.usage_holder.first_frame_at is None
+
+    async def read_first_token() -> bytes:
+        return await anext(stream.body)
+
+    first_read = scheduler.create_task(read_first_token())
+    await scheduler.advance(SOURCE_FIRST_FRAME_DEADLINE_SECONDS + 14.9)
+    assert not first_read.done()
+    await scheduler.advance(0.1)
+    assert first_read.done()
+    assert first_read.result() == first
+    headers_at = SOURCE_HEADER_DEADLINE_SECONDS + 5
+    assert stream.usage_holder.first_frame_at == headers_at + SOURCE_FIRST_FRAME_DEADLINE_SECONDS + 15
     await cast(AsyncGenerator[bytes, None], stream.body).aclose()
     assert lease.released == 1
     await scheduler.cancel_owned_tasks()
@@ -2040,8 +2142,10 @@ async def test_stream_chat_completion_total_budget_expiry_keeps_the_unreachable_
 
     response = _FakeResponse(content=_FakeContent(b"x", first_gate=budget_expired))
     _session, context, lease = _install_session(monkeypatch, response)
+    stream = await forwarding_module.stream_chat_completion(_responses_source(), {"model": "m"})
+    # The open returned at the headers; the body's first read carries the verdict.
     with pytest.raises(ModelSourceForwardingError) as before_first_token:
-        await forwarding_module.stream_chat_completion(_responses_source(), {"model": "m"})
+        await anext(stream.body)
     assert before_first_token.value.status_code == 502
     assert cast(dict[str, object], before_first_token.value.payload["error"])["code"] == "model_source_unreachable"
     assert before_first_token.value.timeout_phase is None

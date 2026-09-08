@@ -28,7 +28,7 @@ Practical consequences:
 - The caps resolve as environment value < dashboard override. A fresh install stores no override, so `CODEX_LB_PROXY_ACCOUNT_*` is the effective value and raising it plus restarting pods takes effect. Once an operator stores a cap in **dashboard settings** (Settings → routing) — or on rows created before the NULL-seed change, which carry the seeded value as a stored override — the dashboard value wins and env changes do nothing until the override is cleared with the empty/`null` input, which returns the cap to inheriting the environment.
 - `CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE` (default 1) is subtracted from each replica's share at selection time, so small shares feel it disproportionately: a share of 2 leaves 1 slot for new selection.
 - Persistent `account_stream_cap` errors with idle replicas are the undersizing signature; raise the cap first.
-- Run one process per pod (`workers_per_instance` stays 1): shares are partitioned across ring members, and worker processes inside one pod would silently multiply the share.
+- Run one process per pod: shares are partitioned across ring members, and worker processes inside one pod would silently multiply the share. `CODEX_LB_WORKERS_PER_INSTANCE` is a startup guard, not a setting — any value other than `1` fails startup.
 
 Semantics and sizing rationale: [proxy-admission-control](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/proxy-admission-control).
 

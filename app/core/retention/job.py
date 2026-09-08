@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import delete, func, select
 
-from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.utils.time import utcnow
 from app.db.models import AccountUsageRollupState, AdditionalUsageHistory, RequestLog, UsageHistory
@@ -33,25 +32,16 @@ class EffectiveRetention:
 
 
 async def get_effective_retention() -> EffectiveRetention:
-    """Resolve the retention windows with dashboard-first precedence.
+    """Resolve the retention windows from the dashboard runtime settings.
 
-    A non-NULL dashboard value (SettingsCache-backed, so a dashboard change
-    takes effect without restart) wins; while the dashboard value is unset the
-    deprecated env alias applies; 0 means disabled at either layer.
+    The dashboard value (SettingsCache-backed, so a change takes effect
+    without restart) is the only source: NULL means never configured, which
+    is disabled, and 0 means explicitly disabled.
     """
-    env = get_settings()
     dashboard = await get_settings_cache().get()
     return EffectiveRetention(
-        request_log_days=(
-            env.request_log_retention_days
-            if dashboard.request_log_retention_days is None
-            else dashboard.request_log_retention_days
-        ),
-        usage_history_days=(
-            env.usage_history_retention_days
-            if dashboard.usage_history_retention_days is None
-            else dashboard.usage_history_retention_days
-        ),
+        request_log_days=dashboard.request_log_retention_days or 0,
+        usage_history_days=dashboard.usage_history_retention_days or 0,
     )
 
 

@@ -87,7 +87,11 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # promoted so the generator, ``.env`` files, and the removed-settings warning
 # govern them. The remaining bare env reads are third-party conventions listed
 # in the reference's process-level section.
-MAX_SETTINGS_FIELDS = 137
+# 137 -> 130: remove-dead-env-settings dropped the deprecated retention env
+# aliases, four env fields the dashboard already owned (first-boot seeds or
+# never read), and workers_per_instance (now a startup guard on the env var,
+# not a field).
+MAX_SETTINGS_FIELDS = 130
 
 
 def test_generated_settings_reference_matches_code() -> None:

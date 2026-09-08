@@ -152,8 +152,6 @@ config:
   httpConnectorLimit: 100
   # @param config.httpConnectorLimitPerHost Per-host HTTP connection pool limit
   httpConnectorLimitPerHost: 50
-  # @param config.cacheAffinityMaxAgeSeconds TTL for prompt cache sticky sessions (account affinity)
-  cacheAffinityMaxAgeSeconds: 1800
   # @param config.promptCacheKeyDerivationEnabled Auto-derive prompt cache keys when client omits them
   promptCacheKeyDerivationEnabled: true
   # @param config.sessionBridgeEnabled Enable in-memory upstream WebSocket session reuse

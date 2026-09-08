@@ -6891,7 +6891,6 @@ def test_http_bridge_admission_obeys_effective_transport_policy(
     dashboard_settings.http_downstream_transport_policy = dashboard_policy
     dashboard_settings.upstream_stream_transport = upstream_config
     base_settings = _make_proxy_settings()
-    base_settings.http_downstream_transport_policy = "smart"
     base_settings.upstream_stream_transport = "auto"
     api_key = (
         _make_api_key_data("key_bridge_policy", transport_policy_override=key_override)
@@ -6916,7 +6915,6 @@ async def _capture_stream_retry_transport(
     monkeypatch: pytest.MonkeyPatch,
     *,
     dashboard_policy: str = "smart",
-    base_policy: str = "smart",
     api_key: ApiKeyData | None = None,
     request_transport: str = "http",
     upstream_config: str = "auto",
@@ -6928,7 +6926,6 @@ async def _capture_stream_retry_transport(
     dashboard_settings.http_downstream_transport_policy = dashboard_policy
     dashboard_settings.upstream_stream_transport = upstream_config
     base_settings = _make_proxy_settings()
-    base_settings.http_downstream_transport_policy = base_policy
     base_settings.upstream_stream_transport = "auto"
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

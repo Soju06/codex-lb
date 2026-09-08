@@ -10,6 +10,7 @@ The service MUST expose the probed replica's nonnegative `heartbeat_age_seconds`
 
 #### Scenario: Missing local row exposes unknown age and fails readiness
 - **GIVEN** bridge registration completed but the probed replica has no ring row
+- **AND** the active ring contains another replica
 - **WHEN** `/health/ready` checks ring membership
 - **THEN** the bridge-ring payload represents heartbeat age as null
 - **AND** readiness fails because the local replica is not active

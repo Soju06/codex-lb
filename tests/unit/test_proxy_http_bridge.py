@@ -37351,6 +37351,8 @@ async def test_periodic_maintenance_helpers_run_distinct_bridge_passes() -> None
     proxy_service_double.prune_idle_http_bridge_sessions.assert_not_awaited()
 
     await run_http_bridge_idle_sweep_maintenance(proxy_service_double)
+    proxy_service_double.reconcile_durable_http_bridge_ownership.assert_awaited_once()
+    proxy_service_double.abandon_stale_http_bridge_operations.assert_awaited_once()
     proxy_service_double.prune_idle_http_bridge_sessions.assert_awaited_once()
 
 

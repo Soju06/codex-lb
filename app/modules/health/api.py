@@ -205,7 +205,7 @@ def _bridge_readiness_failure_detail(bridge_ring: BridgeRingInfo) -> str | None:
         return "Service bridge registration is not complete"
     if bridge_ring.error is not None:
         return "Service bridge ring metadata is unavailable"
-    if bridge_ring.is_member:
+    if bridge_ring.ring_size == 0 or bridge_ring.is_member:
         return None
     return "Service is not an active bridge ring member"
 

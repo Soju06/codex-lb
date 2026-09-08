@@ -307,7 +307,7 @@ async def _shutdown_bridge_ring_membership_impl(
         periodic_lifecycle,
         timeout_seconds=2,
     )
-    if not periodic_shutdown.all_stopped:
+    if not (periodic_shutdown.registration_stopped and periodic_shutdown.heartbeat_stopped):
         logger.warning(
             "Bridge periodic work did not stop within shutdown deadline; allowing membership to expire",
             extra={
@@ -319,7 +319,7 @@ async def _shutdown_bridge_ring_membership_impl(
         )
         return False
     if ring_service is None or instance_id is None:
-        return True
+        return periodic_shutdown.all_stopped
     try:
         await asyncio.wait_for(
             ring_service.mark_stale(
@@ -336,7 +336,7 @@ async def _shutdown_bridge_ring_membership_impl(
     except Exception:
         logger.warning("Failed to mark bridge ring membership stale during shutdown", exc_info=True)
         return False
-    return True
+    return periodic_shutdown.all_stopped
 
 
 async def _drain_proxy_persistence_tasks(
@@ -979,9 +979,8 @@ async def lifespan(app: FastAPI):
         )
         database_tasks_drained = database_tasks_drained and final_proxy_persistence_drained
 
-        # Stop registration and every periodic owner before aging the shared
-        # row. If any owner cannot drain, leave the row to expire naturally so
-        # a late heartbeat cannot race after an intentional stale mark.
+        # Attempt to drain every owner. Only registration and heartbeat can
+        # race a stale mark; surviving maintenance blocks CLEAN, not stale-marking.
         bridge_periodic_drained, bridge_shutdown_cancellation = await _shutdown_bridge_ring_membership(
             registration_task=bridge_registration_task,
             periodic_lifecycle=bridge_periodic_lifecycle,

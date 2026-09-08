@@ -53,6 +53,22 @@ validated before upstream connection or send, using client-plane values.
 - **AND** source forwarding SHALL retain the original configuration update
 - **AND** overlapping requests SHALL remain subject to the existing reservation limit, including when the additional fields exhaust its remaining budget
 
+#### Scenario: Source effort normalization cannot reduce the admission estimate
+
+- **GIVEN** a source-owned Responses request contains a configuration update whose effort has leading or trailing whitespace
+- **WHEN** the proxy reserves the request's usage budget
+- **THEN** the existing bounded input estimate SHALL use the prepared source-bound payload, including the complete effort value forwarded to the source
+- **AND** subscription wire normalization SHALL NOT shorten the source's admission estimate
+- **AND** the existing reservation cap, overlap enforcement and usage settlement SHALL remain unchanged
+
+#### Scenario: Malformed subscription updates have a consistent schema error
+
+- **GIVEN** a subscription Astra request contains an unsupported configuration-update effort or malformed update shape
+- **WHEN** the request is checked with an unrestricted, allowed-effort or enforced-effort API key
+- **THEN** it SHALL return the subscription invalid-request 400 before upstream work
+- **AND** a schema-valid effort forbidden by the key SHALL still return reasoning_effort_not_allowed
+- **AND** source-owned update schemas and request-level effort policy SHALL retain their existing behavior
+
 #### Scenario: A subscription anchor overrides a source model contract
 
 - **GIVEN** a configured source claims gpt-6-astra and a previous_response_id belongs to a recorded subscription account

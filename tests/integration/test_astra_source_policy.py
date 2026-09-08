@@ -147,8 +147,9 @@ async def test_source_configuration_update_enforces_only_explicit_effort(
 @pytest.mark.parametrize("endpoint", ["/v1/responses", "/backend-api/codex/responses"])
 @pytest.mark.parametrize("effort", ["low", "ultra"])
 @pytest.mark.parametrize("vendor_size", [32, 10_000], ids=["small-control", "budget-cap"])
+@pytest.mark.parametrize("value_location", ["vendor-field", "effort"])
 async def test_source_reasoning_fields_count_toward_overlapping_request_budget(
-    async_client, source_upstream, endpoint, effort, vendor_size
+    async_client, source_upstream, endpoint, effort, vendor_size, value_location
 ):
     captured = []
     started = asyncio.Event()
@@ -194,6 +195,8 @@ async def test_source_reasoning_fields_count_toward_overlapping_request_budget(
     key = created.json()
     headers = {"Authorization": f"Bearer {key['key']}"}
     update = {"type": "configuration_update", "reasoning": {"effort": effort, "vendor_payload": "x" * vendor_size}}
+    if value_location == "effort":
+        update = {"type": "configuration_update", "reasoning": {"effort": " " * vendor_size + effort + "\t"}}
     payload = {"model": "gpt-6-astra", "reasoning": {"effort": "low"}, "input": [update]}
     first = asyncio.create_task(async_client.post(endpoint, json=payload, headers=headers))
     try:

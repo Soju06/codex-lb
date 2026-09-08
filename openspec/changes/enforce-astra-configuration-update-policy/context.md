@@ -76,6 +76,21 @@ too little for overlapping requests even though the source receives the full
 value. Copying the reasoning mapping and changing only effort preserves this
 contract without changing the budget cap or remaining-quota calculation.
 
+Source admission now measures the prepared source-bound body through the
+existing estimator. The subscription serializer is not that body: for example,
+a source effort with leading whitespace remains intact on source forwarding
+but shrinks during subscription normalization. The same source-route probes
+retain their budget on upstream main, while the new normalization undercounts
+them. Passing the prepared body also keeps source overrides and tool filtering
+inside the existing estimate, before a reservation is acquired. Its cap,
+remaining-quota and settlement rules do not change.
+
+Subscription update shape validation precedes update key-policy checks, so an
+unsupported effort returns the promised 400 even on a restricted owner-bound
+continuation. A valid but forbidden effort still returns 403. This ordering is
+limited to subscription configuration updates; the baseline's request-level
+policy ordering and source-owned schemas remain intact.
+
 Key allows `low` only. Request input contains
 `configuration_update` with `high`. The proxy returns
 `reasoning_effort_not_allowed` before any upstream send.

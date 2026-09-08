@@ -4985,12 +4985,6 @@ async def _source_responses_response(
         pre_normalization_effort=pre_normalization_effort,
     )
     validate_configuration_update_policy(payload, api_key)
-    reservation = await _enforce_request_limits(
-        api_key,
-        request_model=payload.model,
-        request_service_tier=payload.service_tier,
-        request_usage_budget=estimate_api_key_request_usage(payload),
-    )
     source_payload = payload.model_dump_for_forwarding()
     preserve_materialized_provider_alias = payload._codex_lb_provider_reasoning_effort_materialized and (
         api_key is None or (api_key.enforced_reasoning_effort is None and api_key.allowed_reasoning_efforts is None)
@@ -5029,6 +5023,12 @@ async def _source_responses_response(
     _drop_unsupported_source_response_tools(
         source_payload,
         supported_tool_types=source_model_supported_tool_types(source, payload.model),
+    )
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=payload.model,
+        request_service_tier=payload.service_tier,
+        request_usage_budget=estimate_api_key_request_usage(payload, upstream_payload=source_payload),
     )
 
     if payload.stream:

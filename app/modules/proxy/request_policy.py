@@ -522,7 +522,6 @@ def validate_astra_request(
         raise ProxyInvalidRequestError("The compact endpoint does not support configuration updates.", param="input")
     if prepare_continuation and isinstance(payload, ResponsesRequest):
         prepare_astra_reasoning_policy_continuation(payload, api_key)
-    validate_configuration_update_policy(payload, api_key, subscription=True)
     if payload.reasoning is not None and payload.reasoning.effort is not None:
         if payload.reasoning.effort.strip().lower() != "minimal":
             _astra_wire_effort(payload.reasoning.effort, param="reasoning.effort")
@@ -547,6 +546,7 @@ def validate_astra_request(
         value = reasoning["effort"]
         _astra_wire_effort(value, param=f"{param}.reasoning.effort")
         has_updates = True
+    validate_configuration_update_policy(payload, api_key, subscription=True)
     if not has_updates or not isinstance(payload, ResponsesRequest):
         return
     # Policy uses client efforts above; ordering uses the actual subscription

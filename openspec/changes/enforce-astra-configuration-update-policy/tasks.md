@@ -26,3 +26,5 @@
 - [x] 3.10 Preserve source configuration updates without reasoning changes while enforcing explicit efforts on restricted keys
 - [x] 3.11 Preserve source-owned reasoning fields during effort serialization and API-key reservation estimation
 - [x] 3.12 Preserve client prefix metadata after a late ledger anchor and prove subsequent full-resend matching through the real HTTP bridge
+- [x] 3.13 Use the source-bound body for the existing reservation estimate and cover padded effort values with overlapping real-route requests
+- [x] 3.14 Validate subscription update shape before update key policy and preserve source/request-level policy behavior

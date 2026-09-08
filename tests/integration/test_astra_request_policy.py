@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 import app.modules.proxy.service as proxy_module
+from tests.integration.test_astra_websocket_owner_policy import _continuation
+from tests.integration.test_astra_websocket_owner_policy import (
+    source_and_subscription_owner as source_and_subscription_owner,
+)
 from tests.integration.test_openai_compat_features import _completed_event, _import_account
 
 pytestmark = pytest.mark.integration
@@ -38,8 +44,25 @@ async def test_astra_valid_update_reaches_subscription_without_rewriting_prefix(
 
 
 @pytest.mark.parametrize("endpoint", ["/v1/responses", "/backend-api/codex/responses"])
-@pytest.mark.parametrize("policy", [{"allowedReasoningEfforts": ["low"]}, {"enforcedReasoningEffort": "low"}])
-async def test_astra_history_update_cannot_override_key_policy(async_client, monkeypatch, endpoint, policy):
+@pytest.mark.parametrize(
+    ("effort", "policy", "expected_status"),
+    [
+        pytest.param("none", {}, 400, id="none-unrestricted"),
+        pytest.param("invalid", {}, 400, id="invalid-unrestricted"),
+        pytest.param("none", {"allowedReasoningEfforts": ["low"]}, 400, id="none-allowed"),
+        pytest.param("invalid", {"allowedReasoningEfforts": ["low"]}, 400, id="invalid-allowed"),
+        pytest.param("none", {"enforcedReasoningEffort": "low"}, 400, id="none-enforced"),
+        pytest.param("invalid", {"enforcedReasoningEffort": "low"}, 400, id="invalid-enforced"),
+        pytest.param("low", {"allowedReasoningEfforts": ["low"]}, 200, id="low-allowed"),
+        pytest.param("low", {"enforcedReasoningEffort": "low"}, 200, id="low-enforced"),
+        pytest.param("high", {"allowedReasoningEfforts": ["low"]}, 403, id="high-allowed"),
+        pytest.param("high", {"enforcedReasoningEffort": "low"}, 403, id="high-enforced"),
+    ],
+)
+async def test_astra_update_schema_and_key_policy_errors(
+    async_client, monkeypatch, endpoint, effort, policy, expected_status
+):
+    await _import_account(async_client, "astra-error-policy", "astra-error-policy@example.com")
     settings = await async_client.put(
         "/api/settings",
         json={
@@ -52,21 +75,64 @@ async def test_astra_history_update_cannot_override_key_policy(async_client, mon
     assert settings.status_code == 200
     created = await async_client.post("/api/api-keys/", json={"name": "astra-history-policy", **policy})
     assert created.status_code == 200
+    forwarded = []
 
-    async def fail_upstream(*args, **kwargs):
-        raise AssertionError("Invalid configuration update reached upstream")
-        yield ""
+    async def fake_stream(payload, *args, **kwargs):
+        forwarded.append(payload.to_payload())
+        yield _completed_event("resp_astra_error_policy")
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_upstream)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
     response = await async_client.post(
         endpoint,
-        json=_payload(),
+        json=_payload(effort),
         headers={
             "Authorization": f"Bearer {created.json()['key']}",
         },
     )
-    assert response.status_code == 403
-    assert response.json()["error"]["code"] == "reasoning_effort_not_allowed"
+    assert response.status_code == expected_status, response.text
+    if expected_status == 200:
+        assert len(forwarded) == 1
+        assert forwarded[0]["input"][0] == _payload(effort)["input"][0]
+    else:
+        assert forwarded == []
+        error = response.json()["error"]
+        assert error["code"] == ("invalid_request_error" if expected_status == 400 else "reasoning_effort_not_allowed")
+        assert error["type"] == ("invalid_request_error" if expected_status == 400 else "permission_error")
+        assert error["param"] == "input.0.reasoning.effort"
+
+
+@pytest.mark.parametrize("endpoint", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize(
+    ("effort", "policy"),
+    [
+        pytest.param("none", {}, id="unrestricted-control"),
+        pytest.param("none", {"allowedReasoningEfforts": ["low"]}, id="none-allowed"),
+        pytest.param("invalid", {"allowedReasoningEfforts": ["low"]}, id="invalid-allowed"),
+        pytest.param("none", {"enforcedReasoningEffort": "low"}, id="none-enforced"),
+        pytest.param("invalid", {"enforcedReasoningEffort": "low"}, id="invalid-enforced"),
+    ],
+)
+def test_astra_invalid_update_with_subscription_owner_returns_400(
+    source_and_subscription_owner, monkeypatch, endpoint, effort, policy
+):
+    client, key, _ = source_and_subscription_owner
+    if policy:
+        updated = client.patch("/api/api-keys/" + key["id"], json=policy)
+        assert updated.status_code == 200
+    connect = AsyncMock(side_effect=AssertionError("Invalid subscription update reached upstream connection"))
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    payload = _continuation({"input": _payload(effort)["input"]})
+
+    with client.websocket_connect(endpoint, headers={"Authorization": "Bearer " + key["key"]}) as ws:
+        ws.send_json(payload)
+        event = ws.receive_json()
+
+    assert event["type"] == "error"
+    assert event["status"] == 400, event
+    assert event["error"]["code"] == "invalid_request_error"
+    assert event["error"]["type"] == "invalid_request_error"
+    assert event["error"]["param"] == "input.0.reasoning.effort"
+    connect.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

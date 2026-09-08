@@ -626,3 +626,39 @@ async def test_run_loop_warms_the_codex_version_cache_on_every_replica(monkeypat
     await scheduler.stop()
     failing.assert_awaited_once_with()
     reconcile.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_warmed_version_reaches_the_non_native_upstream_fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Product path of #2170: after the per-replica warm-up, a non-native SDK
+    request is forwarded with the fetched Codex version in ``User-Agent`` and
+    ``version`` instead of the configured fallback, using the real shared cache."""
+    from app.core.clients import proxy as proxy_module
+    from app.core.clients.codex_version import CodexVersionCache, get_codex_version_cache
+    from app.core.config.settings import get_settings
+
+    cache = get_codex_version_cache()
+    await cache.invalidate()
+    fallback = get_settings().model_registry_client_version
+    fetched = "9.9.9"
+    assert fetched != fallback
+
+    async def _stub_fetch(self: CodexVersionCache) -> str | None:
+        return fetched
+
+    monkeypatch.setattr(CodexVersionCache, "_fetch_latest_version", _stub_fetch)
+    try:
+        cold = {"user-agent": "OpenAI/Python 2.24.0", "version": "sdk"}
+        proxy_module._normalize_non_native_upstream_fingerprint(cold)
+        assert cold["User-Agent"].startswith(f"codex_cli_rs/{fallback} ")
+        assert cold["version"] == fallback
+
+        await scheduler_module._warm_codex_version_cache()
+
+        warm = {"user-agent": "OpenAI/Python 2.24.0", "version": "sdk"}
+        proxy_module._normalize_non_native_upstream_fingerprint(warm)
+        assert warm["User-Agent"].startswith(f"codex_cli_rs/{fetched} ")
+        assert warm["version"] == fetched
+        assert warm["originator"] == "codex_cli_rs"
+    finally:
+        await cache.invalidate()

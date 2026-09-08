@@ -77,6 +77,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["singleAccountId"] is None
     assert payload["subscriptionOverflowSourceId"] is None
     assert payload["subscriptionOverflowDrainUntil"] is None
+    assert payload["subscriptionOverflowPinsExpireBy"] is None
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 1800
     assert payload["dashboardSessionTtlSeconds"] == 31536000
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 3600

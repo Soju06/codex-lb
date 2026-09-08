@@ -1192,7 +1192,7 @@
   "settings.routing.subscriptionOverflow.empty": "Add an OpenAI-compatible model source with Responses support to enable overflow.",
   "settings.routing.subscriptionOverflow.ineligibleSource": "{{name}} (no longer eligible)",
   "settings.routing.subscriptionOverflow.deletedSource": "{{id}} (deleted)",
-  "settings.routing.subscriptionOverflow.drainingUntil": "Overflow is off. Conversations already on the source keep working for at most 7 more days (until {{date}}), then expire.",
+  "settings.routing.subscriptionOverflow.drainingUntil": "Overflow is off. Conversations already on the source keep working until {{date}} at the latest, then expire.",
   "settings.routing.subscriptionOverflow.help.toggle": "How overflow works",
   "settings.routing.subscriptionOverflow.help.trigger": "Triggers only on pool-wide usage exhaustion (the same condition that returns 429 usage_limit_reached with resets_at) — never on local caps, fair-share throttles, transient errors, auth failures or a single account's rate limit.",
   "settings.routing.subscriptionOverflow.help.eligibility": "Eligible: new conversations or requests without prior reasoning on standard Responses models, unscoped API keys only. gpt-5.6 conversations cannot overflow in this version. Declare the tool types your source supports (custom, apply_patch, web_search, shell, tool_search) on its model entries. Background jobs never overflow.",

@@ -31,7 +31,7 @@ from app.db.models import Account, AccountStatus, AuditLog, ModelSourcePin
 from app.db.session import SessionLocal
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.settings.repository import SettingsRepository
-from app.modules.settings.subscription_overflow import DRAIN_WINDOW
+from app.modules.settings.subscription_overflow import DRAIN_WINDOW, PIN_IDLE_TTL
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -113,6 +113,19 @@ def _assert_drain_armed(value: str | None) -> datetime:
     return armed
 
 
+def _assert_drain_armed_in(settings: dict) -> datetime:
+    """The deadline is armed and the derived pin expiry sits 22 days before it (clear time + 7 d)."""
+    armed = _assert_drain_armed(settings["subscriptionOverflowDrainUntil"])
+    pins_expire_by = _parse_drain(settings["subscriptionOverflowPinsExpireBy"])
+    assert pins_expire_by == armed - (DRAIN_WINDOW - PIN_IDLE_TTL), (pins_expire_by, armed)
+    return armed
+
+
+def _assert_not_draining(settings: dict) -> None:
+    assert settings["subscriptionOverflowDrainUntil"] is None
+    assert settings["subscriptionOverflowPinsExpireBy"] is None
+
+
 async def _wait_for_audit_log(action: str, *, attempts: int = 20) -> AuditLog:
     for _ in range(attempts):
         async with SessionLocal() as session:
@@ -138,26 +151,28 @@ async def test_designation_round_trips_and_clearing_arms_the_drain_deadline(asyn
     designated = await async_client.put("/api/settings", json={"subscriptionOverflowSourceId": source_id})
     assert designated.status_code == 200
     assert designated.json()["subscriptionOverflowSourceId"] == source_id
-    assert designated.json()["subscriptionOverflowDrainUntil"] is None
+    _assert_not_draining(designated.json())
     fetched = await _get_settings(async_client)
     assert fetched["subscriptionOverflowSourceId"] == source_id
-    assert fetched["subscriptionOverflowDrainUntil"] is None
+    _assert_not_draining(fetched)
 
     cleared = await async_client.put("/api/settings", json={"subscriptionOverflowSourceId": None})
     assert cleared.status_code == 200
     assert cleared.json()["subscriptionOverflowSourceId"] is None
-    armed = _assert_drain_armed(cleared.json()["subscriptionOverflowDrainUntil"])
+    armed = _assert_drain_armed_in(cleared.json())
+    _assert_drain_armed_in(await _get_settings(async_client))
 
     # NULL -> NULL never moves an armed deadline.
     repeated = await async_client.put("/api/settings", json={"subscriptionOverflowSourceId": None})
     assert repeated.status_code == 200
     assert _parse_drain(repeated.json()["subscriptionOverflowDrainUntil"]) == armed
+    assert _parse_drain(repeated.json()["subscriptionOverflowPinsExpireBy"]) == armed - (DRAIN_WINDOW - PIN_IDLE_TTL)
 
-    # Re-designating during the drain clears the deadline.
+    # Re-designating during the drain clears the deadline and the derived expiry.
     redesignated = await async_client.put("/api/settings", json={"subscriptionOverflowSourceId": source_id})
     assert redesignated.status_code == 200
     assert redesignated.json()["subscriptionOverflowSourceId"] == source_id
-    assert redesignated.json()["subscriptionOverflowDrainUntil"] is None
+    _assert_not_draining(redesignated.json())
 
 
 @pytest.mark.asyncio
@@ -252,7 +267,7 @@ async def test_deleting_the_designated_source_clears_the_designation_and_arms_th
     assert (await async_client.delete(f"/api/model-sources/{designated}")).status_code == 204
     cleared = await _get_settings(async_client)
     assert cleared["subscriptionOverflowSourceId"] is None
-    _assert_drain_armed(cleared["subscriptionOverflowDrainUntil"])
+    _assert_drain_armed_in(cleared)
     for _ in range(20):
         designated_audit = await _wait_for_audit_log("model_source_deleted")
         if designated_audit.id != other_audit.id:

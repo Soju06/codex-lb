@@ -55,6 +55,7 @@ from app.modules.settings.service import DashboardSettingsUpdateData
 from app.modules.settings.subscription_overflow import (
     load_subscription_overflow_preflight,
     resolve_drain_until,
+    resolve_pins_expire_by,
     validate_overflow_source,
 )
 from app.modules.usage.additional_quota_keys import (
@@ -186,6 +187,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         single_account_id=settings.single_account_id,
         subscription_overflow_source_id=settings.subscription_overflow_source_id,
         subscription_overflow_drain_until=settings.subscription_overflow_drain_until,
+        subscription_overflow_pins_expire_by=resolve_pins_expire_by(settings.subscription_overflow_drain_until),
         openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
         dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,

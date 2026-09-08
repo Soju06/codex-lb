@@ -1192,7 +1192,7 @@
   "settings.routing.subscriptionOverflow.empty": "请先添加支持 Responses 的 OpenAI 兼容 Model source，再启用溢出。",
   "settings.routing.subscriptionOverflow.ineligibleSource": "{{name}}（已不再符合条件）",
   "settings.routing.subscriptionOverflow.deletedSource": "{{id}}（已删除）",
-  "settings.routing.subscriptionOverflow.drainingUntil": "溢出已关闭。已在该 source 上的会话最多再继续 7 天（至 {{date}}），随后过期。",
+  "settings.routing.subscriptionOverflow.drainingUntil": "溢出已关闭。已在该 source 上的会话最迟可继续至 {{date}}，随后过期。",
   "settings.routing.subscriptionOverflow.help.toggle": "溢出如何工作",
   "settings.routing.subscriptionOverflow.help.trigger": "仅在整个池用量耗尽时触发（与返回带 resets_at 的 429 usage_limit_reached 相同的条件）——绝不会因本地容量限制、公平份额节流、瞬时错误、认证失败或单个账户的速率限制而触发。",
   "settings.routing.subscriptionOverflow.help.eligibility": "符合条件：标准 Responses 模型上没有先前推理的新会话或请求，且仅限未限定范围的 API key。此版本中 gpt-5.6 会话无法溢出。请在 source 的模型条目上声明其支持的工具类型（custom、apply_patch、web_search、shell、tool_search）。后台任务绝不溢出。",

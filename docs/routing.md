@@ -66,7 +66,7 @@ Overflow triggers only on **pool-wide usage exhaustion** — the exact condition
 
 ### Stickiness and the drain window
 
-A conversation that received source output is **pinned** to the source and stays there (7-day idle limit; compaction is unavailable on the source). Turning overflow **off** stops fresh overflow immediately and arms a drain deadline: conversations already on the source keep working for at most 7 more days, then expire. The dashboard shows the deadline while it is running; designating a source again clears it.
+A conversation that received source output is **pinned** to the source and stays there (7-day idle limit; compaction is unavailable on the source). Turning overflow **off** stops fresh overflow immediately and arms a drain deadline: conversations already on the source keep working for at most 7 more days, then expire. While that is running the dashboard shows the date by which every pinned conversation has expired (`subscriptionOverflowPinsExpireBy`, the switch-off time plus 7 days) — not the drain deadline itself (`subscriptionOverflowDrainUntil`, the switch-off time plus 29 days), which additionally spans the 21-day tombstone grace during which an expired conversation is still recognised as pinned and handled like one on a disabled source instead of being treated as new. Designating a source again clears both.
 
 ### Kill switches
 

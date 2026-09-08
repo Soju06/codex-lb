@@ -648,9 +648,10 @@ describe("subscription overflow fields", () => {
 
     expect(parsed.subscriptionOverflowSourceId).toBeNull();
     expect(parsed.subscriptionOverflowDrainUntil).toBeNull();
+    expect(parsed.subscriptionOverflowPinsExpireBy).toBeNull();
   });
 
-  it("round-trips a designation and an ISO drain deadline", () => {
+  it("round-trips a designation, an ISO drain deadline and the derived pin expiry", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
       upstreamStreamTransport: "default",
@@ -664,13 +665,15 @@ describe("subscription overflow fields", () => {
       apiKeyAuthEnabled: false,
       subscriptionOverflowSourceId: "src_1",
       subscriptionOverflowDrainUntil: "2026-10-07T12:34:56.123456Z",
+      subscriptionOverflowPinsExpireBy: "2026-09-15T12:34:56.123456Z",
     });
 
     expect(parsed.subscriptionOverflowSourceId).toBe("src_1");
     expect(parsed.subscriptionOverflowDrainUntil).toBe("2026-10-07T12:34:56.123456Z");
+    expect(parsed.subscriptionOverflowPinsExpireBy).toBe("2026-09-15T12:34:56.123456Z");
   });
 
-  it("accepts the tri-state designation on update requests and rejects the read-only deadline", () => {
+  it("accepts the tri-state designation on update requests and rejects the read-only deadlines", () => {
     expect(SettingsUpdateRequestSchema.parse({ subscriptionOverflowSourceId: "src_1" }).subscriptionOverflowSourceId).toBe(
       "src_1",
     );
@@ -678,6 +681,10 @@ describe("subscription overflow fields", () => {
     expect(SettingsUpdateRequestSchema.parse({}).subscriptionOverflowSourceId).toBeUndefined();
     expect(
       "subscriptionOverflowDrainUntil" in SettingsUpdateRequestSchema.parse({ subscriptionOverflowDrainUntil: "x" }),
+    ).toBe(false);
+    expect(
+      "subscriptionOverflowPinsExpireBy" in
+        SettingsUpdateRequestSchema.parse({ subscriptionOverflowPinsExpireBy: "x" }),
     ).toBe(false);
   });
 

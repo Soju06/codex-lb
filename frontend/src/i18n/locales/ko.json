@@ -1297,7 +1297,7 @@
   "settings.routing.strategy.usageWeighted": "Usage weighted",
   "settings.routing.subscriptionOverflow.deletedSource": "{{id}} (삭제됨)",
   "settings.routing.subscriptionOverflow.description": "적격 subscription Account가 모두 usage limit에 도달하면 새 요청을 이 source로 보내며, 비용은 source가 부담합니다. 기본값은 off이고, 끄면 즉시 적용됩니다.",
-  "settings.routing.subscriptionOverflow.drainingUntil": "Overflow가 꺼져 있습니다. 이미 source에 있는 대화는 최대 7일 더({{date}}까지) 동작한 뒤 만료됩니다.",
+  "settings.routing.subscriptionOverflow.drainingUntil": "Overflow가 꺼져 있습니다. 이미 source에 있는 대화는 늦어도 {{date}}까지 동작한 뒤 만료됩니다.",
   "settings.routing.subscriptionOverflow.empty": "overflow를 켜려면 Responses를 지원하는 OpenAI 호환 Model source를 추가하세요.",
   "settings.routing.subscriptionOverflow.errors.sourceInvalid": "Responses API를 지원하는 OpenAI 호환 Model source를 선택하세요.",
   "settings.routing.subscriptionOverflow.help.billing": "Limited API key는 라이브로 스트리밍되며, source가 usage를 생략하거나 클라이언트가 응답 중 연결을 끊으면 추정치로 청구됩니다. Fast mode는 standard tier로 제공됩니다. source의 rate limit은 Codex에 \"exceeded retry limit, last status: 429\"로 표시됩니다.",

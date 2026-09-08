@@ -78,6 +78,9 @@ export const DashboardSettingsSchema = z
     singleAccountId: z.string().nullable().optional().default(null),
     subscriptionOverflowSourceId: z.string().nullable().optional().default(null),
     subscriptionOverflowDrainUntil: z.iso.datetime({ offset: true }).nullable().optional().default(null),
+    // Derived by the backend from the deadline: the date every conversation
+    // pinned to the cleared source has expired by (clear time + 7 days).
+    subscriptionOverflowPinsExpireBy: z.iso.datetime({ offset: true }).nullable().optional().default(null),
     proxyAccountResponseCreateLimit: z.number().int().min(0).optional().default(4),
     proxyAccountResponseCreateLimitEnvironmentValue: z.number().int().min(0).optional().default(4),
     proxyAccountResponseCreateLimitOverride: z.number().int().min(0).nullable().optional().default(null),

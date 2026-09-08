@@ -65,6 +65,10 @@ class DashboardSettingsResponse(DashboardModel):
     single_account_id: str | None = None
     subscription_overflow_source_id: str | None = None
     subscription_overflow_drain_until: datetime | None = None
+    # Derived, read-only: the drain deadline minus the tombstone grace and one
+    # day (the clear time plus the 7-day pin idle limit); ``None`` when no drain
+    # is armed. The date every pinned conversation has expired by.
+    subscription_overflow_pins_expire_by: datetime | None = None
     openai_cache_affinity_max_age_seconds: int = Field(gt=0)
     dashboard_session_ttl_seconds: int = Field(ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int = Field(gt=0)

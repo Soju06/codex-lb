@@ -36,6 +36,7 @@ from app.modules.settings.subscription_overflow import (
     build_preflight,
     never_overflows_reason,
     resolve_drain_until,
+    resolve_pins_expire_by,
     validate_overflow_source,
 )
 
@@ -67,6 +68,18 @@ def test_drain_window_is_pin_idle_ttl_plus_tombstone_grace_plus_one_day() -> Non
 )
 def test_resolve_drain_until_transitions(current_source, new_source, current_drain, expected) -> None:
     assert resolve_drain_until(current_source, new_source, current_drain, NOW) == expected
+
+
+def test_resolve_pins_expire_by_is_the_clear_time_plus_the_pin_idle_ttl() -> None:
+    # Drain cap (design §3, §8.8): every pin written before or during the drain
+    # carries ``expires_at <= drain_until - PIN_TOMBSTONE_GRACE - 1 d``, so all
+    # pinned conversations are gone 7 days after the clear -- 22 days before the
+    # lookup window itself closes. The dashboard shows this date, not the deadline.
+    drain_until = resolve_drain_until("src_a", None, None, NOW)
+    assert drain_until == NOW + DRAIN_WINDOW
+    assert resolve_pins_expire_by(drain_until) == NOW + PIN_IDLE_TTL
+    assert resolve_pins_expire_by(drain_until) == drain_until - PIN_TOMBSTONE_GRACE - timedelta(days=1)
+    assert resolve_pins_expire_by(None) is None
 
 
 def _source(

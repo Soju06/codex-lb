@@ -59,7 +59,8 @@ export function SubscriptionOverflowSettings({
   // it so the operator can see what the row still names and clear it.
   const deletedSelectedSourceId =
     selectedSourceId !== null && selectedSource === undefined && !modelSourcesLoading ? selectedSourceId : null;
-  const draining = selectedSourceId === null && isSubscriptionOverflowDraining(settings.subscriptionOverflowDrainUntil);
+  const pinsExpireBy = settings.subscriptionOverflowPinsExpireBy;
+  const draining = selectedSourceId === null && isSubscriptionOverflowDraining(pinsExpireBy);
   const label = t("settings.routing.subscriptionOverflow.label");
 
   const save = (sourceId: string | null) => {
@@ -118,9 +119,7 @@ export function SubscriptionOverflowSettings({
       ) : null}
       {draining ? (
         <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs text-foreground">
-          {t("settings.routing.subscriptionOverflow.drainingUntil", {
-            date: formatDateTimeInline(settings.subscriptionOverflowDrainUntil),
-          })}
+          {t("settings.routing.subscriptionOverflow.drainingUntil", { date: formatDateTimeInline(pinsExpireBy) })}
         </p>
       ) : null}
       {selectedSourceId !== null ? <SubscriptionOverflowPreflightPanel sourceId={selectedSourceId} /> : null}

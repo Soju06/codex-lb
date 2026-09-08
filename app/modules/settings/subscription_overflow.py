@@ -83,6 +83,20 @@ def resolve_drain_until(
     return current_drain_until
 
 
+def resolve_pins_expire_by(drain_until: datetime | None) -> datetime | None:
+    """Latest instant a conversation pinned to the cleared source can still resolve.
+
+    The drain cap (design §3, §8.8) bounds every pin written before or during the
+    drain to ``expires_at <= drain_until - PIN_TOMBSTONE_GRACE - 1 d``, i.e. the
+    clear time plus ``PIN_IDLE_TTL``. The remaining 22 days of the lookup window
+    only keep expired pins answerable as tombstones, so this -- not
+    ``drain_until`` -- is the date the dashboard shows while draining.
+    """
+    if drain_until is None:
+        return None
+    return drain_until - PIN_TOMBSTONE_GRACE - timedelta(days=1)
+
+
 def overflow_source_blockers(source: ModelSource) -> list[str]:
     blockers: list[str] = []
     if source.kind != MODEL_SOURCE_KIND_OPENAI_COMPATIBLE:

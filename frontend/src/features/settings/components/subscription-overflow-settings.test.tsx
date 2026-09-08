@@ -13,7 +13,9 @@ import {
 } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
+import { formatDateTimeInline } from "@/utils/formatters";
 
+const DAY_MS = 86_400_000;
 const OVERFLOW_LABEL = "Overflow to model source when all subscription accounts are exhausted";
 const BASE_SETTINGS: DashboardSettings = createDashboardSettings();
 const BASE_UPDATE_PAYLOAD = buildSettingsUpdateRequest(BASE_SETTINGS, {});
@@ -82,28 +84,32 @@ describe("SubscriptionOverflowSettings", () => {
     expect(blocked).toHaveAttribute("aria-disabled", "true");
   });
 
-  it("shows the drain notice only while a cleared designation is still draining", () => {
-    const future = new Date(Date.now() + 5 * 86_400_000).toISOString();
-    const { unmount } = renderWithProviders(
-      <SubscriptionOverflowSettings
-        settings={{ ...BASE_SETTINGS, subscriptionOverflowDrainUntil: future }}
-        modelSources={SOURCES}
-        busy={false}
-        onSave={vi.fn().mockResolvedValue(undefined)}
-      />,
-    );
-    expect(screen.getByText(/keep working for at most 7 more days/)).toBeInTheDocument();
-    unmount();
+  it("shows the drain notice with the date pinned conversations expire, not the 29-day deadline", () => {
+    // Cleared two days ago: pins expire at clear + 7 d, the lookup window closes at clear + 29 d.
+    const pinsExpireBy = new Date(Date.now() + 5 * DAY_MS).toISOString();
+    const drainUntil = new Date(Date.now() + 27 * DAY_MS).toISOString();
+    renderOverflow({ subscriptionOverflowDrainUntil: drainUntil, subscriptionOverflowPinsExpireBy: pinsExpireBy });
 
-    renderWithProviders(
-      <SubscriptionOverflowSettings
-        settings={{ ...BASE_SETTINGS, subscriptionOverflowDrainUntil: "2020-01-01T00:00:00Z" }}
-        modelSources={SOURCES}
-        busy={false}
-        onSave={vi.fn().mockResolvedValue(undefined)}
-      />,
-    );
-    expect(screen.queryByText(/keep working for at most 7 more days/)).not.toBeInTheDocument();
+    const notice = screen.getByText(/Overflow is off\./);
+    expect(notice).toHaveTextContent(`keep working until ${formatDateTimeInline(pinsExpireBy)} at the latest`);
+    expect(notice).not.toHaveTextContent(formatDateTimeInline(drainUntil));
+  });
+
+  it("hides the drain notice once every pinned conversation has expired, even while the deadline is armed", () => {
+    // Cleared nine days ago: no pin can still be live, although lookups run for 20 more days.
+    renderOverflow({
+      subscriptionOverflowDrainUntil: new Date(Date.now() + 20 * DAY_MS).toISOString(),
+      subscriptionOverflowPinsExpireBy: new Date(Date.now() - 2 * DAY_MS).toISOString(),
+    });
+    expect(screen.queryByText(/Overflow is off\./)).not.toBeInTheDocument();
+  });
+
+  it("never shows the drain notice while a source is designated", () => {
+    renderOverflow({
+      subscriptionOverflowSourceId: "src_responses",
+      subscriptionOverflowPinsExpireBy: new Date(Date.now() + 5 * DAY_MS).toISOString(),
+    });
+    expect(screen.queryByText(/Overflow is off\./)).not.toBeInTheDocument();
   });
 
   it("asks for a Responses-capable source when none exists", () => {

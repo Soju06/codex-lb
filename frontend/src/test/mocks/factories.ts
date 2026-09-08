@@ -517,6 +517,7 @@ export function createDashboardSettings(
 		singleAccountId: null,
 		subscriptionOverflowSourceId: null,
 		subscriptionOverflowDrainUntil: null,
+		subscriptionOverflowPinsExpireBy: null,
 		proxyAccountResponseCreateLimit: 4,
 		proxyAccountResponseCreateLimitEnvironmentValue: 4,
 		proxyAccountResponseCreateLimitOverride: 4,

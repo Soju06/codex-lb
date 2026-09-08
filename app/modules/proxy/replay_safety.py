@@ -730,6 +730,10 @@ def responses_payload_is_account_neutral_fresh_replay(payload: Mapping[str, Json
         input_items = cast(list[JsonValue], input_value)
     else:
         return False
+    # ``extract_input_file_ids`` tests item types by set membership; a list or
+    # object in the ``type`` slot is not a replayable item and must not raise.
+    if any(isinstance(item, dict) and "type" in item and not isinstance(item["type"], str) for item in input_items):
+        return False
     if extract_input_file_ids(input_items):
         return False
     if any(

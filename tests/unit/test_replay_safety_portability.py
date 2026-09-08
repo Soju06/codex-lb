@@ -808,13 +808,39 @@ def test_malformed_nested_values_decline_as_history_without_raising(case: str) -
     )
 
 
+def _neutral_baseline() -> dict[str, JsonValue]:
+    """A body the raw replay predicate accepts, so every injected slot is really exercised."""
+
+    return {
+        "model": "gpt-5.5",
+        "instructions": "You are Codex.",
+        "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next"}]},
+        ],
+        "tools": [
+            {"type": "web_search", "search_context_size": "low"},
+            {"type": "custom", "name": "c", "format": {"type": "grammar", "syntax": "lark", "definition": "x"}},
+        ],
+        "tool_choice": {"type": "allowed_tools", "mode": "auto", "tools": [{"type": "web_search"}]},
+        "text": {"verbosity": "low", "format": {"type": "text"}},
+        "reasoning": {"effort": "low", "summary": "auto"},
+        "include": ["reasoning.encrypted_content"],
+        "store": False,
+        "stream": True,
+    }
+
+
 _NESTED_SLOTS: tuple[tuple[str | int, ...], ...] = (
     ("tool_choice",),
     ("tool_choice", "type"),
     ("tool_choice", "mode"),
+    ("tool_choice", "tools", 0, "type"),
     ("tools", 0, "type"),
     ("tools", 0, "search_context_size"),
-    ("tools", 0, "format", "syntax"),
+    ("tools", 1, "format", "syntax"),
+    ("tools", 1, "format", "type"),
     ("text", "verbosity"),
     ("text", "format", "type"),
     ("input", 0, "role"),
@@ -822,6 +848,7 @@ _NESTED_SLOTS: tuple[tuple[str | int, ...], ...] = (
     ("input", 0, "status"),
     ("input", 0, "type"),
     ("input", 0, "content", 0, "type"),
+    ("input", 1, "content", 0, "type"),
     ("reasoning", "effort"),
     ("include",),
     ("instructions",),
@@ -829,11 +856,7 @@ _NESTED_SLOTS: tuple[tuple[str | int, ...], ...] = (
 
 
 def _malformed_at(slot: tuple[str | int, ...], value: JsonValue) -> dict[str, JsonValue]:
-    body = _portable_body(
-        tools=[{"type": "web_search", "search_context_size": "low", "format": {"type": "grammar", "syntax": "lark"}}],
-        tool_choice={"type": "allowed_tools", "mode": "auto", "tools": [{"type": "web_search"}]},
-        text={"verbosity": "low", "format": {"type": "text"}},
-    )
+    body = _neutral_baseline()
     cursor: JsonValue = body
     for key in slot[:-1]:
         cursor = (
@@ -847,7 +870,34 @@ def _malformed_at(slot: tuple[str | int, ...], value: JsonValue) -> dict[str, Js
     return body
 
 
-@settings(max_examples=200, deadline=None)
+def test_neutral_baseline_is_accepted_by_the_predicate_and_the_verdict() -> None:
+    baseline = _neutral_baseline()
+
+    assert responses_payload_is_account_neutral_fresh_replay(baseline) is True
+    assert transcript_is_source_free(PortabilityView(body=baseline)) is True
+    assert responses_payload_is_provider_portable(
+        PortabilityView(body=baseline),
+        NO_HEADERS,
+        supported_tool_types=frozenset({"custom", "web_search"}),
+        supports_vision=True,
+    ) == PortabilityVerdict(True)
+
+
+def test_list_typed_input_item_declines_without_raising_in_every_entry_point() -> None:
+    body = _malformed_at(("input", 0, "type"), [])
+
+    assert responses_payload_is_account_neutral_fresh_replay(body) is False
+    assert transcript_is_source_free(PortabilityView(body=body)) is False
+    verdict = responses_payload_is_provider_portable(
+        PortabilityView(body=body),
+        NO_HEADERS,
+        supported_tool_types=frozenset({"custom", "web_search"}),
+        supports_vision=True,
+    )
+    assert verdict == PortabilityVerdict(False, "not_portable_items", "input[].type")
+
+
+@settings(max_examples=250, deadline=None)
 @given(st.sampled_from(_NESTED_SLOTS), json_values)
 def test_arbitrary_values_in_known_nested_slots_never_raise(slot: tuple[str | int, ...], value: JsonValue) -> None:
     body = _malformed_at(slot, value)
@@ -856,7 +906,7 @@ def test_arbitrary_values_in_known_nested_slots_never_raise(slot: tuple[str | in
     view = PortabilityView(body=body)
     assert isinstance(transcript_is_source_free(view), bool)
     verdict = responses_payload_is_provider_portable(
-        view, NO_HEADERS, supported_tool_types=frozenset({"web_search"}), supports_vision=True
+        view, NO_HEADERS, supported_tool_types=frozenset({"custom", "web_search"}), supports_vision=True
     )
     assert verdict.portable or verdict.reason in DECLINE_REASONS
 

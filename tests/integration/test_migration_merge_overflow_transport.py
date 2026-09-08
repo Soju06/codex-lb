@@ -22,6 +22,7 @@ _OVERFLOW = "20260908_000000_add_subscription_overflow"
 _TRANSPORT = "20260908_000000_replace_upstream_stream_transport_default_sentinel"
 _PARENTS = (_OVERFLOW, _TRANSPORT)
 _MERGE = "20260908_020000_merge_overflow_transport_heads"
+_HEAD = "20260907_000000_add_account_usage_caps"
 
 
 @dataclass
@@ -149,10 +150,12 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[
         engine.dispose()
 
 
-def test_overflow_transport_merge_is_the_only_head_with_both_original_parents(tmp_path: Path) -> None:
+def test_overflow_transport_merge_feeds_the_only_head_with_both_original_parents(tmp_path: Path) -> None:
     config = _build_alembic_config(f"sqlite+aiosqlite:///{tmp_path / 'graph.sqlite'}")
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == [_MERGE]
+    assert script.get_heads() == [_HEAD]
+    head = script.get_revision(_HEAD)
+    assert head is not None and head.down_revision == _MERGE
     merge = script.get_revision(_MERGE)
     assert merge is not None and merge.down_revision == _PARENTS
     for revision in _PARENTS:
@@ -174,8 +177,8 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
             row["subscription_overflow_drain_until"] = None
 
     result = run_upgrade(database.url, "head", bootstrap_legacy=False)
-    assert result.current_revision == _MERGE
-    assert _revisions(database.engine) == (_MERGE,)
+    assert result.current_revision == _HEAD
+    assert _revisions(database.engine) == (_HEAD,)
     merged = _state(database.engine)
     assert merged["settings"] == expected_settings
     assert [row["upstream_stream_transport"] for row in merged["settings"]] == ["auto", "http", "websocket", "auto"]
@@ -194,15 +197,18 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
 
     for parent in _PARENTS:
         command.downgrade(_build_alembic_config(database.url), parent)
-        # A direct downgrade to either immediate parent executes only the
-        # no-op merge downgrade. Alembic records both unmerged parent heads;
-        # it does not execute either parent's schema-removing downgrade.
+        # A direct downgrade to either immediate parent first removes the
+        # descendant usage-cap columns, then executes the no-op merge downgrade.
+        # Alembic records both unmerged parent heads without executing either
+        # parent's schema-removing downgrade.
         assert _revisions(database.engine) == tuple(sorted(_PARENTS))
         assert _state(database.engine) == populated
-        assert check_schema_drift(database.url) == ()
+        drift = check_schema_drift(database.url)
+        assert len(drift) == 2
+        assert all("add_column" in item and "usage_cap_" in item for item in drift)
 
         result = run_upgrade(database.url, "head", bootstrap_legacy=False)
-        assert result.current_revision == _MERGE
-        assert _revisions(database.engine) == (_MERGE,)
+        assert result.current_revision == _HEAD
+        assert _revisions(database.engine) == (_HEAD,)
         assert _state(database.engine) == populated
         assert check_schema_drift(database.url) == ()

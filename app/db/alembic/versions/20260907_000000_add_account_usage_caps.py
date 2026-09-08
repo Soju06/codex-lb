@@ -4,10 +4,7 @@ import sqlalchemy as sa
 from alembic import context, op
 
 revision = "20260907_000000_add_account_usage_caps"
-down_revision = (
-    "20260908_000000_add_subscription_overflow",
-    "20260908_000000_replace_upstream_stream_transport_default_sentinel",
-)
+down_revision = "20260908_020000_merge_overflow_transport_heads"
 branch_labels = None
 depends_on = None
 

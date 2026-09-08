@@ -26,3 +26,9 @@ return the normalized compact payload immediately while upstream keeps HTTP
 open. The owned request is cancelled/closed at that boundary; another request
 on the same native helper remains usable. JSON success still uses the existing
 compact normalizer and does not pass through an SSE byte/text decoder.
+
+HTTP execution returns its terminal event to the runtime. The runtime writes
+that event after leaving the cancellation select, because stdout flush can
+yield after the event is already visible to the parent process. Prioritizing
+the execution future alone does not prevent a cancellation from interrupting
+that flush and emitting a second terminal during stdin EOF shutdown.

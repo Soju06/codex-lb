@@ -134,21 +134,27 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                         let task_active = active.clone();
                         tasks.spawn(async move {
                             tokio::select! {
-                                // An already completed HTTP exchange wins an EOF/cancel
-                                // race, so its terminal event is not followed by Cancelled.
+                                // Prefer a completed exchange, and emit its terminal outside
+                                // the cancellable future: stdout flush can yield after the
+                                // parent sees the terminal and closes stdin.
                                 biased;
                                 result = execute_request(request, client, &task_output) => {
-                                    if let Err(error) = result {
-                                        let (message, phase, retryable, tls_verification) =
-                                            classify_error(error.as_ref());
-                                        let _ = emit_error(
-                                            &task_output,
-                                            &request_id,
-                                            message,
-                                            phase,
-                                            retryable,
-                                            tls_verification,
-                                        ).await;
+                                    match result {
+                                        Ok(terminal) => {
+                                            let _ = emit(&task_output, &terminal).await;
+                                        }
+                                        Err(error) => {
+                                            let (message, phase, retryable, tls_verification) =
+                                                classify_error(error.as_ref());
+                                            let _ = emit_error(
+                                                &task_output,
+                                                &request_id,
+                                                message,
+                                                phase,
+                                                retryable,
+                                                tls_verification,
+                                            ).await;
+                                        }
                                     }
                                 }
                                 _ = cancel_rx => {

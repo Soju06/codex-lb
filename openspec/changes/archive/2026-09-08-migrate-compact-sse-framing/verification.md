@@ -22,8 +22,12 @@ Native worker: built from this worktree with the committed Cargo.lock.
   deterministic pre-head regression proves stream unregistration; this failed
   before the adapter cleanup fix.
 - The existing Rust oversized-event terminal test exposed an EOF/cancel race.
-  Completed exchanges now win simultaneous cancellation; the regression passed
-  20 consecutive runs after the fix.
+  CI reproduced it after the initial poll-order fix passed 20 local runs.
+  With two Tokio worker threads, the initial fix failed on local iteration 10.
+  Terminal emission now happens outside the cancellable HTTP future, including
+  stdout flush. The final code passed 100 consecutive protocol suites (600
+  test executions) with two Tokio worker threads; the suite checks no extra
+  terminal after successful SSE, raw HTTP errors, oversize, and idle timeout.
 
 ## Checks
 
@@ -55,3 +59,17 @@ Ruff check/format, Ty on changed Python files, proxy architecture,
 cancellation safety, timing seams, and git diff checks passed.
 No dependency or lockfile changes. Full repository/cloud CI, deployment, and
 performance measurement are outside this local verification.
+
+## CI follow-up verification
+
+The native-terminal correction was checked with `make rust-check` and the
+following real-worker probes on the rebuilt debug worker:
+
+```sh
+python -m pytest -q --timeout=30 tests/integration/test_native_sse_egress.py \
+  tests/integration/test_native_routed_egress.py
+# 57 passed
+```
+
+CI failure evidence for the superseded poll-order fix:
+[Rust workspace job](https://github.com/Soju06/codex-lb/actions/runs/34193031991/job/101954940010).

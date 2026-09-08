@@ -1184,7 +1184,7 @@
   "settings.routing.singleAccount.placeholder": "选择账户",
   "settings.routing.singleAccount.empty": "请先导入账户再启用单账户路由。",
   "settings.routing.subscriptionOverflow.label": "所有订阅账户耗尽时溢出到 Model source",
-  "settings.routing.subscriptionOverflow.description": "当每个符合条件的订阅账户都达到用量上限时，新请求将发送到此 source，费用由该 source 自行承担。默认关闭；关闭立即生效。",
+  "settings.routing.subscriptionOverflow.description": "当每个符合条件的订阅账户都达到用量上限时，新请求将发送到此 source，费用由该 source 自行承担。默认关闭。关闭后新的溢出会立即停止；已固定到该 source 的会话会继续运行，直到其 pin 过期。",
   "settings.routing.subscriptionOverflow.stagedNotice": "分阶段发布：现在可以选择并预检 source；溢出路由本身将在后续版本中推出。",
   "settings.routing.subscriptionOverflow.off": "关闭",
   "settings.routing.subscriptionOverflow.placeholder": "选择 Model source",

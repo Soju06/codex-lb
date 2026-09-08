@@ -10,6 +10,7 @@ import {
   type OverviewTimeframe,
 } from "@/features/dashboard/schemas";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
+import { getBrowserReportsTimeZone } from "@/features/reports/date";
 
 export function useDashboard(timeframe: OverviewTimeframe = DEFAULT_OVERVIEW_TIMEFRAME) {
   const refreshSeconds = useDashboardPreferencesStore((state) => state.refreshSeconds);
@@ -34,13 +35,15 @@ export function useDashboardProjections(enabled = true) {
   });
 }
 
-export function useDashboardRequestActivity(enabled = false) {
-  const refreshSeconds = useDashboardPreferencesStore((state) => state.refreshSeconds);
+export function useDashboardRequestActivity(
+  enabled = false,
+  timeZone = getBrowserReportsTimeZone() ?? "UTC",
+) {
   return useQuery({
-    queryKey: ["dashboard", "request-activity"],
-    queryFn: getDashboardRequestActivity,
+    queryKey: ["dashboard", "request-activity", timeZone],
+    queryFn: () => getDashboardRequestActivity({ timezone: timeZone }),
     enabled,
-    refetchInterval: refreshSeconds * 1_000,
+    refetchInterval: 60_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });

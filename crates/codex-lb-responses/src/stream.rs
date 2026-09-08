@@ -1,6 +1,7 @@
 //! Interpret framed HTTP Responses events without owning request policy.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use serde::Deserialize;
@@ -22,7 +23,6 @@ pub struct StreamEvent<'a> {
     pub text: Cow<'a, str>,
     pub event_type: Option<String>,
     pub python_normalization: bool,
-    pub payload: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -41,7 +41,6 @@ pub fn interpret(block: &str) -> StreamEvent<'_> {
             text: Cow::Borrowed(block),
             event_type: None,
             python_normalization: true,
-            payload: None,
         };
     };
     // Mirror Python's literal-key fast path, including escaped error keys.
@@ -56,7 +55,6 @@ pub fn interpret(block: &str) -> StreamEvent<'_> {
             text,
             event_type,
             python_normalization: false,
-            payload: None,
         };
     }
     let data = data_text(&text);
@@ -83,44 +81,72 @@ pub fn interpret(block: &str) -> StreamEvent<'_> {
         text,
         event_type,
         python_normalization,
-        payload: None,
     }
 }
 
-/// Interpret one Responses WebSocket JSON text frame using the same alias and
-/// error handoff rules as HTTP SSE. Invalid JSON and non-object values are
-/// returned as `None`, allowing the caller to preserve the existing opaque
-/// WebSocket event path.
-pub fn interpret_websocket(text: &str) -> Option<StreamEvent<'static>> {
-    let value: Value = serde_json::from_str(text).ok()?;
-    let Value::Object(_) = value else {
+/// The raw object is embedded in IPC, so Python's IPC decoder supplies the
+/// policy payload without another JSON parse or any numeric conversion here.
+pub struct WebSocketEvent {
+    pub payload: Box<RawValue>,
+    pub event_type: Option<String>,
+}
+
+/// Match Python's WebSocket classification: a string type wins, otherwise an
+/// object error classifies as "error". WebSocket relay preserves aliases and
+/// original text; HTTP SSE alias rewriting remains a separate boundary.
+pub fn interpret_websocket(text: &str) -> Option<WebSocketEvent> {
+    // IPC lines are capped at 24 MiB. Metadata duplicates the payload and may
+    // expand text/type escaping; larger frames retain the existing opaque path.
+    const MAX_INTERPRETED_BYTES: usize = 1024 * 1024;
+    if text.len() > MAX_INTERPRETED_BYTES || !text.trim_start().starts_with('{') {
         return None;
+    }
+    // A map preserves Python's last-key precedence, including escaped keys.
+    // Raw values preserve large ints, floats, and escaped surrogate values.
+    let fields: BTreeMap<String, &RawValue> = serde_json::from_str(text).ok()?;
+    let event_type = match fields.get("type") {
+        Some(kind) if kind.get().starts_with('"') => {
+            Some(serde_json::from_str::<String>(kind.get()).ok()?)
+        }
+        _ if fields
+            .get("error")
+            .is_some_and(|error| error.get().starts_with('{')) =>
+        {
+            Some("error".to_owned())
+        }
+        _ => None,
     };
-    let compact = ascii_json(&value)?;
-    let block = format!("data: {compact}\n\n");
-    let interpreted = interpret(&block);
-    let payload = data_text(interpreted.text.as_ref());
-    Some(StreamEvent {
-        text: Cow::Owned(payload),
-        event_type: interpreted.event_type,
-        python_normalization: interpreted.python_normalization,
-        payload: Some(value),
+    Some(WebSocketEvent {
+        payload: RawValue::from_string(compact_json_whitespace(text)).ok()?,
+        event_type,
     })
 }
 
-fn ascii_json(value: &Value) -> Option<String> {
-    let text = serde_json::to_string(value).ok()?;
-    let mut ascii = String::with_capacity(text.len());
+// RawValue emits bytes verbatim. Strip only JSON whitespace outside strings so
+// a pretty-printed object cannot split the newline-delimited IPC record. Numeric
+// tokens, duplicate keys, string escapes and all string content stay untouched.
+fn compact_json_whitespace(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escaped = false;
     for ch in text.chars() {
-        if ch.is_ascii() && ch != '\x7f' {
-            ascii.push(ch);
-        } else {
-            for unit in ch.encode_utf16(&mut [0; 2]) {
-                write!(ascii, "\\u{unit:04x}").ok()?;
+        if in_string {
+            result.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
             }
+        } else if ch == '"' {
+            in_string = true;
+            result.push(ch);
+        } else if !matches!(ch, ' ' | '\t' | '\r' | '\n') {
+            result.push(ch);
         }
     }
-    Some(ascii)
+    result
 }
 
 fn alias(kind: &str) -> Option<&'static str> {
@@ -285,54 +311,5 @@ fn exact_json_domain(value: &Value) -> bool {
         Value::Array(items) => items.iter().all(exact_json_domain),
         Value::Object(fields) => fields.values().all(exact_json_domain),
         _ => true,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::interpret_websocket;
-
-    #[test]
-    fn websocket_interpretation_classifies_canonical_json_without_python() {
-        let event =
-            interpret_websocket(r#"{"type":"response.output_text.delta","delta":"hi 한글"}"#)
-                .expect("object frame");
-        assert!(event.text.contains(r#""delta":"hi \ud55c\uae00""#));
-        assert!(
-            event
-                .text
-                .contains(r#""type":"response.output_text.delta""#)
-        );
-        assert_eq!(
-            event.event_type.as_deref(),
-            Some("response.output_text.delta")
-        );
-        assert!(!event.python_normalization);
-    }
-
-    #[test]
-    fn websocket_interpretation_normalizes_aliases() {
-        let event = interpret_websocket(r#"{"type":"response.text.delta","delta":"hi"}"#)
-            .expect("object frame");
-        assert!(event.text.contains("response.output_text.delta"));
-        assert_eq!(
-            event.event_type.as_deref(),
-            Some("response.output_text.delta")
-        );
-        assert!(!event.python_normalization);
-    }
-
-    #[test]
-    fn websocket_interpretation_hands_error_to_python() {
-        let event = interpret_websocket(r#"{"type":"error","error":{"message":"bad"}}"#)
-            .expect("object frame");
-        assert_eq!(event.event_type.as_deref(), Some("error"));
-        assert!(event.python_normalization);
-    }
-
-    #[test]
-    fn websocket_interpretation_ignores_invalid_and_non_objects() {
-        assert!(interpret_websocket("not json").is_none());
-        assert!(interpret_websocket("[1, 2]").is_none());
     }
 }

@@ -1936,6 +1936,7 @@ async def test_http_bridge_reader_timeout_rechecks_receive_completed_during_time
     process_text.assert_awaited_once_with(
         session,
         '{"type":"response.completed"}',
+        message=UpstreamWebSocketMessage(kind="text", text='{"type":"response.completed"}'),
         scheduler=service._scheduler,
         clock=service._clock,
     )
@@ -30047,6 +30048,7 @@ async def test_http_bridge_eventless_timeout_does_not_mark_or_clear_after_late_r
     process_text.assert_awaited_once_with(
         session,
         "late response",
+        message=UpstreamWebSocketMessage(kind="text", text="late response"),
         scheduler=service._scheduler,
         clock=service._clock,
     )

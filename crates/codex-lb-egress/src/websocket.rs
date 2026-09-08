@@ -210,10 +210,9 @@ pub(crate) async fn execute_websocket(
                                 output,
                                 &NativeEvent::WebsocketResponsesText {
                                     request_id: request_id.clone(),
-                                    text: event.text.into_owned(),
+                                    text,
                                     event_type: event.event_type,
-                                    python_normalization: event.python_normalization,
-                                    payload: event.payload.expect("websocket interpretation payload"),
+                                    payload: event.payload,
                                 },
                             )
                             .await?;

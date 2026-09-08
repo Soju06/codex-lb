@@ -148,8 +148,7 @@ pub enum NativeEvent {
         request_id: String,
         text: String,
         event_type: Option<String>,
-        python_normalization: bool,
-        payload: serde_json::Value,
+        payload: Box<serde_json::value::RawValue>,
     },
     WebsocketBinary {
         request_id: String,

@@ -201,7 +201,7 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper(
             assert message.text == '{"type":"response.completed","response":{"id":"resp_ws"}}'
             assert message.responses_interpreted is True
             assert message.event_type == "response.completed"
-            assert message.python_normalization is False
+            assert message.payload == {"type": "response.completed", "response": {"id": "resp_ws"}}
             await websocket.close()
 
             assert native._process is helper_process

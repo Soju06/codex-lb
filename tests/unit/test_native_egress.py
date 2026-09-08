@@ -582,8 +582,8 @@ for line in sys.stdin:
             "type": "websocket_responses_text" if request_id in interpreted else "websocket_text",
             "request_id": request_id,
             "text": command["text"] if request_id in interpreted else "echo:" + command["text"],
-            **({"event_type": "response.output_text.delta", "python_normalization": False,
-                "payload": {"type": "response.output_text.delta", "delta": "hi"}}
+            **({"event_type": "response.text.delta",
+                "payload": json.loads(command["text"])}
                if request_id in interpreted else {}),
         }), flush=True)
         print(json.dumps({
@@ -648,9 +648,15 @@ async def test_native_websocket_routes_frames_and_send_acknowledgements(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_native_responses_websocket_preserves_interpretation_metadata(tmp_path: Path) -> None:
+@pytest.mark.parametrize("invalid_metadata", [False, True], ids=["valid", "missing-payload"])
+async def test_native_responses_websocket_preserves_interpretation_metadata(
+    tmp_path: Path, invalid_metadata: bool
+) -> None:
     helper = tmp_path / "native-helper"
-    _write_helper(helper, _websocket_helper_source())
+    source = _websocket_helper_source()
+    if invalid_metadata:
+        source = source.replace('"payload": json.loads(command["text"])', '"invalid_payload": None')
+    _write_helper(helper, source)
     client = SubprocessNativeEgressClient(helper)
     websocket = await client.websocket(
         NativeWebSocketRequest(
@@ -662,16 +668,20 @@ async def test_native_responses_websocket_preserves_interpretation_metadata(tmp_
         )
     )
 
-    await websocket.send_text('{"type":"response.text.delta","delta":"hi"}')
-    assert await websocket.receive() == NativeWebSocketMessage(
-        kind="text",
-        text='{"type":"response.text.delta","delta":"hi"}',
-        responses_interpreted=True,
-        event_type="response.output_text.delta",
-        python_normalization=False,
-        payload={"type": "response.output_text.delta", "delta": "hi"},
-    )
-    await websocket.close()
+    if invalid_metadata:
+        with pytest.raises(NativeEgressProtocolError, match="Responses websocket event is invalid"):
+            await websocket.send_text('{"type":"response.text.delta","delta":"hi"}')
+            await websocket.receive()
+    else:
+        await websocket.send_text('{"type":"response.text.delta","delta":"hi"}')
+        assert await websocket.receive() == NativeWebSocketMessage(
+            kind="text",
+            text='{"type":"response.text.delta","delta":"hi"}',
+            responses_interpreted=True,
+            event_type="response.text.delta",
+            payload={"type": "response.text.delta", "delta": "hi"},
+        )
+        await websocket.close()
     await client.aclose()
 
 

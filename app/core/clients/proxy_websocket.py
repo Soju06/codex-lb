@@ -59,7 +59,7 @@ from app.core.resilience.network_recovery import (
     process_network_error_code,
     rotate_shared_http_transport,
 )
-from app.core.types import JsonObject
+from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.proxy_env import resolve_websocket_proxy_from_env
 from app.core.utils.request_id import get_request_id
@@ -194,8 +194,7 @@ class UpstreamWebSocketMessage:
     error_code: str | None = None
     responses_interpreted: bool = False
     event_type: str | None = None
-    python_normalization: bool = False
-    payload: JsonObject | None = None
+    payload: dict[str, JsonValue] | None = None
 
 
 class UpstreamWebSocketTransportError(RuntimeError):
@@ -450,7 +449,6 @@ class NativeUpstreamWebSocket:
             close_reason=message.close_reason,
             responses_interpreted=message.responses_interpreted,
             event_type=message.event_type,
-            python_normalization=message.python_normalization,
             payload=message.payload,
         )
 

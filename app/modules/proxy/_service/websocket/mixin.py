@@ -775,13 +775,12 @@ def _parse_upstream_websocket_text_frame(
     frames (the only events whose validated model fields the proxy consumes).
     Native Responses frames supply the already-decoded payload alongside their
     trusted classification, so this path reuses that object and avoids a
-    second JSON decode. Error handoffs and legacy transports use the fallback.
+    second JSON decode. Public error conversion still runs in this policy layer.
     """
     native_payload = getattr(message, "payload", None)
     native_event_type = getattr(message, "event_type", None)
     if (
         getattr(message, "responses_interpreted", False)
-        and not getattr(message, "python_normalization", False)
         and isinstance(native_payload, dict)
         and (native_event_type is None or isinstance(native_event_type, str))
     ):
@@ -817,7 +816,11 @@ async def _websocket_archive_request_id_for_message(
     # Archive attribution only needs the payload dict (response ids and error
     # fields are read from it directly), so reuse the caller's parsed frame
     # when provided and never re-validate non-lifecycle deltas.
-    frame = parsed_frame if parsed_frame is not None else _parse_upstream_websocket_text_frame(message.text)
+    frame = (
+        parsed_frame
+        if parsed_frame is not None
+        else _parse_upstream_websocket_text_frame(message.text, message=message)
+    )
     async with pending_lock:
         request_state = _websocket_archive_request_state_for_payload(
             pending_requests,

@@ -1,71 +1,84 @@
 # Native Responses WebSocket event interpretation
 
-## Boundary and legacy cleanup
+## Ownership and legacy cleanup
 
-The native helper now opts into interpretation only for the Responses WebSocket
-policy. The Live WebSocket path and Python's aiohttp WebSocket implementation
-remain opaque. Rust parses valid JSON objects, emits compact ASCII JSON text,
-normalizes the three existing Responses aliases, and attaches `event_type` plus
-`python_normalization`. Invalid JSON and non-object frames keep the prior opaque
-event path. Error-shaped frames stay marked for Python because public error
-conversion needs request context and controls retry/failover.
+Responses WebSocket calls opt into `websocket_responses_events_v1`. Rust
+classifies JSON objects and embeds the original object in IPC with its original
+text and type. The IPC decoder supplies the policy payload, avoiding a second
+Python JSON parse. Rust strips only whitespace outside JSON strings in the
+embedded object so pretty-printed JSON cannot split a JSON-line record; the
+separate frame text stays byte-for-byte unchanged. Numeric tokens, duplicate keys,
+Unicode and escapes remain opaque to numeric conversion.
 
-The Python native adapter carries this metadata through `NativeWebSocketMessage`,
-including the already-decoded object payload needed by WebSocket request
-matching, sequence tracking and tool-call policy.
-The Responses stream loop trusts it for canonical and successfully normalized
-frames, directly building the existing `data: ...` event block and terminal type
-decision without another `json.loads` or alias pass. It still uses the existing
-Python parser for error handoffs and for non-native WebSocket implementations.
-This removes the duplicated native hot-path parser while preserving the policy
-layer: archiving, request matching, downstream transformation, lifecycle close,
-retry eligibility and account health remain Python-owned.
+A string `type` wins, including empty strings. Otherwise a dict `error` classifies
+as `error`. Aliases remain unchanged at this WebSocket boundary. Unlike HTTP SSE,
+the existing WebSocket relay does not normalize those aliases. Public errors and
+HTTP-specific normalization stay at their existing Python consumers.
 
-The capability is explicit (`websocket_responses_events_v1`) and the request
-flag defaults false, so generic and Live helper calls keep their old wire shape.
-The helper handshake remains fail-closed when an installed binary does not expose
-the required capability, matching the existing native protocol policy.
+`NativeUpstreamWebSocket` carries the decoded payload to the actual WebSocket
+relay and HTTP bridge. Request ids, sequence numbers, tool-call fields and usage
+remain available for Python request matching and settlement. Lifecycle validation
+still runs where the consumer uses those model fields. The bridge only bypasses
+its parser for single-line objects beginning with `{`, preserving its legacy
+SSE-field semantics for pretty-printed/whitespace-prefixed frames. Unsupported
+JSON, surrogate keys/types and objects larger than 1 MiB keep opaque delivery.
+The 1 MiB interpretation bound leaves space under the 24 MiB IPC line limit for
+the embedded payload and escaped text/type; larger frames keep existing limits.
+Queue accounting charges both serialized payload copies plus event-type metadata.
 
-## Current Python-to-Rust parity audit
+The old metadata branch in `_stream_codex_websocket_events` was removed: it
+expected aiohttp-shaped messages, while the native adapter exposes kind/text.
+It was not the consumer reached by the Responses WebSocket policy. Keeping that
+branch gave a misleading impression of completed migration and emitted the wrong
+SSE framing. The remaining Python parser serves actual Python transports.
 
-The implementation was compared against the current main-branch Python behavior
-after the HTTP interpretation migration. Alias names remain exactly:
-`response.text.delta`, `response.audio.delta`, and
-`response.audio_transcript.delta`. Python-owned error envelopes, non-object and
-invalid frames, terminal event classification, and `enforce_openai_sdk_contract`
-handling remain covered. No newer Python alias or lifecycle rule was found that
-could be safely moved without also moving request state and retry policy.
+## Where future fixes belong
 
-## Verification (2026-09-08)
+| Concern | Owner | Python code still required |
+| --- | --- | --- |
+| Native HTTP SSE framing | `crates/codex-lb-egress/src/sse.rs` | Missing-helper transport fallback |
+| Native compact collection | `crates/codex-lb-responses/src/compact.rs` | Python transport collection and public error mapping |
+| Native HTTP event interpretation | `crates/codex-lb-responses/src/stream.rs::interpret` | Error context and unsupported JSON handoffs |
+| Native WebSocket classification | `crates/codex-lb-responses/src/stream.rs::interpret_websocket` | Opaque/oversized frames and Python transports |
+| Request matching, sequence, tool calls, errors, retry and settlement | Python WebSocket/bridge policy consumers | Active implementation, not retired legacy |
 
-- Rust response/protocol/egress tests: 12 egress unit tests, 1 protocol
-  handshake test, 4 WebSocket interpretation tests, shared compact/stream
-  fixtures, and workspace Clippy/tests passed.
-- Python WebSocket/native suites: 1,531 passed, 1 skipped only when the native
-  binary environment variable was intentionally absent; the native routed wire
-  probe passed separately with the release helper.
-- Ruff, format, architecture, cancellation-safety and timing-seam checks passed.
-- Direct/routed Responses WebSocket probe verified `response.completed` metadata;
-  existing Live/opaque and send/close/liveness tests remained green.
-- Strict OpenSpec validation passed before archive. Main spec validation is run
-  after syncing this delta.
+For each completed migration slice, compare Python changes since the previous
+migration baseline, port applicable fixes, and remove superseded native-path
+branches in the same change. Keep only the explicitly supported Python fallback
+or policy owner, and extend the shared fixtures before removing its tests.
 
-## Synthetic CPU evidence
+## Python-to-Rust parity audit (2026-09-08)
 
-The same release helper and loopback WebSocket sent 2,048 canonical delta
-frames, with 3 warmups and 12 samples per mode. The raw mode performed the old
-Python `json.loads` and type assertion; the interpreted mode trusted Rust
-metadata. Median elapsed/helper CPU milliseconds were `524 / 455` raw and
-`539 / 470` interpreted. This first implementation therefore has no speedup:
-Rust owns the classification, but JSON parsing plus IPC serialization costs more
-than the local Python parse in this synthetic setup. The result is retained to
-prevent a false performance claim. The migration's value is one semantic owner
-and reduced Python hot-path code; a later optimization can avoid reserializing
-canonical frames or combine this with WebSocket output batching.
+Reviewed the main history from native SSE framing (`8c6467d97`) through
+`66b26fa8f`, including HTTP collection/interpretation migrations and newly merged
+legacy cleanup PRs #2188 and #2191. Those new Python changes remove unused modules,
+retry helpers, proxy functions and bridge shims; they add no event behavior to
+backport. Preserve their deletions when updating this branch from main.
 
-The reproduction script and result are preserved at
-`/mnt/workspace/projects/codex-lb/rust-migration/2026-09-08-native-websocket-event-interpretation/`.
+The audit found corrections needed in this WebSocket slice: preserve original
+text and numeric values; use last-key precedence and typeless-error classification;
+retain alias behavior of each actual consumer; carry complete payloads for request
+matching; and consume metadata at the WebSocket relay and HTTP bridge. These cases
+are pinned in `crates/codex-lb-responses/tests/fixtures/websocket-v1.json`, used by
+Rust tests and `tests/integration/test_native_websocket_events.py` through the real
+helper. Parser-rejection checks prove payload reuse in both Python consumers.
 
-WebSocket output batching and broader lifecycle/retry migration remain separate
-concerns. The next slice can measure trusted metadata CPU reduction before moving
-additional policy out of Python.
+## Verification and performance
+
+The tracked reproduction is `scripts/bench_native_websocket.py`; the measured
+result is `benchmark.json` alongside this document. Run from the repository root:
+
+```sh
+CODEX_LB_NATIVE_EGRESS_TEST_BINARY=/path/to/codex-lb-native-egress uv run python scripts/bench_native_websocket.py
+```
+
+Same release helper binary, loopback WebSocket, 2,048 canonical delta frames,
+3 warmups and 12 samples per mode. Median elapsed/helper CPU milliseconds were
+`640 / 310` raw and `674 / 330` interpreted. This shared-host synthetic run shows
+no speedup; it does not measure complete request-policy processing or production
+throughput. Payload duplication in IPC is a cost of retaining original text while
+removing the second Python parse. Do not claim a performance gain from this slice.
+
+Rust workspace tests, release helper wire probes, Python relay/bridge regression
+suites, Ruff/type/architecture checks and strict OpenSpec validation are required
+for the corrected head. Final results are recorded in the PR.

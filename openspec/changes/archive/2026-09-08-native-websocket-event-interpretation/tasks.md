@@ -1,7 +1,9 @@
 # Tasks: native-websocket-event-interpretation
 
-- [x] Record current Python/native WebSocket event fixtures and parity cases.
-- [x] Add protocol capability, request opt-in, interpreted event metadata, and Rust interpretation.
-- [x] Consume trusted metadata in Python and remove the duplicate native parse/classify path.
-- [x] Verify direct/routed Responses WebSocket, alias/error/invalid/terminal behavior and Live isolation.
-- [x] Run Rust/Python checks, compare frame CPU, sync specs, archive evidence and preserve artifacts.
+- [x] Audit current Python consumers and intervening changes through the latest main.
+- [x] Add protocol capability, request opt-in, raw payload IPC, and Rust classification.
+- [x] Preserve raw WebSocket text/values, type precedence, aliases and HTTP bridge framing.
+- [x] Reuse native payloads at WebSocket/bridge consumers and remove unreachable duplicate code.
+- [x] Verify direct/routed Responses, opaque Live contract, unsupported/large JSON and invalid metadata.
+- [x] Add shared fixtures and real-helper regressions to CI; validate Rust/Python checks.
+- [x] Record reproducible benchmark, ownership table and legacy-retirement criteria; sync specs.

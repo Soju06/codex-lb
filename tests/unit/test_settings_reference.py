@@ -77,7 +77,9 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # bound-eventless-server-recovery spec called it "configured"; the maintainer
 # asked for it to be promoted to a setting on PR #1633 (2026-08-20/08-26),
 # consistent with that PR's budget-from-settings principle.
-MAX_SETTINGS_FIELDS = 135
+# 135 -> 136: account_bundle_max_bytes. The operator-controlled upload and
+# plaintext bound are justified in portable-encrypted-account-bundles.
+MAX_SETTINGS_FIELDS = 136
 
 
 def test_generated_settings_reference_matches_code() -> None:

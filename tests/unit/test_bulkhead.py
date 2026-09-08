@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+import app.core.middleware.multipart_content_encoding as multipart_content_encoding_module
 import app.core.resilience.bulkhead as bulkhead_module
 from app.core.resilience.bulkhead import BulkheadMiddleware, BulkheadSemaphore
 
@@ -66,6 +67,9 @@ async def test_bulkhead_returns_429_when_proxy_http_lane_full():
     assert overloaded.status_code == 429
     assert overloaded.json()["error"]["code"] == "proxy_overloaded"
     assert overloaded.headers["retry-after"] == "5"
+    assert "cache-control" not in overloaded.headers
+    assert "pragma" not in overloaded.headers
+    assert "expires" not in overloaded.headers
     assert first_response.status_code == 200
 
 
@@ -133,6 +137,93 @@ async def test_bulkhead_exact_proxy_root_rejection_uses_proxy_lane_and_openai_en
     assert payload["error"]["type"] == "rate_limit_error"
     assert payload["error"]["code"] == "proxy_overloaded"
     assert "proxy_http lane" in payload["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_bulkhead_bundle_lane_rejection_is_not_cacheable_and_is_audited(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    audit_events: list[tuple[str, dict[str, object] | None]] = []
+    monkeypatch.setattr(
+        multipart_content_encoding_module.AuditService,
+        "log_async",
+        lambda action, **kwargs: audit_events.append((action, kwargs.get("details"))),
+    )
+    app = FastAPI()
+    app.add_middleware(cast(Any, BulkheadMiddleware), bulkhead=_bulkhead())
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    @app.get("/work")
+    async def work():
+        entered.set()
+        await release.wait()
+        return {"ok": True}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        first_request = asyncio.create_task(client.get("/work"))
+        await entered.wait()
+
+        overloaded = await client.post("/api/accounts/bundle/export")
+        release.set()
+        await first_request
+
+    assert overloaded.status_code == 429
+    assert overloaded.headers["retry-after"] == "5"
+    assert overloaded.headers["cache-control"] == "no-store, no-cache, must-revalidate, private"
+    assert overloaded.headers["pragma"] == "no-cache"
+    assert overloaded.headers["expires"] == "0"
+    assert audit_events == [("account_bundle_request_failed", {"operation": "export", "outcome": "http_429"})]
+
+
+@pytest.mark.asyncio
+async def test_bulkhead_bundle_memory_pressure_rejection_is_not_cacheable(monkeypatch: pytest.MonkeyPatch):
+    audit_events: list[tuple[str, dict[str, object] | None]] = []
+    monkeypatch.setattr(
+        multipart_content_encoding_module.AuditService,
+        "log_async",
+        lambda action, **kwargs: audit_events.append((action, kwargs.get("details"))),
+    )
+    monkeypatch.setattr(bulkhead_module, "is_memory_warning", lambda: False)
+    monkeypatch.setattr(bulkhead_module, "is_memory_pressure", lambda: True)
+    app = FastAPI()
+    app.add_middleware(cast(Any, BulkheadMiddleware), bulkhead=_bulkhead())
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        unavailable = await client.post("/api/accounts/bundle/import/preflight")
+
+    assert unavailable.status_code == 503
+    assert unavailable.headers["retry-after"] == "5"
+    assert unavailable.headers["cache-control"] == "no-store, no-cache, must-revalidate, private"
+    assert unavailable.headers["pragma"] == "no-cache"
+    assert unavailable.headers["expires"] == "0"
+    assert audit_events == [("account_bundle_request_failed", {"operation": "preflight", "outcome": "http_503"})]
+
+
+@pytest.mark.asyncio
+async def test_bulkhead_does_not_duplicate_bundle_failure_audit(monkeypatch: pytest.MonkeyPatch):
+    audit_events: list[str] = []
+    monkeypatch.setattr(
+        multipart_content_encoding_module.AuditService,
+        "log_async",
+        lambda action, **_kwargs: audit_events.append(action),
+    )
+    app = FastAPI()
+    app.add_middleware(cast(Any, multipart_content_encoding_module.MultipartContentEncodingMiddleware))
+    app.add_middleware(cast(Any, BulkheadMiddleware), bulkhead=_bulkhead())
+
+    @app.post("/api/accounts/bundle/import/commit", status_code=400)
+    async def import_bundle():
+        return {"detail": "inner failure"}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/accounts/bundle/import/commit")
+
+    assert response.status_code == 400
+    assert audit_events == ["account_bundle_request_failed"]
 
 
 @pytest.mark.asyncio

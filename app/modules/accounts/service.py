@@ -4,12 +4,13 @@ import asyncio
 import json
 import logging
 from datetime import timedelta
-from typing import cast
+from typing import Literal, cast
 from uuid import uuid4
 
 import aiohttp
 from pydantic import ValidationError
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import (
     DEFAULT_EMAIL,
@@ -36,18 +37,41 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.upstream_proxy.resolver import _is_missing_upstream_proxy_schema
 from app.core.usage.models import UsagePayload
+from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import get_background_session
+from app.modules.accounts.account_bundle import (
+    MAX_BUNDLE_ACCOUNTS,
+    AccountBundlePayload,
+    BundleAccount,
+    BundleCredentials,
+    bundle_integrity_token,
+    decrypt_bundle,
+    encrypt_bundle,
+    mask_email,
+    new_payload,
+)
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.accounts.deletion import request_account_deletion_run
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
-from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.repository import (
+    BUNDLE_IMPORT_VALIDATION_PAUSE_REASON,
+    AccountsRepository,
+    BundlePersistenceResult,
+)
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAdditionalWindow,
     AccountAuthExportResponse,
     AccountAuthExportTokens,
+    AccountBundleCommitResponse,
+    AccountBundleImportResult,
+    AccountBundleImportSummary,
+    AccountBundlePortableMetadata,
+    AccountBundlePreflightAccount,
+    AccountBundlePreflightResponse,
     AccountExportResponse,
     AccountImportResponse,
     AccountOpenCodeAuthExportAccount,
@@ -66,6 +90,7 @@ from app.modules.accounts.schemas import (
 )
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.proxy.account_cache import (
+    ROUTING_UNAVAILABLE_STATUSES,
     clear_account_routing_unavailable,
     get_account_selection_cache,
     mark_account_routing_unavailable,
@@ -76,8 +101,9 @@ from app.modules.usage.additional_quota_keys import (
     get_additional_display_label_for_quota_key,
     get_additional_quota_routing_policy,
 )
+from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
-from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater
+from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater, build_background_usage_updater
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +120,16 @@ PROBE_MAX_OUTPUT_TOKENS = 16
 # return.
 PROBE_NETWORK_FAILURE_STATUS = 0
 IMPORT_PROXY_REQUIRED_PAUSE_REASON = "upstream_proxy_required_on_import"
+BUNDLE_VALIDATION_WARNING = "Account validation could not be completed."
+BUNDLE_VALIDATION_AGGREGATE_WARNING = "Some imported accounts could not be validated."
+BUNDLE_VALIDATION_TIMEOUT_SECONDS = 45.0
+
+
+def _consume_bundle_validation_task_result(
+    task: asyncio.Task[tuple[Account | None, bool, bool]],
+) -> None:
+    if not task.cancelled():
+        task.exception()
 
 
 class InvalidAuthJsonError(Exception):
@@ -130,6 +166,23 @@ class AccountsService:
         self._additional_usage_repo = additional_usage_repo
         self._limit_warmup_repo = limit_warmup_repo
         self._usage_updater = UsageUpdater(usage_repo, repo, additional_usage_repo) if usage_repo else None
+        self._bundle_validation_repo = BackgroundAccountsRepository()
+        # Bundle validation may outlive its request waiter through the global
+        # usage-refresh singleflight. Every repository used here therefore owns
+        # a short-lived background session instead of capturing ``repo.session``.
+        self._bundle_validation_usage_updater = build_background_usage_updater(
+            redact_sensitive_logs=True,
+            bundle_validation_mode=True,
+        )
+        # Existing non-active lifecycle state must survive replacement. This
+        # validator can write usage but cannot refresh tokens or mutate account
+        # lifecycle through an AuthManager.
+        self._bundle_nonreactivating_validation_usage_updater = UsageUpdater(
+            BackgroundUsageRepository(),
+            additional_usage_repo=BackgroundAdditionalUsageRepository(),
+            redact_sensitive_logs=True,
+            bundle_validation_mode=True,
+        )
         self._encryptor = TokenEncryptor()
         self._auth_manager = auth_manager
 
@@ -512,6 +565,294 @@ class AccountsService:
             opencode_auth_json=opencode_auth_json,
         )
 
+    async def export_account_bundle(
+        self,
+        account_ids: list[str] | None,
+        passphrase: str,
+        *,
+        max_bytes: int,
+    ) -> tuple[bytes, int]:
+        accounts = (
+            await self._repo.list_accounts_by_ids(account_ids, refresh_existing=True)
+            if account_ids is not None
+            else await self._repo.list_accounts(refresh_existing=True)
+        )
+        if len(accounts) > MAX_BUNDLE_ACCOUNTS:
+            raise InvalidAuthJsonError("Account bundle exceeds the maximum account count")
+        if account_ids is not None:
+            found_ids = {account.id for account in accounts}
+            missing_ids = [account_id for account_id in account_ids if account_id not in found_ids]
+            if missing_ids:
+                raise InvalidAuthJsonError(f"Selected account not found: {missing_ids[0]}")
+        await self._repo.account_bundle_identity_matches(accounts)
+
+        records: list[BundleAccount] = []
+        for account in accounts:
+            try:
+                access_token = self._encryptor.decrypt(account.access_token_encrypted)
+                refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)
+                id_token = self._encryptor.decrypt(account.id_token_encrypted)
+            except Exception as exc:
+                raise InvalidAuthJsonError(f"Selected account has unreadable credentials: {account.id}") from exc
+            if not account.email.strip():
+                raise InvalidAuthJsonError(f"Selected account has incomplete identity: {account.id}")
+            if any(not token.strip() for token in (access_token, refresh_token, id_token)):
+                raise InvalidAuthJsonError(f"Selected account has incomplete credentials: {account.id}")
+            records.append(
+                BundleAccount(
+                    chatgpt_account_id=account.chatgpt_account_id,
+                    chatgpt_user_id=account.chatgpt_user_id,
+                    email=account.email,
+                    workspace_id=account.workspace_id,
+                    workspace_label=account.workspace_label,
+                    seat_type=account.seat_type,
+                    alias=account.alias,
+                    plan_type=account.plan_type,
+                    routing_policy=cast(
+                        Literal["normal", "burn_first", "preserve"],
+                        account.routing_policy,
+                    ),
+                    limit_warmup_enabled=account.limit_warmup_enabled,
+                    security_work_authorized=account.security_work_authorized,
+                    credentials=BundleCredentials(
+                        access_token=access_token,
+                        refresh_token=refresh_token,
+                        id_token=id_token,
+                    ),
+                )
+            )
+        return encrypt_bundle(new_payload(records), passphrase, max_bytes=max_bytes), len(records)
+
+    async def preflight_account_bundle(
+        self,
+        raw: bytes,
+        passphrase: str,
+        *,
+        max_bytes: int,
+    ) -> AccountBundlePreflightResponse:
+        payload = decrypt_bundle(raw, passphrase, max_bytes=max_bytes)
+        accounts = self._bundle_accounts_for_destination(payload)
+        matches = await self._repo.account_bundle_identity_matches(accounts)
+        previews = [
+            AccountBundlePreflightAccount(
+                index=index,
+                masked_identity=mask_email(record.email),
+                state="matching" if match is not None else "new",
+                metadata=AccountBundlePortableMetadata(
+                    alias=record.alias,
+                    plan_type=record.plan_type,
+                    routing_policy=record.routing_policy,
+                    limit_warmup_enabled=record.limit_warmup_enabled,
+                    security_work_authorized=record.security_work_authorized,
+                ),
+            )
+            for index, (record, match) in enumerate(zip(payload.accounts, matches, strict=True))
+        ]
+        matching_count = sum(preview.state == "matching" for preview in previews)
+        return AccountBundlePreflightResponse(
+            integrity_token=bundle_integrity_token(raw),
+            account_count=len(previews),
+            new_count=len(previews) - matching_count,
+            matching_count=matching_count,
+            accounts=previews,
+        )
+
+    async def commit_account_bundle(
+        self,
+        raw: bytes,
+        passphrase: str,
+        *,
+        integrity_token: str,
+        conflict_mode: Literal["skip", "replace"],
+        confirm_replace: bool,
+        max_bytes: int,
+    ) -> AccountBundleCommitResponse:
+        if bundle_integrity_token(raw) != integrity_token:
+            raise InvalidAuthJsonError("Account bundle does not match the preflight upload")
+        if conflict_mode == "replace" and not confirm_replace:
+            raise InvalidAuthJsonError("Replacing matching accounts requires explicit confirmation")
+        payload = decrypt_bundle(raw, passphrase, max_bytes=max_bytes)
+        accounts = self._bundle_accounts_for_destination(payload)
+        await self._repo.account_bundle_identity_matches(accounts)
+        persisted = await self._repo.persist_account_bundle(accounts, conflict_mode=conflict_mode)
+        # Persistence quarantines every newly routable credential set in one
+        # committed transaction. Invalidate selection across replicas before
+        # any cancellable validation work can begin.
+        get_account_selection_cache().invalidate()
+        for result in persisted:
+            if result.outcome != "skipped":
+                mark_account_routing_unavailable(result.account_id)
+        validation_warnings = await self._validate_imported_bundle_accounts(persisted)
+        results = [
+            AccountBundleImportResult(
+                index=index,
+                outcome=result.outcome,
+                destination_account_id=result.account_id,
+                warning=validation_warnings.get(result.account_id),
+            )
+            for index, result in enumerate(persisted)
+        ]
+        summary = AccountBundleImportSummary(
+            imported=sum(result.outcome == "imported" for result in persisted),
+            replaced=sum(result.outcome == "replaced" for result in persisted),
+            skipped=sum(result.outcome == "skipped" for result in persisted),
+        )
+        get_account_selection_cache().invalidate()
+        warnings = [BUNDLE_VALIDATION_AGGREGATE_WARNING] if validation_warnings else []
+        return AccountBundleCommitResponse(summary=summary, results=results, warnings=warnings)
+
+    async def _validate_imported_bundle_accounts(
+        self,
+        persisted: list[BundlePersistenceResult],
+    ) -> dict[str, str]:
+        warnings: dict[str, str] = {}
+        validation_results = [result for result in persisted if result.outcome != "skipped"]
+        if not validation_results:
+            return warnings
+
+        # Share the fixed batch budget evenly so one slow account cannot
+        # consume the bounded opportunity reserved for every later account.
+        account_timeout = BUNDLE_VALIDATION_TIMEOUT_SECONDS / len(validation_results)
+        loop = asyncio.get_running_loop()
+        pending_validation: asyncio.Task[tuple[Account | None, bool, bool]] | None = None
+        for result in validation_results:
+            deadline = loop.time() + account_timeout
+            account: Account | None = None
+            validation_succeeded = False
+            proxy_pause_required = False
+
+            # Singleflight work intentionally outlives a cancelled waiter.
+            # Retain the sequential slot until that work actually finishes.
+            if pending_validation is not None:
+                remaining = deadline - loop.time()
+                if remaining > 0:
+                    try:
+                        await wait_on_shared_future(pending_validation, timeout=remaining)
+                    except Exception:
+                        pass
+                if pending_validation.done():
+                    pending_validation = None
+
+            remaining = deadline - loop.time()
+            if pending_validation is None and remaining > 0:
+                pending_validation = asyncio.create_task(self._validate_imported_bundle_account(result))
+                pending_validation.add_done_callback(_consume_bundle_validation_task_result)
+                try:
+                    account, validation_succeeded, proxy_pause_required = await wait_on_shared_future(
+                        pending_validation,
+                        timeout=remaining,
+                    )
+                except Exception:
+                    validation_succeeded = False
+                if pending_validation.done():
+                    pending_validation = None
+
+            if proxy_pause_required and account is not None and result.restore_status == AccountStatus.ACTIVE:
+                remaining = deadline - loop.time()
+                if remaining > 0:
+                    try:
+                        await asyncio.wait_for(
+                            self._bundle_validation_repo.update_status_if_current(
+                                account.id,
+                                AccountStatus.PAUSED,
+                                IMPORT_PROXY_REQUIRED_PAUSE_REASON,
+                                None,
+                                blocked_at=None,
+                                expected_status=AccountStatus.PAUSED,
+                                expected_deactivation_reason=BUNDLE_IMPORT_VALIDATION_PAUSE_REASON,
+                                expected_reset_at=None,
+                                expected_blocked_at=None,
+                                expected_refresh_token_encrypted=account.refresh_token_encrypted,
+                            ),
+                            timeout=remaining,
+                        )
+                    except Exception:
+                        pass
+
+            if validation_succeeded and result.restore_status is not None and account is not None:
+                remaining = deadline - loop.time()
+                restored = False
+                if remaining > 0:
+                    try:
+                        restored = await asyncio.wait_for(
+                            self._bundle_validation_repo.restore_validated_bundle_account(
+                                account.id,
+                                expected_refresh_token_encrypted=account.refresh_token_encrypted,
+                                status=result.restore_status,
+                                deactivation_reason=result.restore_deactivation_reason,
+                                reset_at=result.restore_reset_at,
+                                blocked_at=result.restore_blocked_at,
+                            ),
+                            timeout=remaining,
+                        )
+                    except Exception:
+                        restored = False
+                if restored:
+                    if result.restore_status not in ROUTING_UNAVAILABLE_STATUSES:
+                        get_account_selection_cache().invalidate(propagate=False)
+                        clear_account_routing_unavailable(result.account_id)
+                else:
+                    validation_succeeded = False
+
+            if not validation_succeeded:
+                mark_account_routing_unavailable(result.account_id)
+                warnings[result.account_id] = BUNDLE_VALIDATION_WARNING
+        return warnings
+
+    async def _validate_imported_bundle_account(
+        self,
+        result: BundlePersistenceResult,
+    ) -> tuple[Account | None, bool, bool]:
+        account = await self._bundle_validation_repo.get_by_id(result.account_id)
+        if account is None:
+            return None, False, False
+        refresh_allowed = await self._background_import_usage_refresh_allowed(account)
+        if not refresh_allowed:
+            return account, False, True
+        updater = (
+            self._bundle_validation_usage_updater
+            if result.restore_status is not None and result.restore_status not in ROUTING_UNAVAILABLE_STATUSES
+            else self._bundle_nonreactivating_validation_usage_updater
+        )
+        refresh_result = await updater.force_refresh_result(
+            account,
+            ignore_refresh_disabled=True,
+        )
+        return account, refresh_result.fetch_succeeded, False
+
+    def _bundle_accounts_for_destination(self, payload: AccountBundlePayload) -> list[Account]:
+        accounts: list[Account] = []
+        for record in payload.accounts:
+            account_id = generate_unique_account_id(
+                record.chatgpt_account_id,
+                record.email,
+                record.workspace_id,
+                record.workspace_label,
+            )
+            accounts.append(
+                Account(
+                    id=account_id,
+                    chatgpt_account_id=record.chatgpt_account_id,
+                    chatgpt_user_id=record.chatgpt_user_id,
+                    email=record.email,
+                    workspace_id=record.workspace_id,
+                    workspace_label=record.workspace_label,
+                    seat_type=record.seat_type,
+                    alias=record.alias,
+                    plan_type=record.plan_type,
+                    routing_policy=record.routing_policy,
+                    limit_warmup_enabled=record.limit_warmup_enabled,
+                    security_work_authorized=record.security_work_authorized,
+                    access_token_encrypted=self._encryptor.encrypt(record.credentials.access_token),
+                    refresh_token_encrypted=self._encryptor.encrypt(record.credentials.refresh_token),
+                    id_token_encrypted=self._encryptor.encrypt(record.credentials.id_token),
+                    last_refresh=utcnow(),
+                    status=AccountStatus.ACTIVE,
+                    deactivation_reason=None,
+                )
+            )
+        return accounts
+
     async def import_account(self, raw: bytes) -> AccountImportResponse:
         try:
             auth = parse_auth_json(raw)
@@ -570,9 +911,16 @@ class AccountsService:
         )
 
     async def _import_usage_refresh_allowed(self, account: Account) -> bool:
+        return await self._import_usage_refresh_allowed_with_session(account, self._repo.session)
+
+    async def _background_import_usage_refresh_allowed(self, account: Account) -> bool:
+        async with get_background_session() as session:
+            return await self._import_usage_refresh_allowed_with_session(account, session)
+
+    async def _import_usage_refresh_allowed_with_session(self, account: Account, session: AsyncSession) -> bool:
         try:
             route = await resolve_upstream_route(
-                self._repo.session,
+                session,
                 account_id=account.id,
                 operation="usage_refresh",
                 scope="account",
@@ -589,7 +937,7 @@ class AccountsService:
             return True
 
         try:
-            settings = await self._repo.session.get(DashboardSettings, 1)
+            settings = await session.get(DashboardSettings, 1)
         except OperationalError as exc:
             if not _is_missing_upstream_proxy_schema(exc):
                 raise

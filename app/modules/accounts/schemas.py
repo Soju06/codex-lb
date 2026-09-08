@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List
+from typing import List, Literal
 
 from pydantic import Field, PrivateAttr, field_validator
 
@@ -143,6 +143,54 @@ class AccountImportResponse(DashboardModel):
     seat_type: str | None = None
     plan_type: str
     status: str
+
+
+class AccountBundleExportRequest(DashboardModel):
+    account_ids: list[str] | None = None
+    passphrase: str = Field(min_length=1)
+
+
+class AccountBundlePortableMetadata(DashboardModel):
+    alias: str | None = None
+    plan_type: str
+    routing_policy: str = Field(pattern=r"^(normal|burn_first|preserve)$")
+    limit_warmup_enabled: bool
+    security_work_authorized: bool
+
+
+class AccountBundlePreflightAccount(DashboardModel):
+    index: int
+    masked_identity: str
+    state: Literal["new", "matching"]
+    metadata: AccountBundlePortableMetadata
+
+
+class AccountBundlePreflightResponse(DashboardModel):
+    integrity_token: str
+    account_count: int
+    new_count: int
+    matching_count: int
+    accounts: list[AccountBundlePreflightAccount]
+
+
+class AccountBundleImportResult(DashboardModel):
+    index: int
+    outcome: Literal["imported", "replaced", "skipped", "failed"]
+    destination_account_id: str | None = None
+    warning: str | None = None
+
+
+class AccountBundleImportSummary(DashboardModel):
+    imported: int = 0
+    replaced: int = 0
+    skipped: int = 0
+    failed: int = 0
+
+
+class AccountBundleCommitResponse(DashboardModel):
+    summary: AccountBundleImportSummary
+    results: list[AccountBundleImportResult]
+    warnings: list[str] = Field(default_factory=list)
 
 
 class OpenCodeOAuthAuth(DashboardModel):

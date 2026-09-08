@@ -13,6 +13,7 @@ import { AccountsSkeleton } from "@/features/accounts/components/accounts-skelet
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
 import { AuthExportDialog } from "@/features/accounts/components/auth-export-dialog";
+import { ExportAccountBundleDialog, ImportAccountBundleDialog } from "@/features/accounts/components/account-bundle-dialogs";
 import {
   useAccounts,
   useAccountUsageResetCredits,
@@ -53,6 +54,7 @@ export function AccountsPage() {
     deleteMutation,
     routingPolicyMutation,
     exportAuthMutation,
+    invalidateAccounts,
   } = useAccounts();
   const { settingsQuery } = useSettings();
   const { upstreamProxyQuery, accountBindingMutation, testEndpointMutation } = useUpstreamProxyAdmin();
@@ -60,6 +62,8 @@ export function AccountsPage() {
   const canWrite = useAuthStore((state) => state.canWrite);
 
   const importDialog = useDialogState();
+  const importBundleDialog = useDialogState();
+  const exportBundleDialog = useDialogState();
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
   type ResetCreditDialogTarget = { accountId: string; availableResetCredits: number };
@@ -183,6 +187,8 @@ export function AccountsPage() {
                 onSortModeChange={setAccountSortMode}
                 showResetCreditBadges={showResetCreditBadges}
                 onOpenImport={() => importDialog.show()}
+                onOpenImportBundle={() => importBundleDialog.show()}
+                onOpenExportBundle={() => exportBundleDialog.show()}
                 onOpenOauth={() => {
                   setOauthAccountId(null);
                   oauthDialog.show();
@@ -258,6 +264,18 @@ export function AccountsPage() {
         onImport={async (file) => {
           await importMutation.mutateAsync(file);
         }}
+      />
+
+      <ExportAccountBundleDialog
+        open={exportBundleDialog.open}
+        accounts={accounts}
+        onOpenChange={exportBundleDialog.onOpenChange}
+      />
+
+      <ImportAccountBundleDialog
+        open={importBundleDialog.open}
+        onOpenChange={importBundleDialog.onOpenChange}
+        onCommitted={() => invalidateAccounts?.() ?? accountsQuery.refetch().then(() => undefined)}
       />
 
       <Suspense fallback={null}>

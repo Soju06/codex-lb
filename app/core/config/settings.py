@@ -394,6 +394,10 @@ class Settings(BaseSettings):
     telemetry_enabled: bool | None = None
     telemetry_endpoint: str = "https://telemetry.tokmaxxing.com"
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
+    # Portable account-bundle uploads and decrypted payloads share this bound.
+    # Eight MiB is ample for many token records while limiting KDF/decode memory
+    # amplification; operators with stricter ingress budgets may lower it.
+    account_bundle_max_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
     # Startup cross-replica encryption-key consistency check against the shared
     # database sentinel: "enforce" refuses startup on mismatch, "warn" logs an
     # ERROR and continues, "off" disables the check.

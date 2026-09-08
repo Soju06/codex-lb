@@ -43,6 +43,12 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler;
 }
 
+export function handleUnauthorizedResponse(response: Pick<Response, "status">): void {
+  if (response.status === 401) {
+    unauthorizedHandler?.();
+  }
+}
+
 function isBodyInit(value: unknown): value is BodyInit {
   return (
     typeof value === "string" ||
@@ -161,8 +167,8 @@ async function request<T>(
     });
   }
 
-  if (response.status === 401 && !options?.suppressUnauthorizedHandler) {
-    unauthorizedHandler?.();
+  if (!options?.suppressUnauthorizedHandler) {
+    handleUnauthorizedResponse(response);
   }
 
   const payload = await readJsonPayload(response);

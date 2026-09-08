@@ -88,7 +88,7 @@ class AccountSelectionCache:
                 poller.request_bump(NAMESPACE_ACCOUNT_SELECTION)
 
 
-_ROUTING_UNAVAILABLE_STATUSES = frozenset(
+ROUTING_UNAVAILABLE_STATUSES = frozenset(
     {
         AccountStatus.PAUSED,
         AccountStatus.DEACTIVATED,
@@ -137,7 +137,7 @@ class RoutingAvailabilityCache:
         if snapshot is None:
             return False
         status = snapshot.get(account_id)
-        return status is None or status in _ROUTING_UNAVAILABLE_STATUSES
+        return status is None or status in ROUTING_UNAVAILABLE_STATUSES
 
     async def refresh_from_db(self) -> None:
         """Rebuild the snapshot from committed account statuses.
@@ -171,7 +171,7 @@ class RoutingAvailabilityCache:
             for account_id in self._local_marks
             if account_id not in marks_before_refresh
             or (status := snapshot.get(account_id)) is None
-            or status in _ROUTING_UNAVAILABLE_STATUSES
+            or status in ROUTING_UNAVAILABLE_STATUSES
         }
 
     def reset(self) -> None:

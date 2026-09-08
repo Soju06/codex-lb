@@ -39,6 +39,7 @@ async function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof us
     invalidations.push(queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] }));
     invalidations.push(queryClient.invalidateQueries({ queryKey: ["accounts", "usage-reset-credits"] }));
   }
+  invalidations.push(queryClient.invalidateQueries({ queryKey: ["usage"] }));
   await Promise.all(invalidations);
 }
 
@@ -301,6 +302,8 @@ export function useAccounts() {
   const accountsQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 
   const mutations = useAccountMutations();
+  const queryClient = useQueryClient();
+  const invalidateAccounts = () => invalidateAccountRelatedQueries(queryClient);
 
-  return { accountsQuery, ...mutations };
+  return { accountsQuery, invalidateAccounts, ...mutations };
 }

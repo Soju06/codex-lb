@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+from typing import NoReturn
 
 from fastapi import APIRouter, Depends, Request, Response
+from pydantic import ValidationError
 
 from app.core.audit.service import AuditService
 from app.core.auth.dependencies import (
@@ -12,22 +14,41 @@ from app.core.auth.dependencies import (
 )
 from app.core.auth.refresh import RefreshError
 from app.core.clients.usage import UsageFetchError
+from app.core.config.settings import get_settings
 from app.core.exceptions import (
     DashboardBadRequestError,
     DashboardConflictError,
     DashboardNotFoundError,
     DashboardUpstreamError,
+    DashboardValidationError,
 )
-from app.core.middleware.multipart_content_encoding import raise_for_unsupported_multipart_content_encoding
-from app.core.multipart import ACCOUNT_IMPORT_MULTIPART_POLICY, bounded_multipart_form, read_bounded_upload
-from app.core.multipart_fields import required_upload
+from app.core.middleware.multipart_content_encoding import (
+    mark_account_bundle_failure_audited,
+    raise_for_unsupported_multipart_content_encoding,
+)
+from app.core.multipart import (
+    ACCOUNT_IMPORT_MULTIPART_POLICY,
+    MultipartPayloadTooLarge,
+    MultipartPolicy,
+    bounded_multipart_form,
+    read_bounded_upload,
+)
+from app.core.multipart_fields import required_text, required_upload
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.dependencies import AccountsContext, get_accounts_context, get_proxy_service_for_app
-from app.modules.accounts.repository import AccountIdentityConflictError
+from app.modules.accounts.account_bundle import (
+    AccountBundleError,
+    AccountBundleTooLargeError,
+    UnsupportedAccountBundleError,
+)
+from app.modules.accounts.repository import AccountBundleIdentityError, AccountIdentityConflictError
 from app.modules.accounts.schemas import (
     AccountAliasRequest,
     AccountAliasResponse,
     AccountAuthExportResponse,
+    AccountBundleCommitResponse,
+    AccountBundleExportRequest,
+    AccountBundlePreflightResponse,
     AccountDeleteResponse,
     AccountExportResponse,
     AccountImportResponse,
@@ -95,6 +116,93 @@ _ACCOUNT_IMPORT_OPENAPI_EXTRA = {
         }
     },
 }
+_ACCOUNT_BUNDLE_EXPORT_OPENAPI_EXTRA = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": AccountBundleExportRequest.model_json_schema(by_alias=True),
+            }
+        },
+    },
+    "responses": _ACCOUNT_IMPORT_OPENAPI_EXTRA["responses"],
+}
+
+
+def _set_sensitive_response_headers(response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+
+
+def _bundle_multipart_policy(*, fields: int) -> MultipartPolicy:
+    max_bytes = get_settings().account_bundle_max_bytes
+    return MultipartPolicy(
+        max_body_bytes=max_bytes + 64 * 1024,
+        max_file_bytes=max_bytes,
+        max_aggregate_file_bytes=max_bytes,
+        max_files=1,
+        max_fields=fields,
+        max_text_part_bytes=4096,
+    )
+
+
+def _extend_bounded_export_body(body: bytearray, chunk: bytes, *, max_bytes: int) -> None:
+    if len(body) + len(chunk) > max_bytes:
+        raise MultipartPayloadTooLarge()
+    body.extend(chunk)
+
+
+async def _read_bundle_export_request(request: Request) -> AccountBundleExportRequest:
+    max_bytes = get_settings().account_bundle_max_bytes
+    raw_content_length = request.headers.get("content-length")
+    if raw_content_length is not None:
+        try:
+            content_length = int(raw_content_length)
+        except ValueError:
+            content_length = None
+        if content_length is not None and content_length > max_bytes:
+            raise MultipartPayloadTooLarge()
+
+    body = bytearray()
+    async for chunk in request.stream():
+        _extend_bounded_export_body(body, chunk, max_bytes=max_bytes)
+    try:
+        return AccountBundleExportRequest.model_validate_json(body)
+    except ValidationError as exc:
+        raise DashboardValidationError("Invalid request payload", code="validation_error") from exc
+
+
+def _raise_bundle_error(exc: Exception) -> NoReturn:
+    if isinstance(exc, AccountBundleTooLargeError):
+        raise MultipartPayloadTooLarge(param="bundle") from exc
+    if isinstance(exc, UnsupportedAccountBundleError):
+        raise DashboardBadRequestError("Unsupported account bundle format", code=exc.code) from exc
+    if isinstance(exc, AccountBundleError):
+        raise DashboardBadRequestError("Invalid account bundle or passphrase", code=exc.code) from exc
+    if isinstance(exc, AccountBundleIdentityError):
+        raise DashboardBadRequestError("Account bundle contains duplicate account identities", code=exc.code) from exc
+    if isinstance(exc, AccountIdentityConflictError):
+        raise DashboardConflictError(
+            "Account identity conflicts with multiple destination accounts",
+            code="account_identity_conflict",
+        ) from exc
+    if isinstance(exc, InvalidAuthJsonError):
+        raise DashboardBadRequestError("Account bundle request is invalid", code="invalid_account_bundle") from exc
+    raise DashboardUpstreamError(
+        "Account bundle operation failed",
+        code="account_bundle_operation_failed",
+    ) from exc
+
+
+def _bundle_error_outcome(exc: Exception) -> str:
+    if isinstance(exc, (AccountBundleError, AccountBundleIdentityError)):
+        return exc.code
+    if isinstance(exc, AccountIdentityConflictError):
+        return "account_identity_conflict"
+    if isinstance(exc, InvalidAuthJsonError):
+        return "validation_failed"
+    return "operation_failed"
 
 
 @router.get("", response_model=AccountsResponse)
@@ -103,6 +211,134 @@ async def list_accounts(
 ) -> AccountsResponse:
     accounts = await context.service.list_accounts()
     return AccountsResponse(accounts=accounts)
+
+
+@router.post("/bundle/export", openapi_extra=_ACCOUNT_BUNDLE_EXPORT_OPENAPI_EXTRA)
+async def export_account_bundle(
+    request: Request,
+    _write_access=Depends(require_dashboard_write_access),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> Response:
+    payload = await _read_bundle_export_request(request)
+    try:
+        bundle, account_count = await context.service.export_account_bundle(
+            payload.account_ids,
+            payload.passphrase,
+            max_bytes=get_settings().account_bundle_max_bytes,
+        )
+    except Exception as exc:
+        mark_account_bundle_failure_audited(request)
+        AuditService.log_async(
+            "account_bundle_export_failed",
+            actor_ip=request.client.host if request.client else None,
+            details={"requested_count": len(payload.account_ids) if payload.account_ids is not None else None},
+        )
+        _raise_bundle_error(exc)
+    response = Response(content=bundle, media_type="application/vnd.codex-lb.account-bundle")
+    _set_sensitive_response_headers(response)
+    response.headers["Content-Disposition"] = 'attachment; filename="codex-lb-accounts-v1.clb-account-bundle"'
+    AuditService.log_async(
+        "account_bundle_exported",
+        actor_ip=request.client.host if request.client else None,
+        details={"account_count": account_count},
+    )
+    return response
+
+
+@router.post("/bundle/import/preflight", response_model=AccountBundlePreflightResponse)
+async def preflight_account_bundle(
+    request: Request,
+    response: Response,
+    _write_access=Depends(require_dashboard_write_access),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountBundlePreflightResponse:
+    raise_for_unsupported_multipart_content_encoding(request)
+    policy = _bundle_multipart_policy(fields=1)
+    async with bounded_multipart_form(request, policy, typed_upload_fields=("bundle",)) as form:
+        if len(form.multi_items()) != 2 or {name for name, _value in form.multi_items()} != {"bundle", "passphrase"}:
+            raise DashboardBadRequestError("Invalid account bundle form", code="invalid_account_bundle")
+        raw = await read_bounded_upload(required_upload(form, "bundle"), policy.max_file_bytes, "bundle")
+        passphrase = required_text(form, "passphrase")
+    try:
+        result = await context.service.preflight_account_bundle(
+            raw,
+            passphrase,
+            max_bytes=get_settings().account_bundle_max_bytes,
+        )
+    except Exception as exc:
+        mark_account_bundle_failure_audited(request)
+        AuditService.log_async(
+            "account_bundle_preflight_failed",
+            actor_ip=request.client.host if request.client else None,
+            details={"outcome": _bundle_error_outcome(exc)},
+        )
+        _raise_bundle_error(exc)
+    _set_sensitive_response_headers(response)
+    AuditService.log_async(
+        "account_bundle_preflighted",
+        actor_ip=request.client.host if request.client else None,
+        details={
+            "account_count": result.account_count,
+            "new_count": result.new_count,
+            "matching_count": result.matching_count,
+        },
+    )
+    return result
+
+
+@router.post("/bundle/import/commit", response_model=AccountBundleCommitResponse)
+async def commit_account_bundle(
+    request: Request,
+    response: Response,
+    _write_access=Depends(require_dashboard_write_access),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountBundleCommitResponse:
+    raise_for_unsupported_multipart_content_encoding(request)
+    policy = _bundle_multipart_policy(fields=4)
+    async with bounded_multipart_form(request, policy, typed_upload_fields=("bundle",)) as form:
+        expected = {"bundle", "passphrase", "integrity_token", "conflict_mode", "confirm_replace"}
+        if len(form.multi_items()) != 5 or {name for name, _value in form.multi_items()} != expected:
+            raise DashboardBadRequestError("Invalid account bundle form", code="invalid_account_bundle")
+        raw = await read_bounded_upload(required_upload(form, "bundle"), policy.max_file_bytes, "bundle")
+        passphrase = required_text(form, "passphrase")
+        integrity_token = required_text(form, "integrity_token")
+        conflict_mode_raw = required_text(form, "conflict_mode")
+        confirm_replace = required_text(form, "confirm_replace") == "true"
+    if conflict_mode_raw not in ("skip", "replace"):
+        raise DashboardBadRequestError("Invalid account bundle conflict mode", code="invalid_account_bundle")
+    try:
+        result = await context.service.commit_account_bundle(
+            raw,
+            passphrase,
+            integrity_token=integrity_token,
+            conflict_mode=conflict_mode_raw,
+            confirm_replace=confirm_replace,
+            max_bytes=get_settings().account_bundle_max_bytes,
+        )
+    except Exception as exc:
+        mark_account_bundle_failure_audited(request)
+        AuditService.log_async(
+            "account_bundle_import_failed",
+            actor_ip=request.client.host if request.client else None,
+            details={"mode": conflict_mode_raw, "outcome": _bundle_error_outcome(exc)},
+        )
+        _raise_bundle_error(exc)
+    _set_sensitive_response_headers(response)
+    AuditService.log_async(
+        "account_bundle_imported",
+        actor_ip=request.client.host if request.client else None,
+        details={
+            "mode": conflict_mode_raw,
+            "imported": result.summary.imported,
+            "replaced": result.summary.replaced,
+            "skipped": result.summary.skipped,
+            "failed": result.summary.failed,
+            "destination_account_ids": [
+                item.destination_account_id for item in result.results if item.destination_account_id
+            ],
+        },
+    )
+    return result
 
 
 @router.get("/{account_id}/trends", response_model=AccountTrendsResponse)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 
 import pytest
@@ -9,11 +10,56 @@ from starlette.datastructures import UploadFile
 import app.modules.accounts.api as accounts_api_module
 from app.core.auth.dependencies import require_dashboard_write_access
 from app.core.exceptions import DashboardPermissionError
+from app.core.utils.time import utcnow
+from app.db.models import Account, AccountStatus
+from app.db.session import SessionLocal
+from app.modules.accounts.repository import ACCOUNT_PENDING_DELETION_REASON
 from app.modules.accounts.schemas import AccountImportResponse
+
+from .test_account_opencode_auth_export import _encode_jwt
 
 pytestmark = pytest.mark.integration
 
 _MIB = 1024 * 1024
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workspace_field", ["workspace_id", "workspace_label"])
+@pytest.mark.parametrize("pending_deletion", [False, True])
+async def test_repeated_unicode_auth_json_import_reuses_slot(async_client, workspace_field, pending_deletion) -> None:
+    id_token = _encode_jwt(
+        {
+            "email": "Üser@example.com",
+            "chatgpt_account_id": "unicode-import",
+            workspace_field: "unicode-workspace",
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        }
+    )
+    auth = {
+        "tokens": {
+            "idToken": id_token,
+            "accessToken": _encode_jwt({"exp": 2_000_000_000}),
+            "refreshToken": "refresh-token",
+            "accountId": "unicode-import",
+        }
+    }
+    files = {"auth_json": ("auth.json", json.dumps(auth), "application/json")}
+    first = await async_client.post("/api/accounts/import", files=files)
+    assert first.status_code == 200
+    if pending_deletion:
+        async with SessionLocal() as session:
+            account = await session.get(Account, first.json()["accountId"])
+            assert account is not None
+            account.delete_requested_at = utcnow()
+            account.status = AccountStatus.DEACTIVATED
+            account.deactivation_reason = ACCOUNT_PENDING_DELETION_REASON
+            await session.commit()
+    second = await async_client.post("/api/accounts/import", files=files)
+    assert first.status_code == second.status_code == 200
+    assert first.json()["accountId"] == second.json()["accountId"]
+    accounts = (await async_client.get("/api/accounts")).json()["accounts"]
+    assert len(accounts) == 1
+    assert accounts[0]["accountId"] == first.json()["accountId"]
 
 
 class _NeverReadStream(AsyncByteStream):

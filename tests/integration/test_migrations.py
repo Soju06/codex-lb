@@ -2461,3 +2461,131 @@ async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgr
     assert indisvalid is True
     assert indexdef.endswith("(purge_at)")  # rebuilt on purge_at, not the accepted decoy on kind
     assert indexdef.startswith("CREATE INDEX ")  # non-unique, as the ORM declares it
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "parent_revision",
+    [
+        "20260830_010000_merge_accounts_email_index_and_quota_warmup_heads",
+        "20260908_000000_add_subscription_overflow",
+    ],
+)
+async def test_account_bundle_and_subscription_overflow_heads_upgrade_to_single_head(tmp_path, parent_revision):
+    from sqlalchemy import inspect as sa_inspect
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'bundle-overflow-merge.sqlite'}"
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+    assert result.current_revision == _HEAD_REVISION
+
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            revisions = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars().all()
+            assert revisions == [_HEAD_REVISION]
+            assert await conn.run_sync(lambda sync_conn: sa_inspect(sync_conn).has_table("model_source_pins"))
+            index_sql = (
+                await conn.execute(
+                    text("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_accounts_email_lower'")
+                )
+            ).scalar_one()
+            assert "lower(email)" in index_sql.lower()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_accounts_email_lower_index_migration_round_trips_and_serves_lookup(tmp_path):
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'accounts-email-lower-index.sqlite'}"
+    parent_revision = "20260828_000000_add_accounts_chatgpt_identity_index"
+    index_revision = "20260828_010000_add_accounts_email_lower_index"
+    index_name = "idx_accounts_email_lower"
+
+    async def _index_sql(engine) -> str | None:
+        async with engine.connect() as conn:
+            return (
+                await conn.execute(
+                    text("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = :index_name"),
+                    {"index_name": index_name},
+                )
+            ).scalar_one_or_none()
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert await _index_sql(engine) is None
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, index_revision, bootstrap_legacy=False))
+        index_sql = await _index_sql(engine)
+        assert index_sql is not None
+        assert "lower(email)" in index_sql.lower()
+
+        async with engine.connect() as conn:
+            query_plan = (
+                await conn.execute(
+                    text("EXPLAIN QUERY PLAN SELECT id FROM accounts WHERE lower(email) = 'bundle@example.invalid'")
+                )
+            ).all()
+        assert any(index_name in str(row) for row in query_plan)
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        assert await _index_sql(engine) is None
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert await _index_sql(engine) is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not _is_postgresql_database_url(_DATABASE_URL),
+    reason="PostgreSQL-only invalid normalized-email index repair test",
+)
+async def test_accounts_email_lower_index_migration_repairs_invalid_leftover_postgresql(db_setup):
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    parent_revision = "20260828_000000_add_accounts_chatgpt_identity_index"
+    index_name = "idx_accounts_email_lower"
+
+    await run_startup_migrations(_DATABASE_URL)
+    await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(_DATABASE_URL), parent_revision))
+
+    async with SessionLocal() as session:
+        await session.execute(text(f"CREATE INDEX {index_name} ON accounts (email)"))
+        await session.execute(
+            text("UPDATE pg_index SET indisvalid = false WHERE indexrelid = CAST(:name AS regclass)"),
+            {"name": index_name},
+        )
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    async with SessionLocal() as session:
+        indisvalid = (
+            await session.execute(
+                text(
+                    "SELECT i.indisvalid FROM pg_index i "
+                    "JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = :name"
+                ),
+                {"name": index_name},
+            )
+        ).scalar_one()
+        indexdef = (
+            await session.execute(
+                text("SELECT pg_get_indexdef(CAST(:name AS regclass))"),
+                {"name": index_name},
+            )
+        ).scalar_one()
+
+    assert indisvalid is True
+    assert "lower((email)::text)" in indexdef.lower()

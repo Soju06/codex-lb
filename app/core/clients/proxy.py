@@ -367,21 +367,6 @@ def _codex_route_transport_error_message(
     return codex_transport_error_message(operation, endpoint_id, exc)
 
 
-async def _call_with_service_circuit_breaker(
-    request: Awaitable[R],
-    *,
-    settings: Settings | None = None,
-    account_id: str | None = None,
-) -> R:
-    if not account_id:
-        return await request
-    effective_settings = settings or get_settings()
-    circuit_breaker = get_circuit_breaker_for_account(account_id, effective_settings)
-    if circuit_breaker is None:
-        return await request
-    return await circuit_breaker.call(request)
-
-
 @asynccontextmanager
 async def _service_circuit_breaker_context(
     cm: AsyncContextManager[aiohttp.ClientResponse],
@@ -1852,12 +1837,6 @@ async def _error_response_body(resp: ErrorResponse) -> tuple[object | None, str 
         return await resp.json(content_type=None), None
     except Exception:
         return None, await resp.text()
-
-
-def _error_archive_payload(data: object | None, text: str | None) -> object:
-    if data is not None:
-        return data
-    return {"text": text or ""}
 
 
 def _error_event_from_response_body(
@@ -3500,13 +3479,6 @@ def _parse_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Addres
         return None
 
 
-def _is_blocked_ip_literal(host: str) -> bool:
-    ip = _parse_ip_literal(host)
-    if ip is None:
-        return False
-    return _is_disallowed_ip(ip)
-
-
 async def _resolve_global_ips(host: str, *, timeout_seconds: float) -> list[str] | None:
     loop = asyncio.get_running_loop()
     try:
@@ -3539,11 +3511,6 @@ async def _resolve_global_ips(host: str, *, timeout_seconds: float) -> list[str]
         seen.add(normalized_ip)
         resolved_ips.append(normalized_ip)
     return resolved_ips or None
-
-
-async def _resolves_to_blocked_ip(host: str, *, timeout_seconds: float) -> bool:
-    resolved_ips = await _resolve_global_ips(host, timeout_seconds=timeout_seconds)
-    return resolved_ips is None
 
 
 def _is_disallowed_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:

@@ -857,11 +857,6 @@ def _priority_secondary_used(state: AccountState, primary_used: float | None = N
     return primary_used if primary_used is not None else _priority_primary_used(state)
 
 
-def _capacity_probe_sort_key(state: AccountState) -> tuple[float, float, float, float, str]:
-    secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
-    return (-_remaining_secondary_credits(state), secondary_used, primary_used, last_selected, account_id)
-
-
 def _relative_availability_divisor_seconds(state: AccountState, current: float) -> float:
     reset_at = state.priority_reset_at if state.priority_reset_at is not None else state.secondary_reset_at
     if reset_at is None:

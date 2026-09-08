@@ -128,22 +128,6 @@ _circuit_breaker: CircuitBreaker | None = None
 _account_circuit_breakers: dict[str, CircuitBreaker] = {}
 
 
-def get_circuit_breaker(settings: Settings | None = None) -> CircuitBreaker | None:
-    global _circuit_breaker
-
-    if settings is None:
-        return _circuit_breaker
-
-    enabled = getattr(settings, "circuit_breaker_enabled", False)
-    if enabled and _circuit_breaker is None:
-        _circuit_breaker = CircuitBreaker(
-            failure_threshold=_FAILURE_THRESHOLD,
-            recovery_timeout_seconds=_RECOVERY_TIMEOUT_SECONDS,
-        )
-
-    return _circuit_breaker if enabled else None
-
-
 def get_circuit_breaker_for_account(
     account_id: str,
     settings: Settings,

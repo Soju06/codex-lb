@@ -1220,7 +1220,6 @@ class _WebSocketRequestState:
     websocket_stream_lease: AccountLease | None = None
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
     thread_affinity_last_touch_at: float = field(default_factory=time.monotonic)
-    suppressed_downstream_tool_call: bool = False
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)

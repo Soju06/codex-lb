@@ -51,10 +51,6 @@ def log_bootstrap_token(logger: logging.Logger, token: str, *, reason: str = "fi
     )
 
 
-async def get_active_bootstrap_token() -> str | None:
-    return _get_manual_bootstrap_token()
-
-
 async def _get_shared_bootstrap_state() -> tuple[str | None, bytes | None, bytes | None]:
     async with SessionLocal() as session:
         settings = await DashboardAuthRepository(session).get_settings()

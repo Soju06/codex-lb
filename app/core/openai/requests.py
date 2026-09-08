@@ -160,28 +160,6 @@ def validate_tool_types(tools: list[JsonValue], *, allow_builtin_tools: bool = F
     return normalized_tools
 
 
-def _has_input_file_id(input_items: list[JsonValue]) -> bool:
-    for item in input_items:
-        if not is_json_mapping(item):
-            continue
-        item_mapping = item
-        if _is_input_file_with_id(item_mapping):
-            return True
-        content = item_mapping.get("content")
-        if is_json_list(content):
-            parts = content
-        elif is_json_mapping(content):
-            parts = [content]
-        else:
-            parts = []
-        for part in parts:
-            if not is_json_mapping(part):
-                continue
-            if _is_input_file_with_id(part):
-                return True
-    return False
-
-
 def _is_input_file_with_id(item: Mapping[str, JsonValue]) -> bool:
     if item.get("type") != "input_file":
         return False
@@ -461,11 +439,6 @@ def _split_responses_instruction_item_content(item: Mapping[str, JsonValue]) -> 
     if text is not None:
         return text, None
     return "", content
-
-
-def _responses_instruction_item_text(item: Mapping[str, JsonValue]) -> str:
-    instruction_text, _ = _split_responses_instruction_item_content(item)
-    return instruction_text
 
 
 def _responses_instruction_content_text(content: JsonValue) -> str | None:

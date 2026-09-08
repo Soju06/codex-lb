@@ -781,11 +781,3 @@ def _timings_from_responses_event(payload: Mapping[str, JsonValue]) -> SourceTim
     if timings is None:
         timings = _timings_from_payload(payload)
     return timings
-
-
-def _capture_stream_usage(chunk: bytes, usage_holder: SourceUsageHolder) -> None:
-    SourceStreamUsageParser(usage_holder, response_shape="chat").feed(chunk)
-
-
-def _capture_responses_stream_usage(chunk: bytes, usage_holder: SourceUsageHolder) -> None:
-    SourceStreamUsageParser(usage_holder, response_shape="responses").feed(chunk)

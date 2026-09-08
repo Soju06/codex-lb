@@ -4,7 +4,10 @@ import sqlalchemy as sa
 from alembic import context, op
 
 revision = "20260907_000000_add_account_usage_caps"
-down_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+down_revision = (
+    "20260908_000000_add_subscription_overflow",
+    "20260908_000000_replace_upstream_stream_transport_default_sentinel",
+)
 branch_labels = None
 depends_on = None
 

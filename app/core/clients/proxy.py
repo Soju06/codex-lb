@@ -29,7 +29,6 @@ from typing import (
     Protocol,
     Sequence,
     TypeAlias,
-    TypeVar,
     cast,
 )
 from urllib.parse import ParseResult, urlparse, urlunparse
@@ -330,8 +329,6 @@ _TRANSCRIBE_TOTAL_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = conte
     "transcribe_total_timeout_override",
     default=None,
 )
-
-R = TypeVar("R")
 
 
 @dataclass(slots=True)

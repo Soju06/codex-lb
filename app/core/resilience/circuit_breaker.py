@@ -124,7 +124,6 @@ def _is_server_error(exc: Exception) -> bool:
     return True
 
 
-_circuit_breaker: CircuitBreaker | None = None
 _account_circuit_breakers: dict[str, CircuitBreaker] = {}
 
 

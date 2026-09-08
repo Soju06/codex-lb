@@ -22,6 +22,7 @@ from app.core.utils.shared_future import (
     _await_cleanup_deferring_cancellation as _shared_await_cleanup_deferring_cancellation,
 )
 from app.core.utils.shared_future import _await_task_deferring_cancellation
+from app.core.utils.sse import extract_sse_data
 from app.db.models import ModelSource
 
 logger = logging.getLogger(__name__)
@@ -1226,30 +1227,33 @@ class SourceStreamUsageParser:
             self._capture_frame(tail)
 
     def _capture_frame(self, frame: str) -> None:
-        for line in frame.splitlines():
-            stripped = line.strip()
-            if not stripped.startswith("data:"):
-                continue
-            data = stripped.removeprefix("data:").strip()
-            if not data or data == "[DONE]":
-                continue
-            try:
-                parsed = json.loads(data)
-            except ValueError:
-                continue
-            if not isinstance(parsed, dict):
-                continue
-            if self._response_shape == "responses":
-                usage = _usage_from_responses_event(parsed)
-                timings = _timings_from_responses_event(parsed)
-                self._observe_responses_event(parsed)
-            else:
-                usage = _usage_from_chat_payload(parsed)
-                timings = _timings_from_payload(parsed)
-            if usage is not None:
-                self._usage_holder.usage = usage
-            if timings is not None:
-                self._usage_holder.timings = timings
+        # Join multi-line ``data:`` fields through the same reconstruction the
+        # public wrapper uses (``extract_sse_data`` -> ``parse_sse_data_json``),
+        # so the parser and the wrapper never disagree on the event inside one
+        # pipeline: a source that splits a data JSON across several ``data:``
+        # lines (legal SSE) must still set the holder observations the branch's
+        # billing and continuity decisions key on (I11), not parse only the
+        # first line into a ``ValueError`` and observe nothing.
+        data = extract_sse_data(frame)
+        if data is None:
+            return
+        try:
+            parsed = json.loads(data)
+        except ValueError:
+            return
+        if not isinstance(parsed, dict):
+            return
+        if self._response_shape == "responses":
+            usage = _usage_from_responses_event(parsed)
+            timings = _timings_from_responses_event(parsed)
+            self._observe_responses_event(parsed)
+        else:
+            usage = _usage_from_chat_payload(parsed)
+            timings = _timings_from_payload(parsed)
+        if usage is not None:
+            self._usage_holder.usage = usage
+        if timings is not None:
+            self._usage_holder.timings = timings
 
     def _observe_responses_event(self, event: Mapping[str, JsonValue]) -> None:
         """Record the frame observations the dispatch owner needs (design v3 §6).

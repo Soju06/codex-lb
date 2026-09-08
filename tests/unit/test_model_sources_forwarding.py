@@ -599,6 +599,54 @@ def test_chat_parser_does_not_observe_responses_frames() -> None:
     assert holder.delta_chars == 0
 
 
+def test_responses_parser_joins_multi_line_data_fields_like_the_wrapper() -> None:
+    """SSE allows a data JSON to be split across multiple ``data:`` lines (joined with newlines).
+
+    The usage parser must observe the joined event exactly as the public wrapper's
+    ``parse_sse_data_json`` reconstructs it; parsing each ``data:`` line independently silently
+    lost every holder observation for such a frame (codex review P2).
+    """
+
+    from app.core.utils.sse import parse_sse_data_json
+
+    block = (
+        b"event: response.output_item.added\n"
+        b'data: {"type": "response.output_item.added",\n'
+        b'data:  "output_index": 0}\n\n'
+    )
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="responses")
+    parser.feed(block)
+
+    assert holder.first_content_seen is True
+    assert holder.first_output_item_seen is True
+    assert parse_sse_data_json(block.decode()) == {"type": "response.output_item.added", "output_index": 0}
+
+
+def test_responses_parser_captures_usage_and_terminal_from_a_multi_line_completed_frame() -> None:
+    block = (
+        b"event: response.completed\n"
+        b'data: {"type": "response.completed",\n'
+        b'data:  "response": {"id": "resp_ml", "usage": {"input_tokens": 5, "output_tokens": 3}}}\n\n'
+    )
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="responses")
+    parser.feed(block)
+
+    assert holder.terminal_kind == "completed"
+    assert holder.usage == SourceUsage(input_tokens=5, output_tokens=3)
+    assert holder.response_id == "resp_ml"
+
+
+def test_chat_parser_joins_multi_line_data_fields_for_usage() -> None:
+    block = b'data: {\ndata: "usage": {"prompt_tokens": 6, "completion_tokens": 2}\ndata: }\n\n'
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="chat")
+    parser.feed(block)
+
+    assert holder.usage == SourceUsage(input_tokens=6, output_tokens=2)
+
+
 # -- constants ----------------------------------------------------------------
 
 

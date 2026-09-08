@@ -37,3 +37,4 @@
 - [x] 3.24 Normalize explicit required-tool parent IDs before continuation lookup; prove placeholder release before disconnect and completion before planned retirement for canonical and whitespace-padded IDs
 - [x] 3.25 Discard completed Astra input and request/replay bodies before idle retention; preserve effective configuration updates and prove later steering, required-tool continuations and accounting through the WebSocket route
 - [x] 3.26 Detach expired steering continuations through the existing bounded tombstone path; prove late-event suppression, current replacement ownership, same-parent retry, rotation and exactly-once accounting
+- [x] 3.27 Restrict steering snapshots to downstream WebSocket requests; verify HTTP bridge forwarding/completion and preserve direct steering configuration

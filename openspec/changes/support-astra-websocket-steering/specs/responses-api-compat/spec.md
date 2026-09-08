@@ -5,6 +5,15 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 
 Completed Astra parents retained for later steering SHALL discard historical input and serialized request/replay bodies while preserving the effective configuration needed for later steering and explicit tool continuations.
 
+Steering configuration snapshots SHALL be retained only for downstream Astra WebSocket requests. HTTP requests, including requests bridged to an upstream WebSocket, SHALL preserve their existing forwarded payload and accounting without retaining an additional steering snapshot.
+
+#### Scenario: HTTP Astra requests do not retain steering snapshots
+- **GIVEN** an HTTP Astra request is forwarded through the Responses WebSocket bridge
+- **WHEN** the proxy prepares its request state
+- **THEN** the request SHALL NOT retain an additional steering configuration snapshot
+- **AND** its input, response lifecycle and accounting SHALL remain unchanged
+- **AND** downstream Astra WebSocket requests SHALL continue retaining the configuration needed for steering
+
 #### Scenario: Steering creates an automatic successor
 - **GIVEN** an owned Astra response and accepted steering
 - **WHEN** the original response ends with incomplete reason steered and upstream automatically creates a successor

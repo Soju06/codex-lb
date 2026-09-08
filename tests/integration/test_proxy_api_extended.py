@@ -3483,11 +3483,18 @@ async def test_source_responses_stream_preserves_split_utf8_and_crlf(monkeypatch
 
 @pytest.mark.asyncio
 async def test_source_responses_normalize_error_still_settles_reservation(monkeypatch):
-    """Normalize early-return must not aclose settlement as client_disconnected."""
+    """Normalize early-return must not aclose settlement as client_disconnected.
+
+    The source ends with an ``error`` terminal the client receives as
+    ``response.failed``, so the outer reservation is disposed of exactly once
+    on the normal-completion path -- released, never charged and never
+    recorded as a client disconnect.
+    """
     from app.db.models import ModelSource
     from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsage, SourceUsageHolder
 
     settle_calls: list[object] = []
+    release_calls: list[object] = []
     log_statuses: list[str] = []
 
     async def error_then_completed_body():
@@ -3510,6 +3517,9 @@ async def test_source_responses_normalize_error_still_settles_reservation(monkey
         settle_calls.append(reservation)
         return True
 
+    async def record_release(reservation):
+        release_calls.append(reservation)
+
     async def record_log(*args, **kwargs):
         del args
         log_statuses.append(str(kwargs.get("status")))
@@ -3519,6 +3529,7 @@ async def test_source_responses_normalize_error_still_settles_reservation(monkey
     monkeypatch.setattr(proxy_api_module, "stream_source_responses", fake_stream_source_responses)
     monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", allow_request_limits)
     monkeypatch.setattr(proxy_api_module, "_settle_source_reservation", record_settle)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", record_release)
     monkeypatch.setattr(proxy_api_module, "_log_source_chat_completion", record_log)
     monkeypatch.setattr(proxy_api_module, "_reservation_requires_usage", lambda _reservation: False)
 
@@ -3558,7 +3569,10 @@ async def test_source_responses_normalize_error_still_settles_reservation(monkey
     assert "response.created" in joined
     assert "response.failed" in joined
     assert "resp_should_not_matter" not in joined
-    assert settle_calls, "normalize early-return must still settle the outer reservation"
+    # The client received a failure terminal: the reservation is released on the
+    # normal-completion path (never charged, never a client disconnect).
+    assert release_calls, "normalize early-return must still dispose of the outer reservation"
+    assert settle_calls == []
     assert "cancelled" not in log_statuses
 
 

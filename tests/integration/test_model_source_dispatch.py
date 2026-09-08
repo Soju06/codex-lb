@@ -999,6 +999,40 @@ async def test_source_failure_terminal_releases_the_limited_key(async_client, so
 
 
 @pytest.mark.asyncio
+async def test_clean_eof_without_a_terminal_is_recorded_as_truncated_and_released(
+    async_client, source_upstream
+) -> None:
+    """The source closes the body cleanly after content but before any terminal: the SDK client receives the
+    synthesized ``response.failed upstream_stream_truncated``, so the row is an error and nothing is charged."""
+
+    await _enable_api_key_auth(async_client)
+    state = _StubState()
+    base_url = await source_upstream(_sse_handler(state, before_hold=[_created(), _ITEM_ADDED, _DELTA]))
+    model = "dispatch-clean-eof"
+    source_id = await _create_model_source(
+        async_client, name=model, model=model, base_url=base_url, supports_responses=True
+    )
+    key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
+
+    async with async_client.stream(
+        "POST", "/v1/responses", headers={"Authorization": f"Bearer {key}"}, json=_request_body(model)
+    ) as response:
+        assert response.status_code == 200
+        text = "".join([chunk async for chunk in response.aiter_text()])
+
+    assert "response.output_text.delta" in text
+    assert "response.failed" in text and "upstream_stream_truncated" in text
+    assert "response.completed" not in text
+    reservations = await _reservations(key_id)
+    assert [reservation.status for reservation in reservations] == ["released"]
+    rows = await _source_rows(source_id)
+    assert [(row.status, row.error_code) for row in rows] == [("error", "model_source_stream_truncated")]
+    assert rows[0].input_tokens is None and rows[0].output_tokens is None
+    assert rows[0].request_id == "resp_dispatch_1"
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+@pytest.mark.asyncio
 async def test_unlimited_key_streams_live_without_a_settlement(async_client, source_upstream) -> None:
     await _enable_api_key_auth(async_client)
     state = _StubState()

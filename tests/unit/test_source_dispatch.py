@@ -318,7 +318,7 @@ async def test_finalize_transport_finishes_a_never_started_body_exactly_once(rec
 @pytest.mark.asyncio
 async def test_finalize_transport_after_a_completed_body_does_not_double_finish(recorder: _Recorder) -> None:
     owner = _owner(recorder, reservation=_reservation(limited=False))
-    holder = SourceUsageHolder(usage=SourceUsage(input_tokens=3, output_tokens=2))
+    holder = SourceUsageHolder(usage=SourceUsage(input_tokens=3, output_tokens=2), terminal_kind="completed")
     _attach_stream(owner, holder=holder)
 
     async def inner() -> AsyncIterator[str]:
@@ -759,6 +759,7 @@ async def test_settlement_stream_success_settles_from_the_holder(recorder: _Reco
     async def inner() -> AsyncIterator[str]:
         yield "data: one\n\n"
         holder.usage = SourceUsage(input_tokens=9, output_tokens=4)
+        holder.terminal_kind = "completed"
         yield "data: two\n\n"
 
     chunks = [chunk async for chunk in settlement_stream(owner, inner())]
@@ -889,6 +890,127 @@ async def test_settlement_stream_failure_terminal_releases_a_limited_key_instead
     assert recorder.rows[0]["error_code"] == "model_source_response_failed"
 
 
+_SYNTHESIZED_TRUNCATION = (
+    "event: response.failed\n"
+    'data: {"type":"response.failed","sequence_number":3,"response":{"id":"resp_upstream_stream_truncated",'
+    '"object":"response","status":"failed","error":{"code":"upstream_stream_truncated","message":"truncated"}}}\n\n'
+)
+_RELAYED_COMPLETED = (
+    "event: response.completed\n"
+    'data: {"type":"response.completed","response":{"id":"resp_big","status":"completed",'
+    '"output":[{"type":"message"}]}}\n\n'
+)
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_clean_eof_without_a_terminal_is_truncated_and_released(recorder: _Recorder) -> None:
+    """A source that closes after content but before any terminal delivered a failure (the wrapper synthesizes
+    ``response.failed upstream_stream_truncated``): the row is an error and a limited key is never charged."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True, delta_chars=400)
+    stream = _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        yield "event: response.output_text.delta\ndata: {}\n\n"
+        yield _SYNTHESIZED_TRUNCATION
+
+    chunks = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert len(chunks) == 3
+    assert holder.terminal_kind is None
+    assert recorder.settle_calls == []
+    assert recorder.release_calls == [owner.reservation]
+    assert stream.closed == 1
+    assert recorder.rows[0]["status"] == "error"
+    assert recorder.rows[0]["error_code"] == "model_source_stream_truncated"
+    assert recorder.rows[0]["input_tokens"] is None
+    assert owner.claims.released is True
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_relayed_success_terminal_the_parser_missed_settles_at_the_estimate(
+    recorder: _Recorder,
+) -> None:
+    """Decision 24: a success terminal that outgrew the parser's frame cap still reached the client."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True, delta_chars=8_000)
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        yield _RELAYED_COMPLETED
+
+    _ = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert holder.terminal_kind is None
+    assert recorder.release_calls == []
+    assert recorder.settle_calls[0]["usage"] == SourceUsage(
+        input_tokens=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS, output_tokens=2_048
+    )
+    assert recorder.rows[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_trailing_sentinel_and_keepalives_do_not_hide_the_relayed_terminal(
+    recorder: _Recorder,
+) -> None:
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True)
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield ": keepalive\n\n"
+        yield _RELAYED_COMPLETED
+        yield 'event: codex.keepalive\ndata: {"type":"codex.keepalive"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    _ = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert recorder.rows[0]["status"] == "success"
+    assert len(recorder.settle_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_unparseable_relayed_tail_without_a_terminal_is_truncated(recorder: _Recorder) -> None:
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder(first_content_seen=True)
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        yield 'data: {"type":"response.completed","response":{"id":"resp_bad"}\n\n'
+
+    _ = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert recorder.rows[0]["status"] == "error"
+    assert recorder.rows[0]["error_code"] == "model_source_stream_truncated"
+    assert recorder.release_calls == [owner.reservation]
+
+
+@pytest.mark.parametrize(
+    ("frame", "kind"),
+    [
+        ("event: response.completed\ndata: {}\n\n", "completed"),
+        ("event: response.incomplete\r\ndata: {}\r\n\r\n", "incomplete"),
+        ("event: response.failed\ndata: {}\n\n", "failed"),
+        ("event: error\ndata: {}\n\n", "error"),
+        ('data: {"type":"response.completed"}\n\n', "completed"),
+        ('data: {"type":"response.output_text.delta"}\n\n', None),
+        ("event: response.output_item.added\ndata: {}\n\n", None),
+        ("data: [DONE]\n\n", None),
+        (": keepalive\n\n", None),
+        ("data: not json\n\n", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_relayed_terminal_kind_table(frame: str | None, kind: str | None) -> None:
+    assert dispatch_module.relayed_terminal_kind(frame) == kind
+
+
 @pytest.mark.asyncio
 async def test_settlement_stream_unexpected_exception_is_a_stream_error(recorder: _Recorder) -> None:
     owner = _owner(recorder, reservation=_reservation())
@@ -1011,7 +1133,7 @@ async def test_settlement_stream_pin_failure_yields_exactly_the_pair_and_release
 async def test_settlement_stream_pin_written_flushes_withheld_frames(recorder: _Recorder) -> None:
     executor = _FakeExecutor("written")
     owner = _owner(recorder, reservation=_reservation(limited=False), pin_intent=_intent(), pin_executor=executor)
-    holder = SourceUsageHolder()
+    holder = SourceUsageHolder(terminal_kind="completed")
     _attach_stream(owner, holder=holder)
 
     async def inner() -> AsyncIterator[str]:
@@ -1055,7 +1177,7 @@ async def _run_response(
 @pytest.mark.asyncio
 async def test_streaming_response_completion_writes_exactly_one_row(recorder: _Recorder) -> None:
     owner = _owner(recorder, reservation=_reservation(limited=False))
-    holder = SourceUsageHolder(usage=SourceUsage(input_tokens=2, output_tokens=1))
+    holder = SourceUsageHolder(usage=SourceUsage(input_tokens=2, output_tokens=1), terminal_kind="completed")
     stream = _attach_stream(owner, holder=holder)
 
     async def inner() -> AsyncIterator[str]:

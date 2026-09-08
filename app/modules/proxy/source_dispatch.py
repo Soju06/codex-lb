@@ -30,7 +30,11 @@ at the source's usage and cost; ``success`` without usage on a limited key
 settles at an estimate (never at zero, never released); a cancel *after* the
 first output item on a limited key settles at the estimate (a key must not
 consume most of an answer and disconnect unmetered); a cancel before it, and
-every ``error``, release. Estimates are never written to the request-log row
+every ``error``, release. A stream the source ends with a failure terminal, or
+closes without any terminal the client could complete on, is an ``error``
+(``model_source_response_failed`` / ``model_source_stream_truncated``) and
+releases: the client received a failure, so nothing is charged. Estimates are
+never written to the request-log row
 as usage -- they are visible through the WARN line and the
 ``codex_lb_model_source_usage_estimated_total`` counter.
 
@@ -42,6 +46,7 @@ designation itself.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator, Coroutine, Mapping
 from dataclasses import dataclass, field
@@ -121,7 +126,20 @@ ERROR_MODEL_SOURCE_STREAM = "model_source_stream_error"
 # The source ended the stream with ``response.failed`` / ``error``: no answer was
 # delivered, so the attempt is an error and the reservation is released.
 ERROR_MODEL_SOURCE_RESPONSE_FAILED = "model_source_response_failed"
+# The source closed the stream without any terminal frame (the public wrapper
+# synthesizes ``response.failed`` for SDK clients): no answer was delivered.
+ERROR_MODEL_SOURCE_STREAM_TRUNCATED = "model_source_stream_truncated"
 _FAILURE_TERMINAL_KINDS = frozenset({"failed", "error"})
+_SUCCESS_TERMINAL_KINDS = frozenset({"completed", "incomplete"})
+_RELAYED_TERMINAL_KINDS: Mapping[str, str] = {
+    "response.completed": "completed",
+    "response.incomplete": "incomplete",
+    "response.failed": "failed",
+    "error": "error",
+}
+# Frames the settlement layer never takes as the stream's last event: SSE
+# comments (``: keepalive``), the ``[DONE]`` sentinel and the Codex keepalive.
+_NON_EVENT_FRAME_PREFIXES = ("data: [DONE]", "event: codex.keepalive")
 CANCELLED_CLIENT_DISCONNECTED = "client_disconnected"
 # The overflow decision (WP-C2) overrides these with its own codes; a pin
 # intent is never armed by direct routing, so they are unreachable in
@@ -184,6 +202,39 @@ class ClientDisconnectedDuringOpen(Exception):
         super().__init__(f"client disconnected after {pending_seconds:.3f}s (stall={stall})")
         self.pending_seconds = pending_seconds
         self.stall = stall
+
+
+def relayed_terminal_kind(frame: str | None) -> str | None:
+    """Terminal kind of the last event frame relayed to the client; ``None`` when it is not a terminal.
+
+    Read from the ``event:`` line the public wrapper frames every typed event
+    with, falling back to the ``data:`` JSON for a raw pass-through block. This
+    is the client-visible outcome: when the parser saw no terminal (the frame
+    outgrew its cap, or the source closed without one) it decides between a
+    delivered success and a truncated stream.
+    """
+
+    if not frame:
+        return None
+    if frame.startswith("event: "):
+        event_type = frame[7:].split("\n", 1)[0].rstrip("\r")
+        return _RELAYED_TERMINAL_KINDS.get(event_type)
+    for line in frame.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("data:"):
+            continue
+        data = stripped.removeprefix("data:").strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            parsed = json.loads(data)
+        except ValueError:
+            return None
+        if not isinstance(parsed, Mapping):
+            return None
+        event_type = parsed.get("type")
+        return _RELAYED_TERMINAL_KINDS.get(event_type) if isinstance(event_type, str) else None
+    return None
 
 
 def error_code_from_payload(payload: Mapping[str, JsonValue]) -> str | None:
@@ -800,19 +851,36 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
     error_message: str | None = None
     completed_normally = False
     timeout_phase: TimeoutPhase | None = None
+    last_event_frame: str | None = None
     owner.body_started = True
     try:
         async for chunk in wrapped:
+            if chunk and chunk[0] != ":" and not chunk.startswith(_NON_EVENT_FRAME_PREFIXES):
+                last_event_frame = chunk
             yield chunk
         completed_normally = True
         holder = owner.observe_stream()
-        if holder is not None and holder.terminal_kind in _FAILURE_TERMINAL_KINDS:
-            # The public wrapper relays a failure terminal and ends the stream
-            # normally; a limited key must not be charged (not even at the
-            # estimate) for an answer the source never produced.
-            status = "error"
-            error_code = ERROR_MODEL_SOURCE_RESPONSE_FAILED
-            error_message = f"source terminated the stream with response.{holder.terminal_kind}"
+        if holder is not None:
+            if holder.terminal_kind in _FAILURE_TERMINAL_KINDS:
+                # The public wrapper relays a failure terminal and ends the
+                # stream normally; a limited key must not be charged (not even
+                # at the estimate) for an answer the source never produced.
+                status = "error"
+                error_code = ERROR_MODEL_SOURCE_RESPONSE_FAILED
+                error_message = f"source terminated the stream with response.{holder.terminal_kind}"
+            elif (
+                holder.terminal_kind is None and relayed_terminal_kind(last_event_frame) not in _SUCCESS_TERMINAL_KINDS
+            ):
+                # The source closed without a terminal the parser could read
+                # and the client did not receive a success terminal either (the
+                # wrapper synthesized ``response.failed`` or relayed nothing
+                # usable): no answer was delivered, so this is an error and the
+                # reservation is released. A success terminal that only
+                # outgrew the parser's frame cap still reached the client and
+                # stays a success (settled at the estimate for a limited key).
+                status = "error"
+                error_code = ERROR_MODEL_SOURCE_STREAM_TRUNCATED
+                error_message = "source ended the stream without a terminal event"
     except (asyncio.CancelledError, GeneratorExit):
         status = "cancelled"
         error_code = CANCELLED_CLIENT_DISCONNECTED

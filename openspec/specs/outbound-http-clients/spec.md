@@ -713,6 +713,8 @@ responses and HTTP errors MUST retain raw body consumption. Ordinary SSE
 requests without the content-type-aware option MUST retain their existing
 framing behavior. A null native total timeout MUST mean no total deadline;
 positive explicit total, connection, and SSE idle limits MUST be preserved.
+The compact SSE idle limit MUST retain the existing Python policy: use the
+effective compact timeout when set, otherwise use `stream_idle_timeout_seconds`.
 
 #### Scenario: Compact success returns JSON
 
@@ -731,6 +733,12 @@ positive explicit total, connection, and SSE idle limits MUST be preserved.
 - **WHEN** compact succeeds with `text/event-stream+json` or a JSON Content-Type parameter containing `text/event-stream`
 - **THEN** native and missing-helper Python transports use raw-body JSON parsing
 - **AND** the SSE event byte limit does not apply to the JSON body
+
+#### Scenario: Explicit compact timeout preserves its idle budget
+
+- **WHEN** a compact request has an effective compact timeout longer than the ordinary stream idle timeout
+- **THEN** native and missing-helper Python transports permit a body-read gap within that compact timeout
+- **AND** the compact total deadline still bounds the complete request
 
 #### Scenario: Optional total timeout
 

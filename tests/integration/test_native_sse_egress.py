@@ -913,6 +913,33 @@ async def test_native_compact_preserves_idle_and_total_deadlines(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("missing_helper", [False, True])
+async def test_compact_explicit_timeout_preserves_dedicated_idle_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    native_worker: SubprocessNativeEgressClient,
+    tmp_path: Path,
+    routed: bool,
+    missing_helper: bool,
+) -> None:
+    worker = SubprocessNativeEgressClient(tmp_path / "missing-helper") if missing_helper else native_worker
+    monkeypatch.setattr(proxy_module.get_settings(), "upstream_compact_timeout_seconds", 1.0)
+    monkeypatch.setattr(proxy_module.get_settings(), "stream_idle_timeout_seconds", 0.05)
+
+    async def handler(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, _body: bytes) -> None:
+        await _start_chunked_response(writer)
+        await asyncio.sleep(0.15)
+        await _write_chunk(writer, _COMPACT_EVENTS)
+        await _finish_chunks(writer)
+
+    async with _serve_http(handler) as base_url, aiohttp.ClientSession(trust_env=False) as session:
+        response = await _compact(
+            base_url, worker, monkeypatch, routed=routed, session=session if missing_helper else None
+        )
+        assert response.id == "resp_compact"
+    assert not worker._streams
+
+
+@pytest.mark.asyncio
 async def test_native_compact_cancellation_closes_owned_resources_and_keeps_peer(
     monkeypatch: pytest.MonkeyPatch,
     native_worker: SubprocessNativeEgressClient,

@@ -5776,8 +5776,10 @@ cancellation MUST NOT replay a dispatched POST or switch its proxy endpoint.
 
 ### Requirement: Native compact Responses preserve terminal and ownership contracts
 
-Direct and account-routed compact requests MUST use native SSE framing when
-the helper has negotiated `http_compact_sse_v1`. Python MUST retain request shaping, output collection,
+Direct and account-routed compact requests MUST use native transport when the
+helper has negotiated `http_compact_sse_v1`. Native SSE framing MUST apply only
+to successful responses selected by the outbound HTTP Content-Type rule; other
+responses MUST retain raw body handling. Python MUST retain request shaping, output collection,
 compact normalization, terminal error mapping, archives, routing, and settlement.
 Responses MUST remain open until consumption finishes, and owned responses and
 routed sessions MUST close on completion, failure, and cancellation. Missing

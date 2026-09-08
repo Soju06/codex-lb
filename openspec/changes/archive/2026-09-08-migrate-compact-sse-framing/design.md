@@ -33,3 +33,9 @@ that event after leaving the cancellation select, because stdout flush can
 yield after the event is already visible to the parent process. Prioritizing
 the execution future alone does not prevent a cancellation from interrupting
 that flush and emitting a second terminal during stdin EOF shutdown.
+
+Compact retains its existing dedicated read budget: when an effective compact
+timeout is set, it also supplies the SSE idle timeout; otherwise the ordinary
+stream idle timeout applies. The transport still enforces the total deadline
+independently across the entire request. Imposing the ordinary stream idle
+limit on compact with an explicit budget would change the pre-migration behavior.

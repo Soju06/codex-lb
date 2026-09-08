@@ -39,7 +39,7 @@ python -m pytest -q --timeout=30 \
   tests/unit/test_codex_upstream_paths.py tests/unit/test_native_egress_packaging.py \
   tests/unit/test_native_sse_fixtures.py tests/unit/test_sse.py \
   tests/integration/test_native_sse_egress.py tests/integration/test_native_routed_egress.py
-# 284 passed (including the 8 media-type regressions added during review)
+# 288 passed (including 8 media-type and 4 compact idle-budget regressions)
 
 python -m pytest -q --timeout=30 tests/unit/test_proxy_utils.py \
   tests/integration/test_proxy_responses.py -k compact
@@ -79,7 +79,15 @@ cases failed before the fix: `text/event-stream+json` and a JSON media-type
 parameter containing `text/event-stream`, across native/missing-helper and
 direct/routed transports. Exact media-type comparison and content-type-independent
 compact JSON decoding now preserve all eight payloads without SSE scanning or
-event byte limits. The final 284-test native/client suite, 111 compact tests,
+event byte limits. The final 288-test native/client suite, 111 compact tests,
 `make rust-check`, Ruff/Ty, architecture checks, and strict specs all passed.
 Both compact requirements now explicitly require negotiated capability support;
 missing helpers may fall back, while incompatible installed helpers fail closed.
+
+Four additional direct/routed, native/missing-helper cases verify the existing
+compact idle-budget policy: a configured 1-second compact timeout permits a
+150-ms upstream body gap even when the ordinary stream idle timeout is 50 ms.
+The pre-migration Python implementation uses the same compact-timeout-first
+rule. The compact native integration subset passed 46 tests, and the complete
+288-test native/client suite passed against main including #2166. No runtime
+timeout or upstream scheme policy changed in response to those review notes.

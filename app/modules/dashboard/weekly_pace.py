@@ -44,6 +44,7 @@ PACE_ELIGIBLE_ACCOUNT_STATUSES = frozenset(
 class _PaceAccount:
     account_id: str
     full_credits: float
+    provider_full_credits: float
     remaining_credits: float
     reset_at_ms: float
     window_ms: float
@@ -122,7 +123,11 @@ def build_weekly_credit_pace(
             stale_account_count += 1
             continue
 
-        full_credits, actual_remaining_credits, effective_reset_at_ms, window_ms = timing
+        provider_full_credits, provider_remaining_credits, effective_reset_at_ms, window_ms = timing
+        cap_percent = account.usage_cap_weekly_percent
+        full_credits = provider_full_credits if cap_percent is None else provider_full_credits * cap_percent / 100.0
+        reserved_credits = provider_full_credits - full_credits
+        actual_remaining_credits = max(0.0, provider_remaining_credits - reserved_credits)
         used_schedule_fraction = _used_schedule_fraction(
             reset_at_ms=effective_reset_at_ms,
             window_ms=window_ms,
@@ -130,13 +135,17 @@ def build_weekly_credit_pace(
             working_days=working_days,
         )
         expected_remaining_credits = full_credits * (1.0 - used_schedule_fraction)
-        account_rate = _recent_burn_rate_credits_per_hour(rows, full_credits, now)
-        smoothed_remaining_credits = _smoothed_remaining_credits(
-            rows=rows,
-            full_credits=full_credits,
-            current_remaining_credits=actual_remaining_credits,
-            now=now,
-            smoothing_window_minutes=smoothing_window_minutes,
+        account_rate = _recent_burn_rate_credits_per_hour(rows, provider_full_credits, now)
+        smoothed_remaining_credits = max(
+            0.0,
+            _smoothed_remaining_credits(
+                rows=rows,
+                full_credits=provider_full_credits,
+                current_remaining_credits=provider_remaining_credits,
+                now=now,
+                smoothing_window_minutes=smoothing_window_minutes,
+            )
+            - reserved_credits,
         )
 
         total_full_credits += full_credits
@@ -156,6 +165,7 @@ def build_weekly_credit_pace(
             _PaceAccount(
                 account_id=summary.account_id,
                 full_credits=full_credits,
+                provider_full_credits=provider_full_credits,
                 remaining_credits=actual_remaining_credits,
                 reset_at_ms=effective_reset_at_ms,
                 window_ms=window_ms,
@@ -295,7 +305,7 @@ def _fleet_recent_burn_rate_credits_per_hour(
         for previous, current in zip(rows, rows[1:]):
             delta_percent = current.used_percent - previous.used_percent
             if delta_percent > 0:
-                total_burn_credits += account.full_credits * delta_percent / 100.0
+                total_burn_credits += account.provider_full_credits * delta_percent / 100.0
 
     if not considered_recorded_at:
         return None

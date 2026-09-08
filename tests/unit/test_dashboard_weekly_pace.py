@@ -16,8 +16,8 @@ from app.modules.dashboard.weekly_pace import PRO_WEEKLY_CAPACITY_CREDITS, build
 NOW = datetime(2026, 8, 17, 12, 0, 0)
 
 
-def _account(account_id: str) -> Account:
-    return Account(id=account_id, status=AccountStatus.ACTIVE)
+def _account(account_id: str, *, weekly_cap: int | None = None) -> Account:
+    return Account(id=account_id, status=AccountStatus.ACTIVE, usage_cap_weekly_percent=weekly_cap)
 
 
 def _summary(
@@ -71,7 +71,7 @@ def _build(
     trailing_demand_used_percent_by_account: dict[str, float] | None = None,
 ):
     pace = build_weekly_credit_pace(
-        accounts=[_account(summary.account_id) for summary in summaries],
+        accounts=[_account(summary.account_id, weekly_cap=summary.usage_cap_weekly_percent) for summary in summaries],
         account_summaries=summaries,
         secondary_history=histories,
         now=NOW,
@@ -107,6 +107,22 @@ def test_weekly_pace_verdict_branches_and_legacy_status_mapping(
     assert pace.status == legacy_status
     assert pace.burn_rate_recent_credits_per_hour is not None
     assert pace.depletion_eta_hours is not None
+
+
+def test_weekly_pace_rebases_runway_onto_capped_capacity() -> None:
+    summary = _summary("acc-capped", used_percent=60.0, reset_in_hours=5.0, capacity=100_000).model_copy(
+        update={"usage_cap_weekly_percent": 80}
+    )
+    pace = _build(
+        [summary],
+        {"acc-capped": _three_hour_history("acc-capped", final_used_percent=60.0, hourly_delta=5.0)},
+    )
+
+    assert pace.total_full_credits == 80_000
+    assert pace.total_actual_remaining_credits == 20_000
+    assert pace.headroom_credits == 20_000
+    assert pace.headroom_percent == 25
+    assert pace.reset_events[0].credits_returned == 60_000
 
 
 def test_weekly_pace_relief_clusters_resets_within_one_hour() -> None:

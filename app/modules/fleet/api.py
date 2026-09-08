@@ -18,7 +18,7 @@ from app.modules.api_keys.service import ApiKeyData
 from app.modules.fleet.mappers import build_fleet_account_summaries
 from app.modules.fleet.observability import build_fleet_observability
 from app.modules.fleet.schemas import FleetObservabilityResponse, FleetRefreshResponse, FleetSummaryResponse
-from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.account_cache import refresh_usage_cap_caches_after_write
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater
@@ -136,7 +136,7 @@ async def _refresh_fleet_usage_with_owned_session(visible_account_ids: list[str]
         ).refresh_accounts(eligible_accounts, latest_primary, own_singleflight_sessions=True)
         if usage_written:
             await get_rate_limit_headers_cache().invalidate()
-            get_account_selection_cache().invalidate()
+            await refresh_usage_cap_caches_after_write()
         return FleetRefreshResponse(
             usage_written=usage_written,
             account_count=len(accounts),

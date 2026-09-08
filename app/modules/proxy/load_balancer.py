@@ -244,6 +244,7 @@ class _SelectionInputs(SelectionInputsProtocol):
     persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
     quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
+    usage_cap_filtered_account_ids: frozenset[str] = frozenset()
 
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]:
@@ -617,7 +618,10 @@ class LoadBalancer:
                 authorized_accounts = [
                     account for account in selection_inputs.accounts if bool(account.security_work_authorized)
                 ]
-                if selection_inputs.accounts and not authorized_accounts:
+                pre_cap_account_ids = {account.id for account in selection_inputs.accounts} | set(
+                    selection_inputs.usage_cap_filtered_account_ids
+                )
+                if pre_cap_account_ids and not (pre_cap_account_ids & security_authorized_account_ids):
                     return _SelectionInputs(
                         accounts=[],
                         latest_primary={},
@@ -648,9 +652,17 @@ class LoadBalancer:
                     quota_admitted_catalog_omission_account_ids=(
                         selection_inputs.quota_admitted_catalog_omission_account_ids
                     ),
+                    usage_cap_filtered_account_ids=selection_inputs.usage_cap_filtered_account_ids,
                 )
             if excluded_ids and selection_inputs.accounts:
                 filtered_accounts = [account for account in selection_inputs.accounts if account.id not in excluded_ids]
+                if not filtered_accounts and selection_inputs.usage_cap_filtered_account_ids - excluded_ids:
+                    return replace(
+                        selection_inputs,
+                        accounts=[],
+                        error_message="Account usage cap reached",
+                        error_code="account_usage_cap_reached",
+                    )
                 if require_security_work_authorized and not filtered_accounts:
                     return _SelectionInputs(
                         accounts=[],
@@ -686,6 +698,7 @@ class LoadBalancer:
                     quota_admitted_catalog_omission_account_ids=(
                         selection_inputs.quota_admitted_catalog_omission_account_ids
                     ),
+                    usage_cap_filtered_account_ids=selection_inputs.usage_cap_filtered_account_ids,
                 )
             if required_continuity_owner:
                 assert required_account_id is not None
@@ -1322,7 +1335,7 @@ class LoadBalancer:
                 return selection_inputs
             standard_latest_primary = await repos.usage.latest_by_account()
             standard_latest_secondary = await repos.usage.latest_by_account(window="secondary")
-            accounts, all_usage_capped = filter_accounts_by_usage_caps(
+            accounts, usage_cap_filtered_account_ids = filter_accounts_by_usage_caps(
                 accounts, standard_latest_primary, standard_latest_secondary, now=self._clock.time()
             )
             latest_monthly = await repos.usage.latest_by_account(window="monthly")
@@ -1374,8 +1387,11 @@ class LoadBalancer:
                 persist_standard_quota_status=True,
                 routing_policy_override=routing_policy_override,
                 quota_admitted_catalog_omission_account_ids=quota_admitted_catalog_omission_account_ids,
-                error_message="Account usage cap reached" if all_usage_capped else None,
-                error_code="account_usage_cap_reached" if all_usage_capped else None,
+                usage_cap_filtered_account_ids=usage_cap_filtered_account_ids,
+                error_message="Account usage cap reached"
+                if accounts == [] and usage_cap_filtered_account_ids
+                else None,
+                error_code="account_usage_cap_reached" if accounts == [] and usage_cap_filtered_account_ids else None,
             )
             await self._selection_inputs_cache.set(
                 _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
@@ -2993,6 +3009,7 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         quota_admitted_catalog_omission_account_ids=frozenset(
             selection_inputs.quota_admitted_catalog_omission_account_ids
         ),
+        usage_cap_filtered_account_ids=frozenset(selection_inputs.usage_cap_filtered_account_ids),
     )
 
 

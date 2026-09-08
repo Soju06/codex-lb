@@ -110,6 +110,30 @@ async def test_all_fresh_candidates_capped_returns_typed_local_overload(db_setup
 
 
 @pytest.mark.asyncio
+async def test_retry_exclusion_preserves_cap_error(db_setup):
+    await _seed(primary=80)
+
+    selection = await LoadBalancer(_repos).select_account(exclude_account_ids={"fallback"})
+
+    assert selection.account is None
+    assert selection.error_code == "account_usage_cap_reached"
+
+
+@pytest.mark.asyncio
+async def test_trusted_access_error_precedes_cap_error(db_setup):
+    await _seed(primary=80)
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == "fallback").values(status=AccountStatus.PAUSED))
+        await session.commit()
+    get_account_selection_cache().invalidate()
+
+    selection = await LoadBalancer(_repos).select_account(require_security_work_authorized=True)
+
+    assert selection.account is None
+    assert selection.error_code == "no_security_work_authorized_accounts"
+
+
+@pytest.mark.asyncio
 async def test_caps_recover_only_after_both_windows_reset(db_setup):
     await _seed(primary=80, weekly=50)
     balancer = LoadBalancer(_repos)

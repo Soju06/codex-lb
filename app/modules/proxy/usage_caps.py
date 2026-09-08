@@ -52,11 +52,11 @@ def filter_accounts_by_usage_caps(
     secondary: Mapping[str, UsageHistory],
     *,
     now: float,
-) -> tuple[list[Account], bool]:
-    """Return cap-eligible accounts and whether caps removed the entire pool."""
-    available = [
-        account
+) -> tuple[list[Account], frozenset[str]]:
+    """Return cap-eligible accounts and the account IDs removed by caps."""
+    capped_ids = frozenset(
+        account.id
         for account in accounts
-        if not reached_usage_cap_resets(account, primary.get(account.id), secondary.get(account.id), now=now)
-    ]
-    return available, bool(accounts and not available)
+        if reached_usage_cap_resets(account, primary.get(account.id), secondary.get(account.id), now=now)
+    )
+    return [account for account in accounts if account.id not in capped_ids], capped_ids

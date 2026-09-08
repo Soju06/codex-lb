@@ -799,33 +799,6 @@ export function buildWeeklyCreditPace(
   };
 }
 
-export function mergeCapAdjustedWeeklyCreditPace(
-  server: ServerWeeklyCreditPace,
-  adjusted: ServerWeeklyCreditPace,
-): ServerWeeklyCreditPace {
-  const totalExpectedRemainingCredits =
-    adjusted.totalFullCredits * (1 - server.scheduledUsedPercent / 100);
-  const deltaPercent = adjusted.actualUsedPercent - server.scheduledUsedPercent;
-  const scheduleGapCredits = Math.max(
-    0,
-    totalExpectedRemainingCredits - adjusted.totalActualRemainingCredits,
-  );
-  return {
-    ...server,
-    ...adjusted,
-    totalExpectedRemainingCredits,
-    scheduledUsedPercent: server.scheduledUsedPercent,
-    deltaPercent,
-    scheduleGapCredits,
-    overPlanCredits: scheduleGapCredits,
-    smoothedDeltaPercent: server.smoothedDeltaPercent,
-    smoothedScheduleGapCredits: server.smoothedScheduleGapCredits,
-    paceGapSmoothingMinutes: server.paceGapSmoothingMinutes,
-    staleAccountCount: server.staleAccountCount,
-    inactiveAccountCount: server.inactiveAccountCount,
-    confidence: server.confidence,
-  };
-}
 
 export function buildDashboardView(
   overview: DashboardOverview,
@@ -954,14 +927,8 @@ export function buildDashboardView(
   );
   const secondaryFullCapacity = overview.summary.secondaryWindow?.capacityCredits ?? 0;
   const secondaryCapacityTotal = usableCapacityTotal(secondaryFullCapacity, overview.accounts, "secondary");
-  const serverWeeklyCreditPace = overview.weeklyCreditPace ?? projections?.weeklyCreditPace;
-  const adjustedWeeklyCreditPace = buildWeeklyCreditPace(overview.accounts);
   const weeklyCreditPace =
-    overview.accounts.some((account) => account.usageCapWeeklyPercent != null) &&
-    serverWeeklyCreditPace &&
-    adjustedWeeklyCreditPace
-      ? mergeCapAdjustedWeeklyCreditPace(serverWeeklyCreditPace, adjustedWeeklyCreditPace)
-      : serverWeeklyCreditPace ?? adjustedWeeklyCreditPace;
+    overview.weeklyCreditPace ?? projections?.weeklyCreditPace ?? buildWeeklyCreditPace(overview.accounts);
 
   return {
     stats,

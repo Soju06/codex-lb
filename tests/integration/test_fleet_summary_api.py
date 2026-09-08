@@ -1099,9 +1099,8 @@ async def test_fleet_refresh_uses_route_local_usage_updater_and_invalidates_on_w
         async def invalidate(self):
             invalidations.append("rate_limit_headers")
 
-    class FakeAccountSelectionCache:
-        def invalidate(self):
-            invalidations.append("account_selection")
+    async def refresh_usage_cap_caches_after_write():
+        invalidations.append("account_selection")
 
     @asynccontextmanager
     async def recording_background_session():
@@ -1116,8 +1115,8 @@ async def test_fleet_refresh_uses_route_local_usage_updater_and_invalidates_on_w
         lambda: FakeRateLimitHeadersCache(),
     )
     monkeypatch.setattr(
-        "app.modules.fleet.api.get_account_selection_cache",
-        lambda: FakeAccountSelectionCache(),
+        "app.modules.fleet.api.refresh_usage_cap_caches_after_write",
+        refresh_usage_cap_caches_after_write,
     )
 
     headers = {"Authorization": f"Bearer {plain_key}"}
@@ -1258,9 +1257,8 @@ async def test_fleet_refresh_owns_session_until_shielded_refresh_finishes(db_set
         async def invalidate(self):
             invalidations.append("rate_limit_headers")
 
-    class FakeAccountSelectionCache:
-        def invalidate(self):
-            invalidations.append("account_selection")
+    async def refresh_usage_cap_caches_after_write():
+        invalidations.append("account_selection")
 
     @asynccontextmanager
     async def recording_background_session():
@@ -1273,7 +1271,7 @@ async def test_fleet_refresh_owns_session_until_shielded_refresh_finishes(db_set
     monkeypatch.setattr(fleet_api, "get_background_session", recording_background_session)
     monkeypatch.setattr(fleet_api, "UsageUpdater", FakeUsageUpdater)
     monkeypatch.setattr(fleet_api, "get_rate_limit_headers_cache", lambda: FakeRateLimitHeadersCache())
-    monkeypatch.setattr(fleet_api, "get_account_selection_cache", lambda: FakeAccountSelectionCache())
+    monkeypatch.setattr(fleet_api, "refresh_usage_cap_caches_after_write", refresh_usage_cap_caches_after_write)
 
     request_task = asyncio.create_task(
         fleet_api.refresh_fleet_usage(

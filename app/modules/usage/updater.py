@@ -32,7 +32,11 @@ from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
 from app.modules.accounts.background_repository import BackgroundAccountsRepository
-from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.account_cache import (
+    get_account_selection_cache,
+    mark_account_routing_unavailable,
+    refresh_usage_cap_caches_after_write,
+)
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.plan_downgrade_observations import (
@@ -1024,11 +1028,7 @@ async def _run_requested_refresh(account_id: str) -> None:
         _last_successful_refresh[account_id] = utcnow()
         _clear_usage_refresh_auth_cooldown(account_id)
     if result.usage_written:
-        # ``mark_rate_limit`` invalidated the selection cache before this row
-        # existed, so a selection in between repopulated it without usage
-        # evidence. Drop that entry now instead of letting the >= 100 % row
-        # wait out the cache TTL before the pool reports exhaustion.
-        get_account_selection_cache().invalidate()
+        await refresh_usage_cap_caches_after_write()
 
 
 def build_background_usage_updater() -> UsageUpdater:

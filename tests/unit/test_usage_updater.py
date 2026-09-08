@@ -5517,13 +5517,17 @@ async def test_requested_refresh_invalidates_selection_cache_only_when_usage_wri
     stored_account = _make_account("acc_request_cache", "workspace_request_cache")
     lookups: list[str] = []
     _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
-    invalidations: list[bool] = []
+    invalidations = 0
 
-    class SelectionCache:
-        def invalidate(self, *, propagate: bool = True) -> None:
-            invalidations.append(propagate)
+    async def refresh_usage_cap_caches_after_write() -> None:
+        nonlocal invalidations
+        invalidations += 1
 
-    monkeypatch.setattr(usage_updater_module, "get_account_selection_cache", SelectionCache)
+    monkeypatch.setattr(
+        usage_updater_module,
+        "refresh_usage_cap_caches_after_write",
+        refresh_usage_cap_caches_after_write,
+    )
 
     async def fake_refresh_account(
         self: UsageUpdater,
@@ -5541,7 +5545,7 @@ async def test_requested_refresh_invalidates_selection_cache_only_when_usage_wri
 
     await usage_updater_module._run_requested_refresh(stored_account.id)
 
-    assert invalidations == [True] * expected_invalidations
+    assert invalidations == expected_invalidations
 
 
 @pytest.mark.asyncio
@@ -5554,12 +5558,15 @@ async def test_requested_refresh_invalidates_selection_cache_after_joined_schedu
     _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
     invalidations = 0
 
-    class SelectionCache:
-        def invalidate(self, *, propagate: bool = True) -> None:
-            nonlocal invalidations
-            invalidations += 1
+    async def refresh_usage_cap_caches_after_write() -> None:
+        nonlocal invalidations
+        invalidations += 1
 
-    monkeypatch.setattr(usage_updater_module, "get_account_selection_cache", SelectionCache)
+    monkeypatch.setattr(
+        usage_updater_module,
+        "refresh_usage_cap_caches_after_write",
+        refresh_usage_cap_caches_after_write,
+    )
     release = asyncio.Event()
 
     async def scheduler_factory() -> usage_updater_module.AccountRefreshResult:

@@ -155,6 +155,11 @@ class AccountState:
     priority_used_percent: float | None = None
     priority_secondary_used_percent: float | None = None
     priority_reset_at: int | None = None
+
+    @property
+    def blocks_routing(self) -> bool:
+        return self.status == AccountStatus.DEACTIVATED or reauth_reason_blocks_routing(self.deactivation_reason)
+
     priority_capacity_credits: float | None = None
     limit_scoped_usage: bool = False
     access_token_expires_at: float | None = None

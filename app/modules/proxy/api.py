@@ -209,6 +209,7 @@ from app.modules.model_sources.catalog import (
 )
 from app.modules.model_sources.forwarding import (
     ModelSourceForwardingError,
+    SourceResponsesCompletion,
     SourceTimings,
     SourceUsage,
     SourceUsageHolder,
@@ -229,6 +230,7 @@ from app.modules.model_sources.forwarding import (
 from app.modules.model_sources.forwarding import (
     stream_responses as stream_source_responses,
 )
+from app.modules.model_sources.projection import strip_source_telemetry
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.selection import (
     allowed_source_ids_for_api_key,
@@ -312,6 +314,18 @@ from app.modules.proxy.schemas import (
     WarmupSubmittedAccount,
 )
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
+from app.modules.proxy.source_admission import try_claim as try_claim_source_admission
+from app.modules.proxy.source_dispatch import (
+    ABANDON_CLIENT_DISCONNECTED_DURING_OPEN,
+    ABANDON_DISPATCH_INTERRUPTED,
+    ABANDON_SOURCE_STALL,
+    CANCELLED_CLIENT_DISCONNECTED,
+    ClientDisconnectedDuringOpen,
+    SourceDispatch,
+    SourceStreamingResponse,
+    open_with_disconnect_watch,
+    settlement_stream,
+)
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
     RateLimitResetCreditsData,
@@ -1202,6 +1216,7 @@ async def responses(
             pre_normalization_effort=pre_normalization_effort,
             enforce_openai_sdk_contract=openai_sdk_request,
             native_codex_heartbeat=native_codex_heartbeat,
+            context=context,
         )
 
     apply_enforced_service_tier_model_fallback(
@@ -1406,6 +1421,7 @@ async def v1_responses(
             api_key=api_key,
             rate_limit_headers=rate_limit_headers,
             pre_normalization_effort=pre_normalization_effort,
+            context=context,
         )
     apply_enforced_service_tier_model_fallback(
         responses_payload,
@@ -4966,7 +4982,18 @@ async def _source_responses_response(
     pre_normalization_effort: str | None,
     enforce_openai_sdk_contract: bool = True,
     native_codex_heartbeat: bool = False,
+    context: ProxyContext | None = None,
 ) -> Response:
+    """Serve a Responses request from an OpenAI-compatible model source.
+
+    Every dispatched attempt is owned by one ``SourceDispatch`` (design v3 §6):
+    the bulkhead claim is taken before the API-key reservation so a saturated
+    source answers ``503 model_source_busy`` with nothing owned, the source open
+    is raced against the client disconnecting, and the settlement generator is
+    the outermost body layer for limited and unlimited keys alike (live
+    streaming; limited keys settle at an estimate when usage is missing).
+    """
+
     preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(request.headers)
     # This is the first point where the request is known to be served by a
     # model source rather than a subscription account, so it is the only place
@@ -4976,13 +5003,106 @@ async def _source_responses_response(
         source,
         pre_normalization_effort=pre_normalization_effort,
     )
-    reservation = await _enforce_request_limits(
-        api_key,
-        request_model=payload.model,
-        request_service_tier=payload.service_tier,
-        request_usage_budget=estimate_api_key_request_usage(payload),
+    claims = try_claim_source_admission(source)
+    if claims is None:
+        return _logged_error_json_response(
+            request,
+            503,
+            _model_source_busy_error(),
+            headers={**rate_limit_headers, "Retry-After": "1"},
+        )
+    admission_budget = estimate_api_key_request_usage(payload)
+    try:
+        reservation = await _enforce_request_limits(
+            api_key,
+            request_model=payload.model,
+            request_service_tier=payload.service_tier,
+            request_usage_budget=admission_budget,
+        )
+        owner = SourceDispatch(
+            request=request,
+            source=source,
+            model=payload.model,
+            api_key=api_key,
+            reservation=reservation,
+            claims=claims,
+            admission_budget=admission_budget,
+            requested_service_tier=payload.service_tier,
+            cleanup_scheduler=_responses_cleanup_scheduler(context.service) if context is not None else None,
+            scheduler=scheduler_for(context.service) if context is not None else REAL_SCHEDULER,
+            clock=clock_for(context.service) if context is not None else REAL_CLOCK,
+            settle_reservation=_settle_source_reservation,
+            release_reservation=_release_reservation,
+        )
+        claims.transfer_to(owner)
+    except BaseException:
+        claims.release_if_unowned()
+        raise
+    try:
+        source_payload = _shape_source_responses_payload(payload, source, api_key=api_key)
+        if payload.stream:
+            await open_with_disconnect_watch(request, owner, _open_owned_source_stream(owner, source_payload))
+            stream = owner.stream
+            if stream is None:
+                raise RuntimeError("model source open completed without assigning the stream")
+            body = settlement_stream(
+                owner,
+                _wrap_source_responses_public_stream(
+                    stream.body,
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    native_codex_heartbeat=native_codex_heartbeat,
+                    preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
+                ),
+            )
+            return SourceStreamingResponse(
+                body,
+                owner=owner,
+                headers={
+                    "Cache-Control": "no-cache, no-transform",
+                    "X-Accel-Buffering": "no",
+                    **rate_limit_headers,
+                },
+            )
+        result = await open_with_disconnect_watch(request, owner, forward_source_responses(source, source_payload))
+        return await _finish_non_stream_source_dispatch(request, owner, result, rate_limit_headers=rate_limit_headers)
+    except ModelSourceForwardingError as exc:
+        await owner.finish_with_forwarding_error(exc)
+        return _logged_error_json_response(
+            request,
+            exc.status_code,
+            exc.payload,
+            headers=_source_error_response_headers(rate_limit_headers, exc),
+        )
+    except ClientDisconnectedDuringOpen as exc:
+        await owner.abandon(ABANDON_SOURCE_STALL if exc.stall else ABANDON_CLIENT_DISCONNECTED_DURING_OPEN)
+        return Response()
+    except BaseException:
+        await owner.abandon(ABANDON_DISPATCH_INTERRUPTED)
+        raise
+
+
+async def _open_owned_source_stream(owner: SourceDispatch, source_payload: dict[str, JsonValue]) -> None:
+    """Open the source stream for ``owner``; assigning ``owner.stream`` is the coroutine's last statement."""
+
+    stream = await stream_source_responses(
+        owner.source,
+        source_payload,
+        on_first_content=owner.on_first_content if owner.pin_intent is not None else None,
+        scheduler=owner.scheduler,
+        clock=owner.clock,
     )
-    source_payload = payload.model_dump_for_forwarding()
+    owner.stream = stream
+
+
+def _shape_source_responses_payload(
+    payload: ResponsesRequest,
+    source: ModelSource,
+    *,
+    api_key: ApiKeyData | None,
+) -> dict[str, JsonValue]:
+    """Project the client body onto what the source may see (telemetry stripped, reasoning aliases resolved)."""
+
+    source_payload = strip_source_telemetry(payload.model_dump_for_forwarding())
     preserve_materialized_provider_alias = payload._codex_lb_provider_reasoning_effort_materialized and (
         api_key is None or (api_key.enforced_reasoning_effort is None and api_key.allowed_reasoning_efforts is None)
     )
@@ -5021,139 +5141,76 @@ async def _source_responses_response(
         source_payload,
         supported_tool_types=source_model_supported_tool_types(source, payload.model),
     )
+    return source_payload
 
-    if payload.stream:
-        try:
-            stream = await stream_source_responses(source, source_payload)
-        except ModelSourceForwardingError as exc:
-            await _release_reservation(reservation)
-            await _log_source_chat_completion(
-                request,
-                source=source,
-                api_key=api_key,
-                model=payload.model,
-                status="error",
-                error_code=_source_error_code(exc.payload),
-                error_message=_source_error_message(exc.payload),
-                upstream_status_code=exc.upstream_status_code,
-            )
-            return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
-        if _reservation_requires_usage(reservation):
-            response = await _buffered_limited_source_chat_stream_response(
-                request,
-                source=source,
-                api_key=api_key,
-                model=payload.model,
-                reservation=reservation,
-                stream=stream.body,
-                usage_holder=stream.usage_holder,
-                rate_limit_headers=rate_limit_headers,
-            )
-            # Limited keys stay fail-closed: usage must be present before any
-            # body bytes reach the client. Public normalize still applies to the
-            # replayed body; keepalives cannot precede upstream completion while
-            # that buffer gate remains.
-            if isinstance(response, StreamingResponse):
-                return StreamingResponse(
-                    _wrap_source_responses_public_stream(
-                        response.body_iterator,
-                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-                        native_codex_heartbeat=native_codex_heartbeat,
-                        preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
-                    ),
-                    media_type=response.media_type,
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                )
-            return response
-        body = _source_chat_stream_with_settlement(
-            _wrap_source_responses_public_stream(
-                stream.body,
-                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-                native_codex_heartbeat=native_codex_heartbeat,
-                preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
-            ),
-            usage_holder=stream.usage_holder,
-            request=request,
-            source=source,
-            api_key=api_key,
-            model=payload.model,
-            reservation=reservation,
-        )
-        return StreamingResponse(
-            body,
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache, no-transform",
-                "X-Accel-Buffering": "no",
-                **rate_limit_headers,
-            },
-        )
 
-    try:
-        result = await forward_source_responses(source, source_payload)
-    except ModelSourceForwardingError as exc:
-        await _release_reservation(reservation)
-        await _log_source_chat_completion(
-            request,
-            source=source,
-            api_key=api_key,
-            model=payload.model,
-            status="error",
-            error_code=_source_error_code(exc.payload),
-            error_message=_source_error_message(exc.payload),
-            upstream_status_code=exc.upstream_status_code,
-        )
-        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
-
-    if result.usage is None and _reservation_requires_usage(reservation):
-        await _release_reservation(reservation)
-        error = openai_error(
-            "usage_unavailable",
-            "OpenAI-compatible model source response did not include usage for a limited API key",
-            error_type="server_error",
-        )
-        await _log_source_chat_completion(
-            request,
-            source=source,
-            api_key=api_key,
-            model=payload.model,
+async def _finish_non_stream_source_dispatch(
+    request: Request,
+    owner: SourceDispatch,
+    result: SourceResponsesCompletion,
+    *,
+    rate_limit_headers: Mapping[str, str],
+) -> Response:
+    response_id = result.payload.get("id")
+    owner.source_response_id = response_id if isinstance(response_id, str) and response_id else None
+    if result.usage is None and _reservation_requires_usage(owner.reservation):
+        await owner.finish(
             status="error",
             error_code="usage_unavailable",
             error_message="source response missing usage",
             upstream_status_code=result.upstream_status_code,
         )
+        error = openai_error(
+            "usage_unavailable",
+            "OpenAI-compatible model source response did not include usage for a limited API key",
+            error_type="server_error",
+        )
         return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
-
-    settled = await _settle_source_reservation(reservation, source=source, model=payload.model, usage=result.usage)
-    if not settled:
-        await _log_source_chat_completion(
-            request,
-            source=source,
-            api_key=api_key,
-            model=payload.model,
-            status="error",
-            error_code="usage_settlement_failed",
-            error_message="source usage settlement failed",
+    if await request.is_disconnected():
+        await owner.finish(
+            status="cancelled",
+            error_code=CANCELLED_CLIENT_DISCONNECTED,
+            error_message="client disconnected before the model-source response was sent",
+            usage=result.usage,
+            timings=result.timings,
             upstream_status_code=result.upstream_status_code,
         )
+        return Response()
+    await owner.finish(
+        status="success",
+        usage=result.usage,
+        timings=result.timings,
+        upstream_status_code=result.upstream_status_code,
+        trial_result="success",
+    )
+    if owner.settlement_failed:
         return _logged_error_json_response(
             request,
             502,
             _source_usage_settlement_failed_error(),
             headers=rate_limit_headers,
         )
-    await _log_source_chat_completion(
-        request,
-        source=source,
-        api_key=api_key,
-        model=payload.model,
-        status="success",
-        usage=result.usage,
-        timings=result.timings,
-        upstream_status_code=result.upstream_status_code,
-    )
     return JSONResponse(content=result.payload, status_code=200, headers=rate_limit_headers)
+
+
+def _source_error_response_headers(
+    rate_limit_headers: Mapping[str, str],
+    exc: ModelSourceForwardingError,
+) -> dict[str, str]:
+    """Merge the source's own ``Retry-After`` into the pre-open error headers (honest passthrough, I8)."""
+
+    headers = dict(rate_limit_headers)
+    if exc.retry_after:
+        headers["Retry-After"] = exc.retry_after
+    return headers
+
+
+def _model_source_busy_error() -> OpenAIErrorEnvelope:
+    return openai_error(
+        "model_source_busy",
+        "OpenAI-compatible model source is at its configured concurrency limit",
+        error_type="upstream_error",
+    )
 
 
 # Keys that source_request_overrides must never clobber: the routed model slug

@@ -174,6 +174,12 @@ class SourceUsageHolder:
     # frame or a success terminal -- has been parsed (I11: delivered => pinned).
     first_content_seen: bool = False
     first_output_item_seen: bool = False
+    # Set at the flush point of ``_source_stream_body``: a chunk carrying
+    # content (``first_content_seen``) has been handed to the consumer. The
+    # settlement's cancel policy keys on this, not on the parser's observation,
+    # so bytes withheld ahead of a pin write the client did not wait for are
+    # never billed, and delivered content without an output item is.
+    content_delivered: bool = False
     terminal_kind: Literal["completed", "incomplete", "failed", "error"] | None = None
     delta_chars: int = 0
 
@@ -567,7 +573,10 @@ async def _source_stream_body(
     ``502 invalid_upstream_response`` instead of growing the buffer for its
     whole total budget. A hook exception propagates and the withheld bytes are
     dropped -- the client must not receive content whose continuity was not
-    secured.
+    secured. ``usage_holder.content_delivered`` is set exactly where a chunk
+    carrying content is handed to the consumer (after the hook, never before),
+    so the settlement policy can tell delivered content from content the
+    parser merely observed.
     """
 
     withheld: list[bytes] | None = [] if on_first_content is not None else None
@@ -589,6 +598,8 @@ async def _source_stream_body(
                     break
             usage_parser.feed(chunk)
             if withheld is None:
+                if usage_holder.first_content_seen:
+                    usage_holder.content_delivered = True
                 yield chunk
             else:
                 withheld.append(chunk)
@@ -596,6 +607,7 @@ async def _source_stream_body(
                 if usage_holder.first_content_seen:
                     assert on_first_content is not None
                     await on_first_content(usage_holder)
+                    usage_holder.content_delivered = True
                     released, withheld = withheld, None
                     for pending in released:
                         yield pending
@@ -611,6 +623,7 @@ async def _source_stream_body(
                 # The unterminated tail delivered content (I11: delivered => pinned).
                 assert on_first_content is not None
                 await on_first_content(usage_holder)
+                usage_holder.content_delivered = True
             for pending in withheld:
                 yield pending
     finally:

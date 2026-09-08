@@ -400,7 +400,9 @@ async def test_cancel_after_the_first_output_item_on_a_limited_key_settles_at_th
     recorder: _Recorder,
 ) -> None:
     owner = _owner(recorder, reservation=_reservation(limited=True))
-    _attach_stream(owner, holder=SourceUsageHolder(first_output_item_seen=True, delta_chars=400))
+    _attach_stream(
+        owner, holder=SourceUsageHolder(first_output_item_seen=True, content_delivered=True, delta_chars=400)
+    )
     await owner.finish(status="cancelled", error_code="client_disconnected")
 
     assert recorder.release_calls == []
@@ -421,9 +423,53 @@ async def test_cancel_before_the_first_output_item_releases(recorder: _Recorder)
 
 
 @pytest.mark.asyncio
+async def test_cancel_after_delivered_content_without_an_output_item_settles_at_the_estimate(
+    recorder: _Recorder,
+) -> None:
+    """A ``*.delta``-only or completed-only answer carries no ``response.output_item.added``; once its bytes were
+    handed to the client the cancel policy keys on that delivery, not on the parser's item observation."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    _attach_stream(
+        owner,
+        holder=SourceUsageHolder(
+            first_content_seen=True, content_delivered=True, first_output_item_seen=False, delta_chars=400
+        ),
+    )
+    await owner.finish(status="cancelled", error_code="client_disconnected")
+
+    assert recorder.release_calls == []
+    assert recorder.settle_calls[0]["usage"] == SourceUsage(
+        input_tokens=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
+        output_tokens=API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
+    )
+    assert recorder.rows[0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_an_output_item_observed_but_nothing_delivered_releases(recorder: _Recorder) -> None:
+    """The parser saw ``response.output_item.added`` inside bytes still withheld ahead of the pin write; the client
+    left before anything was flushed, so nothing may be charged."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    _attach_stream(
+        owner,
+        holder=SourceUsageHolder(
+            first_content_seen=True, first_output_item_seen=True, content_delivered=False, delta_chars=400
+        ),
+    )
+    await owner.finish(status="cancelled", error_code="client_disconnected")
+
+    assert recorder.settle_calls == []
+    assert recorder.release_calls == [owner.reservation]
+
+
+@pytest.mark.asyncio
 async def test_cancel_after_the_first_output_item_on_an_unlimited_key_releases(recorder: _Recorder) -> None:
     owner = _owner(recorder, reservation=_reservation(limited=False))
-    _attach_stream(owner, holder=SourceUsageHolder(first_output_item_seen=True, delta_chars=9_000))
+    _attach_stream(
+        owner, holder=SourceUsageHolder(first_output_item_seen=True, content_delivered=True, delta_chars=9_000)
+    )
     await owner.finish(status="cancelled")
     assert recorder.settle_calls == []
     assert recorder.release_calls == [owner.reservation]
@@ -806,6 +852,7 @@ async def test_settlement_stream_task_cancellation_after_the_first_item_settles_
 
     async def inner() -> AsyncIterator[str]:
         holder.first_output_item_seen = True
+        holder.content_delivered = True
         holder.delta_chars = 12_000
         yield "data: item\n\n"
         await gate
@@ -828,6 +875,91 @@ async def test_settlement_stream_task_cancellation_after_the_first_item_settles_
         input_tokens=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS, output_tokens=3_000
     )
     assert recorder.rows[0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_task_cancellation_after_delivered_deltas_without_an_item_settles_at_estimate(
+    recorder: _Recorder,
+) -> None:
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder()
+    _attach_stream(owner, holder=holder)
+    gate: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    async def inner() -> AsyncIterator[str]:
+        holder.first_content_seen = True
+        holder.content_delivered = True
+        holder.delta_chars = 12_000
+        yield "event: response.output_text.delta\ndata: {}\n\n"
+        await gate
+        yield "data: never\n\n"
+
+    body = settlement_stream(owner, inner())
+
+    async def consume() -> list[str]:
+        return [chunk async for chunk in body]
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert holder.first_output_item_seen is False
+    assert recorder.release_calls == []
+    assert recorder.settle_calls[0]["usage"] == SourceUsage(
+        input_tokens=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS, output_tokens=3_000
+    )
+    assert recorder.rows[0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_kind", ["completed", "incomplete"])
+async def test_settlement_stream_cancel_after_a_relayed_success_terminal_is_a_success(
+    recorder: _Recorder, terminal_kind: str
+) -> None:
+    """Symmetric with the relayed-failure rule: a client that leaves right after the relayed success terminal (before
+    the source's own EOF, ``[DONE]`` or keepalives) received the whole answer, so the row is a success settled like a
+    completed stream, never ``cancelled``."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder()
+    _attach_stream(owner, holder=holder)
+    gate: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    relayed = (
+        f"event: response.{terminal_kind}\n"
+        f'data: {{"type":"response.{terminal_kind}","response":{{"id":"resp_done","status":"{terminal_kind}"}}}}\n\n'
+    )
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        holder.first_content_seen = True
+        holder.content_delivered = True
+        holder.first_output_item_seen = True
+        holder.terminal_kind = cast(Any, terminal_kind)
+        holder.usage = SourceUsage(input_tokens=9, output_tokens=4)
+        yield relayed
+        # The source has not closed yet; the client disconnects here.
+        await gate
+        yield "data: [DONE]\n\n"
+
+    body = settlement_stream(owner, inner())
+
+    async def consume() -> list[str]:
+        return [chunk async for chunk in body]
+
+    consumer = asyncio.create_task(consume())
+    for _ in range(6):
+        await asyncio.sleep(0)
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert recorder.release_calls == []
+    assert recorder.settle_calls[0]["usage"] == SourceUsage(input_tokens=9, output_tokens=4)
+    assert recorder.rows[0]["status"] == "success"
+    assert recorder.rows[0]["error_code"] is None
 
 
 @pytest.mark.asyncio

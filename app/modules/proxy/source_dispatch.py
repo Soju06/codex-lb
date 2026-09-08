@@ -27,10 +27,11 @@ Composition rules:
 
 Settle policy (design §6.1, CL-8/P4/CP-16): ``success`` with usage finalizes
 at the source's usage and cost; ``success`` without usage on a limited key
-settles at an estimate (never at zero, never released); a cancel *after* the
-first output item on a limited key settles at the estimate (a key must not
-consume most of an answer and disconnect unmetered); a cancel before it, and
-every ``error``, release. A stream the source ends with a failure terminal, or
+settles at an estimate (never at zero, never released); a cancel *after*
+content was delivered to the client (the body's flush point, not the parser's
+observation) on a limited key settles at the estimate (a key must not consume
+most of an answer and disconnect unmetered); a cancel before it, and every
+``error``, release. A stream the source ends with a failure terminal, or
 closes without any terminal the client could complete on, is an ``error``
 (``model_source_response_failed`` / ``model_source_stream_truncated``) and
 releases: the client received a failure, so nothing is charged. Estimates are
@@ -363,6 +364,9 @@ class SourceDispatch:
     sent_at: float = 0.0
     first_frame_at: float | None = None
     first_output_item_seen: bool = False
+    # Content reached the consumer (the body's flush point), as opposed to
+    # having merely been parsed; the cancel settlement policy keys on this.
+    content_delivered: bool = False
     delta_chars: int = 0
     body_started: bool = False
     finished: bool = False
@@ -398,7 +402,7 @@ class SourceDispatch:
         return self.stream.usage_holder if self.stream is not None else None
 
     def observe_stream(self) -> SourceUsageHolder | None:
-        """Mirror the parser's observations (first frame, first output item, delta chars) onto the owner."""
+        """Mirror the stream's observations (first frame, first output item, delivered content, delta chars)."""
 
         holder = self.usage_holder
         if holder is None:
@@ -406,6 +410,7 @@ class SourceDispatch:
         if self.first_frame_at is None and holder.first_frame_at is not None:
             self.first_frame_at = holder.first_frame_at
         self.first_output_item_seen = self.first_output_item_seen or holder.first_output_item_seen
+        self.content_delivered = self.content_delivered or holder.content_delivered
         self.delta_chars = max(self.delta_chars, holder.delta_chars)
         return holder
 
@@ -477,7 +482,11 @@ class SourceDispatch:
         if status == "success" and _reservation_requires_usage(reservation):
             await self._settle_reservation_step(reservation, self._estimate(), cause="missing_usage")
             return
-        if status == "cancelled" and self.first_output_item_seen and _reservation_requires_usage(reservation):
+        if status == "cancelled" and self.content_delivered and _reservation_requires_usage(reservation):
+            # Keyed on content the client actually received, not on the parser
+            # having seen an output item: a delta-only or completed-only answer
+            # that was flushed is charged, an output item still withheld ahead of
+            # an unfinished pin write is not.
             await self._settle_reservation_step(reservation, self._estimate(), cause="client_cancel")
             return
         await self._release_reservation_step(reservation)
@@ -846,7 +855,9 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
     A disconnect surfaces as ``CancelledError`` (task cancellation) or
     ``GeneratorExit`` (``aclose()`` from ``finalize_transport``); both bypass
     ``except Exception`` and are recorded as ``cancelled`` (the settle policy
-    decides between release and estimate). A verified pin non-write yields the
+    decides between release and estimate) unless the client already received a
+    terminal: a relayed failure terminal is an ``error``, a relayed success
+    terminal a ``success``. A verified pin non-write yields the
     synthesized ``response.created`` + ``response.failed`` pair after the
     reservation was released and the source closed.
     """
@@ -905,12 +916,20 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
         # keyed only on ``first_output_item_seen`` and charged the estimate.
         owner.observe_stream()
         holder = owner.usage_holder
-        if (holder is not None and holder.terminal_kind in _FAILURE_TERMINAL_KINDS) or (
-            relayed_terminal_kind(last_event_frame) in _FAILURE_TERMINAL_KINDS
-        ):
+        relayed_kind = relayed_terminal_kind(last_event_frame)
+        if (
+            holder is not None and holder.terminal_kind in _FAILURE_TERMINAL_KINDS
+        ) or relayed_kind in _FAILURE_TERMINAL_KINDS:
             status = "error"
             error_code = ERROR_MODEL_SOURCE_RESPONSE_FAILED
             error_message = "source terminated the stream with a failure terminal"
+        elif relayed_kind in _SUCCESS_TERMINAL_KINDS:
+            # Symmetric: the client received the success terminal before
+            # leaving (Codex tears the stream down on ``response.completed``
+            # while the source still sends ``[DONE]``/keepalives), so the whole
+            # answer was delivered and this is a success settled like a stream
+            # that ran to the source's EOF, never a cancel.
+            status = "success"
         else:
             status = "cancelled"
             error_code = CANCELLED_CLIENT_DISCONNECTED

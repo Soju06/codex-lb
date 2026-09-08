@@ -438,6 +438,100 @@ async def test_limited_key_cancel_after_the_first_output_item_settles_at_the_est
 
 
 @pytest.mark.asyncio
+async def test_limited_key_cancel_after_delivered_deltas_without_an_output_item_settles_at_the_estimate(
+    async_client, source_upstream
+) -> None:
+    """A source that streams ``*.delta`` frames without ``response.output_item.added`` delivered content; a client
+    that leaves after receiving it owes the cancel estimate exactly like one that saw an output item."""
+
+    await _enable_api_key_auth(async_client)
+    state = _StubState()
+    hold = asyncio.Event()
+    base_url = await source_upstream(
+        _sse_handler(state, before_hold=[_created(), _DELTA], hold=hold, after_hold=[_completed(_USAGE)]),
+        handler_cancellation=True,
+        shutdown_timeout=1.0,
+    )
+    model = "dispatch-cancel-after-delta-only"
+    source_id = await _create_model_source(
+        async_client, name=model, model=model, base_url=base_url, supports_responses=True
+    )
+    key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
+
+    stream = _AsgiStream(
+        app=_app(async_client),
+        path="/v1/responses",
+        headers={"authorization": f"Bearer {key}"},
+        body=json.dumps(_request_body(model)).encode(),
+    )
+    runner = asyncio.create_task(stream.run())
+    await stream.wait_for_text("response.output_text.delta")
+    assert "response.output_item.added" not in stream.received().decode()
+    stream.disconnect()
+    await asyncio.wait_for(runner, timeout=10)
+    await _drain(async_client)
+    hold.set()
+
+    reservations = await _reservations(key_id)
+    assert [reservation.status for reservation in reservations] == ["finalized"]
+    assert reservations[0].output_tokens == 2_048
+    rows = await _source_rows(source_id)
+    assert [(row.status, row.error_code) for row in rows] == [("cancelled", "client_disconnected")]
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_limited_key_disconnect_after_the_relayed_success_terminal_is_a_success(
+    async_client, source_upstream
+) -> None:
+    """Codex tears the stream down as soon as ``response.completed`` arrives while the source is still open: the
+    client received the whole answer, so the row is a success settled from the terminal's usage, not a cancel."""
+
+    await _enable_api_key_auth(async_client)
+    state = _StubState()
+    hold = asyncio.Event()
+    base_url = await source_upstream(
+        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, _DELTA, _completed(_USAGE)], hold=hold),
+        handler_cancellation=True,
+        shutdown_timeout=1.0,
+    )
+    model = "dispatch-disconnect-after-completed"
+    source_id = await _create_model_source(
+        async_client,
+        name=model,
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+        input_per_1m=3.0,
+        output_per_1m=6.0,
+    )
+    key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
+
+    stream = _AsgiStream(
+        app=_app(async_client),
+        path="/v1/responses",
+        headers={"authorization": f"Bearer {key}"},
+        body=json.dumps(_request_body(model)).encode(),
+    )
+    runner = asyncio.create_task(stream.run())
+    await stream.wait_for_text("response.completed")
+    assert not hold.is_set()
+    stream.disconnect()
+    await asyncio.wait_for(runner, timeout=10)
+    await _drain(async_client)
+    hold.set()
+
+    reservations = await _reservations(key_id)
+    assert [reservation.status for reservation in reservations] == ["finalized"]
+    assert reservations[0].input_tokens == 100 and reservations[0].output_tokens == 20
+    assert reservations[0].cost_microdollars == 420
+    rows = await _source_rows(source_id)
+    assert [(row.status, row.error_code) for row in rows] == [("success", None)]
+    assert rows[0].input_tokens == 100 and rows[0].output_tokens == 20
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+@pytest.mark.asyncio
 async def test_limited_key_cancel_before_the_first_output_item_releases(async_client, source_upstream) -> None:
     await _enable_api_key_auth(async_client)
     state = _StubState()

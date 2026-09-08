@@ -1674,6 +1674,123 @@ async def test_stream_body_oversized_terminal_frame_runs_the_hook_before_flushin
     assert lease.released == 1
 
 
+@pytest.mark.asyncio
+async def test_stream_body_marks_content_delivered_at_the_flush_point_without_a_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = _sse({"type": "response.created", "response": {"id": "resp_deliver"}})
+    delta = _sse({"type": "response.output_text.delta", "delta": "Hi"})
+    response = _FakeResponse(content=_FakeContent(created, [delta], stall_after_rest=True))
+    _install_session(monkeypatch, response)
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"})
+    holder = stream.usage_holder
+    assert await asyncio.wait_for(anext(stream.body), timeout=1) == created
+    # Bookkeeping only: nothing that counts as content has reached the consumer.
+    assert holder.first_content_seen is False
+    assert holder.content_delivered is False
+    assert await asyncio.wait_for(anext(stream.body), timeout=1) == delta
+    assert holder.first_content_seen is True
+    assert holder.first_output_item_seen is False
+    assert holder.content_delivered is True
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stream_body_hook_interrupted_by_cancellation_leaves_content_undelivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parser observed ``response.output_item.added`` on the withheld chunk; the consumer is cancelled while the
+    pin hook is still in flight, so no byte reached the client and the holder must say so."""
+
+    created = _sse({"type": "response.created", "response": {"id": "resp_pin"}})
+    item = _sse({"type": "response.output_item.added", "item": {"type": "message"}})
+    response = _FakeResponse(content=_FakeContent(created, [item], stall_after_rest=True))
+    _session, _context, lease = _install_session(monkeypatch, response)
+    hook_entered = asyncio.Event()
+    hook_gate: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    async def hook(_holder: SourceUsageHolder) -> None:
+        hook_entered.set()
+        await hook_gate
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"}, on_first_content=hook)
+    holder = stream.usage_holder
+    delivered: list[bytes] = []
+
+    async def consume() -> None:
+        async for chunk in stream.body:
+            delivered.append(chunk)
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(hook_entered.wait(), timeout=1)
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert delivered == []
+    assert holder.first_output_item_seen is True
+    assert holder.first_content_seen is True
+    assert holder.content_delivered is False
+    assert lease.released == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_body_marks_content_delivered_when_the_hook_flush_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    created = _sse({"type": "response.created", "response": {"id": "resp_flush"}})
+    item = _sse({"type": "response.output_item.added", "item": {"type": "message"}})
+    response = _FakeResponse(content=_FakeContent(created, [item], stall_after_rest=True))
+    _install_session(monkeypatch, response)
+    observed: list[bool] = []
+
+    async def hook(holder: SourceUsageHolder) -> None:
+        observed.append(holder.content_delivered)
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"}, on_first_content=hook)
+    holder = stream.usage_holder
+    assert await asyncio.wait_for(anext(stream.body), timeout=1) == created
+    assert observed == [False], "the hook runs before anything is flushed"
+    assert holder.content_delivered is True
+    assert await asyncio.wait_for(anext(stream.body), timeout=1) == item
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stream_body_failure_terminal_flush_delivers_no_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    created = _sse({"type": "response.created", "response": {"id": "resp_failed"}})
+    failed = _sse({"type": "response.failed", "response": {"id": "resp_failed", "error": {"code": "x"}}})
+    response = _FakeResponse(content=_FakeContent(created, [failed]))
+    _install_session(monkeypatch, response)
+
+    async def hook(_holder: SourceUsageHolder) -> None:
+        raise AssertionError("a failure terminal never runs the hook")
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"}, on_first_content=hook)
+
+    assert await _collect(stream.body) == [created, failed]
+    assert stream.usage_holder.content_delivered is False
+
+
+@pytest.mark.asyncio
+async def test_stream_body_eof_tail_with_content_marks_content_delivered_after_the_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = _sse({"type": "response.created", "response": {"id": "resp_tail_deliver"}})
+    tail = f"data: {json.dumps(_bom_completed_event('resp_tail_deliver'))}\n".encode()
+    response = _FakeResponse(content=_FakeContent(created, [tail]))
+    _install_session(monkeypatch, response)
+    observed: list[bool] = []
+
+    async def hook(holder: SourceUsageHolder) -> None:
+        observed.append(holder.content_delivered)
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"}, on_first_content=hook)
+
+    assert await _collect(stream.body) == [created, tail]
+    assert observed == [False]
+    assert stream.usage_holder.content_delivered is True
+
+
 # -- EOF tail classification and the withheld-bytes cap (pre-content hook) -----------------------------------------
 
 

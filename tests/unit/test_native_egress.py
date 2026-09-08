@@ -45,6 +45,7 @@ print(json.dumps({
         "http_compact_collect_v1",
         "http_compact_sse_v1",
         "http_sse_v1",
+        "http_responses_events_v1",
         "websocket",
         "websocket_send_ack",
     ],
@@ -848,7 +849,7 @@ for line in sys.stdin:
         print(json.dumps({{"type": "cancelled", "request_id": request_id}}), flush=True)
         continue
     assert command["sse"] == {{"idle_timeout_ms": 1000, "max_event_bytes": 1024,
-                              "content_type_aware": False, "collect_compact": False}}
+                              "content_type_aware": False, "collect_compact": False, "interpret_responses": False}}
     print(json.dumps({{"type": "head", "request_id": request_id, "status": 200,
                        "http_version": "HTTP/1.1", "headers": []}}), flush=True)
     for event in {events!r}:
@@ -913,7 +914,9 @@ async def test_native_sse_failure_releases_owned_stream(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("capability", ["http_sse_v1", "http_compact_sse_v1", "http_compact_collect_v1"])
+@pytest.mark.parametrize(
+    "capability", ["http_sse_v1", "http_compact_sse_v1", "http_compact_collect_v1", "http_responses_events_v1"]
+)
 async def test_native_sse_capability_is_required_before_dispatch(tmp_path: Path, capability: str) -> None:
     helper = tmp_path / "native-helper"
     preamble = _HELPER_PROTOCOL_PREAMBLE.replace(f'        "{capability}",\n', "")
@@ -981,6 +984,7 @@ async def test_native_compact_rejects_broken_result_without_replay(
         NativeSseOptions(1, 0),
         NativeSseOptions(1, True),
         NativeSseOptions(1, 1024, collect_compact=True),
+        NativeSseOptions(1, 1024, content_type_aware=True, collect_compact=True, interpret_responses=True),
     ],
 )
 async def test_native_sse_options_are_validated_before_start(tmp_path: Path, options: NativeSseOptions) -> None:
@@ -1089,6 +1093,15 @@ def test_bounded_event_queue_trips_on_bytes_or_events_and_releases_bytes_on_get(
     # Text payloads are measured in UTF-8 bytes, not code points.
     queue.put_nowait({"type": "sse", "text": "\u00e9\u00e9"})
     assert queue.queued_bytes == 4
+    # Interpreted event metadata consumes the same byte budget as its text.
+    interpreted = {"type": "responses_event", "text": "hi", "event_type": "\u00e9\u00e9"}
+    queue.put_nowait(interpreted)
+    assert queue.queued_bytes == 10
+    with pytest.raises(asyncio.QueueFull):
+        queue.put_nowait(interpreted)
+    queue.get_nowait()
+    assert queue.get_nowait() == interpreted
+    assert queue.queued_bytes == 0
     # A lone event larger than the whole budget is accepted at an empty queue
     # (the SSE event size cap bounds it), so a single big chunk never fails;
     # anything but a zero-byte event is then rejected until it drains.
@@ -1177,3 +1190,73 @@ for line in sys.stdin:
     body = await asyncio.wait_for(response.read(), timeout=10.0)
     assert len(body) == 16 * 3 * 512 * 1024
     await asyncio.wait_for(client.aclose(), timeout=2.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "events",
+    [
+        [{"type": "responses_event", "text": "data: {}\n\n", "more": False}],
+        [{"type": "responses_event", "text": "x", "more": False, "event_type": 1, "python_normalization": False}],
+        [
+            {
+                "type": "responses_event",
+                "text": "x",
+                "more": True,
+                "event_type": "response.completed",
+                "python_normalization": False,
+            }
+        ],
+        [{"type": "responses_event", "text": "x", "more": False, "event_type": None, "python_normalization": "false"}],
+        [
+            {
+                "type": "responses_event",
+                "text": "x",
+                "more": False,
+                "event_type": "é" * (8 * 1024 + 1),
+                "python_normalization": False,
+            }
+        ],
+        [{"type": "responses_event", "text": "x", "more": True, "event_type": None, "python_normalization": True}],
+        [
+            {
+                "type": "responses_event",
+                "text": "x" * (16 * 1024 + 1),
+                "more": False,
+                "event_type": None,
+                "python_normalization": False,
+            }
+        ],
+        [
+            {
+                "type": "responses_event",
+                "text": "unfinished",
+                "more": True,
+                "event_type": None,
+                "python_normalization": False,
+            },
+            {"type": "end"},
+        ],
+        [{"type": "sse", "text": "data: {}\n\n", "more": False}],
+    ],
+)
+async def test_interpreted_sse_rejects_invalid_metadata_without_replay(
+    tmp_path: Path, events: list[dict[str, object]]
+) -> None:
+    helper = tmp_path / "native-helper"
+    source = _sse_helper_source(events).replace('"interpret_responses": False', '"interpret_responses": True')
+    _write_helper(helper, source)
+    client = SubprocessNativeEgressClient(helper)
+    try:
+        response = await client.request(
+            NativeEgressRequest(
+                "GET", "https://example.test", {}, sse=NativeSseOptions(1, 1024, interpret_responses=True)
+            )
+        )
+        with pytest.raises(NativeEgressProtocolError):
+            async for _ in response.iter_sse_events():
+                pass
+        assert client._request_sequence == 1
+        assert not client._streams
+    finally:
+        await client.aclose()

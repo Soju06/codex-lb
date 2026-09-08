@@ -27,7 +27,7 @@ into the existing Rust egress library. Python supplies the configured idle
 interval and event byte limit; Rust applies them while reading the body.
 For example, an event split over several active body reads must not time out
 just because Python has not yet received a complete event. Python retains
-normalization, terminal detection, archives, selection, health, and replay.
+terminal detection, archives, selection, health, and replay policy.
 
 Complete events cross IPC as UTF-8 text fragments of at most 16 KiB, with a
 `more` flag. This bounds line/queue expansion for control characters and invalid
@@ -37,7 +37,7 @@ residue, and limits measured in original body bytes. The adapter only joins
 text fragments. An incomplete IPC event at clean EOF fails the protocol.
 
 HTTP error bodies and requests without SSE options retain raw body delivery.
-Compact framing remains a separate future cutover. Missing helpers
+Compact requests use separate content-aware framing and collection capabilities. Missing helpers
 keep the pre-dispatch Python fallback; installed helpers without the capability
 fail before dispatch. No dispatched request is replayed through that fallback.
 Response close finishes its owned cancellation handshake even inside an already
@@ -51,3 +51,23 @@ type avoids the raw-body wrapper hiding its framed-event interface. Endpoint
 fallback and trace metadata remain Python-owned. The locally created client
 finishes asynchronous session close before propagating cancellation; borrowed
 clients retain their caller's lifecycle ownership.
+
+## Native HTTP stream interpretation
+
+`http_responses_events_v1` adds `interpret_responses` to framing options and a
+`responses_event` IPC result. The final text fragment includes `event_type` and
+`python_normalization`; intermediate fragments have no type and a false marker.
+Both text and type metadata are bounded at 16 KiB of UTF-8 and count toward the
+queue byte budget. A longer type uses a Python handoff with no type metadata.
+Missing or malformed metadata, mixed compact/stream options, and truncated
+fragments fail before an event is trusted.
+
+For example, a `response.text.delta` payload with ordinary text becomes
+`response.output_text.delta` in Rust; Python can use the attached classification
+without scanning SSE or parsing that payload. Error conversion needs request
+context and stays in Python. An alias payload containing a float, oversized
+integer, or escaped surrogate uses Python serialization to preserve its exact
+legacy representation. Neither handoff starts a second HTTP request. Unchanged
+mixed-line-ending events preserve their text; JSON arrays never become objects.
+The Python transport remains the missing-helper implementation, and WebSocket
+event interpretation is deferred to the next transport slice.

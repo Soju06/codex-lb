@@ -37,9 +37,20 @@ that migration reaches the application shell.
 Direct and account-routed streaming and compact Responses requests delegate SSE byte framing to egress.
 The adapter requires `http_sse_v1` and supplies the existing idle timeout and
 event byte limit as per-request options. Rust owns the deadline between body
-reads, including partial events; for ordinary streaming Python consumes framed text and retains event
-normalization, terminal detection, archives, and public error mapping. HTTP
-error bodies and non-streaming requests keep the raw chunk contract.
+reads, including partial events. Ordinary HTTP streaming additionally requires
+`http_responses_events_v1`: the synchronous Responses library normalizes legacy
+text/audio/audio-transcript aliases and classifies event types. Unchanged event
+text stays byte-for-byte intact. Python retains terminal detection, archives,
+and request-context-dependent public error mapping. HTTP error bodies and
+non-streaming requests keep the raw chunk contract.
+
+Interpreted events carry the effective type and an explicit Python-normalization
+marker on the final fragment. Error conversion and JSON representations that
+cannot be rewritten exactly (such as alias payloads containing floats, huge
+integers, or escaped surrogate strings) use that marker without replaying the
+request. Type metadata is limited to 16 KiB too; longer types use the same
+handoff. Shared Python/Rust fixtures pin SDK and native passthrough behavior.
+WebSocket interpretation remains a later transport slice.
 
 Compact requests additionally require `http_compact_sse_v1`. Their
 `content_type_aware` framing option preserves raw JSON success bodies, while

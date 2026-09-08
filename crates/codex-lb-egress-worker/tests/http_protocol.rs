@@ -104,6 +104,7 @@ fn sse_request(
             max_event_bytes,
             content_type_aware: false,
             collect_compact: false,
+            interpret_responses: false,
         }),
     })
 }

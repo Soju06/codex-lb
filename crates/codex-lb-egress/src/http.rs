@@ -4,6 +4,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use codex_lb_protocol::{NativeEvent, NativeRequest, NativeSseOptions};
 use codex_lb_responses::compact::{CompactCollector, CompactResult};
+use codex_lb_responses::stream::interpret;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::runtime::{Output, RequestError, emit};
@@ -166,7 +167,15 @@ async fn execute_sse_body(
             loop {
                 match framer.next_event() {
                     Ok(Some(text)) => {
-                        if consume_sse(output, request_id, &text, &mut collector).await? {
+                        if consume_sse(
+                            output,
+                            request_id,
+                            &text,
+                            &mut collector,
+                            options.interpret_responses,
+                        )
+                        .await?
+                        {
                             return Ok(None);
                         }
                     }
@@ -178,7 +187,15 @@ async fn execute_sse_body(
     }
     match framer.finish() {
         Ok(Some(text)) => {
-            if consume_sse(output, request_id, &text, &mut collector).await? {
+            if consume_sse(
+                output,
+                request_id,
+                &text,
+                &mut collector,
+                options.interpret_responses,
+            )
+            .await?
+            {
                 return Ok(None);
             }
         }
@@ -196,11 +213,36 @@ async fn consume_sse(
     request_id: &str,
     text: &str,
     collector: &mut Option<CompactCollector>,
+    interpret_responses: bool,
 ) -> Result<bool, std::io::Error> {
     if let Some(collector) = collector {
         if let Some(result) = collector.push(text) {
             emit_compact(output, request_id, result).await?;
             return Ok(true);
+        }
+    } else if interpret_responses {
+        let mut event = interpret(text);
+        // Type metadata is not fragmented; keep it within the text budget too.
+        if event
+            .event_type
+            .as_ref()
+            .is_some_and(|kind| kind.len() > SSE_IPC_TEXT_FRAGMENT_SIZE)
+        {
+            event.event_type = None;
+            event.python_normalization = true;
+        }
+        for (fragment, more) in text_fragments(&event.text, SSE_IPC_TEXT_FRAGMENT_SIZE) {
+            emit(
+                output,
+                &NativeEvent::ResponsesEvent {
+                    request_id: request_id.to_owned(),
+                    text: fragment.to_owned(),
+                    more,
+                    event_type: if more { None } else { event.event_type.clone() },
+                    python_normalization: !more && event.python_normalization,
+                },
+            )
+            .await?;
         }
     } else {
         emit_sse(output, request_id, text).await?;

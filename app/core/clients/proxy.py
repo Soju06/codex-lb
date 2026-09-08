@@ -58,6 +58,7 @@ from app.core.clients.native_egress import (
     NativeEgressResponse,
     NativeEgressTransportError,
     NativeEgressUnavailable,
+    NativeResponsesEvent,
     NativeSseOptions,
     discover_native_egress_client,
 )
@@ -2058,6 +2059,8 @@ def _normalize_multi_data_sse_block(
 
 
 def _normalize_sse_event_block(event_block: str) -> str:
+    if isinstance(event_block, NativeResponsesEvent) and not event_block.python_normalization:
+        return event_block
     if not event_block:
         return event_block
 
@@ -2158,6 +2161,8 @@ def _normalize_stream_payload_for_http_block(
     *,
     enforce_openai_sdk_contract: bool = True,
 ) -> tuple[str, str | None]:
+    if isinstance(event_block, NativeResponsesEvent) and not event_block.python_normalization:
+        return event_block, event_block.event_type
     # Cheap path for the dominant delta traffic: a canonically framed block
     # exposes its event type on the `event:` line, so no JSON parse is needed.
     # Full parsing remains for `error` frames and any block carrying an
@@ -3827,7 +3832,7 @@ async def _stream_responses_with_session(
                 }
                 if not non_streaming_http:
                     request_kwargs["native_sse"] = NativeSseOptions(
-                        effective_idle_timeout, settings.max_sse_event_bytes
+                        effective_idle_timeout, settings.max_sse_event_bytes, interpret_responses=True
                     )
                 request_with_metadata = getattr(active_codex_client, "request_with_route_metadata", None)
                 if callable(request_with_metadata):
@@ -3977,7 +3982,9 @@ async def _stream_responses_with_session(
                             response_head_timeout_seconds=current_timeout.sock_read,
                             proxy_url=resolve_http_proxy_from_env(url),
                             sse=(
-                                NativeSseOptions(effective_idle_timeout, settings.max_sse_event_bytes)
+                                NativeSseOptions(
+                                    effective_idle_timeout, settings.max_sse_event_bytes, interpret_responses=True
+                                )
                                 if not non_streaming_http
                                 else None
                             ),

@@ -90,6 +90,7 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                             || request.sse.is_some_and(|options| {
                                 options.idle_timeout_ms == 0 || options.max_event_bytes == 0
                                     || (options.collect_compact && !options.content_type_aware)
+                                    || (options.collect_compact && options.interpret_responses)
                             })
                         {
                             emit_error(

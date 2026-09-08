@@ -109,12 +109,12 @@ docker run -d --name codex-lb \
 `~/.codex/config.toml`：
 
 ```toml
-model = "gpt-5.3-codex"
+model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
 
 [model_providers.codex-lb]
-name = "OpenAI"  # 必填 —— 启用远程 /responses/compact
+name = "openai"  # 必填 —— 启用远程 /responses/compact。自 Codex 2026-05-23 起必须小写；旧的 "OpenAI" 将无法解析 gpt-5.5
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 supports_websockets = true
@@ -155,7 +155,7 @@ responses_websockets_v2 = true
 
 ```toml
 [model_providers.codex-lb]
-name = "OpenAI"
+name = "openai"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Container, Mapping
 from dataclasses import dataclass
 from typing import cast
 from urllib.parse import urlsplit
@@ -518,7 +518,7 @@ def _direct_tool_call_prefix_state(
                 pending_window_held_parallel_calls = False
             continue
         if pending_calls and (
-            (item_type in (None, "message") and item.get("role") in _ACCOUNT_NEUTRAL_MESSAGE_ROLES)
+            (item_type in (None, "message") and _is_one_of(item.get("role"), _ACCOUNT_NEUTRAL_MESSAGE_ROLES))
             or item_type in {"input_file", "input_image", "input_text"}
         ):
             return None
@@ -613,7 +613,7 @@ def _is_retained_response_message(item: Mapping[str, JsonValue]) -> bool:
 
 def _is_fresh_followup_input(item: Mapping[str, JsonValue]) -> bool:
     item_type = item.get("type")
-    if item_type in {"input_file", "input_image", "input_text"}:
+    if _is_one_of(item_type, {"input_file", "input_image", "input_text"}):
         return _input_content_part_is_self_contained(item, allow_output=False)
     return (
         item_type in (None, "message")
@@ -682,7 +682,7 @@ def _tool_output_is_self_contained(item_type: str, item: Mapping[str, JsonValue]
     if isinstance(output, str):
         return True
     if item_type == "apply_patch_call_output":
-        return output is None and item.get("status") in {"completed", "failed"}
+        return output is None and _is_one_of(item.get("status"), {"completed", "failed"})
     return (
         isinstance(output, list)
         and bool(output)
@@ -695,6 +695,12 @@ def _tool_output_is_self_contained(item_type: str, item: Mapping[str, JsonValue]
 
 def _is_nonblank_string(value: JsonValue | None) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _is_one_of(value: JsonValue | None, options: Container[str]) -> bool:
+    """Membership for a JSON value: lists/objects in a string slot are never members (and never raise)."""
+
+    return isinstance(value, str) and value in options
 
 
 def responses_payload_is_account_neutral_fresh_replay(payload: Mapping[str, JsonValue]) -> bool:
@@ -762,7 +768,7 @@ def _text_controls_are_account_neutral(text: JsonValue | None) -> bool:
     if not isinstance(text, dict) or not set(text) <= {"format", "verbosity"}:
         return False
     verbosity = text.get("verbosity")
-    if verbosity is not None and verbosity not in {"low", "medium", "high"}:
+    if verbosity is not None and not _is_one_of(verbosity, {"low", "medium", "high"}):
         return False
     format_value = text.get("format")
     if format_value is None:
@@ -770,7 +776,7 @@ def _text_controls_are_account_neutral(text: JsonValue | None) -> bool:
     if not isinstance(format_value, dict):
         return False
     format_type = format_value.get("type")
-    if format_type in {"text", "json_object"}:
+    if _is_one_of(format_type, {"text", "json_object"}):
         return set(format_value) == {"type"}
     if format_type != "json_schema" or not set(format_value) <= {
         "description",
@@ -845,7 +851,9 @@ def _web_search_tool_options_are_account_neutral(
             return False
 
     search_context_size = tool.get("search_context_size")
-    if search_context_size is not None and search_context_size not in _ACCOUNT_NEUTRAL_WEB_SEARCH_CONTEXT_SIZES:
+    if search_context_size is not None and not _is_one_of(
+        search_context_size, _ACCOUNT_NEUTRAL_WEB_SEARCH_CONTEXT_SIZES
+    ):
         return False
 
     user_location = tool.get("user_location")
@@ -869,16 +877,16 @@ def _tool_choice_is_account_neutral(tool_choice: JsonValue | None) -> bool:
     if not isinstance(tool_choice, dict) or _contains_account_scoped_tool_state(tool_choice):
         return False
     choice_type = tool_choice.get("type")
-    if choice_type in {"custom", "function"}:
+    if _is_one_of(choice_type, {"custom", "function"}):
         return set(tool_choice) <= {"name", "type"} and _is_nonblank_string(tool_choice.get("name"))
-    if choice_type in {"web_search", "web_search_preview"}:
+    if _is_one_of(choice_type, {"web_search", "web_search_preview"}):
         return set(tool_choice) == {"type"}
     if choice_type != "allowed_tools" or set(tool_choice) > {"mode", "tools", "type"}:
         return False
     mode = tool_choice.get("mode")
     allowed = tool_choice.get("tools")
     return (
-        mode in {"auto", "required"}
+        _is_one_of(mode, {"auto", "required"})
         and isinstance(allowed, list)
         and bool(allowed)
         and all(isinstance(tool, dict) and _tool_choice_reference_is_account_neutral(tool) for tool in allowed)
@@ -887,9 +895,9 @@ def _tool_choice_is_account_neutral(tool_choice: JsonValue | None) -> bool:
 
 def _tool_choice_reference_is_account_neutral(tool: Mapping[str, JsonValue]) -> bool:
     tool_type = tool.get("type")
-    if tool_type in {"custom", "function"}:
+    if _is_one_of(tool_type, {"custom", "function"}):
         return set(tool) <= {"name", "type"} and _is_nonblank_string(tool.get("name"))
-    return tool_type in {"web_search", "web_search_preview"} and set(tool) == {"type"}
+    return _is_one_of(tool_type, {"web_search", "web_search_preview"}) and set(tool) == {"type"}
 
 
 def _custom_tool_format_is_account_neutral(format_value: JsonValue | None) -> bool:
@@ -903,7 +911,7 @@ def _custom_tool_format_is_account_neutral(format_value: JsonValue | None) -> bo
     return (
         format_type == "grammar"
         and set(format_value) == {"definition", "syntax", "type"}
-        and format_value.get("syntax") in {"lark", "regex"}
+        and _is_one_of(format_value.get("syntax"), {"lark", "regex"})
         and isinstance(format_value.get("definition"), str)
     )
 
@@ -930,7 +938,7 @@ def _input_items_have_valid_account_neutral_shape(input_items: list[JsonValue]) 
         if not isinstance(item, dict):
             return False
         item_type = item.get("type")
-        if item_type in {"input_file", "input_image", "input_text"}:
+        if _is_one_of(item_type, {"input_file", "input_image", "input_text"}):
             if not _input_content_part_is_self_contained(item, allow_output=False):
                 return False
             continue
@@ -947,10 +955,10 @@ def _input_items_have_valid_account_neutral_shape(input_items: list[JsonValue]) 
 
 def _message_has_valid_account_neutral_content(item: Mapping[str, JsonValue]) -> bool:
     role = item.get("role")
-    if role not in _ACCOUNT_NEUTRAL_MESSAGE_ROLES:
+    if not _is_one_of(role, _ACCOUNT_NEUTRAL_MESSAGE_ROLES):
         return False
     phase = item.get("phase")
-    if phase is not None and phase not in {"commentary", "final_answer"}:
+    if phase is not None and not _is_one_of(phase, {"commentary", "final_answer"}):
         return False
     content = item.get("content")
     if role != "assistant" and isinstance(content, str):
@@ -960,7 +968,7 @@ def _message_has_valid_account_neutral_content(item: Mapping[str, JsonValue]) ->
     if role == "assistant":
         return all(
             isinstance(part, dict)
-            and part.get("type") in {"output_text", "refusal"}
+            and _is_one_of(part.get("type"), {"output_text", "refusal"})
             and _input_content_part_is_self_contained(part, allow_output=True)
             for part in content
         )
@@ -975,7 +983,7 @@ def _input_content_part_is_self_contained(
     allow_output: bool,
 ) -> bool:
     part_type = part.get("type")
-    if part_type not in _ACCOUNT_NEUTRAL_MESSAGE_CONTENT_TYPES:
+    if not _is_one_of(part_type, _ACCOUNT_NEUTRAL_MESSAGE_CONTENT_TYPES):
         return False
     if any(key not in _ACCOUNT_NEUTRAL_CONTENT_FIELDS[cast(str, part_type)] for key in part):
         return False
@@ -1143,22 +1151,27 @@ def responses_payload_is_provider_portable(
         return PortabilityVerdict(False, "not_portable_items", unportable_item)
     if not supports_vision and _input_carries_image_parts(input_items):
         return PortabilityVerdict(False, "not_portable_vision", _INPUT_IMAGE_PART_TYPE)
-    if not transcript_is_source_free(view):
+    if not transcript_is_source_free(view, supported_tool_types=supported_tool_types):
         return PortabilityVerdict(False, "not_portable_history")
     if is_binding_turn_state(headers):
         return PortabilityVerdict(False, "turn_state_bound")
     return PortabilityVerdict(True)
 
 
-def transcript_is_source_free(view: PortabilityView) -> bool:
+def transcript_is_source_free(view: PortabilityView, *, supported_tool_types: frozenset[str] = frozenset()) -> bool:
     """Steps 1-2 of ``responses_payload_is_provider_portable`` only.
 
     True when the viewed transcript carries no account-scoped upstream state:
     it is an account-neutral fresh replay and holds no ``reasoning`` or
-    ``compaction`` item (implied by the predicate, kept explicit).
+    ``compaction`` item (implied by the predicate, kept explicit). Tool
+    declarations of a type the source model declares but the account-neutral
+    predicate has no vocabulary for (``apply_patch``, ``shell``, ...) are set
+    aside from the replay check once proven free of account-scoped references;
+    without declarations (the default) the check is the predicate's own.
     """
 
-    if not responses_payload_is_account_neutral_fresh_replay(_classification_view(view)):
+    classification_view = _classification_view(view, supported_tool_types=supported_tool_types)
+    if classification_view is None or not responses_payload_is_account_neutral_fresh_replay(classification_view):
         return False
     return not any(_item_type(item) in ("compaction", "reasoning") for item in _view_input_items(view))
 
@@ -1173,15 +1186,44 @@ def is_binding_turn_state(headers: Mapping[str, str]) -> bool:
     return turn_state is not None and not _is_synthesized_turn_state(turn_state)
 
 
-def _classification_view(view: PortabilityView) -> dict[str, JsonValue]:
-    """The view restricted to the fields the account-neutral predicate validates.
+def _classification_view(
+    view: PortabilityView, *, supported_tool_types: frozenset[str] = frozenset()
+) -> dict[str, JsonValue] | None:
+    """The view restricted to what the account-neutral predicate validates, or ``None`` when it cannot be neutral.
 
     Only the provider-neutral knobs are dropped; anything else the view carries
     reaches the predicate, which rejects fields it has no validation for -- a
-    hand-built view with an unknown field fails closed as history.
+    hand-built view with an unknown field still fails closed as history.
+    Declarations of a stateless tool type the source model declares but the
+    predicate does not know (``_ACCOUNT_NEUTRAL_TOOL_TYPES`` stops at custom,
+    function and web search) are removed from ``tools`` -- and a ``tool_choice``
+    naming one is dropped -- after each is proven free of account-scoped
+    references (``file_ids``, ``vector_store_ids``, containers, hosted URLs);
+    one that carries such a reference makes the whole view non-neutral.
     """
 
-    return {key: value for key, value in view.body.items() if key not in _PORTABILITY_VIEW_ONLY_FIELDS}
+    body = {key: value for key, value in view.body.items() if key not in _PORTABILITY_VIEW_ONLY_FIELDS}
+    stateless_types = supported_tool_types - _ACCOUNT_NEUTRAL_TOOL_TYPES
+    if not stateless_types:
+        return body
+    tools = body.get("tools")
+    if isinstance(tools, list):
+        kept: list[JsonValue] = []
+        for tool in tools:
+            if isinstance(tool, dict) and _is_one_of(tool.get("type"), stateless_types):
+                if _contains_account_scoped_tool_state(tool):
+                    return None
+                continue
+            kept.append(tool)
+        body["tools"] = kept
+    tool_choice = body.get("tool_choice")
+    if (
+        isinstance(tool_choice, dict)
+        and set(tool_choice) == {"type"}
+        and _is_one_of(tool_choice["type"], stateless_types)
+    ):
+        body.pop("tool_choice")
+    return body
 
 
 def _view_input_items(view: PortabilityView) -> list[JsonValue]:

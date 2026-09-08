@@ -36,12 +36,13 @@ from app.modules.proxy.replay_safety import (
     _PORTABILITY_VIEW_ONLY_FIELDS,
     _RESPONSES_PAYLOAD_FIELDS_WITH_DEDICATED_VALIDATION,
     PortabilityVerdict,
+    _classification_view,
     is_binding_turn_state,
     responses_payload_is_account_neutral_fresh_replay,
     responses_payload_is_provider_portable,
     transcript_is_source_free,
 )
-from tests.unit.hypothesis_strategies import json_objects
+from tests.unit.hypothesis_strategies import json_objects, json_values
 
 pytestmark = pytest.mark.unit
 
@@ -117,8 +118,9 @@ def _verdict(
     )
 
 
-def _classification_view(view: PortabilityView) -> dict[str, JsonValue]:
-    return {key: value for key, value in view.body.items() if key not in _PORTABILITY_VIEW_ONLY_FIELDS}
+def _neutral(view: PortabilityView, supported_tool_types: frozenset[str] = frozenset()) -> bool:
+    classification = _classification_view(view, supported_tool_types=supported_tool_types)
+    return classification is not None and responses_payload_is_account_neutral_fresh_replay(classification)
 
 
 def _source(
@@ -154,7 +156,7 @@ def test_standard_first_turn_is_portable_and_account_neutral() -> None:
 
     assert verdict == PortabilityVerdict(True)
     assert transcript_is_source_free(_view(_portable_body()))
-    assert responses_payload_is_account_neutral_fresh_replay(_classification_view(_view(_portable_body())))
+    assert _neutral(_view(_portable_body()))
 
 
 def test_declaring_the_tool_type_restores_portability() -> None:
@@ -372,7 +374,7 @@ def test_flat_lite_bundle_in_a_hand_built_view_declines_as_lite_never_history() 
     }
     view = PortabilityView(body={**_portable_body(), "input": [bundle, _user("hello")]})
 
-    assert responses_payload_is_account_neutral_fresh_replay(_classification_view(view)) is True
+    assert _neutral(view) is True
     assert responses_payload_is_provider_portable(
         view, NO_HEADERS, supported_tool_types=frozenset({"custom"}), supports_vision=True
     ) == PortabilityVerdict(False, "not_portable_lite_namespace", "additional_tools")
@@ -539,6 +541,8 @@ _tools: st.SearchStrategy[JsonValue] = st.lists(
                 {"type": "web_search"},
                 {"type": "namespace", "name": "functions", "tools": []},
                 {"type": "function", "name": "f", "file_ids": ["file_1"]},
+                {"type": "apply_patch"},
+                {"type": "shell", "file_ids": ["file_1"]},
             ],
         )
     ),
@@ -569,7 +573,7 @@ def _bodies(draw: st.DrawFn) -> dict[str, JsonValue]:
     return body
 
 
-_supported = st.frozensets(st.sampled_from(["custom", "web_search", "apply_patch", "namespace"]), max_size=3)
+_supported = st.frozensets(st.sampled_from(["custom", "web_search", "apply_patch", "shell", "namespace"]), max_size=3)
 
 
 @settings(max_examples=250, deadline=None)
@@ -589,8 +593,10 @@ def test_portable_implies_account_neutral_fresh_replay(
     verdict = responses_payload_is_provider_portable(
         view, headers, supported_tool_types=supported_tool_types, supports_vision=supports_vision
     )
-    source_free = transcript_is_source_free(view)
-    neutral = responses_payload_is_account_neutral_fresh_replay(_classification_view(view))
+    source_free = transcript_is_source_free(view, supported_tool_types=supported_tool_types)
+    neutral = _neutral(view, supported_tool_types)
+    # Without declarations the check is the predicate's own and never more permissive.
+    assert not transcript_is_source_free(view) or source_free
 
     if verdict.portable:
         assert verdict.reason is None and verdict.detail is None
@@ -636,6 +642,125 @@ def test_verdict_never_raises_on_arbitrary_views(body: dict[str, JsonValue], sup
     assert isinstance(verdict, PortabilityVerdict)
     if not verdict.portable:
         assert verdict.reason in DECLINE_REASONS
+
+
+# --- declared stateless tool declarations (codex review P2) ----------------------------------
+
+
+@pytest.mark.parametrize("tool_type", ["apply_patch", "shell", "local_shell", "tool_search"])
+def test_declaring_a_stateless_tool_type_the_predicate_does_not_know_restores_portability(tool_type: str) -> None:
+    body = _portable_body(tools=[_function_tool(), {"type": tool_type}], tool_choice={"type": tool_type})
+
+    assert _verdict(body) == PortabilityVerdict(False, "not_portable_tools", tool_type)
+    assert _verdict(body, supported_tool_types=frozenset({tool_type})) == PortabilityVerdict(True)
+    # Without declarations the transcript check stays the predicate's own (conservative)...
+    assert transcript_is_source_free(_view(body)) is False
+    # ...and with them the declaration is set aside, not treated as history.
+    assert transcript_is_source_free(_view(body), supported_tool_types=frozenset({tool_type})) is True
+
+
+def test_declared_stateless_tool_carrying_account_scoped_state_is_history() -> None:
+    body = _portable_body(tools=[{"type": "file_search", "vector_store_ids": ["vs_1"]}])
+
+    assert _verdict(body) == PortabilityVerdict(False, "not_portable_tools", "file_search")
+    assert _verdict(body, supported_tool_types=frozenset({"file_search"})) == PortabilityVerdict(
+        False, "not_portable_history"
+    )
+    assert _classification_view(_view(body), supported_tool_types=frozenset({"file_search"})) is None
+
+
+def test_predicate_known_declarations_keep_their_strict_field_allowlists_when_declared() -> None:
+    body = _portable_body(tools=[{"type": "web_search", "unexpected": True}])
+
+    assert _verdict(body, supported_tool_types=frozenset({"web_search"})) == PortabilityVerdict(
+        False, "not_portable_history"
+    )
+
+
+# --- malformed nested values never raise (codex review P2) ------------------------------------
+
+
+_MALFORMED_CASES: dict[str, dict[str, JsonValue]] = {
+    "tool_choice type list": _portable_body(tool_choice={"type": []}),
+    "tool_choice type object": _portable_body(tool_choice={"type": {"nested": 1}}),
+    "allowed_tools mode list": _portable_body(
+        tool_choice={"type": "allowed_tools", "mode": [], "tools": [{"type": "function", "name": "f"}]}
+    ),
+    "allowed_tools reference type list": _portable_body(
+        tool_choice={"type": "allowed_tools", "mode": "auto", "tools": [{"type": []}]}
+    ),
+    "web_search search_context_size list": _portable_body(tools=[{"type": "web_search", "search_context_size": []}]),
+    "custom grammar syntax list": _portable_body(
+        tools=[{"type": "custom", "name": "c", "format": {"type": "grammar", "syntax": [], "definition": "x"}}]
+    ),
+    "text verbosity list": _portable_body(text={"verbosity": []}),
+    "text format type list": _portable_body(text={"format": {"type": []}}),
+    "message role list": _portable_body(input=[{"role": [], "content": "hi"}]),
+    "message phase list": _portable_body(input=[{"role": "user", "content": "hi", "phase": []}]),
+    "content part type list": _portable_body(input=[{"role": "user", "content": [{"type": [], "text": "hi"}]}]),
+    "assistant part type list": _portable_body(input=[{"role": "assistant", "content": [{"type": [], "text": "x"}]}]),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_MALFORMED_CASES))
+def test_malformed_nested_values_decline_as_history_without_raising(case: str) -> None:
+    body = _MALFORMED_CASES[case]
+
+    assert responses_payload_is_account_neutral_fresh_replay(body) is False
+    assert _verdict(body, supported_tool_types=frozenset({"custom", "web_search"}), supports_vision=True) == (
+        PortabilityVerdict(False, "not_portable_history")
+    )
+
+
+_NESTED_SLOTS: tuple[tuple[str | int, ...], ...] = (
+    ("tool_choice",),
+    ("tool_choice", "type"),
+    ("tool_choice", "mode"),
+    ("tools", 0, "type"),
+    ("tools", 0, "search_context_size"),
+    ("tools", 0, "format", "syntax"),
+    ("text", "verbosity"),
+    ("text", "format", "type"),
+    ("input", 0, "role"),
+    ("input", 0, "phase"),
+    ("input", 0, "status"),
+    ("input", 0, "type"),
+    ("input", 0, "content", 0, "type"),
+    ("reasoning", "effort"),
+    ("include",),
+    ("instructions",),
+)
+
+
+def _malformed_at(slot: tuple[str | int, ...], value: JsonValue) -> dict[str, JsonValue]:
+    body = _portable_body(
+        tools=[{"type": "web_search", "search_context_size": "low", "format": {"type": "grammar", "syntax": "lark"}}],
+        tool_choice={"type": "allowed_tools", "mode": "auto", "tools": [{"type": "web_search"}]},
+        text={"verbosity": "low", "format": {"type": "text"}},
+    )
+    cursor: JsonValue = body
+    for key in slot[:-1]:
+        cursor = (
+            cast(Mapping[str, JsonValue], cursor)[key] if isinstance(key, str) else cast(list[JsonValue], cursor)[key]
+        )
+    last = slot[-1]
+    if isinstance(last, str):
+        cast(dict[str, JsonValue], cursor)[last] = value
+    else:
+        cast(list[JsonValue], cursor)[last] = value
+    return body
+
+
+@settings(max_examples=200, deadline=None)
+@given(st.sampled_from(_NESTED_SLOTS), json_values)
+def test_arbitrary_values_in_known_nested_slots_never_raise(slot: tuple[str | int, ...], value: JsonValue) -> None:
+    body = _malformed_at(slot, value)
+
+    assert isinstance(responses_payload_is_account_neutral_fresh_replay(body), bool)
+    verdict = responses_payload_is_provider_portable(
+        PortabilityView(body=body), NO_HEADERS, supported_tool_types=frozenset({"web_search"}), supports_vision=True
+    )
+    assert verdict.portable or verdict.reason in DECLINE_REASONS
 
 
 # --- constants cannot drift -----------------------------------------------------------------

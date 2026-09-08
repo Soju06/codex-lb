@@ -89,7 +89,9 @@ def test_warn_removed_settings_scans_env_files(tmp_path, monkeypatch, caplog):
 
 
 def test_removed_settings_tuple_covers_all_five_groups():
-    assert len(_REMOVED_SETTINGS) == 52
+    # 52 phase-1..4 names + CODEX_LB_UPSTREAM_STREAM_TRANSPORT
+    # (remove-upstream-stream-transport-env: the dashboard owns the value).
+    assert len(_REMOVED_SETTINGS) == 53
     assert all(name.startswith("CODEX_LB_") for name in _REMOVED_SETTINGS)
     assert len(set(_REMOVED_SETTINGS)) == len(_REMOVED_SETTINGS)
 
@@ -194,3 +196,11 @@ def test_phase_4_removed_settings_are_listed_and_ignored(monkeypatch):
         "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT",
         "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ALLOW_API_KEY_IDS",
     ]
+
+
+def test_upstream_stream_transport_env_is_removed_and_ignored(monkeypatch):
+    assert "CODEX_LB_UPSTREAM_STREAM_TRANSPORT" in _REMOVED_SETTINGS
+    monkeypatch.setenv("CODEX_LB_UPSTREAM_STREAM_TRANSPORT", "http")
+    settings = Settings()
+    assert not hasattr(settings, "upstream_stream_transport")
+    assert "CODEX_LB_UPSTREAM_STREAM_TRANSPORT" in warn_removed_settings({"CODEX_LB_UPSTREAM_STREAM_TRANSPORT": "http"})

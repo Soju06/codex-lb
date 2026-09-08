@@ -29,15 +29,18 @@ class SettingsRepository:
         row = DashboardSettings(
             id=_SETTINGS_ID,
             sticky_threads_enabled=True,
-            upstream_stream_transport="default",
+            upstream_stream_transport="auto",
             prohibit_fast_mode=False,
             http_downstream_transport_policy=get_settings().http_downstream_transport_policy,
-            proxy_account_response_create_limit=get_settings().proxy_account_response_create_limit,
-            proxy_account_stream_limit=get_settings().proxy_account_stream_limit,
-            proxy_account_stream_recovery_reserve=get_settings().proxy_account_stream_recovery_reserve,
-            proxy_api_key_fair_share_congestion_threshold_pct=(
-                get_settings().proxy_api_key_fair_share_congestion_threshold_pct
-            ),
+            # Account-capacity overrides are tri-state: NULL inherits the
+            # process environment value at read time. The first-boot seed must
+            # stay NULL — copying the env value here would freeze it as a
+            # dashboard override while the UI keeps labelling the (possibly
+            # changed) env value as the inherited baseline.
+            proxy_account_response_create_limit=None,
+            proxy_account_stream_limit=None,
+            proxy_account_stream_recovery_reserve=None,
+            proxy_api_key_fair_share_congestion_threshold_pct=None,
             upstream_proxy_routing_enabled=False,
             upstream_proxy_default_pool_id=None,
             prefer_earlier_reset_accounts=True,

@@ -409,7 +409,7 @@ describe("RoutingSettings", () => {
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
 
     expect(screen.getByText("Upstream stream transport")).toBeInTheDocument();
-    expect(screen.getByText("Server default")).toBeInTheDocument();
+    expect(screen.getByText("Auto")).toBeInTheDocument();
   });
 
   it("shows account picker for single-account routing and saves the selected account", async () => {

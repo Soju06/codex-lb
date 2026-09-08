@@ -2068,6 +2068,24 @@ def websocket_connect_transport_failure_code(
     )
 
 
+UPSTREAM_STREAM_TRANSPORTS = frozenset({"auto", "http", "websocket"})
+_UPSTREAM_STREAM_TRANSPORT_DEFAULT = "auto"
+
+
+def configured_upstream_stream_transport(dashboard_settings: Any) -> str:
+    """Return the operator-configured upstream stream transport.
+
+    The dashboard row is the only source. The legacy ``"default"`` sentinel
+    (which used to defer to the removed ``CODEX_LB_UPSTREAM_STREAM_TRANSPORT``
+    env var) and any unknown value resolve to ``"auto"`` so a settings-cache
+    snapshot taken before the data migration ran behaves like the migrated row.
+    """
+    configured = getattr(dashboard_settings, "upstream_stream_transport", None)
+    if configured in UPSTREAM_STREAM_TRANSPORTS:
+        return cast(str, configured)
+    return _UPSTREAM_STREAM_TRANSPORT_DEFAULT
+
+
 def upstream_websocket_transport_recently_failed() -> bool:
     marked_at = _upstream_ws_transport_failure_at
     return marked_at is not None and time.monotonic() - marked_at < UPSTREAM_WS_TRANSPORT_FAILURE_TTL_SECONDS

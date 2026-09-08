@@ -19,7 +19,6 @@ data:
   CODEX_LB_UPSTREAM_BASE_URL: {{ .Values.config.upstreamBaseUrl | quote }}
   {{- end }}
   CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS: {{ .Values.config.upstreamConnectTimeout | toString | quote }}
-  CODEX_LB_UPSTREAM_STREAM_TRANSPORT: {{ .Values.config.upstreamStreamTransport | quote }}
   # Logging
   CODEX_LB_LOG_FORMAT: {{ .Values.config.logFormat | quote }}
   # Metrics

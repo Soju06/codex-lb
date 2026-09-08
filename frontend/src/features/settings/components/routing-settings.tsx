@@ -438,14 +438,13 @@ export function RoutingSettings({
             <Select
               value={settings.upstreamStreamTransport}
               onValueChange={(value) =>
-                save({ upstreamStreamTransport: value as "default" | "auto" | "http" | "websocket" })
+                save({ upstreamStreamTransport: value as "auto" | "http" | "websocket" })
               }
             >
               <SelectTrigger className="h-8 w-44 text-xs" disabled={busy}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent align="end">
-                <SelectItem value="default">{t("settings.routing.upstream.default")}</SelectItem>
                 <SelectItem value="auto">{t("settings.routing.upstream.auto")}</SelectItem>
                 <SelectItem value="http">{t("settings.routing.upstream.http")}</SelectItem>
                 <SelectItem value="websocket">{t("settings.routing.upstream.websocket")}</SelectItem>

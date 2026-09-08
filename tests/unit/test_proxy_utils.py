@@ -6717,7 +6717,7 @@ def _make_proxy_settings(*, trace_channels: frozenset[str] = frozenset()) -> Sim
         prefer_earlier_reset_window="secondary",
         sticky_threads_enabled=False,
         sticky_reallocation_budget_threshold_pct=95.0,
-        upstream_stream_transport="default",
+        upstream_stream_transport="auto",
         openai_cache_affinity_max_age_seconds=300,
         openai_prompt_cache_key_derivation_enabled=True,
         routing_strategy="usage_weighted",
@@ -8425,7 +8425,6 @@ async def test_stream_responses_starts_upstream_timer_after_image_inlining(monke
         image_inline_fetch_enabled = True
         trace_channels = frozenset()
         proxy_request_budget_seconds = 15.0
-        upstream_stream_transport = "http"
 
     inline_ran = False
     recorded: dict[str, float | None] = {}
@@ -8462,6 +8461,7 @@ async def test_stream_responses_starts_upstream_timer_after_image_inlining(monke
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -8483,7 +8483,6 @@ async def test_stream_responses_uses_http_responses_stream_budget(monkeypatch):
         trace_channels = frozenset()
         proxy_request_budget_seconds = 600.0
         http_responses_stream_request_budget_seconds = 7200.0
-        upstream_stream_transport = "http"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -8502,6 +8501,7 @@ async def test_stream_responses_uses_http_responses_stream_budget(monkeypatch):
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -8521,7 +8521,6 @@ async def test_stream_responses_archives_http_error_before_raising(monkeypatch):
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 15.0
-        upstream_stream_transport = "http"
 
     class ErrorPostResponse:
         status = 429
@@ -8563,6 +8562,7 @@ async def test_stream_responses_archives_http_error_before_raising(monkeypatch):
                 account_id="acc_1",
                 session=cast(proxy_module.aiohttp.ClientSession, _SseSession(ErrorPostResponse())),
                 raise_for_status=True,
+                upstream_stream_transport_override="http",
             )
         ]
 
@@ -8587,7 +8587,6 @@ async def test_stream_responses_honors_timeout_overrides(monkeypatch):
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 75.0
-        upstream_stream_transport = "http"
 
     seen: dict[str, object] = {}
 
@@ -8621,6 +8620,7 @@ async def test_stream_responses_honors_timeout_overrides(monkeypatch):
                     access_token="token",
                     account_id="acc_1",
                     session=cast(proxy_module.aiohttp.ClientSession, session),
+                    upstream_stream_transport_override="http",
                 )
             ]
     finally:
@@ -8645,7 +8645,6 @@ async def test_stream_responses_maps_inner_pre_response_timeout_to_upstream_unav
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 5.0
-        upstream_stream_transport = "http"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -8663,6 +8662,7 @@ async def test_stream_responses_maps_inner_pre_response_timeout_to_upstream_unav
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, _TimeoutSseSession()),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -8681,7 +8681,6 @@ async def test_stream_responses_keeps_pre_response_total_timeout_as_request_time
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 600.0
-        upstream_stream_transport = "http"
 
     monotonic_values = iter([100.0, 100.0, 100.0, 700.01])
 
@@ -8702,6 +8701,7 @@ async def test_stream_responses_keeps_pre_response_total_timeout_as_request_time
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, _TimeoutSseSession()),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -8720,7 +8720,6 @@ async def test_stream_responses_prefers_idle_timeout_when_total_deadline_ties_af
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 600.0
-        upstream_stream_transport = "http"
 
     monotonic_values = iter([100.0, 100.0, 100.0, 100.0, 700.01])
 
@@ -8741,6 +8740,7 @@ async def test_stream_responses_prefers_idle_timeout_when_total_deadline_ties_af
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, _TimeoutAfterHeadersSseSession()),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -8760,7 +8760,6 @@ async def test_stream_responses_reports_idle_timeout_when_headers_never_arrive(m
         trace_channels = frozenset()
         proxy_request_budget_seconds = 7200.0
         http_responses_stream_request_budget_seconds = 7200.0
-        upstream_stream_transport = "http"
 
     clock = {"now": 100.0}
     session = _SilentBeforeHeadersSseSession(clock, silence_seconds=180.5)
@@ -8782,6 +8781,7 @@ async def test_stream_responses_reports_idle_timeout_when_headers_never_arrive(m
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -8804,7 +8804,6 @@ async def test_stream_responses_keeps_budget_timeout_after_recent_body_activity(
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 600.0
-        upstream_stream_transport = "http"
 
     clock = {"now": 100.0}
 
@@ -8825,6 +8824,7 @@ async def test_stream_responses_keeps_budget_timeout_after_recent_body_activity(
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, _ActiveThenTotalTimeoutSseSession(clock)),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -8844,7 +8844,6 @@ async def test_stream_responses_keeps_budget_timeout_when_budget_precedes_idle(m
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 300.0
-        upstream_stream_transport = "http"
 
     monotonic_values = iter([100.0, 100.0, 100.0, 400.01])
 
@@ -8865,6 +8864,7 @@ async def test_stream_responses_keeps_budget_timeout_when_budget_precedes_idle(m
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, _TimeoutSseSession()),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -8884,7 +8884,6 @@ async def test_stream_responses_preserves_connect_timeout_retry_provenance(monke
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 5.0
-        upstream_stream_transport = "http"
 
     class _ConnectTimeoutSseSession:
         def post(
@@ -8914,6 +8913,7 @@ async def test_stream_responses_preserves_connect_timeout_retry_provenance(monke
         account_id="acc_1",
         session=cast(proxy_module.aiohttp.ClientSession, _ConnectTimeoutSseSession()),
         raise_for_status=raise_for_status,
+        upstream_stream_transport_override="http",
     )
     if raise_for_status:
         with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
@@ -8942,7 +8942,6 @@ async def test_stream_responses_websocket_pre_dispatch_connect_failure_is_retrya
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 5.0
-        upstream_stream_transport = "websocket"
 
     connection_key = ConnectionKey("chatgpt.com", 443, True, True, None, None, None)
     connect_error: aiohttp.ClientError = (
@@ -8973,6 +8972,7 @@ async def test_stream_responses_websocket_pre_dispatch_connect_failure_is_retrya
                 account_id="acc_ws_connect_failure",
                 session=cast(proxy_module.aiohttp.ClientSession, session),
                 raise_for_status=True,
+                upstream_stream_transport_override="websocket",
             )
         ]
 
@@ -8992,7 +8992,6 @@ async def test_stream_responses_direct_http_tls_connect_failure_is_not_retryable
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 5.0
-        upstream_stream_transport = "http"
 
     certificate_error = _client_connector_certificate_error()
 
@@ -9021,6 +9020,7 @@ async def test_stream_responses_direct_http_tls_connect_failure_is_not_retryable
             account_id="acc_http_tls_failure",
             session=cast(proxy_module.aiohttp.ClientSession, _TlsFailureSseSession()),
             raise_for_status=True,
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -9045,7 +9045,6 @@ async def test_stream_responses_routed_http_tls_connect_failure_is_not_retryable
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 5.0
-        upstream_stream_transport = "http"
 
     certificate_error = _client_connector_certificate_error()
 
@@ -9082,6 +9081,7 @@ async def test_stream_responses_routed_http_tls_connect_failure_is_not_retryable
             codex_client=proxy_module.CodexClient(_TlsFailureCodexSession()),
             allow_direct_egress=False,
             raise_for_status=True,
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -9105,7 +9105,6 @@ async def test_stream_responses_maps_typed_dns_failure_with_failed_session_prove
         image_inline_fetch_enabled = False
         log_upstream_request_payload = False
         proxy_request_budget_seconds = 5.0
-        upstream_stream_transport = "http"
         trace_channels = frozenset()
 
     class _DnsFailureSseSession:
@@ -9142,6 +9141,7 @@ async def test_stream_responses_maps_typed_dns_failure_with_failed_session_prove
                 access_token="token",
                 account_id="acc_1",
                 session=cast(proxy_module.aiohttp.ClientSession, session),
+                upstream_stream_transport_override="http",
             )
         ]
 
@@ -9160,7 +9160,6 @@ async def test_stream_responses_raw_route_oserror_is_neutral_but_not_replayed(mo
         image_inline_fetch_enabled = False
         log_upstream_request_payload = False
         proxy_request_budget_seconds = 5.0
-        upstream_stream_transport = "http"
         trace_channels = frozenset()
 
     class _AmbiguousRouteFailureSession:
@@ -9185,6 +9184,7 @@ async def test_stream_responses_raw_route_oserror_is_neutral_but_not_replayed(mo
                 access_token="token",
                 account_id="acc_1",
                 session=cast(proxy_module.aiohttp.ClientSession, session),
+                upstream_stream_transport_override="http",
             )
         ]
 
@@ -9203,7 +9203,6 @@ async def test_stream_responses_keeps_missing_environment_proxy_hostname_endpoin
         image_inline_fetch_enabled = False
         log_upstream_request_payload = False
         proxy_request_budget_seconds = 5.0
-        upstream_stream_transport = "http"
         trace_channels = frozenset()
 
     class _MissingProxySession:
@@ -9241,6 +9240,7 @@ async def test_stream_responses_keeps_missing_environment_proxy_hostname_endpoin
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -9259,7 +9259,6 @@ async def test_stream_responses_uses_native_websocket_upstream_for_codex_headers
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 15.0
-        upstream_stream_transport = "auto"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -9349,7 +9348,6 @@ async def test_stream_responses_falls_back_to_http_post_without_native_codex_hea
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 15.0
-        upstream_stream_transport = "http"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -9376,6 +9374,7 @@ async def test_stream_responses_falls_back_to_http_post_without_native_codex_hea
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -9399,7 +9398,6 @@ async def test_stream_responses_direct_http_prefers_native_egress(monkeypatch: p
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 15.0
-        upstream_stream_transport = "http"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -9420,6 +9418,7 @@ async def test_stream_responses_direct_http_prefers_native_egress(monkeypatch: p
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
             native_egress_client=cast(Any, native_client),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -9445,7 +9444,6 @@ async def test_stream_responses_direct_http_falls_back_when_native_helper_is_una
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 15.0
-        upstream_stream_transport = "http"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -9467,6 +9465,7 @@ async def test_stream_responses_direct_http_falls_back_when_native_helper_is_una
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
             native_egress_client=cast(Any, native_client),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -9487,7 +9486,6 @@ async def test_stream_responses_does_not_replay_ambiguous_native_failure_through
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 15.0
-        upstream_stream_transport = "http"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -9513,6 +9511,7 @@ async def test_stream_responses_does_not_replay_ambiguous_native_failure_through
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
             native_egress_client=cast(Any, native_client),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -9535,7 +9534,6 @@ async def test_stream_responses_http_egress_uses_profiled_installation_identity(
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 15.0
-        upstream_stream_transport = "http"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -9563,6 +9561,7 @@ async def test_stream_responses_http_egress_uses_profiled_installation_identity(
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
             codex_installation_id="account-installation",
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -9589,7 +9588,6 @@ async def test_stream_responses_derives_lite_http_header_from_additional_tools(m
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 15.0
-        upstream_stream_transport = "http"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -9630,6 +9628,7 @@ async def test_stream_responses_derives_lite_http_header_from_additional_tools(m
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -9654,7 +9653,6 @@ async def test_stream_responses_derives_lite_http_header_from_additional_tools(m
 async def test_stream_responses_uses_websocket_transport_and_marks_lite_payload(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -9705,6 +9703,7 @@ async def test_stream_responses_uses_websocket_transport_and_marks_lite_payload(
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -9745,7 +9744,6 @@ async def test_stream_responses_uses_websocket_transport_and_marks_lite_payload(
 async def test_stream_responses_websocket_normalizes_typeless_error_as_terminal(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -9786,6 +9784,7 @@ async def test_stream_responses_websocket_normalizes_typeless_error_as_terminal(
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -9805,7 +9804,6 @@ async def test_stream_responses_websocket_normalizes_typeless_error_as_terminal(
 async def test_stream_responses_websocket_normalizes_typeless_error_code_to_upstream_error(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -9836,6 +9834,7 @@ async def test_stream_responses_websocket_normalizes_typeless_error_code_to_upst
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -10245,7 +10244,6 @@ def test_normalize_http_bridge_error_event_prefers_selected_replacement_failure_
 async def test_stream_responses_websocket_rejects_oversized_response_create_before_connect(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -10278,6 +10276,7 @@ async def test_stream_responses_websocket_rejects_oversized_response_create_befo
                 account_id="acc_1",
                 session=cast(proxy_module.aiohttp.ClientSession, session),
                 raise_for_status=True,
+                upstream_stream_transport_override="websocket",
             )
         ]
 
@@ -10290,7 +10289,6 @@ async def test_stream_responses_websocket_rejects_oversized_response_create_befo
 async def test_stream_responses_websocket_slims_historical_inline_artifacts_and_succeeds(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -10349,6 +10347,7 @@ async def test_stream_responses_websocket_slims_historical_inline_artifacts_and_
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -10370,7 +10369,6 @@ async def test_stream_responses_websocket_slims_historical_inline_artifacts_and_
 async def test_stream_responses_websocket_slims_images_nested_in_tool_output_and_succeeds(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -10425,6 +10423,7 @@ async def test_stream_responses_websocket_slims_images_nested_in_tool_output_and
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -10444,7 +10443,6 @@ async def test_stream_responses_websocket_slims_images_nested_in_tool_output_and
 async def test_stream_responses_websocket_forces_response_create_event_type(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -10483,6 +10481,7 @@ async def test_stream_responses_websocket_forces_response_create_event_type(monk
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -10496,7 +10495,6 @@ async def test_stream_responses_websocket_forces_response_create_event_type(monk
 async def test_stream_responses_websocket_omits_http_only_transport_fields(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -10536,6 +10534,7 @@ async def test_stream_responses_websocket_omits_http_only_transport_fields(monke
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -10734,7 +10733,6 @@ async def test_stream_responses_websocket_decodes_each_frame_once_and_skips_erro
     # runs for non-error-shaped frames.
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -10779,6 +10777,7 @@ async def test_stream_responses_websocket_decodes_each_frame_once_and_skips_erro
             access_token="token",
             account_id="acc_ws_parse_once",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -11265,7 +11264,6 @@ async def test_open_upstream_websocket_holds_half_open_probe_until_lifecycle_fin
 async def test_stream_responses_websocket_records_circuit_breaker_success_after_terminal_event(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -11316,6 +11314,7 @@ async def test_stream_responses_websocket_records_circuit_breaker_success_after_
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, _WsSession(websocket)),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -11329,7 +11328,6 @@ async def test_stream_responses_websocket_records_circuit_breaker_failure_when_s
 ):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -11373,6 +11371,7 @@ async def test_stream_responses_websocket_records_circuit_breaker_failure_when_s
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, _WsSession(websocket)),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -11500,7 +11499,6 @@ async def test_open_upstream_websocket_malformed_101_records_failure(monkeypatch
 async def test_stream_responses_auto_transport_uses_model_preference(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "auto"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -11551,7 +11549,6 @@ async def test_stream_responses_auto_transport_uses_model_preference(monkeypatch
 async def test_stream_responses_auto_transport_uses_bootstrap_model_preference_when_registry_unloaded(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "auto"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -11603,7 +11600,6 @@ async def test_stream_responses_auto_transport_uses_bootstrap_model_preference_w
 async def test_stream_responses_auto_transport_prefers_http_for_image_generation_tool(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "auto"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -11658,7 +11654,6 @@ async def test_stream_responses_http_transport_keeps_http(monkeypatch):
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 75.0
-        upstream_stream_transport = "http"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(
@@ -11684,6 +11679,7 @@ async def test_stream_responses_http_transport_keeps_http(monkeypatch):
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -11701,7 +11697,6 @@ async def test_non_streaming_responses_forces_http_and_preserves_json_request(mo
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 75.0
-        upstream_stream_transport = "websocket"
 
     class JsonResponse:
         status = 200
@@ -11745,6 +11740,7 @@ async def test_non_streaming_responses_forces_http_and_preserves_json_request(mo
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -11775,7 +11771,6 @@ async def test_stream_responses_http_transport_preserves_raw_error_shape_when_co
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 75.0
-        upstream_stream_transport = "http"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(
@@ -11810,6 +11805,7 @@ async def test_stream_responses_http_transport_preserves_raw_error_shape_when_co
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
             enforce_openai_sdk_contract=False,
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -11832,7 +11828,6 @@ async def test_stream_responses_http_transport_normalizes_error_sequence_number_
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 75.0
-        upstream_stream_transport = "http"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(
@@ -11866,6 +11861,7 @@ async def test_stream_responses_http_transport_normalizes_error_sequence_number_
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="http",
         )
     ]
 
@@ -11885,7 +11881,6 @@ async def test_stream_responses_http_transport_normalizes_error_sequence_number_
 async def test_stream_responses_auto_transport_keeps_http_for_bare_session_affinity(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "auto"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -11924,7 +11919,6 @@ async def test_stream_responses_auto_transport_keeps_http_for_bare_session_affin
 async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket_upgrade_required(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "auto"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -11990,7 +11984,6 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
 async def test_stream_responses_auto_transport_does_not_hide_forbidden_websocket_handshake(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "auto"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -12116,7 +12109,6 @@ def test_codex_transport_error_preserves_routed_edge_challenge_classification():
 async def test_stream_responses_auto_transport_falls_back_for_edge_challenge(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "auto"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -12174,7 +12166,6 @@ async def test_stream_responses_uses_websocket_upstream_when_forced(monkeypatch)
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 75.0
-        upstream_stream_transport = "websocket"
         upstream_websocket_mode = "force"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
@@ -12210,6 +12201,7 @@ async def test_stream_responses_uses_websocket_upstream_when_forced(monkeypatch)
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -12243,7 +12235,6 @@ async def test_stream_responses_websocket_preserves_agent_outputs_before_wire_na
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 75.0
-        upstream_stream_transport = "websocket"
         upstream_websocket_mode = "force"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
@@ -12317,6 +12308,7 @@ async def test_stream_responses_websocket_preserves_agent_outputs_before_wire_na
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -12340,7 +12332,6 @@ async def test_stream_responses_websocket_preserves_agent_outputs_before_wire_na
 async def test_stream_responses_forced_websocket_does_not_fallback_on_handshake_rejection(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -12371,6 +12362,7 @@ async def test_stream_responses_forced_websocket_does_not_fallback_on_handshake_
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -12383,7 +12375,6 @@ async def test_stream_responses_forced_websocket_does_not_fallback_on_handshake_
 async def test_stream_responses_forced_websocket_preserves_rate_limit_code_on_handshake_rejection(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -12415,6 +12406,7 @@ async def test_stream_responses_forced_websocket_preserves_rate_limit_code_on_ha
                 account_id="acc_1",
                 session=cast(proxy_module.aiohttp.ClientSession, _SseSession(_SsePostResponse([]))),
                 raise_for_status=True,
+                upstream_stream_transport_override="websocket",
             )
         ]
 
@@ -12425,7 +12417,6 @@ async def test_stream_responses_forced_websocket_preserves_rate_limit_code_on_ha
 async def test_stream_responses_forced_websocket_preserves_quota_code_from_handshake_error_payload(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "websocket"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -12458,6 +12449,7 @@ async def test_stream_responses_forced_websocket_preserves_quota_code_from_hands
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, _SseSession(_SsePostResponse([]))),
+            upstream_stream_transport_override="websocket",
         )
     ]
 
@@ -12475,7 +12467,6 @@ async def test_stream_responses_uses_websocket_upstream_in_auto_mode_for_preferr
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 75.0
-        upstream_stream_transport = "auto"
         upstream_websocket_mode = "auto"
 
     snapshot = SimpleNamespace(
@@ -12531,7 +12522,6 @@ async def test_stream_responses_websocket_emits_incomplete_when_upstream_closes_
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 75.0
-        upstream_stream_transport = "websocket"
         upstream_websocket_mode = "force"
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
@@ -12560,6 +12550,7 @@ async def test_stream_responses_websocket_emits_incomplete_when_upstream_closes_
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
         )
     ]
 

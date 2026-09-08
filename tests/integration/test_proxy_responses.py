@@ -126,7 +126,6 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
-        upstream_stream_transport="auto",
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
@@ -1939,7 +1938,6 @@ async def test_v1_responses_default_smart_policy_routes_http_downstream_by_stick
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
-        upstream_stream_transport="auto",
         http_downstream_transport_policy="smart",
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
@@ -1950,7 +1948,7 @@ async def test_v1_responses_default_smart_policy_routes_http_downstream_by_stick
     dashboard_settings = DashboardSettings(
         id=1,
         sticky_threads_enabled=False,
-        upstream_stream_transport="default",
+        upstream_stream_transport="auto",
         http_downstream_transport_policy="smart",
         prefer_earlier_reset_accounts=False,
         routing_strategy="usage_weighted",
@@ -2036,7 +2034,6 @@ async def test_v1_responses_upstream_transport_metric_counts_terminal_errors(
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
-        upstream_stream_transport="auto",
         http_downstream_transport_policy="smart",
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
@@ -2047,7 +2044,7 @@ async def test_v1_responses_upstream_transport_metric_counts_terminal_errors(
     dashboard_settings = DashboardSettings(
         id=1,
         sticky_threads_enabled=False,
-        upstream_stream_transport="default",
+        upstream_stream_transport="auto",
         http_downstream_transport_policy="smart",
         prefer_earlier_reset_accounts=False,
         routing_strategy="usage_weighted",
@@ -2127,7 +2124,6 @@ async def test_v1_responses_without_http_bridge_honors_explicit_websocket_upstre
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
-        upstream_stream_transport="auto",
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
@@ -2156,7 +2152,6 @@ async def test_v1_responses_without_http_bridge_honors_explicit_websocket_upstre
 
     class _CoreProxySettings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "default"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
@@ -2230,7 +2225,6 @@ async def test_v1_responses_without_http_bridge_http_upstream_preserves_historic
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
-        upstream_stream_transport="auto",
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
@@ -2258,7 +2252,6 @@ async def test_v1_responses_without_http_bridge_http_upstream_preserves_historic
 
     class _CoreProxySettings:
         upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_stream_transport = "default"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024

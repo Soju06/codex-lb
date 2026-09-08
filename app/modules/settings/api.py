@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ipaddress
-import os
 import socket
 import time
 
@@ -95,7 +94,7 @@ def _resolve_hostname_ipv4(hostname: str) -> str | None:
 
 
 def _resolve_runtime_connect_address(request: Request) -> str:
-    override = os.getenv("CODEX_LB_CONNECT_ADDRESS", "").strip()
+    override = get_app_settings().connect_address
     if override:
         return override
 

@@ -2208,6 +2208,12 @@ def _to_websocket_upstream_url(url: str) -> str:
     return urlunparse((scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
 
 
+# The upstream stream transport is dashboard-owned; the proxy service resolves
+# the operator's choice and passes it as ``transport_override``. Callers that
+# do not pass one (warmup probes, bridge owner forwarding) get "auto".
+_DEFAULT_UPSTREAM_STREAM_TRANSPORT = "auto"
+
+
 def _configured_stream_transport(
     *,
     transport: str,
@@ -3696,7 +3702,7 @@ async def _stream_responses_with_session(
         "http"
         if non_streaming_http
         else _configured_stream_transport(
-            transport=settings.upstream_stream_transport,
+            transport=_DEFAULT_UPSTREAM_STREAM_TRANSPORT,
             transport_override=upstream_stream_transport_override,
         )
     )
@@ -3705,7 +3711,7 @@ async def _stream_responses_with_session(
         if non_streaming_http
         else _resolve_stream_transport(
             settings=settings,
-            transport=settings.upstream_stream_transport,
+            transport=_DEFAULT_UPSTREAM_STREAM_TRANSPORT,
             transport_override=upstream_stream_transport_override,
             model=payload.model,
             headers=headers,

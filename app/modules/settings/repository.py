@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,6 +49,8 @@ class SettingsRepository:
             relative_availability_power=2.0,
             relative_availability_top_k=5,
             single_account_id=None,
+            subscription_overflow_source_id=None,
+            subscription_overflow_drain_until=None,
             openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=DEFAULT_DASHBOARD_SESSION_TTL_SECONDS,
             warmup_model=get_settings().warmup_model,
@@ -117,6 +120,10 @@ class SettingsRepository:
         relative_availability_power: float | None = None,
         relative_availability_top_k: int | None = None,
         single_account_id: str | None = None,
+        subscription_overflow_source_id: str | None = None,
+        clear_subscription_overflow_source: bool = False,
+        subscription_overflow_drain_until: datetime | None = None,
+        set_subscription_overflow_drain_until: bool = False,
         openai_cache_affinity_max_age_seconds: int | None = None,
         dashboard_session_ttl_seconds: int | None = None,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = None,
@@ -208,6 +215,15 @@ class SettingsRepository:
             settings.relative_availability_top_k = relative_availability_top_k
         if single_account_id is not None or routing_strategy == "single_account":
             settings.single_account_id = single_account_id
+        # Independent of ``single_account_id``: its NULL write is coupled to the
+        # routing strategy, whereas the overflow designation clears through an
+        # explicit flag and never touches (or is touched by) routing_strategy.
+        if clear_subscription_overflow_source:
+            settings.subscription_overflow_source_id = None
+        elif subscription_overflow_source_id is not None:
+            settings.subscription_overflow_source_id = subscription_overflow_source_id
+        if set_subscription_overflow_drain_until:
+            settings.subscription_overflow_drain_until = subscription_overflow_drain_until
         if openai_cache_affinity_max_age_seconds is not None:
             settings.openai_cache_affinity_max_age_seconds = openai_cache_affinity_max_age_seconds
         if dashboard_session_ttl_seconds is not None:
@@ -292,6 +308,22 @@ class SettingsRepository:
             on_committed=get_upstream_route_cache().clear if upstream_route_inputs_changed else None,
         )
         return settings
+
+    async def clear_subscription_overflow_source_if_matches(self, source_id: str, *, drain_until: datetime) -> bool:
+        """Turn overflow off and arm the drain deadline when ``source_id`` is designated.
+
+        No commit: the caller (the model-source delete route) commits the clear
+        together with the source delete so a designated-but-deleted source can
+        never persist. ``DashboardSettings.version`` is the version_id_col, so a
+        concurrent settings writer still surfaces as ``StaleDataError`` at that
+        commit.
+        """
+        settings = await self.get_or_create()
+        if settings.subscription_overflow_source_id != source_id:
+            return False
+        settings.subscription_overflow_source_id = None
+        settings.subscription_overflow_drain_until = drain_until
+        return True
 
     async def commit_refresh(
         self, settings: DashboardSettings, *, on_committed: Callable[[], None] | None = None

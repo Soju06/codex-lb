@@ -41,8 +41,6 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "database_alembic_auto_remap_enabled": "T0",
     "database_migration_lock_timeout_seconds": "T0",
     "upstream_base_url": "T1",
-    "upstream_stream_transport": "T3",
-    "http_downstream_transport_policy": "T3",
     "upstream_connect_timeout_seconds": "T3",
     "upstream_compact_timeout_seconds": "T3",
     "upstream_websocket_trust_env": "T1",
@@ -64,13 +62,13 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "token_refresh_interval_days": "T3",
     "usage_fetch_timeout_seconds": "T3",
     "usage_fetch_max_retries": "T3",
+    # path to a replacement quota-key registry; deployment artefact, not behaviour
+    "additional_quota_registry_file": "T1",
     "usage_refresh_enabled": "T3",
     "usage_refresh_interval_seconds": "T3",
     "live_usage_ingestion_enabled": "T3",
     "rate_limit_reset_credits_refresh_enabled": "T3",
     "rate_limit_reset_credits_refresh_interval_seconds": "T3",
-    "openai_cache_affinity_max_age_seconds": "T3",
-    "warmup_model": "T3",
     "openai_prompt_cache_key_derivation_enabled": "T3",
     "http_responses_session_bridge_enabled": "T3",
     "http_responses_session_bridge_request_budget_seconds": "T3",
@@ -83,7 +81,6 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "http_responses_session_bridge_max_sessions": "T1",
     "http_responses_session_bridge_queue_limit": "T1",
     "http_responses_session_bridge_clean_close_retry_jitter_max_seconds": "T3",
-    "http_responses_session_bridge_gateway_safe_mode": "T3",
     "http_responses_session_bridge_operation_ledger_enabled": "T3",
     "http_responses_session_bridge_operation_event_spool_max_bytes": "T1",
     "http_responses_session_bridge_operation_spool_format": "T1",
@@ -98,8 +95,6 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "http_responses_session_bridge_advertise_base_url": "T1",
     "sticky_session_cleanup_enabled": "T3",
     "upstream_route_cache_ttl_seconds": "T1",
-    "request_log_retention_days": "T3",
-    "usage_history_retention_days": "T3",
     "quota_planner_scheduler_enabled": "T3",
     "automations_scheduler_enabled": "T3",
     "telemetry_enabled": "T3",
@@ -126,6 +121,8 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     # trusted-proxy topology; policy §2 T1 example
     "firewall_trusted_proxy_cidrs": "T1",
     "firewall_ip_cache_ttl_seconds": "T1",
+    # reverse-proxy trust list for scope["client"] projection (Uvicorn semantics)
+    "forwarded_allow_ips": "T1",
     # reverse-proxy deployment dependent, self-lockout risk from the dashboard (policy D2)
     "dashboard_auth_mode": "T1",
     "dashboard_trust_loopback_host_header_for_long_sessions": "T3",
@@ -144,6 +141,8 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "bulkhead_dashboard_limit": "T1",
     # first remote login token; policy §2 lists it under T0 bootstrap, not T2
     "dashboard_bootstrap_token": "T0",
+    # advertised client-facing address; differs per deployment
+    "connect_address": "T1",
     "proxy_token_refresh_limit": "T3",
     "proxy_upstream_websocket_connect_limit": "T3",
     "proxy_response_create_limit": "T3",
@@ -160,8 +159,6 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "proxy_account_lease_ttl_seconds": "T3",
     "proxy_account_caps_scope": "T1",
     "proxy_account_cap_partition_scale_down_seconds": "T1",
-    # worker topology declaration; policy §2 T1 lists worker/pool sizes
-    "workers_per_instance": "T1",
     "proxy_refresh_failure_cooldown_seconds": "T3",
     "usage_refresh_auth_failure_cooldown_seconds": "T3",
     "timeout_invariant_validation_strict": "T4",

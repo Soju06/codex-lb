@@ -141,10 +141,9 @@ _PROCESS_ENV_CONVENTIONS: tuple[tuple[str, str], ...] = (
         "Test-suite/CI only: overrides the database used by the test session factory.",
     ),
     (
-        "`CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE`, `CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS` "
-        "(inside `app/db/alembic/versions/**` only)",
+        "`CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE` (inside `app/db/alembic/versions/**` only)",
         "Frozen Alembic migrations read the process environment directly because migrations must not "
-        "depend on `Settings`; the live settings of the same name are documented in the tables below.",
+        "depend on `Settings`; the live setting of the same name is documented in the tables below.",
     ),
 )
 

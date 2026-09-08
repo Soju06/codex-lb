@@ -6,7 +6,7 @@ The configuration policy (dashboard first, env only for bootstrap and instance t
 
 - Add `app/core/config/tiers.py`: a `SETTING_TIERS` map assigning every `Settings` field a tier (`T0`–`T4`) and a `MIGRATING` map for T3 fields that still have no `dashboard_settings` home (initially every env-only tunable/flag from the inventory, value `backlog`).
 - Add `scripts/check_settings_tiers.py`, run by `make lint` (architecture-check): fails on fields without a tier, on T3 fields with neither a same-name `dashboard_settings` column nor a `MIGRATING` entry, on `os.environ` / `os.getenv` / `dotenv_values` use under `app/` outside `app/core/config/settings.py` (an explicit allowlist covers the current sites, capped per file at today's number of reading lines, until they are promoted to `Settings` fields), on `.env.example` mentioning a T2/T3/T4 setting, and on `len(Settings.model_fields)` exceeding the new `[settings_fields]` budget. Entries for fields that no longer exist and allowlist entries that no longer match only warn, so removals and this map can land in either order.
-- Add `[settings_fields] max = 135` to `.github/simplicity-budgets.toml`; `tests/unit/test_settings_reference.py` reads its ratchet from the same key instead of a duplicated constant.
+- Add `[settings_fields] max = 130` (the field count on `main` after the B1/B6/B5b removals and promotions) to `.github/simplicity-budgets.toml`; `tests/unit/test_settings_reference.py` reads its ratchet from the same key instead of a duplicated constant.
 - `scripts/generate_settings_reference.py` renders a **Tier** column and a tier legend in `docs/reference/settings.md`.
 
 ## Capabilities

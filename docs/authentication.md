@@ -34,6 +34,10 @@ Internally, authorization is expressed as fine-grained permissions such as `acco
 
 Mutations gated only by the generic write check keep returning `read_only_access`; routes gated by a specific permission (account credential export, security settings, firewall rules, guest password, upstream-proxy endpoint creation) return `permission_required` instead. The full permission list, the built-in grant table, and the per-route requirements are normative in the [admin-auth spec](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/admin-auth).
 
+## Cross-site request protection
+
+State-changing dashboard requests (`POST`, `PUT`, `PATCH`, `DELETE` under `/api/`) are checked against the browser's `Sec-Fetch-Site` and `Origin` headers before they reach any handler. A request the browser marks as cross-site, or whose `Origin` does not match the dashboard's own scheme, host, and port, is refused with `403` and error code `cross_site_request_rejected`; requests without either header (curl, scripts, the CLI) pass through. Bearer-authenticated routes (`/api/fleet/`, `/api/codex/`, or any request with `Authorization: Bearer`) are exempt. Nothing needs to be configured, but a reverse proxy in front of an `http://` dashboard must forward the browser's original `Host` header including its port so the `Origin` comparison can match: nginx `proxy_set_header Host $http_host;` (not `$host`, which drops the port), Apache `ProxyPreserveHost On`; Traefik and Caddy pass `Host` through by default. The exact rules are normative in the [admin-auth spec](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/admin-auth).
+
 ## First-time remote access
 
 Setting the initial dashboard password from a remote machine requires a one-time bootstrap token — see [Getting Started](getting-started.md#remote-setup-bootstrap-token).

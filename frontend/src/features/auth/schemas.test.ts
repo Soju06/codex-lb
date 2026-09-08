@@ -30,11 +30,48 @@ describe("AuthSessionSchema", () => {
       authMode: "trusted_header",
       passwordManagementEnabled: true,
       passwordSessionActive: false,
-      role: "admin",
-      permissions: ["read", "write"],
+      role: "guest",
+      permissions: [],
       guestAccessEnabled: false,
       guestPasswordRequired: false,
     });
+  });
+
+  it("defaults role and permissions to least privilege when omitted", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: false,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+    });
+
+    expect(parsed.role).toBe("guest");
+    expect(parsed.permissions).toEqual([]);
+  });
+
+  it("accepts fine-grained permission strings alongside the coarse aliases", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      role: "admin",
+      permissions: ["read", "write", "accounts:export", "security:write"],
+    });
+
+    expect(parsed.permissions).toEqual(["read", "write", "accounts:export", "security:write"]);
+  });
+
+  it("rejects unknown roles", () => {
+    const result = AuthSessionSchema.safeParse({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      role: "superuser",
+    });
+
+    expect(result.success).toBe(false);
   });
 
   it("rejects missing required fields", () => {

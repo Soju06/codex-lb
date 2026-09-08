@@ -13,6 +13,7 @@ Request-conditional checks (``PUT /api/settings`` security fields,
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
@@ -20,10 +21,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
+from httpx import AsyncClient
 
 import app.core.auth.dependencies as auth_dependencies
 from app.core.auth.dashboard_access import Permission, Scope
 from app.core.auth.dependencies import DashboardPermissionDependency, PermissionRequirement
+from app.core.middleware.dashboard_csrf import CROSS_SITE_REQUEST_REJECTED_CODE
 
 pytestmark = pytest.mark.integration
 
@@ -81,6 +84,15 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
 READ_ONLY_PERMISSIONS: frozenset[Permission] = frozenset(p for p in Permission if p.value.endswith(":read"))
 
 SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
+
+#: Routes under ``/api/`` that authenticate with a bearer proxy API key and are
+#: therefore outside the cross-site (CSRF) origin check.
+CSRF_EXEMPT_PREFIXES: tuple[str, ...] = (
+    "/api/fleet/",
+    "/api/codex/",
+)
+
+_PATH_PARAM = re.compile(r"\{[^}]+\}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,3 +196,55 @@ def test_no_route_requires_own_scope_yet(app_instance: FastAPI) -> None:
         if requirement.minimum_scope is Scope.OWN
     ]
     assert own_scoped == []
+
+
+async def test_every_dashboard_mutation_rejects_cross_site_requests(
+    app_instance: FastAPI, async_client: AsyncClient
+) -> None:
+    """The origin check runs before routing, validation, and authentication.
+
+    Every non-safe ``/api/`` route (including the session-issuing dashboard-auth
+    module and ``/logout``) must answer ``403 cross_site_request_rejected`` when
+    the browser reports a cross-site initiator, regardless of body validity.
+    """
+
+    unprotected: list[str] = []
+    for method, path, _route in _dashboard_routes(app_instance):
+        if method in SAFE_METHODS or path.startswith(CSRF_EXEMPT_PREFIXES):
+            continue
+        response = await async_client.request(
+            method,
+            _PATH_PARAM.sub("x", path),
+            json={},
+            headers={"Sec-Fetch-Site": "cross-site"},
+        )
+        payload = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+        code = payload.get("error", {}).get("code") if isinstance(payload, dict) else None
+        if response.status_code != 403 or code != CROSS_SITE_REQUEST_REJECTED_CODE:
+            unprotected.append(f"{method} {path} -> {response.status_code} {code}")
+    assert unprotected == [], f"mutating routes reachable cross-site: {unprotected}"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        pytest.param({"Sec-Fetch-Site": "same-origin"}, id="same-origin-fetch-metadata"),
+        pytest.param({"Origin": "http://testserver"}, id="matching-origin"),
+    ],
+)
+async def test_every_dashboard_mutation_accepts_same_origin_requests(
+    app_instance: FastAPI, async_client: AsyncClient, headers: dict[str, str]
+) -> None:
+    """Same-origin browser requests must reach the route: whatever the route answers
+    (200, 401, 403 permission, 404, 422), it must not be the cross-site rejection."""
+
+    rejected: list[str] = []
+    for method, path, _route in _dashboard_routes(app_instance):
+        if method in SAFE_METHODS or path.startswith(CSRF_EXEMPT_PREFIXES):
+            continue
+        response = await async_client.request(method, _PATH_PARAM.sub("x", path), json={}, headers=headers)
+        payload = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+        code = payload.get("error", {}).get("code") if isinstance(payload, dict) else None
+        if code == CROSS_SITE_REQUEST_REJECTED_CODE:
+            rejected.append(f"{method} {path} -> {response.status_code} {code}")
+    assert rejected == [], f"same-origin requests rejected as cross-site: {rejected}"

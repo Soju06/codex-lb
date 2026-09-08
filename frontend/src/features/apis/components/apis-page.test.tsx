@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { createApiKey } from "@/test/mocks/factories";
@@ -79,6 +79,12 @@ function renderApisPage({
 
 	return renderWithProviders(<ApisPage />);
 }
+
+// The store boots least-privilege, so every page test that exercises admin
+// controls must seed write access explicitly rather than rely on defaults.
+beforeEach(() => {
+	useAuthStore.setState({ role: "admin", permissions: ["read", "write"], canWrite: true, initialized: true });
+});
 
 afterEach(() => {
 	vi.clearAllMocks();

@@ -499,6 +499,41 @@ describe("DashboardPage", () => {
     expect(useConversationsMock.mock.calls.every(([options]) => options !== undefined && options.enabled === false)).toBe(true);
   });
 
+  it("fails closed during auth hydration from the least-privilege boot state", async () => {
+    // The store now boots as guest with no permissions; the gate normally
+    // holds rendering until initialized, but the page must still fail closed
+    // if it is mounted before the session resolves.
+    useAuthStore.setState({
+      initialized: false,
+      role: "guest",
+      permissions: [],
+      canWrite: false,
+    });
+    window.history.pushState({}, "", "/dashboard?view=conversations");
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByRole("heading", { name: "Request Logs" })).toBeInTheDocument();
+    expect(screen.queryByTestId("conversations-view")).not.toBeInTheDocument();
+    expect(window.location.search).toContain("view=conversations");
+    expect(useConversationsMock.mock.calls.every(([options]) => options !== undefined && options.enabled === false)).toBe(true);
+
+    act(() => {
+      useAuthStore.setState({
+        initialized: true,
+        role: "admin",
+        permissions: ["read", "write"],
+        canWrite: true,
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("conversations-view")).toBeInTheDocument();
+    });
+    expect(window.location.search).toContain("view=conversations");
+  });
+
   it("customizes and restores the request-log table without a global width control", async () => {
     const user = userEvent.setup();
     mockReadyDashboard();

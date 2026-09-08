@@ -13,7 +13,6 @@ export function AuthGate({ children }: PropsWithChildren) {
   const { t } = useTranslation();
   const refreshSessionStable = useAuthStore((state) => state.refreshSession);
   const initialized = useAuthStore((state) => state.initialized);
-  const loading = useAuthStore((state) => state.loading);
   const passwordRequired = useAuthStore((state) => state.passwordRequired);
   const authenticated = useAuthStore((state) => state.authenticated);
   const bootstrapRequired = useAuthStore((state) => state.bootstrapRequired);
@@ -28,7 +27,10 @@ export function AuthGate({ children }: PropsWithChildren) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (!initialized && loading) {
+  // Hold the whole app until the session resolves: the store starts
+  // least-privilege, so rendering early would flash a read-only frame for
+  // admins, and rendering with stale state could expose admin controls.
+  if (!initialized) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <SpinnerBlock />

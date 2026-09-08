@@ -110,6 +110,14 @@ function account(overrides: Partial<AccountSummary>): AccountSummary {
 
 describe("AccountsPage", () => {
   beforeEach(() => {
+    // The auth store starts least-privilege; these cases exercise admin actions.
+    useAuthStore.setState({
+      initialized: true,
+      authenticated: true,
+      role: "admin",
+      permissions: ["read", "write"],
+      canWrite: true,
+    });
     useAccountQuotaDisplayStore.setState({ quotaDisplay: "weekly" });
     vi.spyOn(Date, "now").mockReturnValue(
       new Date("2026-01-01T12:00:00.000Z").getTime(),

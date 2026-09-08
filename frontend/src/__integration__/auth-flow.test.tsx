@@ -40,6 +40,8 @@ describe("auth flow integration", () => {
           totpConfigured: true,
           authMode: "standard",
           passwordManagementEnabled: true,
+          role: "admin",
+          permissions: ["read", "write"],
         }),
       ),
     );

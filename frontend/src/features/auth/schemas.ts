@@ -35,8 +35,11 @@ export const AuthSessionSchema = z.object({
   authMode: DashboardAuthModeSchema.default("standard"),
   passwordManagementEnabled: z.boolean().default(true),
   passwordSessionActive: z.boolean().default(false),
-  role: DashboardRoleSchema.default("admin"),
-  permissions: z.array(DashboardPermissionSchema).default(["read", "write"]),
+  // Least-privilege defaults: a response that omits these fields must never
+  // be treated as an admin. `permissions` accepts any string so that future
+  // fine-grained values (e.g. `accounts:export`) do not reject the session.
+  role: DashboardRoleSchema.default("guest"),
+  permissions: z.array(z.string()).default([]),
   guestAccessEnabled: z.boolean().default(false),
   guestPasswordRequired: z.boolean().default(false),
 });

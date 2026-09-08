@@ -19,6 +19,8 @@ describe("firewall flow integration", () => {
           passwordRequired: true,
           totpRequiredOnLogin: false,
           totpConfigured: true,
+          role: "admin",
+          permissions: ["read", "write"],
         }),
       ),
       http.get("/api/firewall/ips", () =>

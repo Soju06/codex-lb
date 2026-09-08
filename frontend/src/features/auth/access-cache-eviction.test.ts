@@ -1,5 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { installAccessCacheEviction } from "@/features/auth/access-cache-eviction";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
@@ -13,6 +13,12 @@ function seed(client: QueryClient) {
 }
 
 describe("installAccessCacheEviction", () => {
+  beforeEach(() => {
+    // The store boots least-privilege; start each case from a write-capable
+    // session so the true -> false transition under test actually happens.
+    useAuthStore.setState({ role: "admin", permissions: ["read", "write"], canWrite: true });
+  });
+
   afterEach(() => {
     useAuthStore.setState({ role: "admin", permissions: ["read", "write"], canWrite: true });
   });

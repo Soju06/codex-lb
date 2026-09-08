@@ -31,11 +31,11 @@ function resetAuthStore(): void {
     authMode: "standard",
     passwordManagementEnabled: true,
     passwordSessionActive: false,
-    role: "admin",
-    permissions: ["read", "write"],
+    role: "guest",
+    permissions: [],
     guestAccessEnabled: false,
     guestPasswordRequired: false,
-    canWrite: true,
+    canWrite: false,
     adminLoginRequested: false,
     loading: false,
     initialized: false,
@@ -43,10 +43,63 @@ function resetAuthStore(): void {
   });
 }
 
+describe("useAuthStore initial state", () => {
+  it("starts with least privilege before the session resolves", () => {
+    const initial = useAuthStore.getInitialState();
+
+    expect(initial.initialized).toBe(false);
+    expect(initial.authenticated).toBe(false);
+    expect(initial.role).toBe("guest");
+    expect(initial.permissions).toEqual([]);
+    expect(initial.canWrite).toBe(false);
+  });
+});
+
 describe("useAuthStore actions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetAuthStore();
+  });
+
+  it("applySession grants write access only when the backend lists it", async () => {
+    (getAuthSession as Mock).mockResolvedValue({
+      ...sessionBase,
+      role: "admin",
+      permissions: ["read", "write", "accounts:export"],
+    });
+
+    await useAuthStore.getState().refreshSession();
+
+    const next = useAuthStore.getState();
+    expect(next.role).toBe("admin");
+    expect(next.permissions).toEqual(["read", "write", "accounts:export"]);
+    expect(next.canWrite).toBe(true);
+  });
+
+  it("logout resets to least privilege instead of admin defaults before refreshing", async () => {
+    useAuthStore.setState({
+      authenticated: true,
+      passwordRequired: true,
+      initialized: true,
+      role: "admin",
+      permissions: ["read", "write"],
+      canWrite: true,
+    });
+
+    let stateDuringRefresh: ReturnType<typeof useAuthStore.getState> | null = null;
+    (logoutRequest as Mock).mockResolvedValue({ status: "ok" });
+    (getAuthSession as Mock).mockImplementation(async () => {
+      stateDuringRefresh = useAuthStore.getState();
+      return { ...sessionBase, authenticated: false };
+    });
+
+    await useAuthStore.getState().logout();
+
+    expect(stateDuringRefresh).not.toBeNull();
+    expect(stateDuringRefresh!.role).toBe("guest");
+    expect(stateDuringRefresh!.permissions).toEqual([]);
+    expect(stateDuringRefresh!.canWrite).toBe(false);
+    expect(stateDuringRefresh!.authenticated).toBe(false);
   });
 
   it("refreshSession updates auth state", async () => {

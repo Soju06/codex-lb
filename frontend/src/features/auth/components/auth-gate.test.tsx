@@ -38,6 +38,28 @@ describe("AuthGate", () => {
     vi.useRealTimers();
   });
 
+  it("hides children and shows the spinner until the session resolves", async () => {
+    const refreshSession = vi.fn().mockResolvedValue(undefined);
+    setAuthState({
+      refreshSession,
+      initialized: false,
+      loading: false,
+      passwordRequired: false,
+      authenticated: false,
+    });
+
+    render(
+      <AuthGate>
+        <div>Protected content</div>
+      </AuthGate>,
+    );
+
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(screen.queryByText("Protected content")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sign in")).not.toBeInTheDocument();
+    await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
+  });
+
   it("shows login form when unauthenticated", async () => {
     const refreshSession = vi.fn().mockResolvedValue(undefined);
     setAuthState({

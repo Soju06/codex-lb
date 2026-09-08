@@ -8,12 +8,7 @@ import {
   logout as logoutRequest,
   verifyTotp as verifyTotpRequest,
 } from "@/features/auth/api";
-import type {
-  AuthSession,
-  DashboardAuthMode,
-  DashboardPermission,
-  DashboardRole,
-} from "@/features/auth/schemas";
+import type { AuthSession, DashboardAuthMode, DashboardRole } from "@/features/auth/schemas";
 
 let isAdminLoginInProgress = false;
 
@@ -28,7 +23,7 @@ type AuthState = {
   passwordManagementEnabled: boolean;
   passwordSessionActive: boolean;
   role: DashboardRole;
-  permissions: DashboardPermission[];
+  permissions: string[];
   guestAccessEnabled: boolean;
   guestPasswordRequired: boolean;
   canWrite: boolean;
@@ -43,6 +38,15 @@ type AuthState = {
   logout: () => Promise<void>;
   verifyTotp: (code: string) => Promise<AuthSession>;
   clearError: () => void;
+};
+
+// The store starts (and is reset on logout) with the least privilege the
+// backend can grant, so nothing renders admin controls before the session
+// response says so.
+const LEAST_PRIVILEGE_ACCESS: Pick<AuthState, "role" | "permissions" | "canWrite"> = {
+  role: "guest",
+  permissions: [],
+  canWrite: false,
 };
 
 function applySession(set: (next: Partial<AuthState>) => void, session: AuthSession): AuthSession {
@@ -78,11 +82,9 @@ export const useAuthStore = create<AuthState>((set) => ({
   authMode: "standard",
   passwordManagementEnabled: true,
   passwordSessionActive: false,
-  role: "admin",
-  permissions: ["read", "write"],
+  ...LEAST_PRIVILEGE_ACCESS,
   guestAccessEnabled: false,
   guestPasswordRequired: false,
-  canWrite: true,
   adminLoginRequested: false,
   loading: false,
   initialized: false,
@@ -149,9 +151,7 @@ export const useAuthStore = create<AuthState>((set) => ({
         bootstrapTokenConfigured: false,
         authMode: "standard",
         passwordManagementEnabled: true,
-        role: "admin",
-        permissions: ["read", "write"],
-        canWrite: true,
+        ...LEAST_PRIVILEGE_ACCESS,
         adminLoginRequested: false,
       });
       await useAuthStore.getState().refreshSession();

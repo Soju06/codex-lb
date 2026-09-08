@@ -882,9 +882,26 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
                 error_code = ERROR_MODEL_SOURCE_STREAM_TRUNCATED
                 error_message = "source ended the stream without a terminal event"
     except (asyncio.CancelledError, GeneratorExit):
-        status = "cancelled"
-        error_code = CANCELLED_CLIENT_DISCONNECTED
-        error_message = "client disconnected before stream completed"
+        # A client that disconnects right after a relayed failure terminal --
+        # Codex tears the stream down on ``response.failed``/``error`` while
+        # many sources still send ``[DONE]``/keepalives before their own EOF --
+        # received a failure, not a partial answer, so this is an ``error`` that
+        # releases the reservation, never a cancel-after-first-item estimate
+        # (design §6.4; api-keys "Failure terminal is never charged"). The
+        # completed-normally branch already classifies this; the cancel path
+        # keyed only on ``first_output_item_seen`` and charged the estimate.
+        owner.observe_stream()
+        holder = owner.usage_holder
+        if (holder is not None and holder.terminal_kind in _FAILURE_TERMINAL_KINDS) or (
+            relayed_terminal_kind(last_event_frame) in _FAILURE_TERMINAL_KINDS
+        ):
+            status = "error"
+            error_code = ERROR_MODEL_SOURCE_RESPONSE_FAILED
+            error_message = "source terminated the stream with a failure terminal"
+        else:
+            status = "cancelled"
+            error_code = CANCELLED_CLIENT_DISCONNECTED
+            error_message = "client disconnected before stream completed"
         # ``async for`` does not close the inner layer on an exception; the
         # wrapper's own ``finally`` blocks release everything below it.
         await _aclose_best_effort(wrapped, scheduler=owner.scheduler)

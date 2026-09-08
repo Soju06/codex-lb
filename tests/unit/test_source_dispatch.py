@@ -890,6 +890,50 @@ async def test_settlement_stream_failure_terminal_releases_a_limited_key_instead
     assert recorder.rows[0]["error_code"] == "model_source_response_failed"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_kind", ["failed", "error"])
+async def test_settlement_stream_cancel_after_a_relayed_failure_terminal_releases_not_estimates(
+    recorder: _Recorder, terminal_kind: str
+) -> None:
+    """A client that leaves right after a relayed ``response.failed``/``error`` (before the source's own EOF --
+    Codex tears the stream down on the failure terminal while many sources still send ``[DONE]``/keepalives) has
+    received a failure, so the reservation is released and the row is an error, never charged at the cancel
+    estimate (design v3 §6.4; api-keys 'Failure terminal is never charged')."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder()
+    _attach_stream(owner, holder=holder)
+    gate: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    async def inner() -> AsyncIterator[str]:
+        holder.first_output_item_seen = True
+        holder.delta_chars = 12_000
+        yield "event: response.output_item.added\ndata: {}\n\n"
+        holder.terminal_kind = cast(Any, terminal_kind)
+        yield "event: response.failed\ndata: {}\n\n"
+        # The source has not closed yet; the client disconnects here.
+        await gate
+        yield "data: never\n\n"
+
+    body = settlement_stream(owner, inner())
+
+    async def consume() -> list[str]:
+        return [chunk async for chunk in body]
+
+    consumer = asyncio.create_task(consume())
+    for _ in range(6):
+        await asyncio.sleep(0)
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert recorder.settle_calls == []
+    assert recorder.release_calls == [owner.reservation]
+    assert recorder.rows[0]["status"] == "error"
+    assert recorder.rows[0]["error_code"] == "model_source_response_failed"
+    assert recorder.rows[0]["input_tokens"] is None
+
+
 _SYNTHESIZED_TRUNCATION = (
     "event: response.failed\n"
     'data: {"type":"response.failed","sequence_number":3,"response":{"id":"resp_upstream_stream_truncated",'

@@ -39,7 +39,7 @@ python -m pytest -q --timeout=30 \
   tests/unit/test_codex_upstream_paths.py tests/unit/test_native_egress_packaging.py \
   tests/unit/test_native_sse_fixtures.py tests/unit/test_sse.py \
   tests/integration/test_native_sse_egress.py tests/integration/test_native_routed_egress.py
-# 276 passed
+# 284 passed (including the 8 media-type regressions added during review)
 
 python -m pytest -q --timeout=30 tests/unit/test_proxy_utils.py \
   tests/integration/test_proxy_responses.py -k compact
@@ -73,3 +73,13 @@ python -m pytest -q --timeout=30 tests/integration/test_native_sse_egress.py \
 
 CI failure evidence for the superseded poll-order fix:
 [Rust workspace job](https://github.com/Soju06/codex-lb/actions/runs/34193031991/job/101954940010).
+
+Review also identified substring-based Content-Type detection. Eight added
+cases failed before the fix: `text/event-stream+json` and a JSON media-type
+parameter containing `text/event-stream`, across native/missing-helper and
+direct/routed transports. Exact media-type comparison and content-type-independent
+compact JSON decoding now preserve all eight payloads without SSE scanning or
+event byte limits. The final 284-test native/client suite, 111 compact tests,
+`make rust-check`, Ruff/Ty, architecture checks, and strict specs all passed.
+Both compact requirements now explicitly require negotiated capability support;
+missing helpers may fall back, while incompatible installed helpers fail closed.

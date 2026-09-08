@@ -548,8 +548,7 @@ class _CodexSSEResponse:
         self.content = _CodexSSEContent(response)
 
     async def json(self, *, content_type: str | None = None) -> JsonValue:
-        del content_type
-        return cast(JsonValue, await _codex_response_json(self._response))
+        return cast(JsonValue, await _codex_response_json(self._response, content_type=content_type))
 
     async def read(self) -> bytes:
         return await _codex_response_body(self._response)
@@ -1570,11 +1569,11 @@ async def _compact_response_payload_from_success_response(
     headers = _codex_response_headers(resp)
     content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), "")
     content = getattr(resp, "content", None)
-    if "text/event-stream" in content_type.lower() or (
+    if content_type.partition(";")[0].strip().lower() == "text/event-stream" or (
         not content_type and callable(getattr(content, "iter_chunked", None))
     ):
         return await _compact_response_payload_from_sse(cast(SSEResponse, resp), idle_timeout_seconds, max_event_bytes)
-    return await _codex_response_json(resp)
+    return await _codex_response_json(resp, content_type=None)
 
 
 def _normalize_compact_response_payload_shape(payload: JsonValue) -> JsonValue:
@@ -5184,7 +5183,9 @@ def _codex_response_status(response: Any) -> int:
     return int(value)
 
 
-async def _codex_response_json(response: Any) -> Any:
+async def _codex_response_json(response: Any, *, content_type: str | None = "application/json") -> Any:
+    if isinstance(response, (aiohttp.ClientResponse, _CodexSSEResponse)):
+        return await response.json(content_type=content_type)
     json_method = getattr(response, "json", None)
     if callable(json_method):
         result = json_method()

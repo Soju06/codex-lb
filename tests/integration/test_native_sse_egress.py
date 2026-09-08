@@ -773,6 +773,43 @@ async def test_native_compact_frames_and_returns_before_body_eof(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("content_type", ['application/json; profile="text/event-stream"', "text/event-stream+json"])
+@pytest.mark.parametrize("missing_helper", [False, True])
+async def test_compact_non_sse_media_types_keep_raw_json(
+    monkeypatch: pytest.MonkeyPatch,
+    native_worker: SubprocessNativeEgressClient,
+    tmp_path: Path,
+    routed: bool,
+    content_type: str,
+    missing_helper: bool,
+) -> None:
+    worker = SubprocessNativeEgressClient(tmp_path / "missing-helper") if missing_helper else native_worker
+    payload = {"object": "response.compact", "id": "compact_json", "padding": "x" * 512}
+    monkeypatch.setattr(proxy_module.get_settings(), "max_sse_event_bytes", 128)
+    hits: list[bytes] = []
+
+    def forbidden_python_scan(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("non-SSE compact JSON must bypass SSE framing")
+
+    monkeypatch.setattr(proxy_module, "_find_sse_separator", forbidden_python_scan)
+
+    async def handler(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter, head: bytes, _body: bytes) -> None:
+        hits.append(head)
+        await _start_chunked_response(writer, content_type=content_type)
+        await _write_chunk(writer, json.dumps(payload).encode())
+        await _finish_chunks(writer)
+
+    async with _serve_http(handler) as base_url, aiohttp.ClientSession(trust_env=False) as session:
+        response = await _compact(
+            base_url, worker, monkeypatch, routed=routed, session=session if missing_helper else None
+        )
+        assert response.id == payload["id"]
+        assert response.model_extra is not None and response.model_extra["padding"] == payload["padding"]
+    assert len(hits) == 1
+    assert not worker._streams
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["json", "http_error", "terminal", "eof", "oversize", "disconnect"])
 async def test_native_compact_preserves_payloads_errors_and_no_replay(
     monkeypatch: pytest.MonkeyPatch,

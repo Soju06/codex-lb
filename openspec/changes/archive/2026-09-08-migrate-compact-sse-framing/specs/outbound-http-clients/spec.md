@@ -44,8 +44,9 @@ MUST reject a clean EOF that leaves an incomplete event.
 
 The native protocol MUST advertise and the adapter MUST require
 `http_compact_sse_v1` before dispatching content-type-aware SSE requests.
-Such requests MUST frame successful responses when Content-Type contains
-`text/event-stream` case-insensitively or is absent or empty. Other successful
+Such requests MUST frame successful responses when the Content-Type media type
+is exactly `text/event-stream`, ignoring parameters and case, or when the header
+is absent or empty. Other successful
 responses and HTTP errors MUST retain raw body consumption. Ordinary SSE
 requests without the content-type-aware option MUST retain their existing
 framing behavior. A null native total timeout MUST mean no total deadline;
@@ -62,6 +63,12 @@ positive explicit total, connection, and SSE idle limits MUST be preserved.
 - **WHEN** a compact success has a text/event-stream or absent/empty Content-Type
 - **THEN** Rust owns byte framing, original-byte limits, and body-read idle deadlines
 - **AND** Python consumes framed text without rescanning bytes
+
+#### Scenario: Non-SSE media type mentions event-stream
+
+- **WHEN** compact succeeds with `text/event-stream+json` or a JSON Content-Type parameter containing `text/event-stream`
+- **THEN** native and missing-helper Python transports use raw-body JSON parsing
+- **AND** the SSE event byte limit does not apply to the JSON body
 
 #### Scenario: Optional total timeout
 

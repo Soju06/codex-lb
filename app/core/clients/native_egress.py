@@ -635,7 +635,7 @@ class SubprocessNativeEgressClient:
                 and (
                     not request.sse.content_type_aware
                     or not content_type
-                    or "text/event-stream" in content_type.lower()
+                    or content_type.partition(";")[0].strip().lower() == "text/event-stream"
                 )
             )
         except TimeoutError as exc:

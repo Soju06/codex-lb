@@ -42,7 +42,10 @@ error bodies and non-streaming requests keep the raw chunk contract.
 
 Compact requests additionally require `http_compact_sse_v1`. Their
 `content_type_aware` framing option preserves raw JSON success bodies, while
-`text/event-stream` and absent/empty Content-Type use native framing. Python
+the exact `text/event-stream` media type (ignoring parameters and case) and
+absent/empty Content-Type use native framing. Both Python compact paths apply
+the same comparison, so non-SSE types or parameters mentioning event-stream
+retain JSON parsing. Python
 still collects output items and returns the existing compact payload as soon
 as `response.completed` arrives, closing the request without waiting for HTTP
 EOF. A null total timeout stays unset; explicit total, connection, and SSE idle

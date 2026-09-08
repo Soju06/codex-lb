@@ -5777,11 +5777,12 @@ cancellation MUST NOT replay a dispatched POST or switch its proxy endpoint.
 ### Requirement: Native compact Responses preserve terminal and ownership contracts
 
 Direct and account-routed compact requests MUST use native SSE framing when
-the helper is available. Python MUST retain request shaping, output collection,
+the helper has negotiated `http_compact_sse_v1`. Python MUST retain request shaping, output collection,
 compact normalization, terminal error mapping, archives, routing, and settlement.
 Responses MUST remain open until consumption finishes, and owned responses and
 routed sessions MUST close on completion, failure, and cancellation. Missing
-helpers MAY use Python transport only before dispatch. Native failures after
+helpers MAY use Python transport only before dispatch. An installed helper lacking
+`http_compact_sse_v1` MUST fail negotiation before dispatch without Python fallback. Native failures after
 dispatch MUST NOT replay the POST through Python or another proxy endpoint.
 
 #### Scenario: Compact completes before HTTP EOF

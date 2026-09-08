@@ -2,9 +2,10 @@
 
 Compact keeps its Python request/response policy but shares the native SSE
 framer used by ordinary Responses. A per-request `content_type_aware` option
-selects framing for successful responses whose Content-Type contains
-`text/event-stream` case-insensitively, or is absent/empty, matching the existing
-compact parser. Other success bodies and all HTTP errors remain raw bytes.
+selects framing for successful responses whose Content-Type media type equals
+`text/event-stream` ignoring parameters and case, or is absent/empty. Both Python
+compact paths use the same comparison; substring matches in non-SSE media types
+or parameters no longer select framing. Other success bodies and all HTTP errors remain raw bytes.
 The adapter derives the same mode from the request options and response headers;
 real-worker tests cover this cross-language decision. Ordinary SSE options retain
 their unconditional-success framing semantics.

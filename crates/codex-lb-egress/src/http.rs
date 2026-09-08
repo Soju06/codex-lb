@@ -114,9 +114,9 @@ pub(crate) async fn execute_request(
         status < 400
             && (!options.content_type_aware
                 || content_type.is_empty()
-                || content_type
-                    .to_ascii_lowercase()
-                    .contains("text/event-stream"))
+                || content_type.split(';').next().is_some_and(|media_type| {
+                    media_type.trim().eq_ignore_ascii_case("text/event-stream")
+                }))
     }) {
         if let Some(error) =
             execute_sse_body(&mut response, &request.request_id, options, output).await?

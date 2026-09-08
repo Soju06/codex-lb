@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ _HOST_AUTOMATION_HEARTBEAT_FIELDS = frozenset(
     {"internal_chat_message_metadata_passthrough", "name", "namespace", "output", "type"}
 )
 _HOST_AUTOMATION_HEARTBEAT_METADATA_FIELDS = frozenset({"create_time", "turn_id"})
+_HOST_AUTOMATION_HEARTBEAT_OUTPUT_RE = re.compile(r"<heartbeat><automation_id>[^<>\s]+</automation_id></heartbeat>")
 _ACCOUNT_NEUTRAL_TOOL_TYPES = frozenset({"custom", "function", "web_search", "web_search_preview"})
 _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS = {
     "custom": frozenset({"description", "format", "name", "type"}),
@@ -646,13 +648,7 @@ def _is_host_automation_heartbeat_input(item: Mapping[str, JsonValue]) -> bool:
     output = item.get("output")
     if not isinstance(output, str):
         return False
-    stripped_output = output.strip()
-    if (
-        not stripped_output.startswith("<heartbeat>")
-        or not stripped_output.endswith("</heartbeat>")
-        or stripped_output.count("<heartbeat>") != 1
-        or stripped_output.count("</heartbeat>") != 1
-    ):
+    if _HOST_AUTOMATION_HEARTBEAT_OUTPUT_RE.fullmatch(output) is None:
         return False
     metadata = item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD)
     if not isinstance(metadata, dict) or set(metadata) != _HOST_AUTOMATION_HEARTBEAT_METADATA_FIELDS:

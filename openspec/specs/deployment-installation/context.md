@@ -171,17 +171,18 @@ settings, merged as PRs #1351, #1360, #1362, #1363, #1364 in v1.21.x):
    `drop_column` for SQLite, nullable re-add on downgrade) and remove the two
    allow-list entries in the same PR.
 2. ~~**Retire the retention env aliases.**~~ Done in
-   `remove-dead-env-settings` (v1.26): the env fields are gone and
+   `remove-dead-env-settings` (first release after v1.24.0): the env fields are gone and
    `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` /
    `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS` are in `_REMOVED_SETTINGS` for
    their warning release. See `openspec/specs/data-retention/context.md`.
 3. **Retire the removal warning itself.** `_REMOVED_SETTINGS` and
    `warn_removed_settings()` in `app/core/config/settings.py` are a
    one-release courtesy per removed batch ("at least one release"). The
-   phase 1-4 names were pruned in v1.26 (their warning release shipped in
-   v1.22-v1.24); the seven names removed in v1.26 (this batch plus
-   `CODEX_LB_UPSTREAM_STREAM_TRANSPORT`) are pruned in the release
-   after v1.26. Drop the mechanism only once no batch is pending.
+   phase 1-4 names were pruned by `remove-dead-env-settings` (their warning release shipped in
+   v1.22-v1.24); the six names removed by that change, together with
+   `CODEX_LB_UPSTREAM_STREAM_TRANSPORT` (`remove-upstream-stream-transport-env`),
+   are pruned in the release after the one that ships them. Drop the mechanism
+   only once no batch is pending.
 
 ## Settings-surface reduction rationale (issue #1340, phases 1-4)
 
@@ -331,7 +332,7 @@ warning lists names only, never values. `_REMOVED_SETTINGS` holds only the
 most recent removal batch: once a batch's warning release has shipped its
 names are pruned (they stay inert), so the list never accumulates.
 
-### Removed in v1.26 (`remove-dead-env-settings`)
+### Removed by `remove-dead-env-settings` (first release after v1.24.0)
 
 Six env fields whose documented behavior was already dead or deprecated:
 

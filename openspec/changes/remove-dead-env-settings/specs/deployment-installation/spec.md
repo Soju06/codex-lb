@@ -145,6 +145,23 @@ enable switches.
   is `smart`, and `openai_cache_affinity_max_age_seconds` is `1800`
 - **AND** the startup warning names `CODEX_LB_WARMUP_MODEL`
 
+#### Scenario: Fresh database bootstrap ignores a removed variable
+
+- **GIVEN** an empty database and
+  `CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS=64` still set in the
+  environment
+- **WHEN** the Alembic chain is upgraded to head
+- **THEN** the seeded `dashboard_settings` row has
+  `openai_cache_affinity_max_age_seconds` `1800`
+- **AND** no migration reads the removed variable
+
+#### Scenario: Removed names are matched case-insensitively
+
+- **GIVEN** a deployment whose environment sets `codex_lb_warmup_model`
+  in lowercase (which the former field honoured)
+- **WHEN** the application starts
+- **THEN** the startup warning lists `CODEX_LB_WARMUP_MODEL`
+
 #### Scenario: Background pool sizing derives from the main pool settings
 
 - **GIVEN** `CODEX_LB_DATABASE_POOL_SIZE=12` and

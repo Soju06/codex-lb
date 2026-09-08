@@ -323,6 +323,20 @@ def test_settings_rejects_multiple_workers_per_instance(monkeypatch):
     assert "scale horizontally via replicas" in message
 
 
+def test_settings_rejects_multiple_workers_per_instance_declared_in_lowercase(monkeypatch):
+    # pydantic-settings matched the former field case-insensitively
+    # (case_sensitive=False); the guard must not let a lowercase declaration
+    # slip past what the field used to reject.
+    monkeypatch.delenv("CODEX_LB_WORKERS_PER_INSTANCE", raising=False)
+    monkeypatch.setenv("codex_lb_workers_per_instance", "2")
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings()
+
+    assert "CODEX_LB_WORKERS_PER_INSTANCE" in str(exc_info.value)
+    assert "not supported" in str(exc_info.value)
+
+
 @pytest.mark.parametrize("declared", ["0", "-1", "two"])
 def test_settings_rejects_non_positive_workers_per_instance(monkeypatch, declared: str):
     monkeypatch.setenv("CODEX_LB_WORKERS_PER_INSTANCE", declared)

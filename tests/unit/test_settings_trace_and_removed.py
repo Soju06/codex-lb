@@ -130,6 +130,17 @@ def test_dead_env_settings_are_listed_and_ignored(monkeypatch):
     ]
 
 
+def test_warn_removed_settings_matches_names_case_insensitively(caplog):
+    # pydantic-settings read the former fields case-insensitively, so a
+    # lowercase declaration that used to take effect must still be reported
+    # (under its canonical name).
+    with caplog.at_level(logging.WARNING, logger="app.core.config.settings"):
+        found = warn_removed_settings({"codex_lb_warmup_model": "gpt-5.4-nano"})
+    assert found == ["CODEX_LB_WARMUP_MODEL"]
+    assert "CODEX_LB_WARMUP_MODEL" in caplog.text
+    assert "gpt-5.4-nano" not in caplog.text
+
+
 def test_expired_removed_names_are_silently_ignored(monkeypatch, caplog):
     # Phases 1-4 (July 2026) had their warning release; the names stay inert
     # via extra="ignore" but no longer trip the startup warning.

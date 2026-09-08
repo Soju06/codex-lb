@@ -157,7 +157,7 @@ describe("DataRetentionSettings", () => {
       <DataRetentionSettings
         settings={{
           ...baseSettings,
-          requestLogRetentionDays: 90, // effective via env alias
+          requestLogRetentionDays: 90, // effective value reported by the server
           requestLogRetentionOverrideDays: null,
         }}
         busy={false}

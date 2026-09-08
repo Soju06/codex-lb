@@ -60,14 +60,16 @@ OAUTH_CALLBACK_PORT = 1455  # Do not change the port. OpenAI dislikes changes.
 # PRINCIPLES.md P2). ``extra="ignore"`` already makes them harmless; startup
 # emits one WARN for one release as a courtesy to operators who still set them.
 # Names whose warning release has shipped are pruned from this tuple (the
-# July 2026 phases 1-4 shipped in v1.22-v1.24 and were dropped in v1.26).
+# July 2026 phases 1-4 shipped in v1.22-v1.24 and were dropped by
+# ``remove-dead-env-settings``, the first release after v1.24.0).
 _REMOVED_SETTINGS: tuple[str, ...] = (
-    # remove-dead-env-settings (v1.26): retention is a dashboard runtime
-    # setting (Settings -> Advanced -> Data retention); NULL now means disabled.
+    # remove-dead-env-settings (first release after v1.24.0): retention is a
+    # dashboard runtime setting (Settings -> Advanced -> Data retention);
+    # NULL now means disabled.
     "CODEX_LB_REQUEST_LOG_RETENTION_DAYS",
     "CODEX_LB_USAGE_HISTORY_RETENTION_DAYS",
-    # remove-dead-env-settings (v1.26): dashboard-owned columns that the env
-    # value only seeded on first boot (or never read at all).
+    # remove-dead-env-settings (first release after v1.24.0): dashboard-owned
+    # columns that the env value only seeded on first boot (or never read).
     "CODEX_LB_HTTP_DOWNSTREAM_TRANSPORT_POLICY",
     "CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS",
     "CODEX_LB_WARMUP_MODEL",
@@ -90,7 +92,7 @@ def warn_removed_settings(environ: Mapping[str, str] | None = None) -> list[str]
         source: Mapping[str, str | None] = _effective_environ()
     else:
         source = environ
-    found = [name for name in _REMOVED_SETTINGS if name in source]
+    found = [name for name in _REMOVED_SETTINGS if _env_key(source, name) is not None]
     if found:
         logger.warning(
             "removed setting(s) ignored: %s — each is now a fixed default or a dashboard runtime setting; "
@@ -146,6 +148,23 @@ def _effective_environ() -> dict[str, str | None]:
         environ.update(dotenv_values(env_file))
     environ.update(os.environ)
     return environ
+
+
+def _env_key(environ: Mapping[str, str | None], name: str) -> str | None:
+    """Return the key under which ``name`` is declared, matching case-insensitively.
+
+    pydantic-settings resolves ``CODEX_LB_*`` names case-insensitively
+    (``case_sensitive=False`` is the ``BaseSettings`` default), so the env
+    guards that replaced former fields must accept the same spellings a field
+    did. An exact-case declaration wins over other casings.
+    """
+    if name in environ:
+        return name
+    upper = name.upper()
+    for key in environ:
+        if key.upper() == upper:
+            return key
+    return None
 
 
 DEFAULT_HOME_DIR = _default_home_dir()
@@ -758,7 +777,9 @@ class Settings(BaseSettings):
         # accepted value is the default, 1) but a startup guard: an explicit
         # declaration of anything else fails fast rather than silently
         # over-admitting.
-        raw = _effective_environ().get(_WORKERS_PER_INSTANCE_ENV)
+        environ = _effective_environ()
+        key = _env_key(environ, _WORKERS_PER_INSTANCE_ENV)
+        raw = environ.get(key) if key is not None else None
         if raw is None or not raw.strip():
             return self
         try:

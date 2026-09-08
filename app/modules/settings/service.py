@@ -130,7 +130,7 @@ class DashboardSettingsUpdateData:
     guest_access_enabled: bool
     limit_warmup_staggered_idle_enabled: bool
     # Tri-state retention overrides: value set = store, clear flag = reset to
-    # NULL (inherit the deprecated env alias), neither = leave untouched.
+    # NULL (not configured = retention disabled), neither = leave untouched.
     request_log_retention_override_days: int | None
     usage_history_retention_override_days: int | None
     clear_request_log_retention_override: bool

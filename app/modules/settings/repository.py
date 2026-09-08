@@ -278,7 +278,7 @@ class SettingsRepository:
         if limit_warmup_staggered_idle_enabled is not None:
             settings.limit_warmup_staggered_idle_enabled = limit_warmup_staggered_idle_enabled
         # Retention overrides are tri-state: a clear flag resets the column to
-        # NULL (inherit the deprecated env alias); a non-None value stores an
+        # NULL (not configured = retention disabled); a non-None value stores an
         # override; neither leaves the stored value untouched.
         if clear_request_log_retention:
             settings.request_log_retention_days = None

@@ -25,7 +25,7 @@ The scheduler always starts and re-resolves the effective retention at the top o
 ## Env-alias retirement (done)
 
 - `retention-dashboard-settings` (PR #1364, v1.21.x) moved retention to the dashboard and kept `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` / `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS` as deprecated aliases for NULL dashboard values.
-- `remove-dead-env-settings` (v1.26, after v1.22–v1.24 shipped the deprecation window) removed the env fields. The two names are in `_REMOVED_SETTINGS`, so an operator who still sets them gets the one-release startup warning; the effective window for a NULL dashboard value is now `0` (disabled), so such an operator must set the window from the dashboard once.
+- `remove-dead-env-settings` (first release after v1.24.0; v1.22–v1.24 shipped the deprecation window) removed the env fields. The two names are in `_REMOVED_SETTINGS`, so an operator who still sets them gets the one-release startup warning; the effective window for a NULL dashboard value is now `0` (disabled), so such an operator must set the window from the dashboard once.
 
 ## Decisions
 

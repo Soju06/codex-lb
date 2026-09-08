@@ -12,6 +12,7 @@ from app.core.utils.time import utcnow
 from app.db.models import AccountUsageRollupState, AdditionalUsageHistory, RequestLog, UsageHistory
 from app.db.session import get_background_session, sqlite_writer_section
 from app.modules.accounts.usage_rollup import FOLD_LAG
+from app.modules.proxy.model_source_pins import ModelSourcePinRepository, drain_deadline_from_settings
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
 logger = logging.getLogger(__name__)
@@ -55,10 +56,15 @@ async def get_effective_retention() -> EffectiveRetention:
 
 
 async def run_retention_pass(*, now: datetime | None = None) -> dict[str, int]:
-    """Prune aged rows per the effective retention settings. Returns rows deleted per table."""
+    """Prune aged rows per the effective retention settings. Returns rows deleted per table.
+
+    The request-log and usage-history windows are opt-in; the model-source pin
+    purge is not (every pin row carries its own ``purge_at``, design §8.8), so
+    it runs on every pass whatever the windows say.
+    """
     retention = await get_effective_retention()
     now = now or utcnow()
-    deleted = {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0}
+    deleted = {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0, "model_source_pins": 0}
     if retention.request_log_days:
         cutoff = now - timedelta(days=retention.request_log_days)
         deleted["request_logs"] = await _prune_request_logs(cutoff, now=now)
@@ -66,15 +72,59 @@ async def run_retention_pass(*, now: datetime | None = None) -> dict[str, int]:
         cutoff = now - timedelta(days=retention.usage_history_days)
         deleted["usage_history"] = await _prune_usage_history(cutoff)
         deleted["additional_usage_history"] = await _prune_additional_usage_history(cutoff)
+    deleted["model_source_pins"] = await prune_model_source_pins()
     total = sum(deleted.values())
     if total:
         logger.info(
-            "Retention pruned rows request_logs=%s usage_history=%s additional_usage_history=%s",
+            "Retention pruned rows request_logs=%s usage_history=%s additional_usage_history=%s model_source_pins=%s",
             deleted["request_logs"],
             deleted["usage_history"],
             deleted["additional_usage_history"],
+            deleted["model_source_pins"],
         )
     return deleted
+
+
+async def prune_model_source_pins(*, batch_size: int = BATCH_SIZE) -> int:
+    """Delete model-source pin rows whose ``purge_at`` has passed on the database clock.
+
+    ``pin_key``-keyed batches, one short transaction each under the SQLite
+    writer section, until a batch comes back short. Independent of the
+    retention opt-in: a purged pin answers no lookup any more (its tombstone
+    grace is over), so keeping the row buys nothing. Afterwards the drain
+    invariant is checked: while a drain deadline is armed every row must have
+    ``purge_at < drain_until`` (the drain cap), so a later ``purge_at`` is a bug
+    worth a WARN, never something to repair here.
+    """
+    total = 0
+    while True:
+        async with get_background_session() as session:
+            async with sqlite_writer_section():
+                deleted = await ModelSourcePinRepository(session).prune_purged(batch_size=batch_size)
+                await session.commit()
+        total += deleted
+        if deleted < batch_size:
+            break
+    await _warn_on_model_source_pin_drain_invariant()
+    return total
+
+
+async def _warn_on_model_source_pin_drain_invariant() -> None:
+    try:
+        drain_until = drain_deadline_from_settings(await get_settings_cache().get())
+        if drain_until is None:
+            return
+        async with get_background_session() as session:
+            latest_purge_at = await ModelSourcePinRepository(session).max_purge_at()
+    except Exception:
+        logger.exception("Retention: model-source pin drain invariant check failed")
+        return
+    if latest_purge_at is not None and latest_purge_at >= drain_until:
+        logger.warning(
+            "model_source_pins_drain_invariant_violated max_purge_at=%s drain_until=%s",
+            latest_purge_at.isoformat(),
+            drain_until.isoformat(),
+        )
 
 
 async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:

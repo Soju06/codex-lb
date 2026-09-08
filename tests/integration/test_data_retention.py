@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import timedelta
+import logging
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -8,15 +9,18 @@ from sqlalchemy import select
 
 import app.core.retention.job as retention_job
 from app.core.config.settings import Settings, get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
-from app.core.retention.job import run_retention_pass
+from app.core.retention.job import prune_model_source_pins, run_retention_pass
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, AdditionalUsageHistory, RequestLog, UsageHistory
-from app.db.session import SessionLocal
+from app.db.models import Account, AccountStatus, AdditionalUsageHistory, ModelSourcePin, RequestLog, UsageHistory
+from app.db.session import SessionLocal, sqlite_writer_section
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.usage_rollup import run_fold_pass
 from app.modules.accounts.usage_time_rollup import run_conversation_fold_pass, run_hourly_fold_pass
+from app.modules.proxy.model_source_pins import ModelSourcePinRepository, PinWrite
 from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.settings.repository import SettingsRepository
 
 pytestmark = pytest.mark.integration
 
@@ -82,7 +86,7 @@ async def test_retention_disabled_by_default_deletes_nothing(db_setup):
         await session.commit()
 
     deleted = await run_retention_pass(now=now)
-    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0}
+    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0, "model_source_pins": 0}
 
 
 @pytest.mark.asyncio
@@ -688,7 +692,7 @@ async def test_dashboard_zero_disables_retention_despite_env_alias(db_setup, mon
     await _set_dashboard_retention(usage_history=0)
 
     deleted = await run_retention_pass(now=now)
-    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0}
+    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0, "model_source_pins": 0}
     async with SessionLocal() as session:
         assert len((await session.execute(select(UsageHistory.id))).scalars().all()) == 2
 
@@ -713,3 +717,102 @@ async def test_env_alias_applies_while_dashboard_value_unset(db_setup, monkeypat
     async with SessionLocal() as session:
         remaining = (await session.execute(select(UsageHistory.used_percent))).scalars().all()
     assert remaining == [20.0]
+
+
+# --- model-source pins: purge independent of the retention opt-in (#2123 WP-C1) ---
+
+
+async def _write_pin(pin_key: str, *, now: datetime, drain_until: datetime | None = None) -> None:
+    async with SessionLocal() as session:
+        async with sqlite_writer_section():
+            await ModelSourcePinRepository(session).upsert(
+                [PinWrite(pin_key, "thread", "src_overflow", None)], now=now, drain_until=drain_until
+            )
+            await session.commit()
+
+
+async def _pin_exists(pin_key: str) -> bool:
+    async with SessionLocal() as session:
+        return await ModelSourcePinRepository(session).reread(pin_key) is not None
+
+
+async def _arm_drain(drain_until: datetime | None) -> None:
+    async with SessionLocal() as session:
+        row = await SettingsRepository(session).get_or_create()
+        row.subscription_overflow_drain_until = drain_until
+        await session.commit()
+    await get_settings_cache().invalidate(propagate=False)
+
+
+@pytest.mark.asyncio
+async def test_model_source_pins_are_pruned_while_retention_is_disabled(db_setup, caplog):
+    """A purged pin answers no lookup any more, so its row goes regardless of the opt-in windows."""
+    now = datetime.now(timezone.utc)
+    await _write_pin("thread\npurged", now=now - timedelta(days=40))  # purge_at 12 days ago
+    await _write_pin("thread\ntombstone", now=now - timedelta(days=10))  # expired, still answerable
+    await _write_pin("thread\nlive", now=now)
+    caplog.set_level(logging.WARNING, logger="app.core.retention.job")
+
+    deleted = await run_retention_pass(now=utcnow())
+
+    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0, "model_source_pins": 1}
+    assert not await _pin_exists("thread\npurged")
+    assert await _pin_exists("thread\ntombstone")
+    assert await _pin_exists("thread\nlive")
+    assert "model_source_pins_drain_invariant_violated" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_model_source_pin_purge_drains_backlog_across_batches(db_setup):
+    now = datetime.now(timezone.utc)
+    for index in range(5):
+        await _write_pin(f"thread\npurged-{index}", now=now - timedelta(days=40))
+    await _write_pin("thread\nlive", now=now)
+
+    assert await prune_model_source_pins(batch_size=2) == 5
+    assert await prune_model_source_pins(batch_size=2) == 0
+    assert await _pin_exists("thread\nlive")
+
+
+@pytest.mark.asyncio
+async def test_model_source_pin_drain_invariant_alarm(db_setup, caplog):
+    """While a drain is armed every row must purge before the deadline; a later ``purge_at`` is logged, not repaired."""
+    now = datetime.now(timezone.utc)
+    drain_until_naive = utcnow() + timedelta(days=29)
+    drain_until = drain_until_naive.replace(tzinfo=timezone.utc)
+    await _arm_drain(drain_until_naive)
+    caplog.set_level(logging.WARNING, logger="app.core.retention.job")
+
+    # Rows written through the repository are drain-capped: no alarm.
+    await _write_pin("thread\ncapped", now=now, drain_until=drain_until)
+    assert await run_retention_pass(now=utcnow()) == {
+        "request_logs": 0,
+        "usage_history": 0,
+        "additional_usage_history": 0,
+        "model_source_pins": 0,
+    }
+    assert "model_source_pins_drain_invariant_violated" not in caplog.text
+
+    # A row that bypassed the cap (never produced by the repository) trips the alarm and stays.
+    async with SessionLocal() as session:
+        session.add(
+            ModelSourcePin(
+                pin_key="thread\nuncapped",
+                kind="thread",
+                source_id="src_overflow",
+                created_at=now,
+                last_seen_at=now,
+                expires_at=now + timedelta(days=7),
+                purge_at=drain_until + timedelta(days=1),
+            )
+        )
+        await session.commit()
+    await run_retention_pass(now=utcnow())
+    assert "model_source_pins_drain_invariant_violated" in caplog.text
+    assert await _pin_exists("thread\nuncapped")
+
+    # Clearing the drain silences the alarm.
+    caplog.clear()
+    await _arm_drain(None)
+    await run_retention_pass(now=utcnow())
+    assert "model_source_pins_drain_invariant_violated" not in caplog.text

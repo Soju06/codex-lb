@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol, TypeVar, cast
 
-from app.core.retention.job import get_effective_retention, run_retention_pass
+from app.core.retention.job import run_retention_pass
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +29,15 @@ def _get_leader_election() -> _LeaderElectionLike:
 
 @dataclass(slots=True)
 class DataRetentionScheduler:
-    """Always-on hourly tick that re-resolves the effective retention.
+    """Always-on hourly tick running the leader-gated retention pass.
 
     Retention is a runtime (dashboard) setting, so enablement cannot be
-    frozen at startup: each tick reads the SettingsCache-backed effective
-    configuration and skips (before leader election) while retention is
-    disabled. The pass itself stays gated behind the heartbeat-renewed
-    ``run_if_leader`` so at most one instance prunes at a time.
+    frozen at startup: the pass re-resolves the SettingsCache-backed effective
+    windows on every tick. The tick never short-circuits on disabled windows
+    because the model-source pin purge inside the pass is not opt-in (pins
+    carry their own ``purge_at``); the pass stays gated behind the
+    heartbeat-renewed ``run_if_leader`` so at most one instance prunes at a
+    time.
     """
 
     interval_seconds: int
@@ -67,13 +69,6 @@ class DataRetentionScheduler:
                 continue
 
     async def _prune_once(self) -> None:
-        try:
-            retention = await get_effective_retention()
-        except Exception:
-            logger.exception("Failed to resolve effective data retention settings")
-            return
-        if not retention.enabled:
-            return
         await _get_leader_election().run_if_leader(self._prune_as_leader)
 
     async def _prune_as_leader(self) -> None:

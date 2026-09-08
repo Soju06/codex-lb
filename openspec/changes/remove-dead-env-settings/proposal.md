@@ -36,7 +36,7 @@ needs to touch is a default in disguise).
   names removed here so they get their one-release warning. The mechanism
   (`warn_removed_settings`) is unchanged.
 - Generated settings reference: no more "deprecated aliases" list, a
-  startup-guard note for `CODEX_LB_WORKERS_PER_INSTANCE`, ratchet 135 -> 128.
+  startup-guard note for `CODEX_LB_WORKERS_PER_INSTANCE`, ratchet 137 -> 130 (rebased onto #2187, which had promoted three env reads to fields).
 - Helm chart stops rendering `CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS`
   (`config.cacheAffinityMaxAgeSeconds` removed) so a default install does not
   trip its own removal warning.

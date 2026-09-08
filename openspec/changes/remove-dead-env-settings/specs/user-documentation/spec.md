@@ -14,7 +14,7 @@ startup guard (which is not a setting), and SHALL list the removed
 SHALL be checked into the repository so the strict docs build stays hermetic,
 SHALL carry a header identifying it as generated, and SHALL link the owning
 OpenSpec capability. CI unit tests MUST fail when the checked-in page differs
-from regenerated output, when the settings surface exceeds its ratchet (128
+from regenerated output, when the settings surface exceeds its ratchet (130
 fields; lower-only without a simplicity-budget decision), or when an
 uncommented `.env.example` assignment differs from the code default.
 

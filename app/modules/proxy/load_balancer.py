@@ -22,7 +22,6 @@ from app.core.balancer import (
     ROUTING_POLICY_PRESERVE,
     TRAFFIC_CLASS_FOREGROUND,
     TRAFFIC_CLASS_OPPORTUNISTIC,
-    USAGE_LIMIT_REACHED,
     AccountState,
     ResetPreferenceWindow,
     RoutingCostsByAccount,
@@ -86,14 +85,16 @@ from app.modules.proxy._load_balancer.model_eligibility import (
 from app.modules.proxy._load_balancer.model_eligibility import (
     _mapped_model_has_registry_entry as _mapped_model_has_registry_entry_impl,
 )
+from app.modules.proxy._load_balancer.opportunistic_admission import (
+    OPPORTUNISTIC_BURN_WINDOW_CLOSED,
+    OpportunisticAdmissionRequest,
+    run_opportunistic_admission,
+)
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
     SelectionInputsProtocol,
     StickySelectionRequest,
-    _account_cap_error_code,
     _clone_account,
-    _filter_states_for_account_caps,
-    _select_account_preferring_budget_safe,
     _StickySelectionOutcome,
     run_sticky_selection_path,
 )
@@ -114,6 +115,9 @@ from app.modules.proxy._load_balancer.sticky_selection import (
 )
 from app.modules.proxy._load_balancer.sticky_selection import (
     _restore_sticky_mutation as _restore_sticky_mutation,
+)
+from app.modules.proxy._load_balancer.sticky_selection import (
+    _select_account_preferring_budget_safe as _select_account_preferring_budget_safe,
 )
 from app.modules.proxy._load_balancer.sticky_selection import (
     _select_with_stickiness as _run_select_with_stickiness,
@@ -185,7 +189,6 @@ NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
 _ROUTING_POLICY_NORMAL = "normal"
 _ACCOUNT_ROUTING_POLICIES = frozenset({_ROUTING_POLICY_NORMAL, ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE})
 _ADDITIONAL_QUOTA_ROUTING_POLICIES = _ACCOUNT_ROUTING_POLICIES | frozenset({"inherit"})
-OPPORTUNISTIC_BURN_WINDOW_CLOSED = "opportunistic_burn_window_closed"
 CONTINUITY_OWNER_UNAVAILABLE = "continuity_owner_unavailable"
 CONTINUITY_OWNER_POLICY_CONFLICT = "continuity_owner_policy_conflict"
 _AMBIGUOUS_CONVERSATION_OWNER_CODE = "conversation_owner_unavailable"
@@ -1398,84 +1401,28 @@ class LoadBalancer:
         concurrency_caps: AccountConcurrencyCaps | None = None,
         stream_reserve_slots: int = 0,
     ) -> AccountSelection:
-        selection_inputs = await self._load_selection_inputs(
-            model=model,
-            account_ids=account_ids,
-        )
-        if selection_inputs.error_code is not None and not selection_inputs.accounts:
-            return AccountSelection(
-                account=None,
-                error_message=selection_inputs.error_message,
-                error_code=selection_inputs.error_code,
-            )
-        caps = concurrency_caps or effective_account_concurrency_caps()
-        async with self._runtime_lock:
-            self._reclaim_stale_account_leases_locked()
-            self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
-            states, account_map = _build_states(
-                accounts=selection_inputs.accounts,
-                latest_primary=selection_inputs.latest_primary,
-                latest_secondary=selection_inputs.latest_secondary,
-                latest_monthly=selection_inputs.latest_monthly,
-                runtime=self._runtime,
-                now=self._clock.time(),
-                routing_policy_override=selection_inputs.routing_policy_override,
-                ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
-                encryptor=self._encryptor,
-            )
-            selection_states = _filter_states_for_account_caps(
-                states,
+        outcome = await run_opportunistic_admission(
+            self,
+            request=OpportunisticAdmissionRequest(
+                model=model,
+                account_ids=account_ids,
+                prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                prefer_earlier_reset_window=prefer_earlier_reset_window,
+                routing_strategy=routing_strategy,
+                budget_threshold_pct=budget_threshold_pct,
+                secondary_budget_threshold_pct=secondary_budget_threshold_pct,
                 lease_kind=lease_kind,
-                caps=caps,
+                concurrency_caps=concurrency_caps or effective_account_concurrency_caps(),
                 stream_reserve_slots=stream_reserve_slots,
-            )
-            if not selection_states and states:
-                logger.warning(
-                    "Account cap exhausted during opportunistic admission lease_kind=%s reason=%s candidates=%s",
-                    lease_kind,
-                    _account_cap_error_code(lease_kind),
-                    len(states),
-                )
-                _record_account_cap_rejection(lease_kind)
-                return AccountSelection(
-                    account=None,
-                    error_message="opportunistic burn window closed: no account capacity available",
-                    error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
-                )
-        result = _select_account_preferring_budget_safe(
-            selection_states,
-            prefer_earlier_reset=prefer_earlier_reset_accounts,
-            prefer_earlier_reset_window=prefer_earlier_reset_window,
-            routing_strategy=routing_strategy,
-            budget_threshold_pct=budget_threshold_pct,
-            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
-            apply_secondary_budget_threshold=True,
-            deterministic_probe=True,
-            traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
-            ignore_standard_quota=False,
-            usage_exhaustion_states=states,
+                record_account_cap_rejection=_record_account_cap_rejection,
+            ),
         )
-        if result.account is None:
-            if result.error_code == USAGE_LIMIT_REACHED:
-                return AccountSelection(
-                    account=None,
-                    error_message=result.error_message,
-                    error_code=result.error_code,
-                    resets_at=result.resets_at,
-                )
-            return AccountSelection(
-                account=None,
-                error_message=result.error_message,
-                error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
-            )
-        account = account_map.get(result.account.account_id)
-        if account is None:
-            return AccountSelection(
-                account=None,
-                error_message=result.error_message or "opportunistic burn window closed: no account available",
-                error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
-            )
-        return AccountSelection(account=_clone_account(account), error_message=None, error_code=None)
+        return AccountSelection(
+            account=outcome.account,
+            error_message=outcome.error_message,
+            error_code=outcome.error_code,
+            resets_at=outcome.resets_at,
+        )
 
     async def _filter_accounts_for_additional_limit(
         self,

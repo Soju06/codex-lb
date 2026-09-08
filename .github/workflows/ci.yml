@@ -403,13 +403,13 @@ jobs:
       - name: Check formatting, lints, tests, and release build
         run: make rust-check
 
-      - name: Run native routed wire probe
+      - name: Run native routed and SSE wire probes
         env:
           CODEX_LB_NATIVE_EGRESS_TEST_BINARY: ${{ github.workspace }}/target/debug/codex-lb-native-egress
         run: |
           uv sync --dev --frozen
           cargo build --locked -p codex-lb-egress-worker --bin codex-lb-native-egress
-          uv run pytest -q -ra tests/integration/test_native_routed_egress.py
+          uv run pytest -q -ra tests/integration/test_native_routed_egress.py tests/integration/test_native_sse_egress.py
 
       - name: Audit Rust dependencies and licenses
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25

@@ -44,6 +44,12 @@ async def _steal_lease(new_leader_id: str) -> None:
         await session.commit()
 
 
+async def _check_then_record_failure(limiter, key: str, session) -> None:
+    """Mirror the login flow: refuse when the window is full, otherwise count the failure."""
+    await limiter.check(key, session)
+    await limiter.record_failure(key, session)
+
+
 @pytest.mark.asyncio
 async def test_cross_instance_rate_limiting(db_session):
     from app.core.exceptions import DashboardRateLimitError
@@ -55,14 +61,14 @@ async def test_cross_instance_rate_limiting(db_session):
     key = "test-multi-replica-ip"
 
     for _ in range(4):
-        await instance1.check_and_record(key, db_session)
+        await _check_then_record_failure(instance1, key, db_session)
 
     async with SessionLocal() as instance2_session:
         for _ in range(4):
-            await instance2.check_and_record(key, instance2_session)
+            await _check_then_record_failure(instance2, key, instance2_session)
 
         with pytest.raises(DashboardRateLimitError):
-            await instance2.check_and_record(key, instance2_session)
+            await _check_then_record_failure(instance2, key, instance2_session)
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,8 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type { AccountSummary } from "@/features/accounts/schemas";
+import type { ModelSource } from "@/features/model-sources/schemas";
+import { SubscriptionOverflowSettings } from "@/features/settings/components/subscription-overflow-settings";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type {
   AdditionalQuotaRoutingPolicy,
@@ -74,6 +76,9 @@ export type RoutingSettingsProps = {
   settings: DashboardSettings;
   accounts?: AccountSummary[];
   accountsLoading?: boolean;
+  modelSources?: ModelSource[];
+  modelSourcesLoading?: boolean;
+  modelSourcesError?: boolean;
   busy: boolean;
   onSave: (payload: SettingsUpdateRequest) => Promise<void>;
 };
@@ -177,6 +182,9 @@ export function RoutingSettings({
   settings,
   accounts = EMPTY_ACCOUNTS,
   accountsLoading = false,
+  modelSources,
+  modelSourcesLoading = false,
+  modelSourcesError = false,
   busy,
   onSave,
 }: RoutingSettingsProps) {
@@ -430,14 +438,13 @@ export function RoutingSettings({
             <Select
               value={settings.upstreamStreamTransport}
               onValueChange={(value) =>
-                save({ upstreamStreamTransport: value as "default" | "auto" | "http" | "websocket" })
+                save({ upstreamStreamTransport: value as "auto" | "http" | "websocket" })
               }
             >
               <SelectTrigger className="h-8 w-44 text-xs" disabled={busy}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent align="end">
-                <SelectItem value="default">{t("settings.routing.upstream.default")}</SelectItem>
                 <SelectItem value="auto">{t("settings.routing.upstream.auto")}</SelectItem>
                 <SelectItem value="http">{t("settings.routing.upstream.http")}</SelectItem>
                 <SelectItem value="websocket">{t("settings.routing.upstream.websocket")}</SelectItem>
@@ -749,6 +756,15 @@ export function RoutingSettings({
               ) : null}
             </div>
           ) : null}
+
+          <SubscriptionOverflowSettings
+            settings={settings}
+            modelSources={modelSources}
+            modelSourcesLoading={modelSourcesLoading}
+            modelSourcesError={modelSourcesError}
+            busy={busy}
+            onSave={onSave}
+          />
 
           <div className="space-y-3 p-3">
             <div>

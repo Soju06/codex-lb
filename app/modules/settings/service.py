@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 
 from app.core.config.settings import get_settings
 from app.modules.settings.repository import SettingsRepository
@@ -36,6 +37,8 @@ class DashboardSettingsData:
     relative_availability_power: float
     relative_availability_top_k: int
     single_account_id: str | None
+    subscription_overflow_source_id: str | None
+    subscription_overflow_drain_until: datetime | None
     openai_cache_affinity_max_age_seconds: int
     dashboard_session_ttl_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
@@ -95,6 +98,12 @@ class DashboardSettingsUpdateData:
     relative_availability_power: float
     relative_availability_top_k: int
     single_account_id: str | None
+    # Tri-state designation: value = designate, clear flag = off, neither =
+    # untouched. The drain deadline is written only when its set flag is on.
+    subscription_overflow_source_id: str | None
+    clear_subscription_overflow_source: bool
+    subscription_overflow_drain_until: datetime | None
+    set_subscription_overflow_drain_until: bool
     openai_cache_affinity_max_age_seconds: int
     dashboard_session_ttl_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
@@ -121,7 +130,7 @@ class DashboardSettingsUpdateData:
     guest_access_enabled: bool
     limit_warmup_staggered_idle_enabled: bool
     # Tri-state retention overrides: value set = store, clear flag = reset to
-    # NULL (inherit the deprecated env alias), neither = leave untouched.
+    # NULL (not configured = retention disabled), neither = leave untouched.
     request_log_retention_override_days: int | None
     usage_history_retention_override_days: int | None
     clear_request_log_retention_override: bool
@@ -166,6 +175,8 @@ class SettingsService:
             relative_availability_power=row.relative_availability_power,
             relative_availability_top_k=row.relative_availability_top_k,
             single_account_id=row.single_account_id,
+            subscription_overflow_source_id=row.subscription_overflow_source_id,
+            subscription_overflow_drain_until=row.subscription_overflow_drain_until,
             openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
@@ -197,8 +208,8 @@ class SettingsService:
             guest_access_enabled=row.guest_access_enabled,
             guest_password_configured=row.guest_password_hash is not None,
             limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
-            request_log_retention_days=_effective_request_log_retention(row.request_log_retention_days),
-            usage_history_retention_days=_effective_usage_history_retention(row.usage_history_retention_days),
+            request_log_retention_days=_effective_retention_days(row.request_log_retention_days),
+            usage_history_retention_days=_effective_retention_days(row.usage_history_retention_days),
             request_log_retention_override_days=row.request_log_retention_days,
             usage_history_retention_override_days=row.usage_history_retention_days,
             version=row.version,
@@ -242,6 +253,10 @@ class SettingsService:
             relative_availability_power=payload.relative_availability_power,
             relative_availability_top_k=payload.relative_availability_top_k,
             single_account_id=payload.single_account_id,
+            subscription_overflow_source_id=payload.subscription_overflow_source_id,
+            clear_subscription_overflow_source=payload.clear_subscription_overflow_source,
+            subscription_overflow_drain_until=payload.subscription_overflow_drain_until,
+            set_subscription_overflow_drain_until=payload.set_subscription_overflow_drain_until,
             openai_cache_affinity_max_age_seconds=payload.openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=payload.dashboard_session_ttl_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
@@ -308,6 +323,8 @@ class SettingsService:
             relative_availability_power=row.relative_availability_power,
             relative_availability_top_k=row.relative_availability_top_k,
             single_account_id=row.single_account_id,
+            subscription_overflow_source_id=row.subscription_overflow_source_id,
+            subscription_overflow_drain_until=row.subscription_overflow_drain_until,
             openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
@@ -339,8 +356,8 @@ class SettingsService:
             guest_access_enabled=row.guest_access_enabled,
             guest_password_configured=row.guest_password_hash is not None,
             limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
-            request_log_retention_days=_effective_request_log_retention(row.request_log_retention_days),
-            usage_history_retention_days=_effective_usage_history_retention(row.usage_history_retention_days),
+            request_log_retention_days=_effective_retention_days(row.request_log_retention_days),
+            usage_history_retention_days=_effective_retention_days(row.usage_history_retention_days),
             request_log_retention_override_days=row.request_log_retention_days,
             usage_history_retention_override_days=row.usage_history_retention_days,
             version=row.version,
@@ -366,13 +383,9 @@ def _effective_api_key_fair_share_threshold_pct(value: int | None) -> int:
     return get_settings().proxy_api_key_fair_share_congestion_threshold_pct if value is None else value
 
 
-def _effective_request_log_retention(value: int | None) -> int:
-    # Dashboard value (non-NULL) wins; the deprecated env alias applies while unset.
-    return get_settings().request_log_retention_days if value is None else value
-
-
-def _effective_usage_history_retention(value: int | None) -> int:
-    return get_settings().usage_history_retention_days if value is None else value
+def _effective_retention_days(value: int | None) -> int:
+    # NULL = never set from the dashboard = disabled; 0 = explicitly disabled.
+    return 0 if value is None else value
 
 
 def _normalize_additional_quota_key(raw_quota_key: str) -> str | None:

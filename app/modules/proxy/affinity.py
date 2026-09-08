@@ -376,14 +376,6 @@ def _extract_message_content_text(content: object) -> str | None:
     return "".join(parts) if parts else None
 
 
-def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
-    value = _prompt_cache_key_from_request_model(payload)
-    if not value:
-        return None
-    stripped = value.strip()
-    return stripped or None
-
-
 def _sticky_key_from_session_header(headers: Mapping[str, str]) -> str | None:
     # Legacy owner/request-log callers still need the historical alias order.
     # New account, bridge, and replay locality MUST use the typed process/thread

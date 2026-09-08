@@ -34,7 +34,7 @@ from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.locks import fast_lock
 from app.core.utils.sse import sse_event_type_from_block
-from app.db.models import Account
+from app.db.models import Account, StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyRequestUsageBudget,
@@ -1220,7 +1220,6 @@ class _WebSocketRequestState:
     websocket_stream_lease: AccountLease | None = None
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
     thread_affinity_last_touch_at: float = field(default_factory=time.monotonic)
-    suppressed_downstream_tool_call: bool = False
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)
@@ -1762,6 +1761,28 @@ def _websocket_request_is_accepted_lifecycle_only(request_state: _WebSocketReque
     return not (request_state.pending_function_call_ids or request_state.pending_tool_call_types)
 
 
+def _affinity_may_resolve_hard_owner(affinity_policy: _AffinityPolicy) -> bool:
+    """Return whether sticky selection may bind this affinity to one owner account.
+
+    A resolved hard ``CODEX_SESSION`` row narrows selection to its owner
+    (``hard_sticky`` in ``sticky_selection``): turn-state ownership, or the raw
+    compatibility row an old replica persisted for a bare session or thread
+    header, which every policy exposing ``legacy_selection_key`` consults and
+    which wins over the namespaced soft row. The owner is not a request-state
+    pin -- it is read from the database at selection time -- so neither the
+    direct websocket request nor the HTTP bridge session can tell whether its
+    affinity resolves to a hard owner. Any policy that may is treated as
+    owner-bound: excluding that owner would leave every re-selection at
+    ``hard_affinity_saturated`` until the connect budget runs out. Shared by
+    the direct websocket accepted-replay exclusion and the HTTP bridge one.
+    """
+    return (
+        affinity_policy.kind == StickySessionKind.CODEX_SESSION
+        or affinity_policy.legacy_selection_key is not None
+        or affinity_policy.legacy_continuity_source is not None
+    )
+
+
 def _record_websocket_route_metadata(
     request_state: _WebSocketRequestState,
     *,
@@ -2022,6 +2043,24 @@ def websocket_connect_transport_failure_code(
         connect_error.code if connect_error else None,
         connect_error.type if connect_error else None,
     )
+
+
+UPSTREAM_STREAM_TRANSPORTS = frozenset({"auto", "http", "websocket"})
+_UPSTREAM_STREAM_TRANSPORT_DEFAULT = "auto"
+
+
+def configured_upstream_stream_transport(dashboard_settings: Any) -> str:
+    """Return the operator-configured upstream stream transport.
+
+    The dashboard row is the only source. The legacy ``"default"`` sentinel
+    (which used to defer to the removed ``CODEX_LB_UPSTREAM_STREAM_TRANSPORT``
+    env var) and any unknown value resolve to ``"auto"`` so a settings-cache
+    snapshot taken before the data migration ran behaves like the migrated row.
+    """
+    configured = getattr(dashboard_settings, "upstream_stream_transport", None)
+    if configured in UPSTREAM_STREAM_TRANSPORTS:
+        return cast(str, configured)
+    return _UPSTREAM_STREAM_TRANSPORT_DEFAULT
 
 
 def upstream_websocket_transport_recently_failed() -> bool:

@@ -3,7 +3,12 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { createElement, type PropsWithChildren } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { useSettings, useTelemetryConsent, useTelemetryPreview } from "@/features/settings/hooks/use-settings";
+import {
+  useSettings,
+  useSubscriptionOverflowPreflight,
+  useTelemetryConsent,
+  useTelemetryPreview,
+} from "@/features/settings/hooks/use-settings";
 
 function createTestQueryClient(): QueryClient {
   return new QueryClient({
@@ -98,5 +103,24 @@ describe("useTelemetryPreview", () => {
     expect(preview?.metrics.schema_version).toBe(1);
     expect(preview?.instance_id).toBe("00000000-0000-4000-8000-000000000000");
     expect(preview?.timestamp).toBe("2026-08-06T00:00:00Z");
+  });
+});
+
+describe("useSubscriptionOverflowPreflight", () => {
+  it("stays idle without a source and loads the report for a designated source", async () => {
+    const queryClient = createTestQueryClient();
+
+    const idle = renderHook(() => useSubscriptionOverflowPreflight(null), {
+      wrapper: createWrapper(queryClient),
+    });
+    expect(idle.result.current.preflightQuery.isPending).toBe(true);
+    expect(idle.result.current.preflightQuery.isFetching).toBe(false);
+
+    const { result } = renderHook(() => useSubscriptionOverflowPreflight("src_vllm"), {
+      wrapper: createWrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.preflightQuery.isSuccess).toBe(true));
+    expect(result.current.preflightQuery.data?.sourceId).toBe("src_vllm");
+    expect(result.current.preflightQuery.data?.blockers).toEqual(["source_responses_unsupported"]);
   });
 });

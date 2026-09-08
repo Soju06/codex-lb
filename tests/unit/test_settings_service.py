@@ -40,8 +40,6 @@ async def test_migrated_null_account_caps_inherit_environment(monkeypatch: pytes
                 "proxy_account_stream_limit": 32,
                 "proxy_account_stream_recovery_reserve": 4,
                 "proxy_api_key_fair_share_congestion_threshold_pct": 0,
-                "request_log_retention_days": 0,
-                "usage_history_retention_days": 0,
             },
         )(),
     )
@@ -65,8 +63,6 @@ async def test_cleared_account_cap_follows_environment_changes(monkeypatch: pyte
         proxy_account_stream_limit=8,
         proxy_account_stream_recovery_reserve=4,
         proxy_api_key_fair_share_congestion_threshold_pct=0,
-        request_log_retention_days=0,
-        usage_history_retention_days=0,
     )
 
     class _Repository:
@@ -108,8 +104,6 @@ async def test_migrated_null_api_key_fair_share_threshold_inherits_environment(
                 "proxy_account_stream_limit": 32,
                 "proxy_account_stream_recovery_reserve": 4,
                 "proxy_api_key_fair_share_congestion_threshold_pct": 55,
-                "request_log_retention_days": 0,
-                "usage_history_retention_days": 0,
             },
         )(),
     )
@@ -153,18 +147,16 @@ async def test_null_retention_inherits_environment_and_dashboard_value_wins(
                 "proxy_account_stream_limit": 32,
                 "proxy_account_stream_recovery_reserve": 4,
                 "proxy_api_key_fair_share_congestion_threshold_pct": 0,
-                "request_log_retention_days": 90,
-                "usage_history_retention_days": 45,
             },
         )(),
     )
     service = SettingsService(cast(SettingsRepository, _Repository()))
 
-    # NULL dashboard values inherit the deprecated env alias; the raw
-    # overrides stay exposed as None (= inherit).
+    # NULL dashboard values mean retention was never configured, which is
+    # disabled (0); the raw overrides stay exposed as None (= not set).
     settings = await service.get_settings()
-    assert settings.request_log_retention_days == 90
-    assert settings.usage_history_retention_days == 45
+    assert settings.request_log_retention_days == 0
+    assert settings.usage_history_retention_days == 0
     assert settings.request_log_retention_override_days is None
     assert settings.usage_history_retention_override_days is None
 

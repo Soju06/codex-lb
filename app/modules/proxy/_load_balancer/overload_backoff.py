@@ -1,4 +1,4 @@
-"""Soft backoff for accounts upstream keeps rejecting as overloaded.
+"""Backoff and isolation for accounts upstream keeps rejecting as overloaded.
 
 ``server_is_overloaded`` is an admission rejection: upstream refuses to start
 a *new* response for the account while already-admitted streams on the same
@@ -9,28 +9,42 @@ path cannot express:
   admissions for an hour while its siblings are clean, and the rejection can
   take 30-90 s to arrive, so every fresh admission routed there costs the
   client that wait before failover even starts.
-- It says nothing bad about the account's live sessions. Bridge reuse and
-  sticky continuity on the same account keep succeeding, and every success
-  zeroes ``RuntimeState.error_count`` -- so the generic error backoff and the
-  drain tier never latch, and fresh selection keeps feeding the rejected
-  account.
+- It says nothing bad about the account's live sessions. Bridge reuse on the
+  same account keeps succeeding, and every success zeroes
+  ``RuntimeState.error_count`` -- so the generic error backoff and the drain
+  tier never latch, and selection keeps feeding the rejected account.
 
 This module keeps a replica-local sliding window of overload rejections per
-account. When it trips, fresh (unbound) selection *deprioritizes* the account
-for a bounded, exponentially growing interval: it is dropped from the candidate
-pool only while at least one other candidate remains, so it can never empty
-the pool, and sticky / continuity / hard-affinity selection is untouched. The
-window is not reset by successes -- an account that succeeds on warm sessions
-but rejects fresh admissions is exactly the case this exists for.
+account with two escalation stages:
+
+1. **Soft backoff** (every trip): fresh (unbound) selection and fresh sticky
+   bindings *deprioritize* the account for a bounded, exponentially growing
+   interval. Established sticky owners are left alone, so a short burst never
+   churns warm sessions.
+2. **Isolation** (the configured trip level, sustained overload): the account
+   is held out for a longer, operator-configured interval and established
+   *soft* sticky owners are rerouted as well. Only a soft sticky mapping is a
+   locality hint; every request that re-enters the pinned account is a fresh
+   upstream admission, so keeping the owner pinned just replays the rejection
+   wait per request. Hard continuity owners (``previous_response_id``, bridge
+   ownership, file pins) are resolved before soft selection and are never
+   moved by this module.
+
+In both stages the account is dropped from a candidate pool only while at
+least one other candidate remains, so the window can never empty the pool.
+The window is not reset by successes -- an account that succeeds on warm
+sessions but rejects fresh admissions is exactly the case this exists for.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping
-from typing import Any, Protocol
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
 from app.core.balancer.logic import AccountState
+from app.core.config.settings import get_settings
 from app.db.models import Account
 from app.modules.proxy._load_balancer.types import RuntimeState
 
@@ -49,7 +63,8 @@ OVERLOAD_WINDOW_SECONDS = 120.0
 OVERLOAD_BACKOFF_BASE_SECONDS = 60.0
 OVERLOAD_BACKOFF_MAX_SECONDS = 600.0
 # The level decays back to the base once the account has gone this long
-# without tripping, so a recovered account is not punished for last hour.
+# without tripping *and* without being held out, so a recovered account is not
+# punished for last hour while an account leaving isolation keeps its level.
 OVERLOAD_LEVEL_DECAY_SECONDS = 1800.0
 # Levels saturate at the first level whose interval hits the cap
 # (60, 120, 240, 480, then 600), so the stored level and the exponent are
@@ -57,11 +72,28 @@ OVERLOAD_LEVEL_DECAY_SECONDS = 1800.0
 OVERLOAD_MAX_LEVEL = 5
 
 
-class _OverloadBalancerLike(Protocol):
-    _runtime: dict[str, RuntimeState]
-    _clock: Any
+# The trip level at which sustained overload escalates from soft backoff to
+# isolation: the third trip means at least nine rejections inside a few
+# minutes despite the account already being deprioritized twice.
+OVERLOAD_ISOLATION_TRIP_LEVEL = 3
 
-    async def _get_account_lock(self, account_id: str) -> Any: ...
+
+@dataclass(frozen=True, slots=True)
+class OverloadIsolationPolicy:
+    """Operator knob for the isolation stage (``CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS``)."""
+
+    seconds: float = 1800.0
+
+    @classmethod
+    def from_settings(cls) -> OverloadIsolationPolicy:
+        return cls(seconds=float(get_settings().proxy_overload_isolation_seconds))
+
+    @property
+    def enabled(self) -> bool:
+        return self.seconds > 0.0
+
+    def isolates(self, level: int) -> bool:
+        return self.enabled and level >= OVERLOAD_ISOLATION_TRIP_LEVEL
 
 
 def overload_backoff_seconds(level: int) -> float:
@@ -71,19 +103,32 @@ def overload_backoff_seconds(level: int) -> float:
 
 
 def overload_backoff_active(runtime: RuntimeState | None, now: float) -> bool:
+    """Whether fresh admissions should avoid the account (soft backoff or isolation)."""
     return runtime is not None and runtime.overload_backoff_until is not None and now < runtime.overload_backoff_until
 
 
-def record_overload_rejection_locked(runtime: RuntimeState, now: float) -> float | None:
+def overload_isolation_active(runtime: RuntimeState | None, now: float) -> bool:
+    """Whether the account is in the isolation stage (soft sticky owners reroute too)."""
+    return runtime is not None and runtime.overload_isolated_until is not None and now < runtime.overload_isolated_until
+
+
+def record_overload_rejection_locked(
+    runtime: RuntimeState,
+    now: float,
+    *,
+    isolation: OverloadIsolationPolicy | None = None,
+) -> float | None:
     """Record one overload rejection observed at ``now``; return the new
     backoff deadline when it trips the window, else ``None``.
 
+    When ``isolation`` says the new level isolates, the deadline is the
+    isolation interval and ``runtime.overload_isolated_until`` is set to it.
     Caller holds the balancer's per-account lock.
     """
-    if (
-        runtime.overload_last_trip_at is not None
-        and now - runtime.overload_last_trip_at >= OVERLOAD_LEVEL_DECAY_SECONDS
-    ):
+    quiet_since = runtime.overload_last_trip_at
+    if quiet_since is not None and runtime.overload_backoff_until is not None:
+        quiet_since = max(quiet_since, runtime.overload_backoff_until)
+    if quiet_since is not None and now - quiet_since >= OVERLOAD_LEVEL_DECAY_SECONDS:
         runtime.overload_backoff_level = 0
     window_start = now - OVERLOAD_WINDOW_SECONDS
     recent = [at for at in (runtime.overload_rejections or ()) if at > window_start]
@@ -94,12 +139,20 @@ def record_overload_rejection_locked(runtime: RuntimeState, now: float) -> float
     runtime.overload_rejections = []
     runtime.overload_backoff_level = min(runtime.overload_backoff_level + 1, OVERLOAD_MAX_LEVEL)
     runtime.overload_last_trip_at = now
-    deadline = now + overload_backoff_seconds(runtime.overload_backoff_level)
+    isolated = isolation is not None and isolation.isolates(runtime.overload_backoff_level)
+    interval = (
+        isolation.seconds
+        if isolated and isolation is not None
+        else overload_backoff_seconds(runtime.overload_backoff_level)
+    )
+    deadline = now + interval
     # A trip while already deprioritized (rejections keep arriving from
     # in-flight admissions) extends, never shortens, the deadline.
     if runtime.overload_backoff_until is not None and runtime.overload_backoff_until > deadline:
         deadline = runtime.overload_backoff_until
     runtime.overload_backoff_until = deadline
+    if isolated:
+        runtime.overload_isolated_until = deadline
     return deadline
 
 
@@ -113,19 +166,33 @@ async def record_upstream_overload(balancer: Any, account: Account, *, redact_ac
     runtime_map = getattr(balancer, "_runtime", None)
     if not isinstance(runtime_map, dict):
         return
+    isolation = OverloadIsolationPolicy.from_settings()
     lock = await balancer._get_account_lock(account.id)
     async with lock:
         now = float(balancer._clock.time())
         runtime = runtime_map.setdefault(account.id, RuntimeState())
-        deadline = record_overload_rejection_locked(runtime, now)
-    if deadline is not None:
+        deadline = record_overload_rejection_locked(runtime, now, isolation=isolation)
+        isolated = deadline is not None and overload_isolation_active(runtime, now)
+    if deadline is None:
+        return
+    account_label = "<redacted>" if redact_account_id else account.id
+    if isolated:
         logger.warning(
-            "Account overload backoff engaged account_id=%s level=%d backoff_seconds=%.0f "
-            "(fresh selection deprioritizes the account while another candidate can be selected)",
-            "<redacted>" if redact_account_id else account.id,
+            "Account overload isolation engaged account_id=%s level=%d isolation_seconds=%.0f "
+            "(fresh selection avoids the account and soft sticky owners are rerouted while another "
+            "candidate can be selected; hard continuity owners are untouched)",
+            account_label,
             runtime.overload_backoff_level,
             deadline - now,
         )
+        return
+    logger.warning(
+        "Account overload backoff engaged account_id=%s level=%d backoff_seconds=%.0f "
+        "(fresh selection deprioritizes the account while another candidate can be selected)",
+        account_label,
+        runtime.overload_backoff_level,
+        deadline - now,
+    )
 
 
 def filter_overload_backoff_candidates(
@@ -151,14 +218,26 @@ def filter_overload_backoff_candidates(
     return kept
 
 
-def overload_backed_off_account_ids(
-    states: Iterable[AccountState],
-    runtime_by_account_id: Mapping[str, RuntimeState],
+def sticky_owner_isolation_reroute_pool(
+    states: list[AccountState],
+    runtime_by_account_id: Mapping[str, RuntimeState] | None,
     *,
+    owner_account_id: str,
     now: float,
-) -> list[str]:
-    return [
-        state.account_id
-        for state in states
-        if overload_backoff_active(runtime_by_account_id.get(state.account_id), now)
-    ]
+) -> list[AccountState] | None:
+    """Return the overload-free pool a *soft* sticky owner should be rerouted
+    into, or ``None`` when the owner keeps its session.
+
+    The owner is released only while it is in the isolation stage (not on a
+    soft backoff) and the pool still holds another candidate outside the
+    overload window; the caller must verify the strategy actually selects
+    from the returned pool before abandoning the owner.
+    """
+    if runtime_by_account_id is None:
+        return None
+    if not overload_isolation_active(runtime_by_account_id.get(owner_account_id), now):
+        return None
+    pool = filter_overload_backoff_candidates(states, runtime_by_account_id, now=now)
+    if pool is states:
+        return None
+    return pool

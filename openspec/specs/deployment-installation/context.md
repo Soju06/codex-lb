@@ -144,8 +144,9 @@ upgrade with `terminationGracePeriodSeconds` absent.
 codex-lb captures the incoming ASGI client before delegating once to Uvicorn's
 proxy projection. Shipped launchers disable the outer server middleware so raw
 transport policy can use the original peer while downstream handlers still see
-the projected client and scheme. `FORWARDED_ALLOW_IPS` remains the sole trust
-input and is passed through unchanged.
+the projected client and scheme. The `forwarded_allow_ips` setting (env
+`FORWARDED_ALLOW_IPS`, alias `CODEX_LB_FORWARDED_ALLOW_IPS`, also loadable from
+`.env` files) is the sole trust input and keeps Uvicorn's semantics unchanged.
 
 For example, a TCP peer at `10.0.0.8` may project client `192.168.65.1` and
 scheme `https`; raw-peer authorization still evaluates `10.0.0.8`.
@@ -156,26 +157,32 @@ Work queued for the release after the one that shipped the
 settings-surface reduction (issue #1340, phases 1-4 + retention dashboard
 settings, merged as PRs #1351, #1360, #1362, #1363, #1364 in v1.21.x):
 
-1. **Drop the deprecated prewarm request-log columns.** `RequestLog`
-   still declares `prewarm_canary_bucket` and `prewarm_eligible_reason`
-   (deprecated, unwritten since phase 4) so old replicas keep inserting
-   safely during rolling upgrades — the Helm migration job is a
-   pre-upgrade hook while the workload rolls. The Alembic drop revision
-   MUST ship in the next release; it could not ship together with the
-   writer removal.
-2. **Retire the retention env aliases.**
-   `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` and
-   `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS` are deprecated one-release
-   aliases for the dashboard retention settings
-   (`retention-dashboard-settings`). A follow-up phase removes the env
-   fields and adds them to `_REMOVED_SETTINGS` with a pointer to the
-   dashboard setting, once operators have had a release to migrate. See
-   `openspec/specs/data-retention/context.md`.
-3. **Eventually retire the removal warning itself.** `_REMOVED_SETTINGS`
-   and `warn_removed_settings()` in `app/core/config/settings.py` are a
-   one-release courtesy per removed batch ("at least one release"); prune
-   entries (or the mechanism) once every batch has had its warning
-   release. Item 2 adds entries first, so this comes last.
+1. **Drop the deprecated prewarm request-log columns (phase B).**
+   `prewarm_canary_bucket` and `prewarm_eligible_reason` have been unwritten
+   since phase 4 and are no longer mapped by the `RequestLog` ORM model since
+   `retire-prewarm-canary-column-mappings` (v1.25); the physical columns are
+   allow-listed in `_LEGACY_EXTRA_COLUMNS` (`app/db/migrate.py`). They could
+   not be dropped in the same release that retired the mapping: the Helm
+   migration Job runs before old replicas drain, and a previous-release
+   replica renders explicit NULLs for every mapped column in its request-log
+   INSERTs, so dropping the columns while v1.24 still mapped them would have
+   failed its inserts and full-entity reads during the roll. Once v1.25 is the
+   oldest supported release, add the Alembic drop revision (batch-mode
+   `drop_column` for SQLite, nullable re-add on downgrade) and remove the two
+   allow-list entries in the same PR.
+2. ~~**Retire the retention env aliases.**~~ Done in
+   `remove-dead-env-settings` (first release after v1.24.0): the env fields are gone and
+   `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` /
+   `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS` are in `_REMOVED_SETTINGS` for
+   their warning release. See `openspec/specs/data-retention/context.md`.
+3. **Retire the removal warning itself.** `_REMOVED_SETTINGS` and
+   `warn_removed_settings()` in `app/core/config/settings.py` are a
+   one-release courtesy per removed batch ("at least one release"). The
+   phase 1-4 names were pruned by `remove-dead-env-settings` (their warning release shipped in
+   v1.22-v1.24); the six names removed by that change, together with
+   `CODEX_LB_UPSTREAM_STREAM_TRANSPORT` (`remove-upstream-stream-transport-env`),
+   are pruned in the release after the one that ships them. Drop the mechanism
+   only once no batch is pending.
 
 ## Settings-surface reduction rationale (issue #1340, phases 1-4)
 
@@ -321,9 +328,32 @@ Phase 4 (3 removed; prewarm canary scaffolding):
 fields are deleted; the startup WARN (`warn_removed_settings()` in
 `app/core/config/settings.py`, called from the `app/main.py` lifespan) is
 one release of courtesy so operators notice stale configuration. The
-warning lists names only, never values, and is removed together with its
-`_REMOVED_SETTINGS` entries in a later release (see the next-release
-queue above).
+warning lists names only, never values. `_REMOVED_SETTINGS` holds only the
+most recent removal batch: once a batch's warning release has shipped its
+names are pruned (they stay inert), so the list never accumulates.
+
+### Removed by `remove-dead-env-settings` (first release after v1.24.0)
+
+Six env fields whose documented behavior was already dead or deprecated:
+
+- `CODEX_LB_REQUEST_LOG_RETENTION_DAYS`, `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS`
+  — deprecated aliases for the dashboard retention settings since
+  v1.21.x; NULL dashboard values are now disabled (`data-retention`).
+- `CODEX_LB_HTTP_DOWNSTREAM_TRANSPORT_POLICY`,
+  `CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS`, `CODEX_LB_WARMUP_MODEL`
+  — only ever copied into the `dashboard_settings` row when it was first
+  created, so on every initialized deployment the env value was ignored
+  while docs and the Helm chart (`config.cacheAffinityMaxAgeSeconds`,
+  removed) presented it as live configuration. The first-created row now
+  takes the column defaults (`smart`, `1800`, `gpt-5.4-mini`), which equal
+  the former env defaults.
+- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_GATEWAY_SAFE_MODE` — zero
+  readers; only the dashboard column was ever consulted.
+
+`CODEX_LB_WORKERS_PER_INSTANCE` was also dropped as a `Settings` field but
+is NOT a removed setting: it is a startup guard (only `1` is supported) and
+keeps rejecting any other value with the same error
+(`proxy-admission-control`).
 
 ## Example
 

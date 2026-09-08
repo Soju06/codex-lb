@@ -106,7 +106,7 @@ describe("DataRetentionSettings", () => {
     expect(screen.getByRole("button", { name: "Save retention" })).toBeDisabled();
   });
 
-  it("shows empty inputs with the inherited effective value as a hint while no override is set", () => {
+  it("shows empty inputs with the effective value as a hint while no value is stored", () => {
     render(
       <DataRetentionSettings
         settings={{
@@ -123,10 +123,10 @@ describe("DataRetentionSettings", () => {
     expect(screen.getByLabelText("Request log retention days")).toHaveDisplayValue("");
     expect(screen.getByLabelText("Usage history retention days")).toHaveDisplayValue("");
     expect(
-      screen.getByText("Inherited: 90 days (environment default; 0 = disabled)"),
+      screen.getByText("Not configured: effective 90 days (0 = disabled)"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("Inherited: 0 days (environment default; 0 = disabled)"),
+      screen.getByText("Not configured: effective 0 days (0 = disabled)"),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save retention" })).toBeDisabled();
   });
@@ -157,7 +157,7 @@ describe("DataRetentionSettings", () => {
       <DataRetentionSettings
         settings={{
           ...baseSettings,
-          requestLogRetentionDays: 90, // effective via env alias
+          requestLogRetentionDays: 90, // effective value reported by the server
           requestLogRetentionOverrideDays: null,
         }}
         busy={false}

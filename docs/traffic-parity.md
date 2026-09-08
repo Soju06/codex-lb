@@ -259,13 +259,13 @@ proxy variables pointing at it:
 https_proxy=http://127.0.0.1:18081 \
 wss_proxy=http://127.0.0.1:18081 \
 SSL_CERT_FILE="$HOME/.mitmproxy/mitmproxy-ca-cert.pem" \
-CODEX_LB_UPSTREAM_STREAM_TRANSPORT=auto \
 uv run fastapi run app/main.py --port 2455
 ```
 
-`auto` exercises the normal transport decision. Set the transport to `http` or
-`websocket` for a controlled lane, then run both lanes when investigating a
-transport-specific regression. If the account has an explicit upstream proxy
+The upstream stream transport is a dashboard setting (Settings → Routing →
+Upstream stream transport). `auto` exercises the normal transport decision. Set
+the transport to `http` or `websocket` in the dashboard for a controlled lane,
+then run both lanes when investigating a transport-specific regression. If the account has an explicit upstream proxy
 route, route it through the capture proxy as well; explicit account routing can
 otherwise bypass environment proxies.
 

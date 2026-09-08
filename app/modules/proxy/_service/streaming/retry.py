@@ -63,6 +63,7 @@ from app.modules.proxy._service.support import (
     _TerminalStreamError,
     _TransientStreamError,
     _WebSocketUpstreamControl,
+    configured_upstream_stream_transport,
 )
 from app.modules.proxy._service.websocket.helpers import (
     _websocket_input_items_are_self_contained_fresh_replay,
@@ -174,7 +175,6 @@ def _verified_cross_transport_fresh_replay(
 def _effective_http_downstream_transport_policy(
     api_key: ApiKeyData | None,
     dashboard_settings: Any,
-    base_settings: Any,
 ) -> tuple[str, bool]:
     override = getattr(api_key, "transport_policy_override", None) if api_key is not None else None
     if override is not None:
@@ -182,14 +182,11 @@ def _effective_http_downstream_transport_policy(
     dashboard_policy = getattr(dashboard_settings, "http_downstream_transport_policy", None)
     if isinstance(dashboard_policy, str) and dashboard_policy:
         return dashboard_policy, False
-    base_policy = getattr(base_settings, "http_downstream_transport_policy", _HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT)
-    return base_policy, False
+    return _HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT, False
 
 
-def _resolved_configured_stream_transport(dashboard_settings: Any, base_settings: Any) -> tuple[str, bool]:
-    configured = getattr(dashboard_settings, "upstream_stream_transport", "default")
-    if configured == "default":
-        configured = getattr(base_settings, "upstream_stream_transport", "auto")
+def _resolved_configured_stream_transport(dashboard_settings: Any) -> tuple[str, bool]:
+    configured = configured_upstream_stream_transport(dashboard_settings)
     return configured, configured in ("http", "websocket")
 
 
@@ -203,21 +200,14 @@ def _http_bridge_allowed_by_transport_policy(
 ) -> bool:
     """Apply ordinary HTTP transport precedence before entering the WS bridge."""
 
-    configured_transport, explicit_transport = _resolved_configured_stream_transport(
-        dashboard_settings,
-        base_settings,
-    )
+    configured_transport, explicit_transport = _resolved_configured_stream_transport(dashboard_settings)
     if explicit_transport:
         return configured_transport == "websocket"
     if _is_native_codex_request(headers):
         # A first-party Codex client owns its WebSocket -> HTTP fallback. Once
         # it submits HTTP, sticky metadata must not promote it back to WS.
         return False
-    policy, _override_applied = _effective_http_downstream_transport_policy(
-        api_key,
-        dashboard_settings,
-        base_settings,
-    )
+    policy, _override_applied = _effective_http_downstream_transport_policy(api_key, dashboard_settings)
     return _resolve_http_downstream_transport(policy, payload=payload, headers=headers) == "websocket"
 
 
@@ -354,7 +344,7 @@ class _StreamingRetryMixin:
 
         upstream_stream_transport = upstream_stream_transport_override
         if upstream_stream_transport is None:
-            configured_transport, explicit_transport = _resolved_configured_stream_transport(settings, base_settings)
+            configured_transport, explicit_transport = _resolved_configured_stream_transport(settings)
             image_bypass = _facade()._responses_request_uses_image_generation(
                 payload
             ) or _facade()._responses_request_contains_input_image(payload)
@@ -382,9 +372,7 @@ class _StreamingRetryMixin:
                     upstream_transport_policy_label = policy
                     upstream_stream_transport = "http"
                 else:
-                    policy, override_applied = _effective_http_downstream_transport_policy(
-                        api_key, settings, base_settings
-                    )
+                    policy, override_applied = _effective_http_downstream_transport_policy(api_key, settings)
                     upstream_transport_policy_label = policy
                     policy_transport = _resolve_http_downstream_transport(policy, payload=payload, headers=headers)
                     upstream_stream_transport = "http" if policy_transport == "http" else configured_transport

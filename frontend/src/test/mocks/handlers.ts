@@ -23,6 +23,7 @@ import {
   createDashboardOverview,
   createDashboardProjections,
   createDashboardSettings,
+  createSubscriptionOverflowPreflight,
   createDefaultAccounts,
   createDefaultApiKeys,
   createDefaultConversations,
@@ -108,8 +109,9 @@ const AccountRoutingPolicyPayloadSchema = z.object({
 
 const SettingsPayloadSchema = z.looseObject({
   stickyThreadsEnabled: z.boolean().optional(),
+  subscriptionOverflowSourceId: z.string().nullable().optional(),
   upstreamStreamTransport: z
-    .enum(["default", "auto", "http", "websocket"])
+    .enum(["auto", "http", "websocket"])
     .optional(),
   httpDownstreamTransportPolicy: z
     .enum(["smart", "always_http", "always_websocket", "pinned"])
@@ -1207,6 +1209,28 @@ export const handlers = [
 
   http.get("/api/settings", () => {
     return HttpResponse.json(state.settings);
+  }),
+
+  http.get("/api/settings/subscription-overflow/preflight", ({ request }) => {
+    const sourceId = new URL(request.url).searchParams.get("source_id") ?? "";
+    const source = state.modelSources.find((candidate) => candidate.id === sourceId);
+    if (!source) {
+      return HttpResponse.json(
+        { error: { code: "not_found", message: "Model source not found" } },
+        { status: 404 },
+      );
+    }
+    const eligible = source.kind === "openai_compatible" && source.supportsResponses;
+    return HttpResponse.json(
+      createSubscriptionOverflowPreflight({
+        sourceId: source.id,
+        sourceName: source.name,
+        sourceEnabled: source.isEnabled,
+        eligible,
+        blockers: eligible ? [] : ["source_responses_unsupported"],
+        drainUntil: state.settings.subscriptionOverflowDrainUntil,
+      }),
+    );
   }),
 
   http.get("/api/settings/telemetry", ({ request }) => {

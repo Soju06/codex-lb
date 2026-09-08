@@ -77,7 +77,21 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # bound-eventless-server-recovery spec called it "configured"; the maintainer
 # asked for it to be promoted to a setting on PR #1633 (2026-08-20/08-26),
 # consistent with that PR's budget-from-settings principle.
-MAX_SETTINGS_FIELDS = 133
+# 135 -> 134: upstream_stream_transport removed (remove-upstream-stream-transport-env).
+# The dashboard row is the only source; the env var only ever fed the DB
+# "default" sentinel, which was two places to configure one value.
+# 134 -> 137: connect_address, additional_quota_registry_file,
+# forwarded_allow_ips (slop-removal 0908, env reads outside Settings). Not new
+# knobs: all three env names were already consumed via ad-hoc ``os.environ``
+# reads in request/registry code without appearing in this reference; they are
+# promoted so the generator, ``.env`` files, and the removed-settings warning
+# govern them. The remaining bare env reads are third-party conventions listed
+# in the reference's process-level section.
+# 137 -> 130: remove-dead-env-settings dropped the deprecated retention env
+# aliases, four env fields the dashboard already owned (first-boot seeds or
+# never read), and workers_per_instance (now a startup guard on the env var,
+# not a field).
+MAX_SETTINGS_FIELDS = 130
 
 
 def test_generated_settings_reference_matches_code() -> None:

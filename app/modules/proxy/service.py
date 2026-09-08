@@ -71,7 +71,6 @@ from app.core.errors import (
     ResponseFailedEvent,
     coerce_error_param,
     is_previous_response_not_found_error,
-    is_previous_response_not_found_message,
     openai_error,
     previous_response_id_from_not_found_message,
     previous_response_stream_incomplete_error,
@@ -514,18 +513,13 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.helpers import (
     _call_stream_with_supported_optional_kwargs as _call_stream_with_supported_optional_kwargs,
 )
-from app.modules.proxy._service.streaming.helpers import (
-    _classify_upstream_close as _classify_upstream_close,
-)
+from app.modules.proxy._service.streaming.helpers import _classify_upstream_close as _classify_upstream_close
 from app.modules.proxy._service.streaming.helpers import (
     _is_account_neutral_transport_drop as _is_account_neutral_transport_drop,
 )
 from app.modules.proxy._service.streaming.helpers import _is_background_json_ack as _is_background_json_ack
 from app.modules.proxy._service.streaming.helpers import (
     _push_stream_attempt_timeout_overrides as _push_stream_attempt_timeout_overrides,
-)
-from app.modules.proxy._service.streaming.helpers import (
-    _resolve_upstream_stream_transport as _resolve_upstream_stream_transport,
 )
 from app.modules.proxy._service.streaming.helpers import (
     _rewrite_previous_response_stream_error as _rewrite_previous_response_stream_error,
@@ -2104,10 +2098,6 @@ class ProxyService(
         )
 
 
-def _is_previous_response_not_found_message(message: str | None) -> bool:
-    return is_previous_response_not_found_message(message)
-
-
 def _previous_response_id_from_not_found_message(message: str | None) -> str | None:
     return previous_response_id_from_not_found_message(message)
 
@@ -2526,21 +2516,6 @@ def _previous_response_owner_lookup_failed_error_envelope() -> OpenAIErrorEnvelo
         "Previous response owner lookup failed; retry later.",
         error_type="server_error",
     )
-
-
-def _mark_request_state_previous_response_not_found(
-    request_state: _WebSocketRequestState,
-    detail: str,
-) -> None:
-    previous_response_id = request_state.previous_response_id
-    if previous_response_id is None:
-        return
-    payload = _http_bridge_previous_response_error_envelope(previous_response_id, detail)
-    error = payload["error"]
-    request_state.error_code_override = error.get("code")
-    request_state.error_message_override = error.get("message")
-    request_state.error_type_override = error.get("type")
-    request_state.error_param_override = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
 
 
 def _header_value_case_insensitive(headers: Mapping[str, str], name: str) -> str | None:

@@ -1204,11 +1204,20 @@ class SourceStreamUsageParser:
         self._usage_holder = usage_holder
         self._response_shape = response_shape
         self._buffer = ""
+        self._bom_pending = True
 
     def feed(self, chunk: bytes) -> None:
         # SSE permits CRLF (and bare CR) line endings; normalize so frame
         # detection below only has to handle "\n\n".
         text = chunk.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
+        if self._bom_pending and text:
+            # One optional leading UTF-8 BOM, ignored exactly as the public
+            # wrapper's event-block reassembler ignores it: left in place it
+            # turns the first field name into "\ufeffdata", so the parser would
+            # observe nothing from a record the wrapper delivers to the client
+            # (I11: delivered => pinned; usage never captured).
+            self._bom_pending = False
+            text = text.removeprefix("\ufeff")
         self._buffer += text
         while "\n\n" in self._buffer:
             frame, self._buffer = self._buffer.split("\n\n", 1)

@@ -10,7 +10,7 @@ Source `4xx`/`5xx` answers MUST pass through honestly: the source status code, t
 
 The stream body MUST yield the first chunk the open already read before reading further, so the first-frame deadline is the only wait between the headers and the first byte the client receives.
 
-While a pre-content hook is armed on a Responses stream, the frames withheld ahead of the hook MUST be classified by the same frame parser that classifies complete frames, at EOF included: a final record the source closed without the blank-line terminator MUST be parsed as a frame before the withheld bytes are released, so a success terminal or content frame in that tail runs the hook first and a failure terminal or an empty tail flushes without it. The withheld bytes MUST be bounded by an aggregate cap of twice the parser's single-frame cap; a source that keeps producing complete bookkeeping frames past that bound MUST fail closed with `502 invalid_upstream_response` and release the source connection, never flush unpinned and never run the hook on bookkeeping alone. Without a hook nothing is withheld and the cap does not apply.
+While a pre-content hook is armed on a Responses stream, the frames withheld ahead of the hook MUST be classified by the same frame parser that classifies complete frames, at EOF included: a final record the source closed without the blank-line terminator MUST be parsed as a frame before the withheld bytes are released, so a success terminal or content frame in that tail runs the hook first and a failure terminal or an empty tail flushes without it. The withheld bytes MUST be bounded by an aggregate cap of twice the parser's single-frame cap; a source that keeps producing complete bookkeeping frames past that bound MUST fail closed with `502 invalid_upstream_response` and release the source connection, never flush unpinned and never run the hook on bookkeeping alone. Without a hook nothing is withheld and the cap does not apply. The frame parser MUST ignore one leading UTF-8 byte-order mark exactly as the proxy's event-block reassembler does, so a source that prefixes its stream with a BOM never has its first record delivered by the wrapper while the parser observes nothing.
 
 #### Scenario: source accepts the TCP connection but never sends headers
 
@@ -74,6 +74,12 @@ While a pre-content hook is armed on a Responses stream, the frames withheld ahe
 - **GIVEN** a pre-content hook is armed and the source has produced only `response.created`
 - **WHEN** the source closes after an unterminated `response.failed` record
 - **THEN** the withheld frames are flushed, the hook never runs and the holder records terminal kind `failed`
+
+#### Scenario: BOM-prefixed data-only terminal runs the hook first
+
+- **GIVEN** a pre-content hook is armed
+- **WHEN** the source's first bytes are a UTF-8 byte-order mark followed by a data-only `response.completed` frame carrying `output` and `usage`
+- **THEN** the hook runs once with terminal kind `completed` before the frame is released, the frame is relayed byte-identically and the holder records the frame's usage
 
 #### Scenario: bookkeeping past the withheld cap fails closed
 

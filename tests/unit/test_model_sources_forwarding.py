@@ -647,6 +647,98 @@ def test_chat_parser_joins_multi_line_data_fields_for_usage() -> None:
     assert holder.usage == SourceUsage(input_tokens=6, output_tokens=2)
 
 
+_BOM = b"\xef\xbb\xbf"
+
+
+def _bom_completed_event(response_id: str) -> dict[str, object]:
+    return {
+        "type": "response.completed",
+        "response": {
+            "id": response_id,
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "hi"}]}],
+            "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        pytest.param([_BOM + _sse(_bom_completed_event("resp_bom"))], id="bom_and_frame_in_one_chunk"),
+        pytest.param([_BOM, _sse(_bom_completed_event("resp_bom"))], id="bom_alone_in_the_first_chunk"),
+        pytest.param([_BOM[:1], _BOM[1:] + _sse(_bom_completed_event("resp_bom"))], id="bom_split_across_chunks"),
+    ],
+)
+def test_responses_parser_ignores_one_leading_utf8_bom_like_the_wrapper(chunks: list[bytes]) -> None:
+    """The public wrapper's event-block reassembler drops one leading UTF-8 BOM and delivers the frame; the usage
+    parser must classify the same record (I11: delivered => pinned) instead of reading the field ``\\ufeffdata`` and
+    observing nothing."""
+
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="responses")
+
+    for chunk in chunks:
+        parser.feed(chunk)
+
+    assert holder.terminal_kind == "completed"
+    assert holder.first_content_seen is True
+    assert holder.usage == SourceUsage(input_tokens=3, output_tokens=5)
+    assert holder.response_id == "resp_bom"
+
+
+def test_responses_parser_strips_only_the_stream_leading_bom() -> None:
+    """A BOM inside the stream is not a BOM to the reassembler either: both sides leave the record unparsed."""
+
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="responses")
+
+    parser.feed(_sse({"type": "response.created", "response": {"id": "resp_mid"}}))
+    parser.feed(_BOM + _sse(_bom_completed_event("resp_mid")))
+
+    assert holder.response_id == "resp_mid"
+    assert holder.terminal_kind is None
+    assert holder.usage is None
+
+
+def test_chat_parser_ignores_one_leading_utf8_bom() -> None:
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="chat")
+
+    parser.feed(_BOM + b'data: {"usage": {"prompt_tokens": 6, "completion_tokens": 2}}\n\n')
+
+    assert holder.usage == SourceUsage(input_tokens=6, output_tokens=2)
+
+
+@pytest.mark.asyncio
+async def test_stream_body_bom_prefixed_data_only_terminal_runs_the_hook_before_flushing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source whose first bytes are a BOM followed by a data-only ``response.completed`` delivers an answer the
+    wrapper parses (it strips the BOM); the hook must run before that frame is released and its usage must reach the
+    holder -- the parser reading ``\\ufeffdata`` instead bypassed both."""
+
+    completed = _BOM + _sse(_bom_completed_event("resp_bom_hook"))
+    response = _FakeResponse(content=_FakeContent(completed, []))
+    _session, _context, lease = _install_session(monkeypatch, response)
+    order: list[str] = []
+
+    async def hook(holder: SourceUsageHolder) -> None:
+        order.append(f"hook:{holder.terminal_kind}")
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"}, on_first_content=hook)
+    delivered: list[bytes] = []
+    async for chunk in stream.body:
+        if not order or not order[-1].startswith("yield"):
+            order.append("yield")
+        delivered.append(chunk)
+
+    assert order == ["hook:completed", "yield"]
+    # Bytes are relayed verbatim; the public wrapper strips the BOM downstream.
+    assert delivered == [completed]
+    assert stream.usage_holder.usage == SourceUsage(input_tokens=3, output_tokens=5)
+    assert lease.released == 1
+
+
 # -- constants ----------------------------------------------------------------
 
 

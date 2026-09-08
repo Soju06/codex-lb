@@ -1722,3 +1722,86 @@ async def test_stream_body_oversized_content_frame_wins_over_the_withheld_cap(mo
     assert b"".join(await _collect(stream.body)) == created + completed
     assert hook_calls == 1
     assert lease.released == 1
+
+
+# -- chat-completions streams: pre-first-token phases are bounded by the total budget only ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_completion_pre_first_token_phases_outlive_the_responses_deadlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chat stream has no bookkeeping frame: headers and the first token arrive after prompt processing."""
+
+    clock, scheduler = _virtual()
+    first = b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
+    response = _FakeResponse(
+        content=_FakeContent(first, first_gate=lambda: scheduler.sleep(SOURCE_FIRST_FRAME_DEADLINE_SECONDS + 15))
+    )
+    _session, _context, lease = _install_session(
+        monkeypatch, response, enter_gate=lambda: scheduler.sleep(SOURCE_HEADER_DEADLINE_SECONDS + 5)
+    )
+
+    task = scheduler.create_task(
+        forwarding_module.stream_chat_completion(_responses_source(), {"model": "m"}, scheduler=scheduler, clock=clock)
+    )
+    await scheduler.advance(SOURCE_HEADER_DEADLINE_SECONDS + 4.9)
+    assert not task.done()
+    await scheduler.advance(0.1)
+    assert not task.done()
+    await scheduler.advance(SOURCE_FIRST_FRAME_DEADLINE_SECONDS + 14.9)
+    assert not task.done()
+    await scheduler.advance(0.1)
+    assert task.done()
+
+    stream = task.result()
+    assert await asyncio.wait_for(anext(stream.body), timeout=1) == first
+    await cast(AsyncGenerator[bytes, None], stream.body).aclose()
+    assert lease.released == 1
+    await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_completion_total_budget_expiry_keeps_the_unreachable_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no phase deadline armed, a ``TimeoutError`` is the source's total budget: the pre-hardening 502."""
+
+    _install_session(monkeypatch, _FakeResponse(content=_FakeContent(b"x")), enter_error=TimeoutError("total"))
+    with pytest.raises(ModelSourceForwardingError) as before_headers:
+        await forwarding_module.stream_chat_completion(_responses_source(), {"model": "m"})
+    assert before_headers.value.status_code == 502
+    assert cast(dict[str, object], before_headers.value.payload["error"])["code"] == "model_source_unreachable"
+    assert before_headers.value.timeout_phase is None
+
+    async def budget_expired() -> None:
+        raise TimeoutError("total")
+
+    response = _FakeResponse(content=_FakeContent(b"x", first_gate=budget_expired))
+    _session, context, lease = _install_session(monkeypatch, response)
+    with pytest.raises(ModelSourceForwardingError) as before_first_token:
+        await forwarding_module.stream_chat_completion(_responses_source(), {"model": "m"})
+    assert before_first_token.value.status_code == 502
+    assert cast(dict[str, object], before_first_token.value.payload["error"])["code"] == "model_source_unreachable"
+    assert before_first_token.value.timeout_phase is None
+    assert context.exited == 1
+    assert lease.released == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_keeps_both_open_deadlines_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scoping is per shape: Responses streams still expire at the header deadline."""
+
+    clock, scheduler = _virtual()
+    response = _FakeResponse(content=_FakeContent(b"data: late\n\n"))
+    _install_session(monkeypatch, response, enter_gate=_forever)
+
+    task = scheduler.create_task(
+        forwarding_module.stream_responses(_responses_source(), {"model": "m"}, scheduler=scheduler, clock=clock)
+    )
+    await scheduler.advance(SOURCE_HEADER_DEADLINE_SECONDS)
+    assert task.done()
+    with pytest.raises(ModelSourceForwardingError) as excinfo:
+        task.result()
+    assert excinfo.value.timeout_phase == "header"
+    await scheduler.cancel_owned_tasks()

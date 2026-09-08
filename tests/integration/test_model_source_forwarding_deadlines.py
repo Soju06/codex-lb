@@ -220,6 +220,63 @@ async def test_first_frame_deadline_fires_at_thirty_virtual_seconds_and_closes_t
 
 
 @pytest.mark.asyncio
+async def test_chat_stream_slow_prompt_processing_outlives_the_responses_deadlines(
+    http_client: HttpClient, source_upstream
+) -> None:
+    """A chat-completions source that sends its headers and first token only after prompt processing is not cut
+    at the Responses header / first-frame deadlines (design v3 §2: chat completions are out of the hardening)."""
+
+    release_headers = asyncio.Event()
+    release_token = asyncio.Event()
+    prepared = asyncio.Event()
+    token = b'data: {"id":"chatcmpl_slow","choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n'
+    final = (
+        b'data: {"id":"chatcmpl_slow","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":1}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+
+    async def slow_prompt_processing(request: web.Request) -> web.StreamResponse:
+        await release_headers.wait()
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        prepared.set()
+        await release_token.wait()
+        await response.write(token)
+        await response.write(final)
+        await response.write_eof()
+        return response
+
+    base_url = await source_upstream(slow_prompt_processing)
+    clock, scheduler = _virtual()
+    task = scheduler.create_task(
+        forwarding_module.stream_chat_completion(
+            _source(base_url), {"model": "m", "stream": True}, scheduler=scheduler, clock=clock
+        )
+    )
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+    await scheduler.advance(SOURCE_HEADER_DEADLINE_SECONDS + 5)
+    assert not task.done()
+
+    release_headers.set()
+    await asyncio.wait_for(prepared.wait(), timeout=5)
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+    await scheduler.advance(SOURCE_FIRST_FRAME_DEADLINE_SECONDS + 5)
+    assert not task.done()
+
+    release_token.set()
+    stream = await asyncio.wait_for(task, timeout=5)
+    delivered = b"".join([chunk async for chunk in stream.body])
+
+    assert delivered == token + final
+    assert stream.usage_holder.usage is not None
+    assert stream.usage_holder.usage.input_tokens == 4
+    assert _acquired(http_client, model_source=True) == 0
+    await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
 async def test_stalled_source_opens_never_touch_the_chatgpt_connector(http_client: HttpClient) -> None:
     clock, scheduler = _virtual()
     chatgpt_connector = http_client.session.connector

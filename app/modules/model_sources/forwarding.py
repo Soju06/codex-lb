@@ -4,11 +4,11 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import AsyncExitStack
+from contextlib import AbstractContextManager, AsyncExitStack, nullcontext
 from dataclasses import dataclass, field
 from json import JSONDecodeError
 from math import isfinite
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import aiohttp
 
@@ -31,8 +31,15 @@ _DEFAULT_SOURCE_TIMEOUT_SECONDS = 600
 # Bounded exposure for OpenAI-compatible model-source transport (#2123 WP-C1,
 # design v3 §3, §8.2). Single definition: callers import, never re-literal.
 SOURCE_CONNECT_DEADLINE_SECONDS = 10.0
+# Responses streams only (``stream_responses``): a compliant source emits
+# ``response.created`` within milliseconds of its headers, so headers-then-
+# queue is exactly what these two catch. Chat-completions streams have no
+# bookkeeping frame -- the first byte is the first token, and OpenAI-compatible
+# local servers (llama.cpp, vLLM, Ollama) send it, often together with their
+# headers, only after prompt processing -- so their pre-first-token phases stay
+# bounded by the source's total budget alone, as before the hardening.
 SOURCE_HEADER_DEADLINE_SECONDS = 20.0
-# Streaming only: time from response headers to the first body chunk.
+# Time from response headers to the first body chunk.
 SOURCE_FIRST_FRAME_DEADLINE_SECONDS = 30.0
 # Mid-stream silence cap; ``source_stream_idle_seconds()`` takes the minimum
 # with ``settings.stream_idle_timeout_seconds`` so a source never inherits the
@@ -312,7 +319,10 @@ async def stream_chat_completion(
     usage_holder = SourceUsageHolder()
     usage_parser = SourceStreamUsageParser(usage_holder, response_shape="chat")
     # Chat completions keep the source's own 401/403 envelope (recode is a
-    # Responses-dispatch decision); deadlines and the dedicated connector apply.
+    # Responses-dispatch decision) and bound their pre-first-token phases by
+    # the source's total budget alone: the first byte is the first token, which
+    # a local source produces only after prompt processing. The connect bound,
+    # the dedicated connector and the mid-stream idle cap apply.
     stack, response, first_chunk = await _open_source_stream(
         source,
         "/chat/completions",
@@ -320,6 +330,8 @@ async def stream_chat_completion(
         encryptor=encryptor,
         scheduler=scheduler,
         clock=clock,
+        header_deadline_seconds=None,
+        first_frame_deadline_seconds=None,
     )
     usage_holder.first_frame_at = clock.monotonic()
     transport = SourceStreamTransport(stack, scheduler=scheduler)
@@ -616,6 +628,8 @@ async def _open_source_stream(
     recode_credential_failures: bool = False,
     scheduler: Scheduler = REAL_SCHEDULER,
     clock: Clock = REAL_CLOCK,
+    header_deadline_seconds: float | None = SOURCE_HEADER_DEADLINE_SECONDS,
+    first_frame_deadline_seconds: float | None = SOURCE_FIRST_FRAME_DEADLINE_SECONDS,
 ) -> tuple[AsyncExitStack, aiohttp.ClientResponse, bytes]:
     """Open the upstream request eagerly so errors surface before headers.
 
@@ -625,20 +639,22 @@ async def _open_source_stream(
     failures and a source that accepts the request but never produces a frame
     map to a proper OpenAI error response instead of a truncated stream. The
     open is bounded per phase (design v3 §8.2): connect establishment by
-    ``ClientTimeout``, the header wait by ``SOURCE_HEADER_DEADLINE_SECONDS``
-    and the first body chunk by ``SOURCE_FIRST_FRAME_DEADLINE_SECONDS``, both
-    through ``scheduler.fail_after`` so virtual time can expire them; the
-    mid-stream idle cap is the body's (``_source_stream_body``). The
-    returned exit stack owns the session lease and response and must be closed
-    by the stream body (or ``SourceResponsesStream.aclose``); the returned
-    bytes are the first chunk, which the body yields before reading further.
+    ``ClientTimeout``, the header wait by ``header_deadline_seconds`` and the
+    first body chunk by ``first_frame_deadline_seconds``, both through
+    ``scheduler.fail_after`` so virtual time can expire them; ``None`` leaves
+    that phase to the source's total budget (chat-completions streams, whose
+    first byte is the first token). The mid-stream idle cap is the body's
+    (``_source_stream_body``). The returned exit stack owns the session lease
+    and response and must be closed by the stream body (or
+    ``SourceResponsesStream.aclose``); the returned bytes are the first chunk,
+    which the body yields before reading further.
     """
     stack = AsyncExitStack()
     opened_at = clock.monotonic()
     try:
         session = await stack.enter_async_context(lease_model_source_session())
         try:
-            with scheduler.fail_after(SOURCE_HEADER_DEADLINE_SECONDS):
+            with _phase_deadline(scheduler, header_deadline_seconds):
                 response = await stack.enter_async_context(
                     session.post(
                         _source_url(source, path),
@@ -654,6 +670,9 @@ async def _open_source_stream(
         except aiohttp.ClientError as exc:
             raise _unreachable_error(exc) from exc
         except TimeoutError as exc:
+            if header_deadline_seconds is None:
+                # Only the source's total budget was armed: the pre-hardening verdict.
+                raise _unreachable_error(exc) from exc
             raise _timeout_error("header", source, elapsed=clock.monotonic() - opened_at) from exc
         if response.status >= 400:
             if recode_credential_failures and response.status in _CREDENTIAL_REJECTION_STATUSES:
@@ -661,9 +680,11 @@ async def _open_source_stream(
             data = await _read_error_body(response, scheduler=scheduler)
             raise _upstream_status_error(response, source, encryptor=encryptor, error_payload=_error_payload(data))
         try:
-            with scheduler.fail_after(SOURCE_FIRST_FRAME_DEADLINE_SECONDS):
+            with _phase_deadline(scheduler, first_frame_deadline_seconds):
                 first_chunk = await response.content.readany()
         except TimeoutError as exc:
+            if first_frame_deadline_seconds is None:
+                raise _unreachable_error(exc) from exc
             # anyio's deadline (or the source's total budget, a ``TimeoutError``
             # too) -- either way the source accepted the request and produced
             # nothing.
@@ -679,6 +700,12 @@ async def _open_source_stream(
 
 
 _CREDENTIAL_REJECTION_STATUSES = frozenset({401, 403})
+
+
+def _phase_deadline(scheduler: Scheduler, seconds: float | None) -> AbstractContextManager[Any]:
+    """``scheduler.fail_after(seconds)``, or no bound at all when the phase is left to the source's total budget."""
+
+    return scheduler.fail_after(seconds) if seconds is not None else nullcontext()
 
 
 def _source_client_timeout(source: ModelSource) -> aiohttp.ClientTimeout:

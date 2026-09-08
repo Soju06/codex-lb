@@ -10,6 +10,8 @@ Source `4xx`/`5xx` answers MUST pass through honestly: the source status code, t
 
 The stream body MUST yield the first chunk the open already read before reading further, so the first-frame deadline is the only wait between the headers and the first byte the client receives.
 
+While a pre-content hook is armed on a Responses stream, the frames withheld ahead of the hook MUST be classified by the same frame parser that classifies complete frames, at EOF included: a final record the source closed without the blank-line terminator MUST be parsed as a frame before the withheld bytes are released, so a success terminal or content frame in that tail runs the hook first and a failure terminal or an empty tail flushes without it.
+
 #### Scenario: source accepts the TCP connection but never sends headers
 
 - **WHEN** a streaming Responses request is forwarded to a source that accepts the connection and sends nothing for 20 seconds
@@ -46,6 +48,19 @@ The stream body MUST yield the first chunk the open already read before reading 
 - **WHEN** fifty streaming source opens stall waiting for headers
 - **THEN** the ChatGPT connector has no acquired connections attributable to them
 - **AND** the model-source connector holds those fifty connections until the header deadline releases them
+
+#### Scenario: unterminated success terminal at EOF runs the hook first
+
+- **GIVEN** a pre-content hook is armed and the source has produced only `response.created`
+- **WHEN** the source writes `data: {"type":"response.completed", ... "output":[...]}` followed by a single newline and closes the connection
+- **THEN** the hook runs once with terminal kind `completed` before any withheld byte is released
+- **AND** the client receives `response.created` and the completed frame in order
+
+#### Scenario: unterminated failure terminal at EOF flushes without the hook
+
+- **GIVEN** a pre-content hook is armed and the source has produced only `response.created`
+- **WHEN** the source closes after an unterminated `response.failed` record
+- **THEN** the withheld frames are flushed, the hook never runs and the holder records terminal kind `failed`
 
 #### Scenario: source 429 passes through with Retry-After
 

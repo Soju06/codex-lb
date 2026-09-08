@@ -24,6 +24,7 @@ from app.modules.model_sources.forwarding import (
     ModelSourceForwardingError,
     SourceResponsesStream,
     SourceStreamUsageParser,
+    SourceUsage,
     SourceUsageHolder,
     _audio_seconds_from_body,
     _error_payload_from_body,
@@ -1527,3 +1528,120 @@ async def test_stream_body_oversized_terminal_frame_runs_the_hook_before_flushin
     assert b"".join(delivered) == created + completed
     assert stream.usage_holder.first_content_seen is True
     assert lease.released == 1
+
+
+# -- EOF tail classification and the withheld-bytes cap (pre-content hook) -----------------------------------------
+
+
+def _unterminated(event: dict[str, object]) -> bytes:
+    """A final SSE record the source closed with a single newline (no blank-line terminator)."""
+
+    return f"data: {json.dumps(event)}\n".encode()
+
+
+def _completed_with_output(response_id: str) -> dict[str, object]:
+    return {
+        "type": "response.completed",
+        "response": {
+            "id": response_id,
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "hi"}]}],
+            "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
+        },
+    }
+
+
+def test_stream_usage_parser_finish_classifies_an_unterminated_tail() -> None:
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="responses")
+    parser.feed(_sse({"type": "response.created", "response": {"id": "resp_tail"}}))
+    parser.feed(_unterminated(_completed_with_output("resp_tail")))
+    # Only blank-line terminated frames were parsed so far.
+    assert holder.terminal_kind is None
+    assert holder.first_content_seen is False
+    assert holder.usage is None
+
+    parser.finish()
+
+    assert holder.terminal_kind == "completed"
+    assert holder.first_content_seen is True
+    assert holder.usage == SourceUsage(input_tokens=3, output_tokens=5)
+    assert parser._buffer == ""
+    parser.finish()
+    assert holder.terminal_kind == "completed"
+
+
+def test_stream_usage_parser_finish_ignores_a_cut_frame() -> None:
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="responses")
+    parser.feed(b'data: {"type":"response.output_text.delta","delta":"ab')
+
+    parser.finish()
+
+    # A record cut mid-JSON is not a frame any client can parse: nothing observed.
+    assert holder.first_content_seen is False
+    assert holder.terminal_kind is None
+    assert parser._buffer == ""
+
+
+@pytest.mark.asyncio
+async def test_stream_body_unterminated_eof_tail_runs_the_hook_before_flushing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """I11: a success terminal the source closed with a single newline is delivered content."""
+
+    created = _sse({"type": "response.created", "response": {"id": "resp_tail"}})
+    completed_tail = _unterminated(_completed_with_output("resp_tail"))
+    response = _FakeResponse(content=_FakeContent(created, [completed_tail]))
+    _session, _context, lease = _install_session(monkeypatch, response)
+    order: list[str] = []
+
+    async def hook(holder: SourceUsageHolder) -> None:
+        order.append(f"hook:terminal={holder.terminal_kind}")
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"}, on_first_content=hook)
+    delivered: list[bytes] = []
+    async for chunk in stream.body:
+        if not order or not order[-1].startswith("yield"):
+            order.append("yield")
+        delivered.append(chunk)
+
+    assert order == ["hook:terminal=completed", "yield"]
+    assert delivered == [created, completed_tail]
+    assert stream.usage_holder.first_content_seen is True
+    assert stream.usage_holder.usage == SourceUsage(input_tokens=3, output_tokens=5)
+    assert lease.released == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_body_unterminated_failure_tail_flushes_without_the_hook(monkeypatch: pytest.MonkeyPatch) -> None:
+    created = _sse({"type": "response.created", "response": {"id": "resp_tail"}})
+    failed_tail = _unterminated({"type": "response.failed", "response": {"id": "resp_tail", "error": {"code": "x"}}})
+    response = _FakeResponse(content=_FakeContent(created, [failed_tail]))
+    _session, _context, lease = _install_session(monkeypatch, response)
+    hook_calls = 0
+
+    async def hook(_holder: SourceUsageHolder) -> None:
+        nonlocal hook_calls
+        hook_calls += 1
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"}, on_first_content=hook)
+
+    assert await _collect(stream.body) == [created, failed_tail]
+    assert hook_calls == 0
+    assert stream.usage_holder.terminal_kind == "failed"
+    assert stream.usage_holder.first_content_seen is False
+    assert lease.released == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_body_eof_tail_observations_reach_the_holder_without_a_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = _sse({"type": "response.created", "response": {"id": "resp_tail"}})
+    completed_tail = _unterminated(_completed_with_output("resp_tail"))
+    response = _FakeResponse(content=_FakeContent(created, [completed_tail]))
+    _install_session(monkeypatch, response)
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"})
+
+    assert await _collect(stream.body) == [created, completed_tail]
+    assert stream.usage_holder.terminal_kind == "completed"
+    assert stream.usage_holder.usage == SourceUsage(input_tokens=3, output_tokens=5)

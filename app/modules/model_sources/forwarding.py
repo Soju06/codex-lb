@@ -535,13 +535,15 @@ async def _source_stream_body(
     are withheld until the parser sees the first frame that delivers content
     (a ``content`` frame or a success terminal); the hook is awaited once and
     the withheld bytes are flushed in order behind it. A failure terminal with
-    no prior content flushes without the hook, as does EOF: nothing was
-    delivered, so there is nothing to pin. A frame that outgrows the parser's
-    buffer cap counts as content (it cannot be a bookkeeping envelope and its
-    truncated remainder never parses), so an oversized terminal never reaches
-    the client unpinned. A hook exception propagates and the withheld bytes
-    are dropped -- the client must not receive content whose continuity was
-    not secured.
+    no prior content flushes without the hook. At EOF the parser's unterminated
+    tail is parsed as a final frame first (a record the source closed with a
+    single newline is still a frame the client will parse), and only a tail
+    that delivers nothing flushes without the hook: nothing was delivered, so
+    there is nothing to pin. A frame that outgrows the parser's buffer cap
+    counts as content (it cannot be a bookkeeping envelope and its truncated
+    remainder never parses), so an oversized terminal never reaches the client
+    unpinned. A hook exception propagates and the withheld bytes are dropped
+    -- the client must not receive content whose continuity was not secured.
     """
 
     withheld: list[bytes] | None = [] if on_first_content is not None else None
@@ -557,6 +559,8 @@ async def _source_stream_body(
                 except TimeoutError as exc:
                     raise _idle_timeout_error(idle_seconds) from exc
                 if chunk is None:
+                    # EOF: an unterminated final record is still a frame.
+                    usage_parser.finish()
                     break
             usage_parser.feed(chunk)
             if withheld is None:
@@ -575,6 +579,10 @@ async def _source_stream_body(
                         yield pending
             chunk = None
         if withheld:
+            if usage_holder.first_content_seen:
+                # The unterminated tail delivered content (I11: delivered => pinned).
+                assert on_first_content is not None
+                await on_first_content(usage_holder)
             for pending in withheld:
                 yield pending
     finally:
@@ -1141,6 +1149,20 @@ class SourceStreamUsageParser:
             if self._response_shape == "responses":
                 self._usage_holder.first_content_seen = True
             self._buffer = self._buffer[-self._MAX_BUFFER_CHARS :]
+
+    def finish(self) -> None:
+        """Parse the unterminated tail at EOF as a final frame.
+
+        SSE consumers (the proxy's own event-block reassembler included)
+        accept a final record that the source closed without the trailing
+        blank line, so its event type, usage and terminal kind must reach the
+        holder like any other frame; a truncated oversized remainder never
+        starts with ``data:`` and parses to nothing. Idempotent.
+        """
+
+        tail, self._buffer = self._buffer, ""
+        if tail.strip():
+            self._capture_frame(tail)
 
     def _capture_frame(self, frame: str) -> None:
         for line in frame.splitlines():

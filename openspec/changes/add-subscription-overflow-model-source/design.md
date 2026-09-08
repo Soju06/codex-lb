@@ -46,6 +46,8 @@ Design source: issue #2123 (subscription-exhaustion overflow to a designated mod
 
 29. **The admission budget estimate runs under the route-helper latch.** `estimate_api_key_request_usage` serializes the body and raises `UnicodeEncodeError` on a lone surrogate inside the first ~8 KiB; computed between `try_claim` and the `try` that releases unowned claims, the raise left the bulkhead slot claimed forever (one malformed request per slot saturated a `max_concurrency` source on that worker, I13). The estimate now sits inside the latch, so every failure between the claim and `transfer_to` releases the slot; the 500 itself is unchanged and pre-dates this change.
 
+30. **The EOF tail is a frame.** `SourceStreamUsageParser` only parsed blank-line terminated frames, while the proxy's own event-block reassembler (and every SSE client) accepts a final record closed with a single newline. With a pre-content hook armed, a `response.completed {output: [...]}` tail therefore reached the client without the hook (I11 bypass); without a hook its usage and terminal kind never reached the holder. `finish()` parses the unterminated tail at EOF before the withheld bytes are classified and released; a record cut mid-JSON (and a truncated oversized remainder) parses to nothing, which is still "nothing delivered".
+
 ## Alternatives considered
 
 - Folding the schema into the settings/dashboard stage: rejected — re-parenting a migration behind a long-lived feature branch is what stalled #1664.

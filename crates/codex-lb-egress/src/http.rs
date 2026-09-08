@@ -74,10 +74,10 @@ pub(crate) async fn execute_request(
     let sse = request.sse;
     let method = reqwest::Method::from_bytes(request.method.as_bytes())?;
     let headers = forwarded_headers(request.headers)?;
-    let mut builder = client
-        .request(method, request.url)
-        .headers(headers)
-        .timeout(Duration::from_millis(request.timeout_ms));
+    let mut builder = client.request(method, request.url).headers(headers);
+    if let Some(timeout_ms) = request.timeout_ms {
+        builder = builder.timeout(Duration::from_millis(timeout_ms));
+    }
     if let Some(encoded_body) = request.body {
         builder = builder.body(base64::engine::general_purpose::STANDARD.decode(encoded_body)?);
     }
@@ -105,7 +105,19 @@ pub(crate) async fn execute_request(
     )
     .await?;
 
-    if let Some(options) = sse.filter(|_| status < 400) {
+    if let Some(options) = sse.filter(|options| {
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .map(|value| String::from_utf8_lossy(value.as_bytes()))
+            .unwrap_or_default();
+        status < 400
+            && (!options.content_type_aware
+                || content_type.is_empty()
+                || content_type
+                    .to_ascii_lowercase()
+                    .contains("text/event-stream"))
+    }) {
         if !execute_sse_body(&mut response, &request.request_id, options, output).await? {
             return Ok(());
         }

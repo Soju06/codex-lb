@@ -29,6 +29,7 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
         "failure_provenance_v1",
         "http",
         "http2_profile_v1",
+        "http_compact_sse_v1",
         "http_sse_v1",
         "websocket",
         "websocket_send_ack",
@@ -80,6 +81,7 @@ class NativeEgressTransportError(NativeEgressError):
 class NativeSseOptions:
     idle_timeout_seconds: float
     max_event_bytes: int
+    content_type_aware: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +90,7 @@ class NativeEgressRequest:
     url: str
     headers: Mapping[str, str]
     body: bytes | None = None
-    timeout_seconds: float = 60.0
+    timeout_seconds: float | None = 60.0
     connect_timeout_seconds: float | None = None
     response_head_timeout_seconds: float | None = None
     proxy_url: str | None = None
@@ -562,7 +564,7 @@ class SubprocessNativeEgressClient:
     async def request(self, request: NativeEgressRequest) -> NativeEgressResponse:
         if not self.available:
             raise NativeEgressUnavailable(f"native egress helper is unavailable: {self.executable}")
-        if request.timeout_seconds <= 0:
+        if request.timeout_seconds is not None and request.timeout_seconds <= 0:
             raise ValueError("native egress timeout_seconds must be positive")
         if request.connect_timeout_seconds is not None and request.connect_timeout_seconds <= 0:
             raise ValueError("native egress connect_timeout_seconds must be positive")
@@ -586,7 +588,9 @@ class SubprocessNativeEgressClient:
             "url": request.url,
             "headers": list(request.headers.items()),
             "body": base64.b64encode(request.body).decode("ascii") if request.body is not None else None,
-            "timeout_ms": max(1, round(request.timeout_seconds * 1000)),
+            "timeout_ms": (
+                max(1, round(request.timeout_seconds * 1000)) if request.timeout_seconds is not None else None
+            ),
             "connect_timeout_ms": (
                 max(1, round(request.connect_timeout_seconds * 1000))
                 if request.connect_timeout_seconds is not None
@@ -597,6 +601,7 @@ class SubprocessNativeEgressClient:
                 {
                     "idle_timeout_ms": max(1, round(request.sse.idle_timeout_seconds * 1000)),
                     "max_event_bytes": request.sse.max_event_bytes,
+                    "content_type_aware": request.sse.content_type_aware,
                 }
                 if request.sse is not None
                 else None
@@ -605,7 +610,9 @@ class SubprocessNativeEgressClient:
         try:
             await self._send_command(process, generation, request_event)
             head_timeout = request.response_head_timeout_seconds or request.timeout_seconds
-            item = await asyncio.wait_for(events.get(), timeout=min(head_timeout, request.timeout_seconds))
+            if request.timeout_seconds is not None and head_timeout is not None:
+                head_timeout = min(head_timeout, request.timeout_seconds)
+            item = await asyncio.wait_for(events.get(), timeout=head_timeout)
             if isinstance(item, BaseException):
                 self._finish_request(request_id, generation, events)
                 raise item
@@ -621,14 +628,32 @@ class SubprocessNativeEgressClient:
             if not isinstance(status, int) or not isinstance(http_version, str) or not isinstance(raw_headers, list):
                 raise NativeEgressProtocolError("native response head has an invalid shape")
             headers = tuple(_decode_header_pair(pair) for pair in raw_headers)
+            content_type = next((value for name, value in headers if name.lower() == "content-type"), "")
+            sse_framed = (
+                request.sse is not None
+                and status < 400
+                and (
+                    not request.sse.content_type_aware
+                    or not content_type
+                    or "text/event-stream" in content_type.lower()
+                )
+            )
         except TimeoutError as exc:
-            await self._cancel_request(request_id, generation, events)
+            cancellation = await _await_cleanup_deferring_cancellation(
+                self._cancel_request(request_id, generation, events)
+            )
+            if cancellation is not None:
+                raise cancellation
             raise NativeEgressTransportError(
                 "native upstream response head timed out",
                 failure_phase="timeout",
             ) from exc
         except BaseException:
-            await self._cancel_request(request_id, generation, events)
+            cancellation = await _await_cleanup_deferring_cancellation(
+                self._cancel_request(request_id, generation, events)
+            )
+            if cancellation is not None:
+                raise cancellation
             raise
 
         return NativeEgressResponse(
@@ -639,7 +664,7 @@ class SubprocessNativeEgressClient:
             request_id=request_id,
             generation=generation,
             events=events,
-            sse_framed=request.sse is not None and status < 400,
+            sse_framed=sse_framed,
         )
 
     async def websocket(self, request: NativeWebSocketRequest) -> NativeEgressWebSocket:

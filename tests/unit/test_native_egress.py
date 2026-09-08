@@ -41,6 +41,7 @@ print(json.dumps({
         "failure_provenance_v1",
         "http",
         "http2_profile_v1",
+        "http_compact_sse_v1",
         "http_sse_v1",
         "websocket",
         "websocket_send_ack",
@@ -803,7 +804,7 @@ for line in sys.stdin:
     if command["type"] == "cancel":
         print(json.dumps({{"type": "cancelled", "request_id": request_id}}), flush=True)
         continue
-    assert command["sse"] == {{"idle_timeout_ms": 1000, "max_event_bytes": 1024}}
+    assert command["sse"] == {{"idle_timeout_ms": 1000, "max_event_bytes": 1024, "content_type_aware": False}}
     print(json.dumps({{"type": "head", "request_id": request_id, "status": 200,
                        "http_version": "HTTP/1.1", "headers": []}}), flush=True)
     for event in {events!r}:
@@ -868,15 +869,16 @@ async def test_native_sse_failure_releases_owned_stream(
 
 
 @pytest.mark.asyncio
-async def test_native_sse_capability_is_required_before_dispatch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("capability", ["http_sse_v1", "http_compact_sse_v1"])
+async def test_native_sse_capability_is_required_before_dispatch(tmp_path: Path, capability: str) -> None:
     helper = tmp_path / "native-helper"
-    preamble = _HELPER_PROTOCOL_PREAMBLE.replace('        "http_sse_v1",\n', "")
+    preamble = _HELPER_PROTOCOL_PREAMBLE.replace(f'        "{capability}",\n', "")
     source = "#!/usr/bin/env python3\n" + preamble + "\nassert sys.stdin.readline() == ''\n"
     helper.write_text(source, encoding="utf-8")
     helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
     client = SubprocessNativeEgressClient(helper)
     try:
-        with pytest.raises(NativeEgressProtocolError, match="http_sse_v1"):
+        with pytest.raises(NativeEgressProtocolError, match=capability):
             await client.request(NativeEgressRequest("GET", "https://example.test", {}, sse=NativeSseOptions(1, 1024)))
         assert client._process is None
         assert not client._streams
@@ -923,4 +925,50 @@ async def test_native_sse_close_finishes_in_cancelled_scope(tmp_path: Path) -> N
         assert not client._streams
         assert client._process is not None and client._process.returncode is None
     finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_native_request_cancelled_before_head_unregisters_stream_in_cancelled_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = tmp_path / "native-helper"
+    _write_helper(
+        helper,
+        """#!/usr/bin/env python3
+for line in sys.stdin:
+    command = json.loads(line)
+    if command["type"] == "cancel":
+        print(json.dumps({"type": "cancelled", "request_id": command["request_id"]}), flush=True)
+""",
+    )
+    client = SubprocessNativeEgressClient(helper)
+    sent = asyncio.Event()
+    original_send = client._send_command
+
+    async def send(process, generation, command):
+        await original_send(process, generation, command)
+        if command.get("type") == "request":
+            sent.set()
+
+    monkeypatch.setattr(client, "_send_command", send)
+    scope_ready: asyncio.Future[anyio.CancelScope] = asyncio.get_running_loop().create_future()
+
+    async def request() -> None:
+        with anyio.CancelScope() as scope:
+            scope_ready.set_result(scope)
+            await client.request(NativeEgressRequest("POST", "https://example.test", {}, timeout_seconds=None))
+
+    task = asyncio.create_task(request())
+    try:
+        scope = await scope_ready
+        await asyncio.wait_for(sent.wait(), timeout=2)
+        scope.cancel()
+        await asyncio.wait_for(task, timeout=2)
+        assert not client._streams
+        assert client._process is not None and client._process.returncode is None
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
         await client.aclose()

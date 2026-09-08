@@ -96,12 +96,13 @@ fn sse_request(
         url,
         headers: vec![("accept".to_owned(), "text/event-stream".to_owned())],
         body: None,
-        timeout_ms: 2_000,
+        timeout_ms: Some(2_000),
         connect_timeout_ms: Some(2_000),
         proxy_url: None,
         sse: Some(NativeSseOptions {
             idle_timeout_ms,
             max_event_bytes,
+            content_type_aware: false,
         }),
     })
 }
@@ -164,7 +165,7 @@ async fn gzip_response_relay_crosses_native_helper_boundary() {
             url: format!("http://{address}/response"),
             headers: vec![("accept-encoding".to_owned(), "br, zstd, gzip".to_owned())],
             body: None,
-            timeout_ms: 2_000,
+            timeout_ms: Some(2_000),
             connect_timeout_ms: Some(2_000),
             proxy_url: None,
             sse: None,
@@ -272,7 +273,7 @@ async fn request_without_accept_encoding_reaches_origin_without_accept_encoding(
             url: format!("http://{address}/response"),
             headers: vec![("accept".to_owned(), "application/json".to_owned())],
             body: None,
-            timeout_ms: 2_000,
+            timeout_ms: Some(2_000),
             connect_timeout_ms: Some(2_000),
             proxy_url: None,
             sse: None,

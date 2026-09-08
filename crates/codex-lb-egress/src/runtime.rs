@@ -85,7 +85,7 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                             ).await?;
                             continue;
                         }
-                        if request.timeout_ms == 0
+                        if request.timeout_ms == Some(0)
                             || request.connect_timeout_ms == Some(0)
                             || request.sse.is_some_and(|options| {
                                 options.idle_timeout_ms == 0 || options.max_event_bytes == 0
@@ -134,6 +134,9 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                         let task_active = active.clone();
                         tasks.spawn(async move {
                             tokio::select! {
+                                // An already completed HTTP exchange wins an EOF/cancel
+                                // race, so its terminal event is not followed by Cancelled.
+                                biased;
                                 result = execute_request(request, client, &task_output) => {
                                     if let Err(error) = result {
                                         let (message, phase, retryable, tls_verification) =

@@ -202,8 +202,9 @@ async def test_request_passes_resolver_proxy_and_builtin_fingerprint(route: Reso
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native_sse", [None, NativeSseOptions(3, 1024)])
+@pytest.mark.parametrize("total_timeout", [90, None])
 async def test_routed_request_prefers_native_single_endpoint_attempt(
-    route: ResolvedUpstreamRoute, native_sse: NativeSseOptions | None
+    route: ResolvedUpstreamRoute, native_sse: NativeSseOptions | None, total_timeout: int | None
 ) -> None:
     session = _Session()
     native = _NativeClient()
@@ -216,7 +217,7 @@ async def test_routed_request_prefers_native_single_endpoint_attempt(
         params={"client": "codex"},
         json={"input": "hello"},
         headers={"Authorization": "Bearer token"},
-        timeout=aiohttp.ClientTimeout(total=90, sock_connect=7, sock_read=30),
+        timeout=aiohttp.ClientTimeout(total=total_timeout, sock_connect=7, sock_read=30),
         buffer_response=native_sse is None,
         native_sse=native_sse,
     )
@@ -230,7 +231,7 @@ async def test_routed_request_prefers_native_single_endpoint_attempt(
     assert request.url == "https://upstream.test/responses?existing=1&client=codex"
     assert request.body == b'{"input":"hello"}'
     assert request.headers["Content-Type"] == "application/json"
-    assert request.timeout_seconds == 90
+    assert request.timeout_seconds == total_timeout
     assert request.connect_timeout_seconds == 7
     assert request.response_head_timeout_seconds == 30
     assert request.sse is native_sse

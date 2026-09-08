@@ -118,7 +118,7 @@ class _PreparedNativeRequest:
     url: str
     headers: dict[str, str]
     body: bytes | None
-    timeout_seconds: float
+    timeout_seconds: float | None
     connect_timeout_seconds: float | None
     response_head_timeout_seconds: float | None
 
@@ -646,11 +646,10 @@ def _prepare_native_request(
     else:
         return None
 
-    timeout_seconds, connect_timeout_seconds, response_head_timeout_seconds = _native_timeout_parts(
-        kwargs.get("timeout")
-    )
-    if timeout_seconds is None:
+    timeouts = _native_timeout_parts(kwargs.get("timeout"))
+    if timeouts is None:
         return None
+    timeout_seconds, connect_timeout_seconds, response_head_timeout_seconds = timeouts
     return _PreparedNativeRequest(
         url=url,
         headers=headers,
@@ -661,22 +660,22 @@ def _prepare_native_request(
     )
 
 
-def _native_timeout_parts(value: Any) -> tuple[float | None, float | None, float | None]:
+def _native_timeout_parts(value: Any) -> tuple[float | None, float | None, float | None] | None:
     if value is None:
         return 60.0, None, None
     if isinstance(value, aiohttp.ClientTimeout):
-        total = float(value.total) if value.total is not None else 60.0
+        total = float(value.total) if value.total is not None else None
         connect = float(value.sock_connect) if value.sock_connect is not None else None
         response_head = float(value.sock_read) if value.sock_read is not None else None
     else:
         try:
             total = float(value)
         except (TypeError, ValueError):
-            return None, None, None
+            return None
         connect = None
         response_head = None
-    if total <= 0 or (connect is not None and connect <= 0) or (response_head is not None and response_head <= 0):
-        return None, None, None
+    if any(part is not None and part <= 0 for part in (total, connect, response_head)):
+        return None
     return total, connect, response_head
 
 

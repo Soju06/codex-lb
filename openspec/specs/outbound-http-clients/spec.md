@@ -645,8 +645,8 @@ The native protocol MUST advertise and the Python adapter MUST require
 `http_sse_v1` before dispatch. HTTP requests MAY include SSE framing options
 with positive idle timeout and event byte limit. Without these options, and
 for HTTP statuses at least 400, the worker MUST preserve raw chunk output.
-With these options and a successful HTTP response, Rust MUST emit complete
-SSE text blocks and own byte framing and the deadline between body reads.
+With these options and a successful HTTP response selected for framing, Rust
+MUST emit complete SSE text blocks and own byte framing and the deadline between body reads.
 Python MUST NOT reframe these blocks or replay a dispatched request.
 IPC text fragments MUST be bounded to at most 16 KiB of UTF-8, with an explicit
 continuation flag; the adapter MUST join them before exposing an event and
@@ -701,3 +701,38 @@ retain selected route metadata and native framed-response consumption.
 
 - **WHEN** a caller supplies native SSE options with buffered response consumption
 - **THEN** the request fails before either native or Python dispatch
+
+### Requirement: Compact native framing supports response content negotiation
+
+The native protocol MUST advertise and the adapter MUST require
+`http_compact_sse_v1` before dispatching content-type-aware SSE requests.
+Such requests MUST frame successful responses when Content-Type contains
+`text/event-stream` case-insensitively or is absent or empty. Other successful
+responses and HTTP errors MUST retain raw body consumption. Ordinary SSE
+requests without the content-type-aware option MUST retain their existing
+framing behavior. A null native total timeout MUST mean no total deadline;
+positive explicit total, connection, and SSE idle limits MUST be preserved.
+
+#### Scenario: Compact success returns JSON
+
+- **WHEN** a compact request receives a successful application/json response
+- **THEN** the worker and adapter expose raw bytes for the existing JSON parser
+- **AND** SSE event limits and decoding are not applied to that JSON body
+
+#### Scenario: Compact success returns SSE or omits Content-Type
+
+- **WHEN** a compact success has a text/event-stream or absent/empty Content-Type
+- **THEN** Rust owns byte framing, original-byte limits, and body-read idle deadlines
+- **AND** Python consumes framed text without rescanning bytes
+
+#### Scenario: Optional total timeout
+
+- **WHEN** compact has no total timeout
+- **THEN** native transport does not substitute a default total timeout
+- **AND** its configured connection and SSE idle limits remain active
+
+#### Scenario: Incompatible helper
+
+- **WHEN** an installed helper lacks http_compact_sse_v1
+- **THEN** the adapter fails before dispatch rather than silently ignoring compact options
+- **AND** it does not replay through Python

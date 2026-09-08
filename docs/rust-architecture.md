@@ -33,13 +33,21 @@ keeps the egress implementation usable from a future in-process Rust server;
 the transport will not need to be extracted from a subprocess executable when
 that migration reaches the application shell.
 
-Direct and account-routed streaming Responses requests delegate SSE byte framing to egress.
+Direct and account-routed streaming and compact Responses requests delegate SSE byte framing to egress.
 The adapter requires `http_sse_v1` and supplies the existing idle timeout and
 event byte limit as per-request options. Rust owns the deadline between body
 reads, including partial events; Python consumes framed text and retains event
 normalization, terminal detection, archives, and public error mapping. HTTP
-error bodies and non-streaming requests keep the raw chunk contract. Compact
-responses retain Python framing until their own cutover.
+error bodies and non-streaming requests keep the raw chunk contract.
+
+Compact requests additionally require `http_compact_sse_v1`. Their
+`content_type_aware` framing option preserves raw JSON success bodies, while
+`text/event-stream` and absent/empty Content-Type use native framing. Python
+still collects output items and returns the existing compact payload as soon
+as `response.completed` arrives, closing the request without waiting for HTTP
+EOF. A null total timeout stays unset; explicit total, connection, and SSE idle
+deadlines retain their meaning. The adapter and bundled helper must be updated
+together because an older helper cannot honor this contract.
 
 Routed requests carry typed `native_sse` options through `CodexClient` with
 `buffer_response=False`. Python selects each concrete endpoint and records
@@ -48,7 +56,10 @@ consumption. A confirmed pre-dispatch connect failure may use the next endpoint;
 body errors and cancellation cannot replay a dispatched POST. If the helper is
 unavailable before dispatch, the resolved Python transport uses ordinary byte
 framing, and receives no native-only option. A locally created routed client
-finishes closing its session even in an already cancelled scope.
+finishes closing its session even in an already cancelled scope. Compact
+responses likewise retain their transport and owned routed session through
+consumption, and finish cleanup on completion, failure, or cancellation,
+including cancellation before the native response headers arrive.
 
 SSE text crosses IPC in fragments of at most 16 KiB of UTF-8, with an explicit
 continuation flag. This keeps individual JSON lines and the existing bounded

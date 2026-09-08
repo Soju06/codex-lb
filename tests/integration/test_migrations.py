@@ -2464,35 +2464,30 @@ async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgr
 
 
 @pytest.mark.asyncio
-async def test_drop_prewarm_canary_columns_migration_upgrade_and_downgrade(tmp_path):
-    from alembic import command
+async def test_retired_prewarm_canary_columns_stay_insertable_for_legacy_replicas(tmp_path):
     from sqlalchemy import inspect as sa_inspect
 
-    from app.db.migrate import _build_alembic_config
+    from app.db.models import RequestLog
 
-    db_url = f"sqlite+aiosqlite:///{tmp_path / 'drop-prewarm-canary-columns.sqlite'}"
-    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
-    drop_revision = "20260908_000000_drop_prewarm_canary_columns"
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'retired-prewarm-canary-columns.sqlite'}"
     retired_columns = {"prewarm_canary_bucket", "prewarm_eligible_reason"}
 
-    async def _request_log_columns() -> set[str]:
-        engine = create_async_engine(db_url, future=True)
-        try:
-            async with engine.connect() as conn:
-                return await conn.run_sync(
-                    lambda sync_conn: {column["name"] for column in sa_inspect(sync_conn).get_columns("request_logs")}
-                )
-        finally:
-            await engine.dispose()
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
 
-    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
-    assert retired_columns <= await _request_log_columns()
+    # The ORM no longer maps the retired columns...
+    assert not (retired_columns & set(RequestLog.__table__.columns.keys()))
 
-    # A historical row written by a pre-phase-4 replica must survive the
-    # SQLite batch-mode table recreation with its live columns intact.
     engine = create_async_engine(db_url, future=True)
     try:
         async with engine.begin() as conn:
+            head_columns = await conn.run_sync(
+                lambda sync_conn: {column["name"] for column in sa_inspect(sync_conn).get_columns("request_logs")}
+            )
+            # ...but the head schema still carries them, so a replica running the
+            # previous release (which maps them and renders explicit NULLs in its
+            # INSERT) keeps writing request logs while the migration Job has
+            # already run ahead of the workload roll.
+            assert retired_columns <= head_columns
             await conn.execute(
                 text(
                     """
@@ -2503,21 +2498,11 @@ async def test_drop_prewarm_canary_columns_migration_upgrade_and_downgrade(tmp_p
                     )
                     VALUES (
                         1, 'acc_prewarm_legacy', 'req_prewarm_legacy', '2026-07-01 00:00:00', 'gpt-5', 10, 20,
-                        0, 0, NULL, 100, 'ok', NULL, NULL, 'success', 'bucket-07', 'allowlist'
+                        0, 0, NULL, 100, 'ok', NULL, NULL, 'success', NULL, NULL
                     )
                     """
                 )
             )
-    finally:
-        await engine.dispose()
-
-    await to_thread.run_sync(lambda: run_upgrade(db_url, drop_revision, bootstrap_legacy=False))
-    columns_after_upgrade = await _request_log_columns()
-    assert not (retired_columns & columns_after_upgrade)
-    assert "prewarm_status" in columns_after_upgrade
-
-    engine = create_async_engine(db_url, future=True)
-    try:
         async with engine.connect() as conn:
             row = (
                 await conn.execute(
@@ -2528,26 +2513,5 @@ async def test_drop_prewarm_canary_columns_migration_upgrade_and_downgrade(tmp_p
     finally:
         await engine.dispose()
 
-    # Re-running the drop against an already-migrated schema is a no-op.
-    await to_thread.run_sync(lambda: run_upgrade(db_url, drop_revision, bootstrap_legacy=False))
-    assert not (retired_columns & await _request_log_columns())
-
-    config = _build_alembic_config(db_url)
-    await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
-    columns_after_downgrade = await _request_log_columns()
-    assert retired_columns <= columns_after_downgrade
-
-    engine = create_async_engine(db_url, future=True)
-    try:
-        async with engine.connect() as conn:
-            row = (
-                await conn.execute(
-                    text(
-                        "SELECT prewarm_canary_bucket, prewarm_eligible_reason, prewarm_status "
-                        "FROM request_logs WHERE id = 1"
-                    )
-                )
-            ).one()
-        assert tuple(row) == (None, None, "success")
-    finally:
-        await engine.dispose()
+    # The retained physical columns are an allow-listed drift, not a schema defect.
+    assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()

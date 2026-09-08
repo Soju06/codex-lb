@@ -7,8 +7,13 @@ stable strings, and MUST emit a prewarm outcome counter labelled only by
 outcome. Prewarm eligibility is the prewarm enabled flag alone: no
 deterministic canary sampling or allow/deny cohort exists, so no canary
 bucket or eligibility cohort dimension is recorded and the
-`prewarm_status=canary_miss` value MUST NOT occur. The request log schema
-MUST NOT carry canary bucket or eligibility cohort columns.
+`prewarm_status=canary_miss` value MUST NOT occur. The request-log ORM model
+MUST NOT map the legacy canary bucket or eligibility cohort columns. The
+physical columns MAY remain in the schema, allow-listed by the schema-drift
+gate, until the release after the last release whose ORM mapped them; they
+MUST NOT be dropped while a supported previous-release replica still maps
+them, because that replica renders explicit NULLs for them in every
+request-log INSERT while the migration Job runs ahead of the workload roll.
 
 #### Scenario: Prewarm outcome is visible without raw identifiers
 
@@ -28,14 +33,11 @@ MUST NOT carry canary bucket or eligibility cohort columns.
 - **AND** the prewarm counter and request log carry no canary bucket or
   eligibility cohort dimension
 
-#### Scenario: Legacy canary columns are dropped by migration
+#### Scenario: Legacy canary columns stay insertable during the rolling upgrade
 
-- **GIVEN** a database migrated through `20260709_000000_add_ttft_phase_observability`
-  whose `request_logs` rows still hold historical `prewarm_canary_bucket` /
-  `prewarm_eligible_reason` values
-- **WHEN** the schema upgrades to `20260908_000000_drop_prewarm_canary_columns`
-- **THEN** both columns are removed on SQLite and PostgreSQL
-- **AND** the remaining request-log fields of those rows (including
-  `prewarm_status` and `prewarm_latency_ms`) are preserved
-- **AND** re-running the upgrade is a no-op, and downgrading re-adds both
-  columns as nullable
+- **GIVEN** a database at the current Alembic head
+- **WHEN** a replica running the previous release inserts a request log with
+  explicit NULL `prewarm_canary_bucket` / `prewarm_eligible_reason` values
+- **THEN** the insert succeeds because both physical columns still exist
+- **AND** the current release's `RequestLog` model does not map either column
+- **AND** the schema-drift check reports no drift for the retained columns

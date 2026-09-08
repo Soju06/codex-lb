@@ -156,13 +156,19 @@ Work queued for the release after the one that shipped the
 settings-surface reduction (issue #1340, phases 1-4 + retention dashboard
 settings, merged as PRs #1351, #1360, #1362, #1363, #1364 in v1.21.x):
 
-1. ~~**Drop the deprecated prewarm request-log columns.**~~ Done:
-   `prewarm_canary_bucket` and `prewarm_eligible_reason` (deprecated,
-   unwritten since phase 4; kept through v1.22–v1.24 so old replicas kept
-   inserting safely while the Helm pre-upgrade migration hook ran ahead of
-   the workload roll) are dropped by
-   `20260908_000000_drop_prewarm_canary_columns`
-   (`drop-prewarm-canary-columns`).
+1. **Drop the deprecated prewarm request-log columns (phase B).**
+   `prewarm_canary_bucket` and `prewarm_eligible_reason` have been unwritten
+   since phase 4 and are no longer mapped by the `RequestLog` ORM model since
+   `retire-prewarm-canary-column-mappings` (v1.25); the physical columns are
+   allow-listed in `_LEGACY_EXTRA_COLUMNS` (`app/db/migrate.py`). They could
+   not be dropped in the same release that retired the mapping: the Helm
+   migration Job runs before old replicas drain, and a previous-release
+   replica renders explicit NULLs for every mapped column in its request-log
+   INSERTs, so dropping the columns while v1.24 still mapped them would have
+   failed its inserts and full-entity reads during the roll. Once v1.25 is the
+   oldest supported release, add the Alembic drop revision (batch-mode
+   `drop_column` for SQLite, nullable re-add on downgrade) and remove the two
+   allow-list entries in the same PR.
 2. **Retire the retention env aliases.**
    `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` and
    `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS` are deprecated one-release

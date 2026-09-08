@@ -27,7 +27,7 @@ const telemetrySettingsMock = vi.fn();
 
 vi.mock("@/features/settings/hooks/use-settings", () => ({
   useSettings: () => useSettingsMock(),
-  useUpstreamProxyAdmin: () => useUpstreamProxyAdminMock(),
+  useUpstreamProxyAdmin: (options: unknown) => useUpstreamProxyAdminMock(options),
 }));
 
 vi.mock("@/features/accounts/hooks/use-accounts", () => ({
@@ -289,8 +289,16 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Upstream Timeout Settings")).toBeInTheDocument();
   });
 
-  it("disables write-capable sections for read-only guests", async () => {
+  it("disables write-capable sections and hides restricted surfaces for read-only guests", async () => {
     useAuthStore.setState({ canWrite: false });
+    // A disabled query has no data, mirroring the real hook for guests.
+    useUpstreamProxyAdminMock.mockReturnValue({
+      upstreamProxyQuery: { data: undefined, error: null },
+      createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      createPoolMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      addPoolMemberMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
 
     renderSettings();
 
@@ -299,18 +307,39 @@ describe("SettingsPage", () => {
     expect(screen.queryByText("Password Settings")).not.toBeInTheDocument();
     expect(screen.queryByText("Session Settings")).not.toBeInTheDocument();
     expect(importSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
-    expect(apiKeysSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(telemetrySettingsMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
+    // Backend answers API-key and upstream-proxy reads with 403 for guests, so
+    // the section is not mounted and the admin query is never enabled.
+    expect(screen.queryByText("API Keys Section")).not.toBeInTheDocument();
+    expect(apiKeysSectionMock).not.toHaveBeenCalled();
+    expect(useUpstreamProxyAdminMock).toHaveBeenCalledWith({ enabled: false });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
     await expandAdvancedSettings();
 
     expect(routingSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
-    expect(upstreamProxySettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
     expect(firewallSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(quotaPlannerSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
-    expect(stickySessionsSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(dataRetentionSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
     expect(upstreamTimeoutSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
+    expect(screen.queryByText("Upstream Proxy Settings")).not.toBeInTheDocument();
+    expect(upstreamProxySettingsMock).not.toHaveBeenCalled();
+    expect(screen.queryByText("Sticky Sessions Section")).not.toBeInTheDocument();
+    expect(stickySessionsSectionMock).not.toHaveBeenCalled();
+  });
+
+  it("mounts API key and sticky-session sections and enables the upstream-proxy query for writers", async () => {
+    renderSettings();
+
+    expect(screen.getByText("API Keys Section")).toBeInTheDocument();
+    expect(apiKeysSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: false }));
+    expect(useUpstreamProxyAdminMock).toHaveBeenCalledWith({ enabled: true });
+
+    await expandAdvancedSettings();
+
+    expect(screen.getByText("Upstream Proxy Settings")).toBeInTheDocument();
+    expect(screen.getByText("Sticky Sessions Section")).toBeInTheDocument();
+    expect(stickySessionsSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: false }));
   });
 
   it("keeps guest access settings available for writable sessions", async () => {

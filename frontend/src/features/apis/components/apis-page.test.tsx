@@ -2,6 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { createApiKey } from "@/test/mocks/factories";
 import { renderWithProviders } from "@/test/utils";
 
@@ -81,6 +82,7 @@ function renderApisPage({
 
 afterEach(() => {
 	vi.clearAllMocks();
+	useAuthStore.setState({ role: "admin", permissions: ["read", "write"], canWrite: true });
 });
 
 describe("ApisPage", () => {
@@ -141,6 +143,34 @@ describe("ApisPage", () => {
 
 		expect(apiKeysQuery.refetch).toHaveBeenCalledTimes(1);
 		expect(screen.queryByText("Create API Key")).not.toBeInTheDocument();
+	});
+
+	it("shows an administrator-only notice and keeps API key queries idle for read-only guests", () => {
+		useAuthStore.setState({ role: "guest", permissions: ["read"], canWrite: false, initialized: true });
+
+		renderApisPage();
+
+		expect(screen.getByRole("heading", { name: "APIs" })).toBeInTheDocument();
+		expect(screen.getByRole("status")).toHaveTextContent("API keys are managed by administrators");
+		expect(screen.getByRole("status")).toHaveTextContent(
+			"Sign in as an administrator to view and manage API keys.",
+		);
+		expect(hookMocks.useApiKeys).toHaveBeenCalledWith({ enabled: false });
+		// Even with a (stale) cached key list, per-key queries stay idle.
+		expect(hookMocks.useApiKeyTrends).toHaveBeenCalledWith("key_1", { enabled: false });
+		expect(hookMocks.useApiKeyUsage7Day).toHaveBeenCalledWith("key_1", { enabled: false });
+		// No key list, no create/edit/delete controls, no error card.
+		expect(screen.queryByText("Overview")).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Create API Key" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+	});
+
+	it("enables the API key queries for writers", () => {
+		renderApisPage();
+
+		expect(hookMocks.useApiKeys).toHaveBeenCalledWith({ enabled: true });
+		expect(hookMocks.useApiKeyTrends).toHaveBeenCalledWith("key_1", { enabled: true });
+		expect(screen.getByRole("button", { name: "Create API Key" })).toBeInTheDocument();
 	});
 
 	it("labels the legacy limit bar as API Limit", () => {

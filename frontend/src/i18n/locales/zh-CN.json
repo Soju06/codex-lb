@@ -350,6 +350,8 @@
   "apis.listItem.pooled5hAria": "池化 5h credit 剩余",
   "apis.listItem.pooledWeekly": "每周池化额度",
   "apis.listItem.pooledWeeklyAria": "池化 weekly credit 剩余",
+  "apis.page.adminOnlyDescription": "请以管理员身份登录以查看和管理 API Key。",
+  "apis.page.adminOnlyTitle": "API Key 由管理员管理",
   "apis.page.subtitle": "创建并查看 API Key 与用量。",
   "apis.page.title": "API",
   "apis.trend.series.cost": "费用",

@@ -600,6 +600,7 @@ export function DashboardPage() {
                       apiKeyOptions={apiKeyOptions}
                       modelOptions={modelOptions}
                       statusOptions={statusOptions}
+                      showApiKeyFilter={canWrite || apiKeyOptions.length > 0}
                       onSearchChange={(search) => updateFilters({ search, offset: 0 })}
                       onTimeframeChange={(timeframe) => updateFilters({ timeframe, offset: 0 })}
                       onAccountChange={(accountIds) => updateFilters({ accountIds, offset: 0 })}

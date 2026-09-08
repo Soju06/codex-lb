@@ -97,11 +97,12 @@ def test_env_read_detection_flags_every_form_and_skips_settings_module(tmp_path:
     _write(tmp_path, "app/b.py", "from os import getenv as read_env\n\nvalue = read_env('A')\n")
     _write(tmp_path, "app/c.py", "from dotenv import dotenv_values\n\nvalues = dotenv_values('.env')\n")
     _write(tmp_path, "app/d.py", "import dotenv\n\nvalues = dotenv.dotenv_values('.env')\n")
+    _write(tmp_path, "app/e.py", "import os as env\n\nvalue = env.getenv('A')\nother = env.environ['B']\n")
     _write(tmp_path, "app/clean.py", "# os.environ is only mentioned in a comment\nNAME = 'os.getenv'\n")
     report = checker.check_env_reads(tmp_path / "app", tmp_path, {})
     assert report.warnings == []
     flagged = sorted(message.split(":")[0] + ":" + message.split(":")[1] for message in report.errors)
-    assert flagged == ["app/a.py:3", "app/a.py:4", "app/b.py:3", "app/c.py:3", "app/d.py:3"]
+    assert flagged == ["app/a.py:3", "app/a.py:4", "app/b.py:3", "app/c.py:3", "app/d.py:3", "app/e.py:3", "app/e.py:4"]
 
 
 def test_env_read_allowlist_suppresses_errors_and_stale_entry_warns(tmp_path: Path) -> None:
@@ -127,10 +128,10 @@ def test_env_read_allowlist_cap_is_per_site_not_per_file(tmp_path: Path) -> None
     ]
 
 
-def test_live_env_read_allowlist_caps_match_the_tree() -> None:
+def test_live_env_read_allowlist_caps_are_not_exceeded() -> None:
+    # Errors only: a read cleanup (PR B6) landing before its allowlist update must only warn.
     report = checker.check_env_reads(checker.APP_DIR, checker.ROOT, checker.ENV_READ_ALLOWLIST)
     assert report.errors == []
-    assert report.warnings == [], "ENV_READ_ALLOWLIST caps are above the live read counts; lower them"
 
 
 def test_env_read_syntax_error_is_reported_not_raised(tmp_path: Path) -> None:

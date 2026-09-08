@@ -134,15 +134,20 @@ def _env_read_lines(source: str, filename: str) -> list[int]:
     except SyntaxError as exc:
         raise ValueError(f"{filename}: cannot parse ({exc.msg} at line {exc.lineno})") from exc
     direct_names: set[str] = set()
+    os_names: set[str] = {"os"}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module in {"os", "dotenv"}:
             for alias in node.names:
                 if alias.name in {"environ", "getenv", "dotenv_values"}:
                     direct_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "os" and alias.asname:
+                    os_names.add(alias.asname)
     lines: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr in {"environ", "getenv"}:
-            if isinstance(node.value, ast.Name) and node.value.id == "os":
+            if isinstance(node.value, ast.Name) and node.value.id in os_names:
                 lines.add(node.lineno)
         elif isinstance(node, ast.Attribute) and node.attr == "dotenv_values":
             lines.add(node.lineno)

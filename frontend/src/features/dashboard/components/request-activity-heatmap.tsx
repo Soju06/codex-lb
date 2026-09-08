@@ -22,19 +22,21 @@ const ACTIVITY_LEVEL_CLASSES = [
 
 export type RequestActivityHeatmapProps = {
   days?: RequestActivityDay[];
+  timeZone?: string;
   isLoading?: boolean;
   error?: Error | null;
 };
 
 export function RequestActivityHeatmap({
   days = [],
+  timeZone = "UTC",
   isLoading = false,
   error = null,
 }: RequestActivityHeatmapProps) {
   const { t } = useTranslation();
   const calendar = useMemo(
-    () => buildRequestActivityCalendar(days),
-    [days],
+    () => buildRequestActivityCalendar(days, undefined, timeZone),
+    [days, timeZone],
   );
   const weekCount = calendar.weeks.length;
   const gridStyle = { gridTemplateColumns: `repeat(${weekCount}, minmax(0, 1fr))` };

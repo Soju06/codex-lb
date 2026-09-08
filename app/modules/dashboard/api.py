@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, Query
 
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
@@ -39,9 +41,10 @@ async def get_projections(
 
 @router.get("/dashboard/request-activity", response_model=DashboardRequestActivityResponse)
 async def get_request_activity(
+    timezone_name: Annotated[str | None, Query(alias="timezone")] = None,
     context: DashboardContext = Depends(get_dashboard_context),
 ) -> DashboardRequestActivityResponse:
-    return await context.service.get_request_activity()
+    return await context.service.get_request_activity(timezone_name)
 
 
 @router.get("/models")

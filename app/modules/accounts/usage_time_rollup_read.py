@@ -85,6 +85,8 @@ _EPOCH = datetime(1970, 1, 1)
 
 # A raw request_logs window: half-open [start, end), end=None meaning +inf.
 RawWindow = tuple[datetime, datetime | None]
+LabeledWindow = tuple[str, datetime, datetime]
+LabeledRawWindow = tuple[str, RawWindow]
 
 
 def epoch_to_datetime(epoch: int) -> datetime:
@@ -220,6 +222,81 @@ async def sum_demand_window(
     if folded_until_epoch is None:
         return 0, raw_windows
     return folded_total, raw_windows
+
+
+async def sum_labeled_hourly_window(
+    session: AsyncSession,
+    windows: Sequence[LabeledWindow],
+    *,
+    filters: Sequence[ColumnElement[bool]] = (),
+) -> tuple[dict[str, int], list[LabeledRawWindow]]:
+    """Sum hourly request counts for bounded, labeled UTC-naive windows.
+
+    This is the labeled counterpart to :func:`sum_demand_window`.  The state
+    row and hourly rollup are read in one statement, while the partition rule
+    still returns the exact raw complement for each label.  The caller can
+    then issue a separate small raw-tail aggregation without materializing
+    hourly rollup rows or request-log rows.
+    """
+    if not windows:
+        return {}, []
+
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        watermark_epoch = sa_cast(func.extract("epoch", AccountUsageRollupState.hourly_folded_through), BigInteger)
+    else:
+        watermark_epoch = sa_cast(func.strftime("%s", AccountUsageRollupState.hourly_folded_through), Integer)
+
+    window_rows = [
+        select(
+            literal(label).label("label"),
+            literal(start).label("window_start"),
+            literal(end).label("window_end"),
+            literal(epoch_seconds(ceil_to_grid(start, HOURLY_BUCKET_SECONDS))).label("fold_lo_epoch"),
+            literal(epoch_seconds(floor_to_grid(end, HOURLY_BUCKET_SECONDS))).label("fold_hi_epoch"),
+        )
+        for label, start, end in windows
+    ]
+    windows_cte = (window_rows[0] if len(window_rows) == 1 else union_all(*window_rows)).cte("activity_windows")
+    rollup_conditions = [
+        *filters,
+        RequestUsageHourlyRollup.bucket_epoch >= windows_cte.c.fold_lo_epoch,
+        RequestUsageHourlyRollup.bucket_epoch < windows_cte.c.fold_hi_epoch,
+        RequestUsageHourlyRollup.bucket_epoch < watermark_epoch,
+    ]
+    statement = (
+        select(
+            AccountUsageRollupState.hourly_folded_through,
+            windows_cte.c.label,
+            func.coalesce(func.sum(RequestUsageHourlyRollup.request_count), 0).label("request_count"),
+        )
+        .select_from(
+            windows_cte.join(AccountUsageRollupState, AccountUsageRollupState.id == _STATE_ROW_ID).outerjoin(
+                RequestUsageHourlyRollup,
+                and_(*rollup_conditions),
+            )
+        )
+        .group_by(AccountUsageRollupState.hourly_folded_through, windows_cte.c.label)
+        .order_by(windows_cte.c.label)
+    )
+    rows = (await session.execute(statement)).all()
+    if not rows:
+        return {}, [(label, (start, end)) for label, start, end in windows]
+
+    watermark = rows[0][0]
+    folded_counts = {str(row[1]): int(row[2] or 0) for row in rows}
+    raw_windows: list[LabeledRawWindow] = []
+    for label, start, end in windows:
+        folded_until_epoch, complements = _partition_raw_windows(
+            start,
+            end,
+            watermark,
+            HOURLY_BUCKET_SECONDS,
+        )
+        if folded_until_epoch is None:
+            folded_counts.pop(label, None)
+        raw_windows.extend((label, raw_window) for raw_window in complements)
+    return folded_counts, raw_windows
 
 
 @dataclass(frozen=True, slots=True)

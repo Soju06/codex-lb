@@ -50,6 +50,18 @@ async def test_request_activity_merges_hourly_rollups_and_bounded_raw_tail(
         session.add(
             RequestUsageHourlyRollup(
                 bucket_epoch=_epoch(folded_at),
+                account_id="account-2",
+                api_key_id="api-key-2",
+                model="gpt-5.2",
+                service_tier="priority",
+                request_kind="normal",
+                is_deleted=True,
+                request_count=4,
+            )
+        )
+        session.add(
+            RequestUsageHourlyRollup(
+                bucket_epoch=_epoch(folded_at),
                 account_id="\x1f",
                 api_key_id="\x1f",
                 model="gpt-5.2",
@@ -107,7 +119,7 @@ async def test_request_activity_merges_hourly_rollups_and_bounded_raw_tail(
             latency_ms=1,
             status="success",
             error_code=None,
-            requested_at=datetime(2026, 5, 1),
+            requested_at=datetime(2026, 2, 1),
         )
 
     response = await async_client.get("/api/dashboard/request-activity")
@@ -115,7 +127,70 @@ async def test_request_activity_merges_hourly_rollups_and_bounded_raw_tail(
     assert response.status_code == 200
     assert response.json() == {
         "days": [
-            {"date": "2026-06-15", "requests": 3},
+            {"date": "2026-06-15", "requests": 7},
             {"date": "2026-07-15", "requests": 1},
         ]
     }
+
+
+@pytest.mark.asyncio
+async def test_request_activity_uses_local_half_hour_boundaries_and_excludes_after_now(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixed_now = datetime(2026, 8, 10, 0, 30, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: fixed_now)
+
+    async with SessionLocal() as session:
+        session.add(
+            AccountUsageRollupState(
+                id=1,
+                folded_through=datetime(2026, 8, 10),
+                hourly_folded_through=datetime(2026, 8, 10),
+                conversation_folded_through=datetime(1970, 1, 1),
+            )
+        )
+        await session.commit()
+
+        logs = RequestLogsRepository(session)
+        await logs.add_log(
+            account_id=None,
+            request_id="local-day-leading-edge",
+            model="gpt-5.2",
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            requested_at=datetime(2026, 8, 9, 18, 45),
+        )
+        await logs.add_log(
+            account_id=None,
+            request_id="local-day-tail",
+            model="gpt-5.2",
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            requested_at=datetime(2026, 8, 10, 0, 15),
+        )
+        await logs.add_log(
+            account_id=None,
+            request_id="after-captured-now",
+            model="gpt-5.2",
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            requested_at=datetime(2026, 8, 10, 0, 31),
+        )
+
+    response = await async_client.get("/api/dashboard/request-activity?timezone=Asia%2FKolkata")
+
+    assert response.status_code == 200
+    days = response.json()["days"]
+    assert {day["date"]: day["requests"] for day in days}["2026-08-10"] == 2
+    assert "2026-08-09" not in {day["date"] for day in days}

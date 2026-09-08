@@ -46,6 +46,10 @@ export type DashboardOverviewParams = {
   timeframe?: OverviewTimeframe;
 };
 
+export type DashboardRequestActivityParams = {
+  timezone?: string;
+};
+
 function appendMany(params: URLSearchParams, key: string, values?: string[]): void {
   if (!values || values.length === 0) {
     return;
@@ -67,8 +71,13 @@ export function getDashboardProjections() {
   return get(`${DASHBOARD_PATH}/projections`, DashboardProjectionsSchema);
 }
 
-export function getDashboardRequestActivity() {
-  return get(REQUEST_ACTIVITY_PATH, RequestActivityResponseSchema);
+export function getDashboardRequestActivity(params: DashboardRequestActivityParams = {}) {
+  const query = new URLSearchParams();
+  if (params.timezone) {
+    query.set("timezone", params.timezone);
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return get(`${REQUEST_ACTIVITY_PATH}${suffix}`, RequestActivityResponseSchema);
 }
 
 export function getRequestLogs(params: RequestLogsListFilters = {}) {

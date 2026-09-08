@@ -59,6 +59,7 @@ import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import { getErrorMessageOrNull } from "@/utils/errors";
 import { formatModelLabel, formatCurrency, formatSlug } from "@/utils/formatters";
 import { usePrivacyStore } from "@/hooks/use-privacy";
+import { getBrowserReportsTimeZone } from "@/features/reports/date";
 
 const MODEL_OPTION_DELIMITER = ":::";
 
@@ -117,7 +118,11 @@ export function DashboardPage() {
   const dashboardTimeframe =
     dashboardView === "conversations" ? conversationTimeframe : overviewTimeframe;
   const dashboardQuery = useDashboard(dashboardTimeframe);
-  const requestActivityQuery = useDashboardRequestActivity(dashboardDisplayMode === "requestHeatmap");
+  const requestActivityTimeZone = getBrowserReportsTimeZone() ?? "UTC";
+  const requestActivityQuery = useDashboardRequestActivity(
+    dashboardDisplayMode === "requestHeatmap",
+    requestActivityTimeZone,
+  );
   const [retainedDashboardLoadError, setRetainedDashboardLoadError] =
     useState<RetainedDashboardLoadError | null>(null);
   const [overviewRetryTimeframe, setOverviewRetryTimeframe] =
@@ -490,6 +495,7 @@ export function DashboardPage() {
               {dashboardDisplayMode === "requestHeatmap" ? (
                 <RequestActivityHeatmap
                   days={requestActivityQuery.data?.days}
+                  timeZone={requestActivityTimeZone}
                   error={requestActivityQuery.error}
                   isLoading={requestActivityQuery.isPending || requestActivityQuery.isFetching}
                 />

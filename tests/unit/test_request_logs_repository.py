@@ -10,7 +10,6 @@ from sqlalchemy.exc import ResourceClosedError
 
 from app.db.models import ModelSource, RequestLog
 from app.db.session import SessionLocal
-from app.modules.accounts.usage_time_rollup import HourlyUsageRollupRow
 from app.modules.request_logs import repository as repository_module
 from app.modules.request_logs.repository import RequestLogsRepository
 
@@ -200,33 +199,24 @@ async def test_aggregate_request_activity_bounds_raw_tail_by_requested_at(monkey
     session.get_bind = MagicMock(return_value=SimpleNamespace(dialect=SimpleNamespace(name="sqlite")))
     since = datetime(2026, 7, 1)
     until = datetime(2026, 7, 2)
-    day_epoch = int(datetime(2026, 7, 1, tzinfo=timezone.utc).timestamp())
-    session.execute.return_value = SimpleNamespace(all=lambda: [SimpleNamespace(day_epoch=day_epoch, request_count=2)])
+    session.execute.return_value = SimpleNamespace(all=lambda: [SimpleNamespace(label="2026-07-01", request_count=2)])
     monkeypatch.setattr(
         repository_module,
-        "read_hourly_window",
+        "sum_labeled_hourly_window",
         AsyncMock(
             return_value=(
-                [
-                    HourlyUsageRollupRow(
-                        bucket_epoch=day_epoch + 3_600,
-                        account_id="\x1f",
-                        api_key_id="\x1f",
-                        model="gpt-5.2",
-                        service_tier="\x1f",
-                        request_kind="normal",
-                        is_deleted=False,
-                        request_count=3,
-                    )
-                ],
-                [(since, until)],
+                {"2026-07-01": 3},
+                [("2026-07-01", (since, until))],
             )
         ),
     )
+    hourly_reader = AsyncMock(side_effect=AssertionError("activity must not materialize hourly rows"))
+    monkeypatch.setattr(repository_module, "read_hourly_window", hourly_reader)
 
-    result = await RequestLogsRepository(session).aggregate_request_activity(since, until)
+    result = await RequestLogsRepository(session).aggregate_request_activity([("2026-07-01", since, until)])
 
     assert [(day.date, day.requests) for day in result] == [("2026-07-01", 5)]
+    hourly_reader.assert_not_awaited()
     statement = str(session.execute.await_args.args[0])
     assert "request_logs.requested_at >=" in statement
     assert "request_logs.requested_at <" in statement

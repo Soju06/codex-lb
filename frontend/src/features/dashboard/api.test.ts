@@ -23,6 +23,20 @@ describe("dashboard api", () => {
     expect(activity.days).toEqual([{ date: "2026-01-01", requests: 12 }]);
   });
 
+  it("forwards a provided timezone to the request activity endpoint", async () => {
+    let requestedTimezone: string | null = null;
+    server.use(
+      http.get("/api/dashboard/request-activity", ({ request }) => {
+        requestedTimezone = new URL(request.url).searchParams.get("timezone");
+        return HttpResponse.json({ days: [] });
+      }),
+    );
+
+    await getDashboardRequestActivity({ timezone: "America/Los_Angeles" });
+
+    expect(requestedTimezone).toBe("America/Los_Angeles");
+  });
+
   it.each([".", ".."]) ("keeps dot-only conversation ID %s opaque", async (conversationId) => {
     const paths: string[] = [];
     server.use(

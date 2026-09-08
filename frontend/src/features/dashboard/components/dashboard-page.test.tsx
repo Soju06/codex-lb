@@ -18,6 +18,7 @@ import { buildDashboardView } from "@/features/dashboard/utils";
 import type { AccountListSort } from "@/features/dashboard/components/account-list";
 import type { RecentRequestsTableProps } from "@/features/dashboard/components/recent-requests-table";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
+import { getBrowserReportsTimeZone } from "@/features/reports/date";
 
 import { DashboardPage } from "./dashboard-page";
 
@@ -43,6 +44,10 @@ vi.mock("@/features/dashboard/hooks/use-dashboard", () => ({
   useDashboard: vi.fn(),
   useDashboardProjections: vi.fn(),
   useDashboardRequestActivity: vi.fn(),
+}));
+
+vi.mock("@/features/reports/date", () => ({
+  getBrowserReportsTimeZone: vi.fn(),
 }));
 
 vi.mock("@/features/dashboard/hooks/use-request-logs", async (importOriginal) => {
@@ -155,6 +160,7 @@ const useAccountMutationsMock = vi.mocked(useAccountMutations);
 const useDashboardMock = vi.mocked(useDashboard);
 const useDashboardProjectionsMock = vi.mocked(useDashboardProjections);
 const useDashboardRequestActivityMock = vi.mocked(useDashboardRequestActivity);
+const getBrowserReportsTimeZoneMock = vi.mocked(getBrowserReportsTimeZone);
 const useRequestLogsMock = vi.mocked(useRequestLogs);
 const useConversationsMock = vi.mocked(useConversations);
 const buildDashboardViewMock = vi.mocked(buildDashboardView);
@@ -189,6 +195,8 @@ describe("DashboardPage", () => {
     useDashboardMock.mockReset();
     useDashboardProjectionsMock.mockReset();
     useDashboardRequestActivityMock.mockReset();
+    getBrowserReportsTimeZoneMock.mockReset();
+    getBrowserReportsTimeZoneMock.mockReturnValue("UTC");
     useRequestLogsMock.mockReset();
     useConversationsMock.mockReset();
     buildDashboardViewMock.mockReset();
@@ -596,7 +604,7 @@ describe("DashboardPage", () => {
     expect(screen.getByTestId("usage-donuts")).toBeInTheDocument();
     expect(screen.getByTestId("request-activity-heatmap")).toBeInTheDocument();
     expect(screen.queryByTestId("weekly-credits-pace-card")).not.toBeInTheDocument();
-    expect(useDashboardRequestActivityMock).toHaveBeenCalledWith(true);
+    expect(useDashboardRequestActivityMock).toHaveBeenCalledWith(true, "UTC");
   });
 
   it("switches the Accounts section to list view", async () => {

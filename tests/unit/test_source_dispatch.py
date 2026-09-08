@@ -1263,3 +1263,74 @@ async def test_streaming_response_disconnect_before_the_body_starts_finishes_can
     assert recorder.rows[0]["status"] == "cancelled"
     assert recorder.rows[0]["error_code"] == ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY
     assert owner.claims.released is True
+
+
+# -- metric increments (spec scenario -> counter assertions) --------------------------------------
+
+
+class _LabelRecorder:
+    """Records ``labels(**kw).inc()`` so a scenario can assert the exact label set.
+
+    ``SourceDispatch`` increments through ``_inc``/``.labels(...).inc()``, which
+    swallow a wrong label set (a missing/extra label would raise inside the
+    metrics client and be logged, never surfaced), so the observability and
+    api-keys delta clauses that end in a counter increment need a direct assertion.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str]] = []
+        self.incs = 0
+
+    def labels(self, **labels: str) -> _LabelRecorder:
+        self.calls.append(labels)
+        return self
+
+    def inc(self, amount: float = 1) -> None:
+        self.incs += 1
+
+
+@pytest.mark.asyncio
+async def test_success_dispatch_increments_dispatch_total_with_kind_and_status(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """observability 'Successful dispatch row attribution': ``dispatch_total{kind=direct,status=success}``."""
+
+    counter = _LabelRecorder()
+    monkeypatch.setattr(dispatch_module, "model_source_dispatch_total", counter)
+    owner = _owner(recorder, reservation=None)
+    await owner.finish(status="success", usage=SourceUsage(input_tokens=1, output_tokens=1))
+
+    assert counter.calls == [{"kind": "direct", "status": "success"}]
+    assert counter.incs == 1
+
+
+@pytest.mark.asyncio
+async def test_abandon_during_open_increments_abandoned_total_with_stage(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """observability 'Client leaves while the open is pending': ``dispatch_abandoned_total{stage=during_open}``."""
+
+    counter = _LabelRecorder()
+    monkeypatch.setattr(dispatch_module, "model_source_dispatch_abandoned_total", counter)
+    owner = _owner(recorder, reservation=_reservation())
+    _attach_stream(owner)
+    await owner.abandon(ABANDON_CLIENT_DISCONNECTED_DURING_OPEN)
+
+    assert counter.calls == [{"stage": "during_open"}]
+    assert counter.incs == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_usage_increments_usage_estimated_total_with_source_and_cause(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """api-keys 'Missing usage settles at the estimate': ``usage_estimated_total{source_id,cause=missing_usage}``."""
+
+    counter = _LabelRecorder()
+    monkeypatch.setattr(dispatch_module, "model_source_usage_estimated_total", counter)
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    _attach_stream(owner, holder=SourceUsageHolder(first_output_item_seen=True, delta_chars=20_000))
+    await owner.finish(status="success")
+
+    assert counter.calls == [{"source_id": owner.source.id, "cause": "missing_usage"}]
+    assert counter.incs == 1

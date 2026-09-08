@@ -146,3 +146,32 @@ def test_get_source_bulkhead_is_a_process_singleton(monkeypatch: pytest.MonkeyPa
     assert first.in_flight(source.id) == 1
     claims.release_if_unowned()
     assert first.in_flight(source.id) == 0
+
+
+class _LabelRecorder:
+    """Records ``labels(**kw).inc()`` so a scenario can assert the exact label set."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str]] = []
+        self.incs = 0
+
+    def labels(self, **labels: str) -> "_LabelRecorder":
+        self.calls.append(labels)
+        return self
+
+    def inc(self, amount: float = 1) -> None:
+        self.incs += 1
+
+
+def test_saturated_source_increments_bulkhead_rejections_with_source_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """proxy-runtime-observability 'Saturated source answers busy': ``…bulkhead_rejections_total{source_id}``."""
+
+    counter = _LabelRecorder()
+    monkeypatch.setattr(admission_module, "model_source_bulkhead_rejections_total", counter)
+    bulkhead = SourceBulkhead()
+    assert bulkhead.try_acquire("src_busy", 1) is not None
+    # The second claim is over the limit: rejected and counted, once, for that source id.
+    assert bulkhead.try_acquire("src_busy", 1) is None
+
+    assert counter.calls == [{"source_id": "src_busy"}]
+    assert counter.incs == 1

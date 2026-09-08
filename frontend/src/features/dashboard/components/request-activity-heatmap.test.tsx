@@ -35,6 +35,53 @@ describe("request activity heatmap", () => {
     });
   });
 
+  it("uses the browser-local calendar date at UTC day boundaries", () => {
+    const today = new Date("2026-01-01T00:30:00Z");
+
+    const calendar = buildRequestActivityCalendar(
+      [
+        { date: "2025-07-01", requests: 3 },
+        { date: "2025-12-31", requests: 7 },
+        { date: "2026-01-01", requests: 11 },
+      ],
+      today,
+      "America/Los_Angeles",
+    );
+    const cells = calendar.weeks.flat().filter((cell) => cell !== null);
+
+    expect(cells[0]?.date).toBe("2025-07-01");
+    expect(cells.at(-1)?.date).toBe("2025-12-31");
+    expect(cells.find((cell) => cell?.date === "2025-12-31")).toMatchObject({ requests: 7 });
+    expect(cells.find((cell) => cell?.date === "2026-01-01")).toBeUndefined();
+  });
+
+  it("uses the requested IANA timezone for calendar dates across DST", () => {
+    const calendar = buildRequestActivityCalendar(
+      [
+        { date: "2026-03-08", requests: 3 },
+        { date: "2026-03-09", requests: 7 },
+      ],
+      new Date("2026-03-09T00:30:00Z"),
+      "America/Los_Angeles",
+    );
+    const cells = calendar.weeks.flat().filter((cell) => cell !== null);
+
+    expect(cells.at(-1)?.date).toBe("2026-03-08");
+    expect(cells.find((cell) => cell?.date === "2026-03-08")).toMatchObject({ requests: 3 });
+    expect(cells.find((cell) => cell?.date === "2026-03-09")).toBeUndefined();
+  });
+
+  it("defaults calendar date derivation to UTC", () => {
+    const calendar = buildRequestActivityCalendar(
+      [{ date: "2026-01-01", requests: 5 }],
+      new Date("2026-01-01T00:30:00Z"),
+    );
+    const cells = calendar.weeks.flat().filter((cell) => cell !== null);
+
+    expect(cells.at(-1)?.date).toBe("2026-01-01");
+    expect(cells.find((cell) => cell?.date === "2026-01-01")).toMatchObject({ requests: 5 });
+  });
+
   it("renders localized tooltip content without axis labels", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-15T12:00:00Z"));

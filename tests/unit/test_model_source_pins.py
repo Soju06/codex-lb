@@ -499,6 +499,24 @@ async def test_executor_acquisition_timeout_is_not_written_with_no_statement_iss
 
 
 @pytest.mark.asyncio
+async def test_executor_acquisition_failure_is_not_written_with_no_statement_issued(virtual, caplog) -> None:
+    clock, scheduler = virtual
+
+    class _BrokenCheckout(_FakeSession):
+        async def connection(self) -> None:
+            raise RuntimeError("pool exhausted")
+
+    session = _BrokenCheckout()
+    executor = _executor(session)
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+    outcome = await executor.commit(_intent(), drain_until=None, scheduler=scheduler, clock=clock)
+    assert outcome == "not_written"
+    assert session.statements == [] and session.closed is True
+    assert "model_source_pin_write outcome=not_written" in caplog.text
+    assert "reason=acquire_failed" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_executor_caller_cancellation_during_acquisition_issues_nothing(virtual) -> None:
     clock, scheduler = virtual
     sessions = [_FakeSession()]
@@ -685,9 +703,9 @@ def test_upsert_statement_keeps_created_at_and_slides_the_rest() -> None:
         assert f"{column} = excluded.{column}" in conflict_clause
 
 
-def test_touch_statement_slides_live_rows_only() -> None:
+def test_touch_statement_slides_live_thread_and_anchor_rows_only() -> None:
     touch = " ".join(str(pins_module._TOUCH).split())
-    assert "WHERE pin_key = :pin_key AND expires_at > :now" in touch
+    assert "WHERE pin_key = :pin_key AND expires_at > :now AND kind <> 'bounce'" in touch
 
 
 def test_bounce_ttl_matches_the_design_constant() -> None:

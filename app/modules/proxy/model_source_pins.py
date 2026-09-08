@@ -156,13 +156,14 @@ _SELECT_BY_KEYS = (
     .bindparams(bindparam("pin_keys", expanding=True))
     .columns(**_COLUMN_TYPES)
 )
-# A touch slides live rows only: a tombstone stays a tombstone until a fresh
-# delivery re-pins the thread through ``upsert``.
+# A touch slides live thread/anchor rows only: a tombstone stays a tombstone
+# until a fresh delivery re-pins the thread through ``upsert``, and a bounce
+# row keeps its 60 s lifetime (its expiry rule differs, so it is never slid).
 _TOUCH = text(
     f"""
     UPDATE {_TABLE}
     SET last_seen_at = :now, expires_at = :expires_at, purge_at = :purge_at
-    WHERE pin_key = :pin_key AND expires_at > :now
+    WHERE pin_key = :pin_key AND expires_at > :now AND kind <> '{PIN_KIND_BOUNCE}'
     """
 ).bindparams(
     bindparam("now", type_=_PIN_DATETIME),
@@ -425,7 +426,8 @@ class ModelSourcePinRepository:
     async def touch(self, pin_key: str, *, now: datetime, drain_until: datetime | None) -> bool:
         """Slide ``last_seen_at``/``expires_at``/``purge_at`` (drain-capped); ``True`` when a row changed.
 
-        Only a live row slides; a tombstone or an absent key returns ``False``.
+        Only a live thread or anchor row slides; a tombstone, a bounce row or
+        an absent key returns ``False``.
         """
 
         now = _as_utc(now)
@@ -583,8 +585,9 @@ class PinWriteExecutor:
     """Verified-durable pin write.
 
     ``PIN_WRITE_ACQUIRE_DEADLINE_SECONDS`` bounds acquisition of the writer
-    section only (``sqlite_writer_section()`` / PostgreSQL checkout) ->
-    ``not_written`` with no statement issued. Once issued, statement + COMMIT
+    section only (``sqlite_writer_section()`` / PostgreSQL checkout); a
+    deadline or any failure before issuance -> ``not_written`` with no
+    statement issued. Once issued, statement + COMMIT
     run under ``_await_result_deferring_cancellation`` and any post-issuance
     exception is resolved by a bounded primary-key re-read -> ``written`` |
     ``not_written`` | ``unknown``. A caller cancellation that arrives while the
@@ -686,12 +689,17 @@ class PinWriteExecutor:
         async with AsyncExitStack() as stack:
             try:
                 # Acquisition only: the writer section (file-backed SQLite) and
-                # the session's connection checkout. A timeout here means no
-                # statement was issued, so ``not_written`` is exact. The section
-                # is entered and left by this task (anyio locks are task-bound).
+                # the session's connection checkout. A timeout or failure here
+                # means no statement was issued, so ``not_written`` is exact
+                # (cancellation still propagates: nothing needs verifying). The
+                # section is entered and left by this task (anyio locks are
+                # task-bound).
                 session = await scheduler.wait_for(self._acquire(stack), PIN_WRITE_ACQUIRE_DEADLINE_SECONDS)
             except TimeoutError:
                 return self._log_outcome("not_written", action=action, kinds=kinds, reason="acquire_timeout")
+            except Exception as exc:
+                logger.warning("model_source_pin_write %s acquisition failed (%s: %s)", action, type(exc).__name__, exc)
+                return self._log_outcome("not_written", action=action, kinds=kinds, reason="acquire_failed")
             # Statement + COMMIT run to completion in an owned task; the
             # caller's cancellation is deferred and returned as a marker.
             failure, cancellation = await _await_result_deferring_cancellation(

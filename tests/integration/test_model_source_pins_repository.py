@@ -144,14 +144,18 @@ async def test_touch_slides_live_rows_only(db_setup) -> None:
     assert record.last_seen_at == now + _DAY
     assert record.expires_at == now + _DAY + PIN_IDLE_TTL
 
+    await _upsert(_write("bounce\nkey", kind=PIN_KIND_BOUNCE), now=now)
+    bounce = await _reread("bounce\nkey")
     async with SessionLocal() as session:
         async with sqlite_writer_section():
             repository = ModelSourcePinRepository(session)
-            # A tombstone is never revived, an absent key never created.
+            # A tombstone is never revived, an absent key never created, a bounce row never slid.
             assert await repository.touch("thread\nkey", now=record.expires_at, drain_until=None) is False
             assert await repository.touch("thread\nmissing", now=now, drain_until=None) is False
+            assert await repository.touch("bounce\nkey", now=now + timedelta(seconds=1), drain_until=None) is False
             await session.commit()
     assert await _reread("thread\nkey") == record
+    assert await _reread("bounce\nkey") == bounce
 
 
 @pytest.mark.asyncio

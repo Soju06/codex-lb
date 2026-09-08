@@ -34,6 +34,7 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
         "http_sse_v1",
         "http_responses_events_v1",
         "websocket",
+        "websocket_responses_events_v1",
         "websocket_send_ack",
     }
 )
@@ -176,6 +177,7 @@ class NativeWebSocketRequest:
     ping_interval_seconds: float | None = 20.0
     ping_timeout_seconds: float | None = None
     proxy_url: str | None = None
+    interpret_responses: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +187,9 @@ class NativeWebSocketMessage:
     data: bytes | None = None
     close_code: int | None = None
     close_reason: str | None = None
+    responses_interpreted: bool = False
+    event_type: str | None = None
+    python_normalization: bool = False
 
 
 class NativeEgressClient(Protocol):
@@ -559,6 +564,26 @@ class NativeEgressWebSocket:
                         raise NativeEgressProtocolError("native websocket text event is invalid")
                     self._queue_message(NativeWebSocketMessage(kind="text", text=text))
                     continue
+                if event_type == "websocket_responses_text":
+                    text = item.get("text")
+                    kind = item.get("event_type")
+                    python_normalization = item.get("python_normalization")
+                    if (
+                        not isinstance(text, str)
+                        or (kind is not None and not isinstance(kind, str))
+                        or type(python_normalization) is not bool
+                    ):
+                        raise NativeEgressProtocolError("native Responses websocket event is invalid")
+                    self._queue_message(
+                        NativeWebSocketMessage(
+                            kind="text",
+                            text=text,
+                            responses_interpreted=True,
+                            event_type=kind,
+                            python_normalization=python_normalization,
+                        )
+                    )
+                    continue
                 if event_type == "websocket_binary":
                     encoded = item.get("data")
                     if not isinstance(encoded, str):
@@ -843,6 +868,7 @@ class SubprocessNativeEgressClient:
                         else None
                     ),
                     "proxy_url": request.proxy_url,
+                    "interpret_responses": request.interpret_responses,
                 },
             )
             item = await asyncio.wait_for(events.get(), timeout=request.connect_timeout_seconds)

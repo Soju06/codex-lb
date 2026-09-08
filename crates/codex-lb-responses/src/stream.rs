@@ -83,6 +83,41 @@ pub fn interpret(block: &str) -> StreamEvent<'_> {
     }
 }
 
+/// Interpret one Responses WebSocket JSON text frame using the same alias and
+/// error handoff rules as HTTP SSE. Invalid JSON and non-object values are
+/// returned as `None`, allowing the caller to preserve the existing opaque
+/// WebSocket event path.
+pub fn interpret_websocket(text: &str) -> Option<StreamEvent<'static>> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let Value::Object(_) = value else {
+        return None;
+    };
+    let compact = ascii_json(&value)?;
+    let block = format!("data: {compact}\n\n");
+    let interpreted = interpret(&block);
+    let payload = data_text(interpreted.text.as_ref());
+    Some(StreamEvent {
+        text: Cow::Owned(payload),
+        event_type: interpreted.event_type,
+        python_normalization: interpreted.python_normalization,
+    })
+}
+
+fn ascii_json(value: &Value) -> Option<String> {
+    let text = serde_json::to_string(value).ok()?;
+    let mut ascii = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_ascii() && ch != '\x7f' {
+            ascii.push(ch);
+        } else {
+            for unit in ch.encode_utf16(&mut [0; 2]) {
+                write!(ascii, "\\u{unit:04x}").ok()?;
+            }
+        }
+    }
+    Some(ascii)
+}
+
 fn alias(kind: &str) -> Option<&'static str> {
     ALIASES
         .iter()
@@ -245,5 +280,54 @@ fn exact_json_domain(value: &Value) -> bool {
         Value::Array(items) => items.iter().all(exact_json_domain),
         Value::Object(fields) => fields.values().all(exact_json_domain),
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::interpret_websocket;
+
+    #[test]
+    fn websocket_interpretation_classifies_canonical_json_without_python() {
+        let event =
+            interpret_websocket(r#"{"type":"response.output_text.delta","delta":"hi 한글"}"#)
+                .expect("object frame");
+        assert!(event.text.contains(r#""delta":"hi \ud55c\uae00""#));
+        assert!(
+            event
+                .text
+                .contains(r#""type":"response.output_text.delta""#)
+        );
+        assert_eq!(
+            event.event_type.as_deref(),
+            Some("response.output_text.delta")
+        );
+        assert!(!event.python_normalization);
+    }
+
+    #[test]
+    fn websocket_interpretation_normalizes_aliases() {
+        let event = interpret_websocket(r#"{"type":"response.text.delta","delta":"hi"}"#)
+            .expect("object frame");
+        assert!(event.text.contains("response.output_text.delta"));
+        assert_eq!(
+            event.event_type.as_deref(),
+            Some("response.output_text.delta")
+        );
+        assert!(!event.python_normalization);
+    }
+
+    #[test]
+    fn websocket_interpretation_hands_error_to_python() {
+        let event = interpret_websocket(r#"{"type":"error","error":{"message":"bad"}}"#)
+            .expect("object frame");
+        assert_eq!(event.event_type.as_deref(), Some("error"));
+        assert!(event.python_normalization);
+    }
+
+    #[test]
+    fn websocket_interpretation_ignores_invalid_and_non_objects() {
+        assert!(interpret_websocket("not json").is_none());
+        assert!(interpret_websocket("[1, 2]").is_none());
     }
 }

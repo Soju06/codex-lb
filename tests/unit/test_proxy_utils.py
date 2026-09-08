@@ -10458,6 +10458,31 @@ async def test_stream_codex_websocket_events_treats_raw_error_as_terminal_when_s
 
 
 @pytest.mark.asyncio
+async def test_stream_codex_websocket_events_uses_trusted_native_metadata_without_reparse():
+    message = SimpleNamespace(
+        type=proxy_module.aiohttp.WSMsgType.TEXT,
+        data='{"type":"response.output_text.delta","delta":"hi"}',
+        extra=None,
+        responses_interpreted=True,
+        event_type="response.output_text.delta",
+        python_normalization=False,
+    )
+    websocket = _WsResponse([message])
+
+    events = [
+        event
+        async for event in proxy_module._stream_codex_websocket_events(
+            websocket,
+            idle_timeout_seconds=45.0,
+            total_timeout_seconds=5.0,
+            max_event_bytes=1024,
+        )
+    ]
+
+    assert events == [('data: {"type":"response.output_text.delta","delta":"hi"}\n\n', "response.output_text.delta")]
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_websocket_decodes_each_frame_once_and_skips_error_validation(monkeypatch):
     # Regression for the parse-once requirement on the websocket hot path:
     # each upstream frame is json-decoded exactly once in the receive loop,

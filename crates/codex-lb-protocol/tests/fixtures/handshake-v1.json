@@ -15,8 +15,9 @@
       "http_compact_sse_v1",
       "http_sse_v1",
       "http_responses_events_v1",
-      "websocket",
-      "websocket_send_ack"
+    "websocket",
+    "websocket_responses_events_v1",
+    "websocket_send_ack"
     ]
   }
 }

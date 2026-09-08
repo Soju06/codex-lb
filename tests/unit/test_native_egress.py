@@ -47,6 +47,7 @@ print(json.dumps({
         "http_sse_v1",
         "http_responses_events_v1",
         "websocket",
+        "websocket_responses_events_v1",
         "websocket_send_ack",
     ],
 }), flush=True)
@@ -69,7 +70,6 @@ def _echo_helper_source() -> str:
 import base64
 import json
 import sys
-
 for line in sys.stdin:
     command = json.loads(line)
     request_id = command["request_id"]
@@ -562,11 +562,14 @@ import base64
 import json
 import sys
 
+interpreted = set()
 for line in sys.stdin:
     command = json.loads(line)
     request_id = command["request_id"]
     kind = command["type"]
     if kind == "websocket_connect":
+        if command.get("interpret_responses"):
+            interpreted.add(request_id)
         assert command["headers"] == [["user-agent", "codex-cli"], ["sec-websocket-protocol", "openai"]]
         assert command["ping_interval_ms"] == 20000
         assert command["ping_timeout_ms"] is None
@@ -576,8 +579,11 @@ for line in sys.stdin:
         }), flush=True)
     elif kind == "websocket_send_text":
         print(json.dumps({
-            "type": "websocket_text", "request_id": request_id,
-            "text": "echo:" + command["text"],
+            "type": "websocket_responses_text" if request_id in interpreted else "websocket_text",
+            "request_id": request_id,
+            "text": command["text"] if request_id in interpreted else "echo:" + command["text"],
+            **({"event_type": "response.output_text.delta", "python_normalization": False}
+               if request_id in interpreted else {}),
         }), flush=True)
         print(json.dumps({
             "type": "websocket_sent", "request_id": request_id,
@@ -637,6 +643,33 @@ async def test_native_websocket_routes_frames_and_send_acknowledgements(tmp_path
         await asyncio.wait_for(websocket.receive(), timeout=0.1)
     assert client._process is process
     assert process is not None and process.returncode is None
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_native_responses_websocket_preserves_interpretation_metadata(tmp_path: Path) -> None:
+    helper = tmp_path / "native-helper"
+    _write_helper(helper, _websocket_helper_source())
+    client = SubprocessNativeEgressClient(helper)
+    websocket = await client.websocket(
+        NativeWebSocketRequest(
+            url="wss://example.test/codex/responses",
+            headers={"user-agent": "codex-cli", "sec-websocket-protocol": "openai"},
+            connect_timeout_seconds=2,
+            max_message_bytes=1024,
+            interpret_responses=True,
+        )
+    )
+
+    await websocket.send_text('{"type":"response.text.delta","delta":"hi"}')
+    assert await websocket.receive() == NativeWebSocketMessage(
+        kind="text",
+        text='{"type":"response.text.delta","delta":"hi"}',
+        responses_interpreted=True,
+        event_type="response.output_text.delta",
+        python_normalization=False,
+    )
+    await websocket.close()
     await client.aclose()
 
 

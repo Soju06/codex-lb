@@ -2770,6 +2770,16 @@ async def _stream_codex_websocket_events(
         if len(text_bytes) > max_event_bytes:
             raise StreamEventTooLargeError(len(text_bytes), max_event_bytes)
 
+        if getattr(msg, "responses_interpreted", False) and not msg.python_normalization:
+            event_type = msg.event_type
+            yield f"data: {text}\n\n", event_type
+            if event_type is not None and _is_response_stream_terminal_event_type(
+                event_type,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            ):
+                break
+            continue
+
         try:
             payload = json.loads(text)
         except json.JSONDecodeError:

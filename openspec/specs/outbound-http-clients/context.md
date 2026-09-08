@@ -70,7 +70,18 @@ integer, or escaped surrogate uses Python serialization to preserve its exact
 legacy representation. Neither handoff starts a second HTTP request. Unchanged
 mixed-line-ending events preserve their text; JSON arrays never become objects.
 The Python transport remains the missing-helper implementation, and WebSocket
-event interpretation is deferred to the next transport slice.
+event interpretation is now native for Responses WebSocket calls. The helper
+parses valid JSON objects, normalizes the three existing Responses aliases and
+attaches event-type metadata. Invalid/non-object frames remain opaque;
+error-shaped frames retain a Python-normalization handoff because request
+context is needed for public error conversion. Live WebSocket calls do not opt
+in. Python trusts metadata for canonical/normalized frames and keeps request
+matching, archiving, terminal lifecycle, retry/failover and account health
+policy. A loopback benchmark on 2,048 frames currently shows raw Python parsing
+at 524 ms versus Rust interpretation at 539 ms median; this is a semantic
+ownership migration, not a claimed speedup. Avoiding canonical reserialization
+or combining it with future WebSocket output batching is a separate
+optimization.
 
 ## Native SSE output writes
 

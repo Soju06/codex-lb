@@ -191,6 +191,9 @@ class UpstreamWebSocketMessage:
     close_reason: str | None = None
     error: str | None = None
     error_code: str | None = None
+    responses_interpreted: bool = False
+    event_type: str | None = None
+    python_normalization: bool = False
 
 
 class UpstreamWebSocketTransportError(RuntimeError):
@@ -443,6 +446,9 @@ class NativeUpstreamWebSocket:
             data=message.data,
             close_code=message.close_code,
             close_reason=message.close_reason,
+            responses_interpreted=message.responses_interpreted,
+            event_type=message.event_type,
+            python_normalization=message.python_normalization,
         )
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
@@ -912,6 +918,7 @@ async def _connect_upstream_websocket(
                     max_msg_size=settings.max_sse_event_bytes,
                     heartbeat=heartbeat,
                     compress=15,
+                    native_interpret_responses=policy.include_responses_beta,
                     **protocol_kwargs,
                 )
                 context = result.context
@@ -1039,6 +1046,7 @@ async def _connect_upstream_websocket(
                     ping_interval_seconds=20.0,
                     ping_timeout_seconds=ping_timeout,
                     proxy_url=proxy_url,
+                    interpret_responses=policy.include_responses_beta,
                 )
             )
         except NativeEgressUnavailable:

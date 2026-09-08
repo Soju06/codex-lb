@@ -36,10 +36,60 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
     }
 )
 _NATIVE_EVENT_LINE_LIMIT = 24 * 1024 * 1024
-_NATIVE_STREAM_QUEUE_LIMIT = 64
+# Per-request bound between the helper reader (one task draining the helper's
+# stdout for every in-flight request) and each request's consumer. The bound
+# is a *byte budget* with a generous event cap: framed SSE deltas are tens of
+# bytes each and arrive in bursts of hundreds when upstream flushes reasoning
+# output, while a non-SSE body (an image generation JSON) is a handful of
+# large chunks. Either shape must fit while a healthy consumer is merely late
+# for a scheduling turn on a saturated event loop; only a consumer that truly
+# stops draining (dead client) trips the bound and is failed so it cannot hold
+# the shared reader hostage.
+_NATIVE_STREAM_QUEUE_LIMIT = 4096
+_NATIVE_STREAM_QUEUE_BYTES_LIMIT = 32 * 1024 * 1024
 _NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT = 64
 _NATIVE_CANCEL_TIMEOUT_SECONDS = 2.0
 _NATIVE_WEBSOCKET_COMMAND_TIMEOUT_SECONDS = 30.0
+
+
+def _event_payload_size(item: object) -> int:
+    """Approximate queued payload bytes of one helper event (its body field)."""
+    if not isinstance(item, dict):
+        return 0
+    payload = item.get("data")
+    if not isinstance(payload, str):
+        payload = item.get("text")
+    return len(payload) if isinstance(payload, str) else 0
+
+
+class _BoundedEventQueue(asyncio.Queue[dict[str, object] | BaseException]):
+    """``asyncio.Queue`` whose ``full()`` also trips on a queued-bytes budget.
+
+    ``put_nowait`` consults ``full()`` before enqueueing, so the reader's
+    existing ``QueueFull`` handling covers both the event cap and the byte
+    budget without any change to the put/get call sites.
+    """
+
+    def __init__(self, *, max_events: int, max_bytes: int) -> None:
+        super().__init__(maxsize=max_events)
+        self._max_bytes = max_bytes
+        self.queued_bytes = 0
+
+    def full(self) -> bool:
+        return super().full() or self.queued_bytes >= self._max_bytes
+
+    def _put(self, item: dict[str, object] | BaseException) -> None:
+        super()._put(item)
+        self.queued_bytes += _event_payload_size(item)
+
+    def _get(self) -> dict[str, object] | BaseException:
+        item = super()._get()
+        self.queued_bytes -= _event_payload_size(item)
+        return item
+
+
+def _new_stream_queue() -> _BoundedEventQueue:
+    return _BoundedEventQueue(max_events=_NATIVE_STREAM_QUEUE_LIMIT, max_bytes=_NATIVE_STREAM_QUEUE_BYTES_LIMIT)
 
 
 class NativeEgressError(Exception):
@@ -579,7 +629,7 @@ class SubprocessNativeEgressClient:
         process, generation = await self._ensure_process()
         self._request_sequence += 1
         request_id = f"{generation}:{self._request_sequence}"
-        events: asyncio.Queue[dict[str, object] | BaseException] = asyncio.Queue(maxsize=_NATIVE_STREAM_QUEUE_LIMIT)
+        events: asyncio.Queue[dict[str, object] | BaseException] = _new_stream_queue()
         self._streams[request_id] = (generation, events)
         request_event = {
             "type": "request",
@@ -682,7 +732,7 @@ class SubprocessNativeEgressClient:
         process, generation = await self._ensure_process()
         self._request_sequence += 1
         request_id = f"{generation}:{self._request_sequence}"
-        events: asyncio.Queue[dict[str, object] | BaseException] = asyncio.Queue(maxsize=_NATIVE_STREAM_QUEUE_LIMIT)
+        events: asyncio.Queue[dict[str, object] | BaseException] = _new_stream_queue()
         self._streams[request_id] = (generation, events)
         try:
             await self._send_command(

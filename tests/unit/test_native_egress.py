@@ -9,6 +9,7 @@ from pathlib import Path
 import anyio
 import pytest
 
+import app.core.clients.native_egress as native_egress_module
 from app.core.clients.native_egress import (
     NativeEgressError,
     NativeEgressProtocolError,
@@ -442,10 +443,13 @@ for line in sys.stdin:
         "http_version": "HTTP/2.0", "headers": [],
     }), flush=True)
     if command["url"].endswith("/slow-consumer"):
-        for _ in range(256):
+        # 48 x 1 MiB exceeds the 32 MiB per-request byte budget while staying
+        # far below the 4096-event cap: the byte budget is what trips here.
+        big = base64.b64encode(b"x" * (1024 * 1024)).decode()
+        for _ in range(48):
             print(json.dumps({
                 "type": "chunk", "request_id": request_id,
-                "data": base64.b64encode(b"x").decode(),
+                "data": big,
             }), flush=True)
     else:
         print(json.dumps({
@@ -972,3 +976,66 @@ for line in sys.stdin:
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         await client.aclose()
+
+
+def test_bounded_event_queue_trips_on_bytes_or_events_and_releases_bytes_on_get() -> None:
+    queue = native_egress_module._BoundedEventQueue(max_events=3, max_bytes=10)
+    queue.put_nowait({"type": "chunk", "data": "abcd"})
+    queue.put_nowait({"type": "sse", "text": "efgh"})
+    assert queue.queued_bytes == 8 and not queue.full()
+    queue.put_nowait({"type": "chunk", "data": "ij"})  # 10 bytes reaches the budget
+    assert queue.full()
+    with pytest.raises(asyncio.QueueFull):
+        queue.put_nowait({"type": "end"})
+    assert queue.get_nowait() == {"type": "chunk", "data": "abcd"}
+    assert queue.queued_bytes == 6 and not queue.full()
+    # Non-payload events (end/error/exceptions) cost no bytes but count as events.
+    queue.put_nowait({"type": "end"})
+    assert queue.full()  # 3 events = the event cap
+    while not queue.empty():
+        queue.get_nowait()
+    assert queue.queued_bytes == 0
+    queue.put_nowait(RuntimeError("x"))
+    assert queue.queued_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_burst_of_small_events_does_not_trip_the_queue_while_the_consumer_drains(tmp_path: Path) -> None:
+    """Hundreds of tiny framed deltas buffered in the helper pipe must not fail
+    a healthy consumer (the pre-budget 64-event cap did exactly that on a
+    saturated event loop, #2167)."""
+    helper = tmp_path / "native-helper"
+    _write_helper(
+        helper,
+        """#!/usr/bin/env python3
+import base64
+import json
+import sys
+for line in sys.stdin:
+    command = json.loads(line)
+    request_id = command["request_id"]
+    if command["type"] == "cancel":
+        print(json.dumps({"type": "cancelled", "request_id": request_id}), flush=True)
+        continue
+    print(json.dumps({
+        "type": "head", "request_id": request_id, "status": 200,
+        "http_version": "HTTP/2.0", "headers": [],
+    }), flush=True)
+    out = []
+    for _ in range(2000):
+        out.append(json.dumps({
+            "type": "chunk", "request_id": request_id,
+            "data": base64.b64encode(b"delta").decode(),
+        }))
+    out.append(json.dumps({"type": "end", "request_id": request_id}))
+    sys.stdout.write("\\n".join(out) + "\\n")
+    sys.stdout.flush()
+""",
+    )
+    client = SubprocessNativeEgressClient(helper)
+    response = await client.request(NativeEgressRequest(method="GET", url="https://example.test/burst", headers={}))
+    # Let the whole burst land in the pipe before the consumer starts reading.
+    await asyncio.sleep(0.2)
+    body = await asyncio.wait_for(response.read(), timeout=5.0)
+    assert body == b"delta" * 2000
+    await asyncio.wait_for(client.aclose(), timeout=2.0)

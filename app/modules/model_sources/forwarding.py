@@ -710,7 +710,21 @@ def _phase_deadline(scheduler: Scheduler, seconds: float | None) -> AbstractCont
 
 
 def _source_client_timeout(source: ModelSource) -> aiohttp.ClientTimeout:
-    """Per-request timeout: the source's total budget plus bounded connect establishment.
+    """Per-request timeout: the source's total budget plus bounded TCP establishment.
+
+    Only ``sock_connect`` bounds the 10 s connection-establishment deadline, not
+    ``connect``: in aiohttp ``connect`` *also* bounds the wait for a free pooled
+    connection, so a source whose dedicated pool is saturated at
+    ``http_connector_limit_per_host`` would fail fast at 10 s with a misleading
+    ``model_source_unreachable`` verdict (and feed false breaker trips) instead
+    of queuing for a slot -- exactly the shape a whole exhausted pool funnelling
+    to one designated source produces, where ``max_concurrency`` unset promises
+    'unlimited'. ``sock_connect`` bounds only a *new* connection's TCP handshake;
+    a genuine connect timeout still surfaces as ``ConnectionTimeoutError``
+    (``ClientSession._request`` wraps the ``sock_connect`` ``TimeoutError``), so
+    the ``connect`` phase verdict is unchanged. The pool-slot wait falls back to
+    the source's total budget (and, for a streaming Responses open, the header
+    deadline armed on the scheduler seam).
 
     ``sock_read`` stays unset on purpose: aiohttp arms it from request send, so
     it would shorten the header and first-frame phases under a low configured
@@ -721,7 +735,6 @@ def _source_client_timeout(source: ModelSource) -> aiohttp.ClientTimeout:
 
     return aiohttp.ClientTimeout(
         total=_source_timeout_seconds(source),
-        connect=SOURCE_CONNECT_DEADLINE_SECONDS,
         sock_connect=SOURCE_CONNECT_DEADLINE_SECONDS,
     )
 

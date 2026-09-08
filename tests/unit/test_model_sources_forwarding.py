@@ -692,7 +692,8 @@ async def test_stream_responses_yields_the_first_chunk_before_reading_further(mo
     assert response.content.readany_calls == 1
     timeout = cast(aiohttp.ClientTimeout, session.calls[0]["timeout"])
     assert timeout.total == 600.0
-    assert timeout.connect == SOURCE_CONNECT_DEADLINE_SECONDS
+    # ``connect`` is not armed: it also bounds the pooled-connection wait (codex review P2).
+    assert timeout.connect is None
     assert timeout.sock_connect == SOURCE_CONNECT_DEADLINE_SECONDS
     # The idle cap is the body's scheduler timer, never aiohttp's socket timer
     # (which would pre-empt the header/first-frame phases under a low idle window).
@@ -1351,7 +1352,8 @@ async def test_stream_chat_completion_keeps_the_source_401_envelope(monkeypatch:
     assert response.json_calls == 1
     # Chat streams share the hardened open: same connect bounds, no socket read timer.
     timeout = cast(aiohttp.ClientTimeout, session.calls[0]["timeout"])
-    assert timeout.connect == SOURCE_CONNECT_DEADLINE_SECONDS
+    assert timeout.connect is None
+    assert timeout.sock_connect == SOURCE_CONNECT_DEADLINE_SECONDS
     assert timeout.sock_read is None
 
 
@@ -1399,7 +1401,8 @@ async def test_forward_responses_bounds_connect_and_total_only_and_survives_a_lo
     assert observed["effective_deadline"] == math.inf
     timeout = cast(aiohttp.ClientTimeout, session.calls[0]["timeout"])
     assert timeout.total == 1800.0
-    assert timeout.connect == SOURCE_CONNECT_DEADLINE_SECONDS
+    # ``connect`` is not armed: it also bounds the pooled-connection wait (codex review P2).
+    assert timeout.connect is None
     assert timeout.sock_connect == SOURCE_CONNECT_DEADLINE_SECONDS
     assert timeout.sock_read is None
     assert cast(dict[str, str], session.calls[0]["headers"])["Accept"] == "application/json"
@@ -1474,7 +1477,8 @@ async def test_forward_chat_completion_uses_the_dedicated_session_with_connect_d
 
     assert result.payload == body
     timeout = cast(aiohttp.ClientTimeout, session.calls[0]["timeout"])
-    assert timeout.connect == SOURCE_CONNECT_DEADLINE_SECONDS
+    assert timeout.connect is None
+    assert timeout.sock_connect == SOURCE_CONNECT_DEADLINE_SECONDS
     assert timeout.sock_read is None
     assert lease.released == 1
 

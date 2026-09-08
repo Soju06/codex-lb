@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
+import aiohttp
 import pytest
 from aiohttp import web
 
@@ -311,6 +312,74 @@ async def test_stalled_source_opens_never_touch_the_chatgpt_connector(http_clien
         assert _acquired(http_client, model_source=True) == 0
         assert _acquired(http_client, model_source=False) == 0
     await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
+async def test_saturated_source_pool_waits_for_a_slot_instead_of_failing_as_unreachable(
+    source_upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dedicated pool at its per-host limit must queue for a free connection, not fail fast as
+    ``model_source_unreachable``: aiohttp's ``connect`` timeout also bounds the wait for a pooled
+    connection, so the source client arms only ``sock_connect`` (TCP establishment). Regression for the
+    connect-vs-pool-wait delta -- otherwise a source with >``limit_per_host`` concurrent streams (exactly
+    what an exhausted pool funnelling to one designated source produces) fails at the 10 s connect deadline
+    with a misleading unreachable verdict, while ``max_concurrency`` unset promises 'unlimited' (codex review P2).
+    """
+
+    hold = asyncio.Event()
+
+    async def created_then_hold(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(_sse({"type": "response.created", "response": {"id": "resp_slot"}}))
+        try:
+            await hold.wait()
+        except asyncio.CancelledError:
+            raise
+        await response.write_eof()
+        return response
+
+    base_url = await source_upstream(created_then_hold, handler_cancellation=True, shutdown_timeout=1.0)
+    # A short connect deadline keeps the test fast: on the buggy shape the pool
+    # wait would be cut at this deadline as a ``ConnectionTimeoutError``.
+    monkeypatch.setattr(forwarding_module, "SOURCE_CONNECT_DEADLINE_SECONDS", 0.3)
+    connector = aiohttp.TCPConnector(limit_per_host=1)
+    session = aiohttp.ClientSession(connector=connector)
+
+    @asynccontextmanager
+    async def lease() -> AsyncIterator[aiohttp.ClientSession]:
+        yield session
+
+    monkeypatch.setattr(forwarding_module, "lease_model_source_session", lease)
+    source = _source(base_url, source_id="src_pool_wait")
+    first = None
+    second: asyncio.Task[object] | None = None
+    try:
+        # The first open already read its first chunk, so it holds the one slot.
+        first = await forwarding_module.stream_responses(source, {"model": "m", "stream": True})
+        second = asyncio.create_task(forwarding_module.stream_responses(source, {"model": "m", "stream": True}))
+        await asyncio.sleep(0.3 * 4)
+        assert not second.done(), "a saturated pool wait was cut short as a connect timeout (fail-fast unreachable)"
+
+        # Freeing the slot lets the queued open acquire a connection and proceed:
+        # it was genuinely waiting, not hung.
+        await first.aclose()
+        first = None
+        second_stream = await asyncio.wait_for(second, timeout=10)
+        second = None
+        assert await asyncio.wait_for(anext(second_stream.body), timeout=5) == _sse(
+            {"type": "response.created", "response": {"id": "resp_slot"}}
+        )
+        await second_stream.aclose()
+    finally:
+        hold.set()
+        if second is not None:
+            second.cancel()
+            with pytest.raises((asyncio.CancelledError, ModelSourceForwardingError, aiohttp.ClientError)):
+                await second
+        if first is not None:
+            await first.aclose()
+        await session.close()
 
 
 @pytest.mark.asyncio

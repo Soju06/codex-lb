@@ -88,6 +88,8 @@ from app.modules.proxy._load_balancer.model_eligibility import (
 from app.modules.proxy._load_balancer.opportunistic_admission import (
     OPPORTUNISTIC_BURN_WINDOW_CLOSED,
     OpportunisticAdmissionRequest,
+    apply_lease_release,
+    detached_runtime_snapshot,
     run_opportunistic_admission,
 )
 from app.modules.proxy._load_balancer.sticky_selection import (
@@ -486,23 +488,11 @@ class LoadBalancer:
         redact_sensitive_details: bool = False,
     ) -> bool:
         runtime = self._runtime.get(lease.account_id)
-        if runtime is None or runtime.leases is None:
+        if runtime is None:
             return False
-        current = runtime.leases.pop(lease.lease_id, None)
+        current = apply_lease_release(runtime, lease)
         if current is None:
             return False
-        if current.kind == "response_create":
-            runtime.inflight_response_creates = max(0, runtime.inflight_response_creates - 1)
-        else:
-            runtime.inflight_streams = max(0, runtime.inflight_streams - 1)
-            if current.api_key_id is not None and runtime.stream_key_inflight is not None:
-                remaining = runtime.stream_key_inflight.get(current.api_key_id, 0) - 1
-                if remaining > 0:
-                    runtime.stream_key_inflight[current.api_key_id] = remaining
-                else:
-                    runtime.stream_key_inflight.pop(current.api_key_id, None)
-        runtime.leased_tokens = max(0.0, runtime.leased_tokens - current.estimated_tokens)
-        runtime.version += 1
         _record_account_lease_released(current.kind, reason)
         _record_account_inflight_leases(current.account_id, runtime)
         if reason == "stale":
@@ -536,6 +526,15 @@ class LoadBalancer:
                     reason="stale",
                     redact_sensitive_details=redact_sensitive_details,
                 )
+
+    def _detached_runtime_snapshot(self) -> dict[str, RuntimeState]:
+        """Runtime as ordinary selection would see it, for observations that must not touch it."""
+        settings = get_settings()
+        return detached_runtime_snapshot(
+            self._runtime,
+            now=self._clock.monotonic(),
+            stale_lease_ttl_seconds=lambda kind: _account_lease_stale_ttl_seconds(kind, settings),
+        )
 
     async def select_account(
         self,
@@ -1400,11 +1399,14 @@ class LoadBalancer:
         lease_kind: AccountLeaseKind | None = None,
         concurrency_caps: AccountConcurrencyCaps | None = None,
         stream_reserve_slots: int = 0,
+        service_tier: str | None = None,
+        observe_only: bool = False,
     ) -> AccountSelection:
         outcome = await run_opportunistic_admission(
             self,
             request=OpportunisticAdmissionRequest(
                 model=model,
+                service_tier=service_tier,
                 account_ids=account_ids,
                 prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                 prefer_earlier_reset_window=prefer_earlier_reset_window,
@@ -1415,6 +1417,8 @@ class LoadBalancer:
                 concurrency_caps=concurrency_caps or effective_account_concurrency_caps(),
                 stream_reserve_slots=stream_reserve_slots,
                 record_account_cap_rejection=_record_account_cap_rejection,
+                build_states=_build_states,
+                observe_only=observe_only,
             ),
         )
         return AccountSelection(

@@ -2029,10 +2029,14 @@ class ProxyService(
         api_key: ApiKeyData | None,
         model: str | None,
         lease_kind: AccountLeaseKind | None = None,
+        service_tier: str | None = None,
+        observe_only: bool = False,
     ) -> AccountSelection:
         settings = await get_settings_cache().get()
         return await self._load_balancer.check_opportunistic_admission(
             model=model,
+            service_tier=service_tier,
+            observe_only=observe_only,
             account_ids=opportunistic_admission_account_scope(settings, api_key),
             prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),

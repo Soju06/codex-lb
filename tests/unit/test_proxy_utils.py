@@ -39,6 +39,7 @@ import app.core.resilience.network_recovery as network_recovery_module
 import app.modules.proxy.load_balancer as load_balancer_module
 from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import RefreshError
+from app.core.balancer import HEALTH_TIER_DRAINING
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.clients.proxy_websocket import (
@@ -63,7 +64,7 @@ from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import parse_sse_data_json
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ModelSource, StickySessionKind
+from app.db.models import Account, AccountStatus, ModelSource, StickySessionKind, UsageHistory
 from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -73,6 +74,7 @@ from app.modules.proxy import api as proxy_api
 from app.modules.proxy import helpers as proxy_helpers_module
 from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._load_balancer.exhaustion_probe import probe_pool_usage_exhaustion
 from app.modules.proxy._service import compact as proxy_compact_service
 from app.modules.proxy._service import file_ops as proxy_file_ops
 from app.modules.proxy._service import observability as proxy_observability_module
@@ -4297,6 +4299,272 @@ async def test_opportunistic_admission_reserves_stream_recovery_slot(monkeypatch
 
     assert selection.account is None
     assert selection.error_code == "opportunistic_burn_window_closed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("service_tier", [None, "priority"])
+async def test_opportunistic_admission_forwards_service_tier_to_the_balancer(monkeypatch, service_tier):
+    settings = _make_proxy_settings()
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    admission_mock = AsyncMock(return_value=AccountSelection(account=_make_account("acc_tiered"), error_message=None))
+    monkeypatch.setattr(service._load_balancer, "check_opportunistic_admission", admission_mock)
+
+    if service_tier is None:
+        await service.check_opportunistic_admission(api_key=None, model="gpt-5.1", lease_kind="stream")
+    else:
+        await service.check_opportunistic_admission(
+            api_key=None, model="gpt-5.1", lease_kind="stream", service_tier=service_tier
+        )
+
+    admission_mock.assert_awaited_once()
+    await_args = admission_mock.await_args
+    assert await_args is not None
+    assert await_args.kwargs["service_tier"] == service_tier
+    assert await_args.kwargs["account_ids"] is None
+    assert await_args.kwargs["lease_kind"] == "stream"
+    assert await_args.kwargs["observe_only"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("service_tier", [None, "priority"])
+async def test_opportunistic_admission_forwards_service_tier_to_selection_inputs(monkeypatch, service_tier):
+    settings = _make_proxy_settings()
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    load_inputs = AsyncMock(
+        return_value=SelectionInputs(
+            accounts=[],
+            latest_primary={},
+            latest_secondary={},
+            latest_monthly={},
+            error_message="No accounts with a plan supporting model 'gpt-5.1' at service tier 'priority'",
+            error_code="no_plan_support_for_model",
+        )
+    )
+    monkeypatch.setattr(service._load_balancer, "_load_selection_inputs", load_inputs)
+
+    selection = await service._load_balancer.check_opportunistic_admission(
+        model="gpt-5.1",
+        account_ids={"acc_scoped"},
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        service_tier=service_tier,
+    )
+
+    load_inputs.assert_awaited_once_with(model="gpt-5.1", service_tier=service_tier, account_ids={"acc_scoped"})
+    assert selection.account is None
+    assert selection.error_code == "no_plan_support_for_model"
+    assert selection.error_message == "No accounts with a plan supporting model 'gpt-5.1' at service tier 'priority'"
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_probe_ignores_account_caps_that_close_the_opportunistic_burn_window(monkeypatch):
+    """``lease_kind=None`` disables cap filtering: an exhausted pool at its stream cap is still exhausted."""
+    settings = _make_proxy_settings()
+    settings.proxy_account_stream_limit = 1
+    settings.proxy_account_response_create_limit = 64
+    settings.soft_drain_enabled = False
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings_cache", lambda: _SettingsCache(settings))
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    now = utcnow()
+    now_epoch = int(time.time())
+    reset_at = now_epoch + 1800
+    account = _make_account("acc_exhausted_at_cap")
+    # Mirror handle_quota_exceeded: status + blocked_at marker + reset deadline, with 100 % primary usage.
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = reset_at
+    account.blocked_at = now_epoch
+    monkeypatch.setattr(
+        service._load_balancer,
+        "_load_selection_inputs",
+        AsyncMock(
+            return_value=SelectionInputs(
+                accounts=[account],
+                latest_primary={
+                    account.id: UsageHistory(
+                        id=1,
+                        account_id=account.id,
+                        recorded_at=now,
+                        window="primary",
+                        used_percent=100.0,
+                        reset_at=reset_at,
+                        window_minutes=300,
+                    )
+                },
+                latest_secondary={
+                    account.id: UsageHistory(
+                        id=2,
+                        account_id=account.id,
+                        recorded_at=now,
+                        window="secondary",
+                        used_percent=40.0,
+                        reset_at=reset_at + 6 * 86400,
+                        window_minutes=10080,
+                    )
+                },
+                latest_monthly={},
+            )
+        ),
+    )
+    service._load_balancer._runtime[account.id] = RuntimeState(inflight_streams=1)
+
+    capped = await service.check_opportunistic_admission(api_key=None, model="gpt-5.1", lease_kind="stream")
+    assert capped.account is None
+    assert capped.error_code == "opportunistic_burn_window_closed"
+
+    runtime_before = deepcopy(service._load_balancer._runtime)
+    exhaustion = await probe_pool_usage_exhaustion(service, api_key=None, model="gpt-5.1", service_tier=None)
+    assert exhaustion is not None
+    assert exhaustion.resets_at == reset_at
+    assert exhaustion.selection.error_code == "usage_limit_reached"
+    assert service._load_balancer._runtime == runtime_before, "the probe leased nothing and touched no runtime state"
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_probe_observes_health_tiers_without_refreshing_the_live_runtime(monkeypatch):
+    """A live admission check refreshes the usage-derived health tier; the observe-only probe must not."""
+    settings = _make_proxy_settings()
+    settings.soft_drain_enabled = True
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings_cache", lambda: _SettingsCache(settings))
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    now = utcnow()
+    now_epoch = int(time.time())
+    account = _make_account("acc_draining_soon")
+    # ACTIVE at 96 % of the 5h window: past the soft-drain threshold, still selectable.
+    monkeypatch.setattr(
+        service._load_balancer,
+        "_load_selection_inputs",
+        AsyncMock(
+            return_value=SelectionInputs(
+                accounts=[account],
+                latest_primary={
+                    account.id: UsageHistory(
+                        id=1,
+                        account_id=account.id,
+                        recorded_at=now,
+                        window="primary",
+                        used_percent=96.0,
+                        reset_at=now_epoch + 1800,
+                        window_minutes=300,
+                    )
+                },
+                latest_secondary={
+                    account.id: UsageHistory(
+                        id=2,
+                        account_id=account.id,
+                        recorded_at=now,
+                        window="secondary",
+                        used_percent=20.0,
+                        reset_at=now_epoch + 6 * 86400,
+                        window_minutes=10080,
+                    )
+                },
+                latest_monthly={},
+            )
+        ),
+    )
+    runtime = service._load_balancer._runtime
+    assert runtime == {}
+
+    # The observation neither creates a runtime entry nor refreshes health.
+    assert await probe_pool_usage_exhaustion(service, api_key=None, model="gpt-5.1", service_tier=None) is None
+    assert runtime == {}
+
+    # The same question asked as a live admission check performs the ordinary refresh.
+    live = await service.check_opportunistic_admission(api_key=None, model="gpt-5.1", lease_kind=None)
+    assert live.account is not None or live.error_code == "opportunistic_burn_window_closed"
+    refreshed = runtime[account.id]
+    assert refreshed.health_tier == HEALTH_TIER_DRAINING
+    assert refreshed.drain_entered_at is not None
+    assert refreshed.health_version == 1
+
+    # And a subsequent observation still leaves that live state exactly as the refresh left it.
+    snapshot = deepcopy(runtime)
+    assert await probe_pool_usage_exhaustion(service, api_key=None, model="gpt-5.1", service_tier=None) is None
+    assert runtime == snapshot
+
+
+@pytest.mark.asyncio
+async def test_observe_only_admission_expires_stale_leases_like_the_live_check(monkeypatch):
+    """A stale lease's inflight/token pressure must not skew the observation away from the live answer."""
+    settings = _make_proxy_settings()
+    settings.soft_drain_enabled = False
+    settings.proxy_account_lease_ttl_seconds = 900.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings_cache", lambda: _SettingsCache(settings))
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    balancer = service._load_balancer
+    now = utcnow()
+    now_epoch = int(time.time())
+    account = _make_account("acc_stale_lease_pressure")
+    # The last normal account keeps a 5 % emergency reserve: 94 % used is admissible on its own,
+    # but one stale stream lease adds enough pressure to close the opportunistic burn window.
+    monkeypatch.setattr(
+        balancer,
+        "_load_selection_inputs",
+        AsyncMock(
+            return_value=SelectionInputs(
+                accounts=[account],
+                latest_primary={
+                    account.id: UsageHistory(
+                        id=1,
+                        account_id=account.id,
+                        recorded_at=now,
+                        window="primary",
+                        used_percent=94.0,
+                        reset_at=now_epoch + 1800,
+                        window_minutes=300,
+                    )
+                },
+                latest_secondary={
+                    account.id: UsageHistory(
+                        id=2,
+                        account_id=account.id,
+                        recorded_at=now,
+                        window="secondary",
+                        used_percent=20.0,
+                        reset_at=now_epoch + 6 * 86400,
+                        window_minutes=10080,
+                    )
+                },
+                latest_monthly={},
+            )
+        ),
+    )
+    stale = AccountLease(
+        lease_id="stale-stream",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=balancer._clock.monotonic() - 24 * 3600.0,
+        estimated_tokens=50_000.0,
+    )
+    balancer._runtime[account.id] = RuntimeState(
+        inflight_streams=1, leased_tokens=50_000.0, leases={stale.lease_id: stale}
+    )
+    runtime_before = deepcopy(balancer._runtime)
+
+    observed = await service.check_opportunistic_admission(
+        api_key=None, model="gpt-5.1", lease_kind=None, observe_only=True
+    )
+    assert balancer._runtime == runtime_before, "an observation never reclaims live leases"
+
+    live = await service.check_opportunistic_admission(api_key=None, model="gpt-5.1", lease_kind=None)
+    assert balancer._runtime[account.id].leases == {}, "the live check reclaimed the stale lease"
+    assert live.account is not None
+
+    assert observed.account is not None
+    assert observed.account.id == live.account.id
+    assert (observed.error_code, observed.resets_at) == (live.error_code, live.resets_at)
 
 
 @pytest.mark.asyncio

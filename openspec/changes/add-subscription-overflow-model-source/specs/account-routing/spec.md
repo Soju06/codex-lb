@@ -61,9 +61,22 @@ The proxy SHALL provide a read-only pool-exhaustion probe that evaluates the str
 - **THEN** the probe evaluates the account without the stale lease's in-flight and token pressure and answers exactly as the live check
 - **AND** the live runtime still holds the stale lease after the probe
 
-#### Scenario: Selection parity over arbitrary pools
+#### Scenario: Selection parity over arbitrary pools outside the drain strategies
 
-- **GIVEN** any pool of account states, routing strategy, reset preference and budget thresholds
-- **WHEN** the deterministic opportunistic selector and foreground selection evaluate their own copy of that pool at one instant
+- **GIVEN** any pool of account states, reset preference and budget thresholds, and any routing strategy other than `sequential_drain`, `reset_drain` and `single_account`
+- **WHEN** the deterministic opportunistic selector (secondary budget threshold applied, as the opportunistic admission check does) and foreground selection (secondary budget threshold not applied) evaluate their own copy of that pool at one instant
 - **THEN** one answers `usage_limit_reached` exactly when the other does
 - **AND** their `resets_at` and messages are equal whenever they do
+
+#### Scenario: Selection parity under the drain strategies over a shared budget subset
+
+- **GIVEN** any pool of account states, reset preference and budget thresholds under `sequential_drain`, `reset_drain` or `single_account`
+- **WHEN** the deterministic opportunistic selector and foreground selection evaluate their own copy of that pool at one instant with the same secondary-budget-threshold setting
+- **THEN** one answers `usage_limit_reached` exactly when the other does, with equal `resets_at` and messages
+
+#### Scenario: Drain strategies with a mixed exempt pool are a recorded divergence
+
+- **GIVEN** `sequential_drain`, `reset_drain` or `single_account`, an available additional-quota-scoped `preserve` account (exempt from the exhaustion predicate) and a usage-exhausted account in the same pool
+- **WHEN** the opportunistic admission check (secondary budget threshold applied) and foreground selection (not applied) evaluate that pool
+- **THEN** the two production paths draw from different budget subsets and are not guaranteed to agree on `usage_limit_reached`
+- **AND** this pre-existing divergence is pinned by a strict expected failure and MUST be resolved — or the probe MUST decline to trigger overflow for those strategies — before the routing stage arms the probe

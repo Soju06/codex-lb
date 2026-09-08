@@ -393,8 +393,9 @@ def test_probe_selection_answers_usage_exhaustion_exactly_when_foreground_select
     ``deterministic_probe``); both sides evaluate their own copy at one frozen
     instant because ordinary selection expires elapsed windows in place. The
     budget subset the two production paths draw from differs
-    (``apply_secondary_budget_threshold``); that pre-existing divergence is
-    pinned separately below.
+    (``apply_secondary_budget_threshold``): the production-knob instance holds
+    outside the drain strategies (property below) and its drain-strategy
+    divergence is pinned as a strict xfail.
     """
     with mock.patch("time.time", return_value=_NOW):
         probe_states = deepcopy(states)
@@ -431,6 +432,73 @@ def test_probe_selection_answers_usage_exhaustion_exactly_when_foreground_select
     assert probe_exhausted == foreground_exhausted
     if probe_exhausted:
         assert probe.account is None and foreground.account is None
+        assert probe.resets_at == foreground.resets_at
+        assert probe.error_message == foreground.error_message
+
+
+_NON_DRAIN_STRATEGIES: tuple[RoutingStrategy, ...] = tuple(
+    strategy
+    for strategy in _ROUTING_STRATEGIES
+    if strategy not in ("sequential_drain", "reset_drain", "single_account")
+)
+
+
+@given(
+    states=_account_pools(),
+    routing_strategy=st.sampled_from(_NON_DRAIN_STRATEGIES),
+    prefer_earlier_reset=st.booleans(),
+    prefer_earlier_reset_window=st.sampled_from(_RESET_WINDOWS),
+    budget_threshold_pct=st.sampled_from([50.0, 95.0, 100.0]),
+    secondary_budget_threshold_pct=st.sampled_from([80.0, 100.0]),
+)
+@settings(max_examples=400, deadline=None)
+def test_probe_selection_parity_holds_under_the_production_knobs_outside_the_drain_strategies(
+    states: list[AccountState],
+    routing_strategy: RoutingStrategy,
+    prefer_earlier_reset: bool,
+    prefer_earlier_reset_window: ResetPreferenceWindow,
+    budget_threshold_pct: float,
+    secondary_budget_threshold_pct: float,
+) -> None:
+    """The production instance of the parity property: the opportunistic admission check applies the secondary
+    budget threshold (``opportunistic_admission.py``), foreground selection does not. Outside the drain strategies
+    the budget subset only orders candidates and both paths fall back to the whole pool, so the exhaustion answer
+    agrees; under the drain strategies the subset *is* the pool (pinned divergence below)."""
+
+    with mock.patch("time.time", return_value=_NOW):
+        probe_states = deepcopy(states)
+        probe = _select_account_preferring_budget_safe(
+            probe_states,
+            prefer_earlier_reset=prefer_earlier_reset,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=routing_strategy,
+            budget_threshold_pct=budget_threshold_pct,
+            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+            apply_secondary_budget_threshold=True,
+            deterministic_probe=True,
+            traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
+            ignore_standard_quota=False,
+            usage_exhaustion_states=probe_states,
+        )
+        foreground_states = deepcopy(states)
+        foreground = _select_account_preferring_budget_safe(
+            foreground_states,
+            prefer_earlier_reset=prefer_earlier_reset,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=routing_strategy,
+            budget_threshold_pct=budget_threshold_pct,
+            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+            apply_secondary_budget_threshold=False,
+            traffic_class=TRAFFIC_CLASS_FOREGROUND,
+            ignore_standard_quota=False,
+            allow_usage_exhaustion_error=True,
+            usage_exhaustion_states=foreground_states,
+        )
+
+    probe_exhausted = probe.error_code == USAGE_LIMIT_REACHED
+    foreground_exhausted = foreground.error_code == USAGE_LIMIT_REACHED
+    assert probe_exhausted == foreground_exhausted
+    if probe_exhausted:
         assert probe.resets_at == foreground.resets_at
         assert probe.error_message == foreground.error_message
 

@@ -1109,6 +1109,16 @@ _DECLARED_TOOL_TYPE_BY_ITEM_TYPE = {
     "shell_call": "shell",
     "shell_call_output": "shell",
 }
+# Stateless Codex tool declarations a source may declare into portability
+# (design §10 preflight). The account-neutral predicate has no vocabulary for
+# them, so the classification view sets a declared one aside after proving it
+# free of account-scoped references. Hosted tool declarations (code_interpreter,
+# file_search, mcp, image_generation, computer_use_preview, ...) carry provider-
+# or account-side state -- containers, vector stores, connectors -- and are never
+# portable in v1, declared or not.
+_STATELESS_DECLARABLE_TOOL_TYPES = frozenset({"apply_patch", "local_shell", "shell", "tool_search"})
+# Every tool type a portable body may declare besides ``function``.
+_PORTABLE_DECLARABLE_TOOL_TYPES = _ACCOUNT_NEUTRAL_TOOL_TYPES | _STATELESS_DECLARABLE_TOOL_TYPES
 # Response-owned history the account-neutral predicate declines (``history``):
 # the vocabulary check defers them so a stored reasoning item or an item
 # reference is never misreported as an undeclared tool type.
@@ -1165,15 +1175,23 @@ def transcript_is_source_free(view: PortabilityView, *, supported_tool_types: fr
     it is an account-neutral fresh replay and holds no ``reasoning`` or
     ``compaction`` item (implied by the predicate, kept explicit). Tool
     declarations of a type the source model declares but the account-neutral
-    predicate has no vocabulary for (``apply_patch``, ``shell``, ...) are set
-    aside from the replay check once proven free of account-scoped references;
-    without declarations (the default) the check is the predicate's own.
+    predicate has no vocabulary for (``_STATELESS_DECLARABLE_TOOL_TYPES``) are
+    set aside from the replay check once proven free of account-scoped
+    references; without declarations (the default) the check is the predicate's
+    own. Never raises on a body the request model admits.
     """
 
+    input_items = _view_input_items(view)
+    # The replay predicate (and ``extract_input_file_ids`` it delegates to) expects
+    # object items with string types; anything else is declined here, never raised.
+    if any(
+        not isinstance(item, dict) or ("type" in item and not isinstance(item["type"], str)) for item in input_items
+    ):
+        return False
     classification_view = _classification_view(view, supported_tool_types=supported_tool_types)
     if classification_view is None or not responses_payload_is_account_neutral_fresh_replay(classification_view):
         return False
-    return not any(_item_type(item) in ("compaction", "reasoning") for item in _view_input_items(view))
+    return not any(_item_type(item) in ("compaction", "reasoning") for item in input_items)
 
 
 def is_binding_turn_state(headers: Mapping[str, str]) -> bool:
@@ -1194,16 +1212,17 @@ def _classification_view(
     Only the provider-neutral knobs are dropped; anything else the view carries
     reaches the predicate, which rejects fields it has no validation for -- a
     hand-built view with an unknown field still fails closed as history.
-    Declarations of a stateless tool type the source model declares but the
-    predicate does not know (``_ACCOUNT_NEUTRAL_TOOL_TYPES`` stops at custom,
-    function and web search) are removed from ``tools`` -- and a ``tool_choice``
-    naming one is dropped -- after each is proven free of account-scoped
-    references (``file_ids``, ``vector_store_ids``, containers, hosted URLs);
-    one that carries such a reference makes the whole view non-neutral.
+    Declarations of a stateless Codex tool type the source model declares
+    (``_STATELESS_DECLARABLE_TOOL_TYPES``; the predicate's own vocabulary stops
+    at custom, function and web search) are removed from ``tools`` -- and a
+    ``tool_choice`` naming one is dropped -- after each is proven free of
+    account-scoped references (``file_ids``, ``vector_store_ids``, containers,
+    hosted URLs); one that carries such a reference makes the whole view
+    non-neutral. Hosted declarations are never set aside.
     """
 
     body = {key: value for key, value in view.body.items() if key not in _PORTABILITY_VIEW_ONLY_FIELDS}
-    stateless_types = supported_tool_types - _ACCOUNT_NEUTRAL_TOOL_TYPES
+    stateless_types = supported_tool_types & _STATELESS_DECLARABLE_TOOL_TYPES
     if not stateless_types:
         return body
     tools = body.get("tools")
@@ -1239,7 +1258,12 @@ def _item_type(item: JsonValue) -> str | None:
 
 
 def _undeclared_tool_type(tools: JsonValue | None, supported_tool_types: frozenset[str]) -> str | None:
-    """First ``tools[]`` entry a standard source cannot serve, or ``None``."""
+    """First ``tools[]`` entry a standard source cannot serve portably, or ``None``.
+
+    Acceptable: ``function``; a type the source model declares that is either
+    account-neutral by the replay predicate's vocabulary (custom, web search)
+    or a stateless Codex tool type (``_STATELESS_DECLARABLE_TOOL_TYPES``).
+    """
 
     if tools is None:
         return None
@@ -1253,8 +1277,9 @@ def _undeclared_tool_type(tools: JsonValue | None, supported_tool_types: frozens
             return "tools[].type"
         if tool_type == _FUNCTION_TOOL_TYPE:
             continue
-        # The reserved ``collaboration``/code-mode namespace is never declarable.
-        if tool_type == _NAMESPACE_TOOL_TYPE or tool_type not in supported_tool_types:
+        # The reserved ``collaboration``/code-mode namespace is never declarable;
+        # hosted types are declarable for direct routing only, never portable.
+        if tool_type not in supported_tool_types or tool_type not in _PORTABLE_DECLARABLE_TOOL_TYPES:
             return tool_type
     return None
 

@@ -33,8 +33,10 @@ from app.modules.model_sources.projection import (
     strip_source_telemetry,
 )
 from app.modules.proxy.replay_safety import (
+    _ACCOUNT_NEUTRAL_TOOL_TYPES,
     _PORTABILITY_VIEW_ONLY_FIELDS,
     _RESPONSES_PAYLOAD_FIELDS_WITH_DEDICATED_VALIDATION,
+    _STATELESS_DECLARABLE_TOOL_TYPES,
     PortabilityVerdict,
     _classification_view,
     is_binding_turn_state,
@@ -543,6 +545,7 @@ _tools: st.SearchStrategy[JsonValue] = st.lists(
                 {"type": "function", "name": "f", "file_ids": ["file_1"]},
                 {"type": "apply_patch"},
                 {"type": "shell", "file_ids": ["file_1"]},
+                {"type": "code_interpreter", "container": "cntr_previous_account"},
             ],
         )
     ),
@@ -573,7 +576,9 @@ def _bodies(draw: st.DrawFn) -> dict[str, JsonValue]:
     return body
 
 
-_supported = st.frozensets(st.sampled_from(["custom", "web_search", "apply_patch", "shell", "namespace"]), max_size=3)
+_supported = st.frozensets(
+    st.sampled_from(["custom", "web_search", "apply_patch", "shell", "namespace", "code_interpreter"]), max_size=3
+)
 
 
 @settings(max_examples=250, deadline=None)
@@ -617,7 +622,13 @@ def test_portable_implies_account_neutral_fresh_replay(
 
 
 def tool_type_ok(tool: JsonValue, supported_tool_types: frozenset[str]) -> bool:
-    return isinstance(tool, dict) and (tool.get("type") == "function" or tool.get("type") in supported_tool_types)
+    if not isinstance(tool, dict):
+        return False
+    tool_type = tool.get("type")
+    if tool_type == "function":
+        return True
+    portable_declarable = _ACCOUNT_NEUTRAL_TOOL_TYPES | _STATELESS_DECLARABLE_TOOL_TYPES
+    return isinstance(tool_type, str) and tool_type in supported_tool_types and tool_type in portable_declarable
 
 
 def _items(view: PortabilityView) -> list[JsonValue]:
@@ -659,14 +670,65 @@ def test_declaring_a_stateless_tool_type_the_predicate_does_not_know_restores_po
     assert transcript_is_source_free(_view(body), supported_tool_types=frozenset({tool_type})) is True
 
 
-def test_declared_stateless_tool_carrying_account_scoped_state_is_history() -> None:
-    body = _portable_body(tools=[{"type": "file_search", "vector_store_ids": ["vs_1"]}])
+_HOSTED_DECLARATIONS: dict[str, dict[str, JsonValue]] = {
+    "code_interpreter container": {"type": "code_interpreter", "container": "cntr_previous_account"},
+    "file_search vector stores": {"type": "file_search", "vector_store_ids": ["vs_1"]},
+    "mcp connector": {"type": "mcp", "server_label": "drive", "connector_id": "connector_googledrive"},
+    "image_generation": {"type": "image_generation"},
+    "computer_use_preview": {"type": "computer_use_preview", "display_width": 1, "display_height": 1},
+}
 
-    assert _verdict(body) == PortabilityVerdict(False, "not_portable_tools", "file_search")
-    assert _verdict(body, supported_tool_types=frozenset({"file_search"})) == PortabilityVerdict(
+
+@pytest.mark.parametrize("case", sorted(_HOSTED_DECLARATIONS))
+def test_hosted_tool_declarations_are_never_portable_even_when_declared(case: str) -> None:
+    """Hosted declarations carry provider/account-side state; declaring them serves direct routing only."""
+
+    tool = _HOSTED_DECLARATIONS[case]
+    tool_type = cast(str, tool["type"])
+    body = _portable_body(tools=[_function_tool(), tool])
+
+    assert _verdict(body) == PortabilityVerdict(False, "not_portable_tools", tool_type)
+    assert _verdict(body, supported_tool_types=frozenset({tool_type})) == PortabilityVerdict(
+        False, "not_portable_tools", tool_type
+    )
+    # The set-aside never touches a hosted declaration, so the predicate keeps rejecting it.
+    classification = _classification_view(_view(body), supported_tool_types=frozenset({tool_type}))
+    assert classification is not None and classification["tools"] == body["tools"]
+    assert transcript_is_source_free(_view(body), supported_tool_types=frozenset({tool_type})) is False
+
+
+def test_stateless_declaration_carrying_account_scoped_state_is_history() -> None:
+    body = _portable_body(tools=[{"type": "apply_patch", "file_ids": ["file_1"]}])
+
+    assert _verdict(body, supported_tool_types=frozenset({"apply_patch"})) == PortabilityVerdict(
         False, "not_portable_history"
     )
-    assert _classification_view(_view(body), supported_tool_types=frozenset({"file_search"})) is None
+    assert _classification_view(_view(body), supported_tool_types=frozenset({"apply_patch"})) is None
+
+
+def test_stateless_declarable_allowlist_is_closed_and_disjoint_from_the_predicate_vocabulary() -> None:
+    assert _STATELESS_DECLARABLE_TOOL_TYPES == frozenset({"apply_patch", "local_shell", "shell", "tool_search"})
+    assert not _STATELESS_DECLARABLE_TOOL_TYPES & _ACCOUNT_NEUTRAL_TOOL_TYPES
+    assert "namespace" not in _STATELESS_DECLARABLE_TOOL_TYPES | _ACCOUNT_NEUTRAL_TOOL_TYPES
+
+
+def test_transcript_check_declines_malformed_item_types_without_raising() -> None:
+    """``transcript_is_source_free`` is exposed on its own (neutral release) and must never raise."""
+
+    malformed_inputs: tuple[list[JsonValue], ...] = (
+        [{"type": [], "role": "user", "content": "hi"}],
+        [{"type": {"nested": 1}, "role": "user", "content": "hi"}],
+        ["hi"],
+        [{"type": 7}],
+    )
+    for input_items in malformed_inputs:
+        view = PortabilityView(body={**_portable_body(), "input": input_items})
+        assert transcript_is_source_free(view) is False
+        assert transcript_is_source_free(view, supported_tool_types=frozenset({"apply_patch"})) is False
+        verdict = responses_payload_is_provider_portable(
+            view, NO_HEADERS, supported_tool_types=frozenset(), supports_vision=True
+        )
+        assert verdict.portable is False and verdict.reason in DECLINE_REASONS
 
 
 def test_predicate_known_declarations_keep_their_strict_field_allowlists_when_declared() -> None:
@@ -757,8 +819,10 @@ def test_arbitrary_values_in_known_nested_slots_never_raise(slot: tuple[str | in
     body = _malformed_at(slot, value)
 
     assert isinstance(responses_payload_is_account_neutral_fresh_replay(body), bool)
+    view = PortabilityView(body=body)
+    assert isinstance(transcript_is_source_free(view), bool)
     verdict = responses_payload_is_provider_portable(
-        PortabilityView(body=body), NO_HEADERS, supported_tool_types=frozenset({"web_search"}), supports_vision=True
+        view, NO_HEADERS, supported_tool_types=frozenset({"web_search"}), supports_vision=True
     )
     assert verdict.portable or verdict.reason in DECLINE_REASONS
 

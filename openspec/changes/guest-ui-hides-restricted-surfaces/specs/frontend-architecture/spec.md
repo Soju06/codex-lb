@@ -9,13 +9,16 @@ controls, and Fast Mode prohibition), password management
 API key management (table, create, edit, delete, regenerate), and
 sticky-session administration. API key create/edit controls that expose
 reasoning effort choices MUST include upstream-supported extended efforts such
-as `max` and `ultra`. The API key management section (including the API key
-auth toggle), the upstream-proxy administration query and card, and the
+as `max` and `ultra`. The guest access, password management, session, and
+TOTP sections, the API key management section (including the API key auth
+toggle), the upstream-proxy administration query and card, and the
 sticky-session administration section are write-only surfaces: they SHALL be
 mounted, and their data requests issued, only for principals whose session
 holds the `write` permission. For read-only principals these surfaces SHALL
-NOT mount, SHALL NOT issue their data requests, and SHALL NOT produce an error
-banner; the read-only notice remains.
+NOT mount, SHALL NOT issue their data requests, SHALL NOT render data cached
+from an earlier session that held the `write` permission, and SHALL NOT
+produce an error banner; the read-only notice remains. When a session loses
+the `write` permission, cached responses for these surfaces SHALL be evicted.
 
 Advanced sections — routing settings, upstream proxy administration, model
 sources, firewall, quota phase planner, and sticky-session administration —
@@ -53,7 +56,9 @@ group, subject to the role qualifiers above.
 - **AND** the API key management section, the Upstream Proxy card, and the sticky-session section are not mounted
 - **AND** the app does not request `GET /api/api-keys`, `GET /api/settings/upstream-proxy`, or `GET /api/sticky-sessions`
 - **AND** no page-level error banner is rendered for those surfaces
-- **AND** the remaining sections (appearance, import, reset credits, telemetry, routing, model sources, firewall, quota planner, data retention) render with their controls disabled
+- **AND** upstream-proxy data cached from an earlier `write` session, if any, is not rendered
+- **AND** the appearance section renders unchanged (its controls are local preferences)
+- **AND** the remaining sections (import, reset credits, telemetry, routing, model sources, firewall, quota planner, data retention) render with their controls disabled
 
 #### Scenario: API key dialog offers extended reasoning efforts
 

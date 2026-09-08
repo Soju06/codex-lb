@@ -6,6 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import { AccountsPage } from "@/features/accounts/components/accounts-page";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
+import { createUpstreamProxyAdmin } from "@/test/mocks/factories";
 import type { AccountSummary } from "@/features/accounts/schemas";
 
 vi.mock("@/features/accounts/hooks/use-accounts", () => ({
@@ -144,6 +145,46 @@ describe("AccountsPage", () => {
     expect(screen.getByRole("button", { name: "Add account" })).toBeDisabled();
     expect(screen.getByRole("heading", { name: "m***@example.com" })).toBeInTheDocument();
     expect(screen.getAllByText(/Personal \/ unknown workspace/).length).toBeGreaterThan(0);
+  });
+
+  it("does not render cached upstream-proxy data in the proxy-binding panel for read-only guests", () => {
+    useAuthStore.setState({ role: "guest", permissions: ["read"], canWrite: false, initialized: true });
+    // `enabled: false` only stops fetching; an earlier admin session's response
+    // can still be in the cache and must not reach the panel.
+    mockedUseUpstreamProxyAdmin.mockReturnValue({
+      upstreamProxyQuery: { data: createUpstreamProxyAdmin(), error: null },
+      accountBindingMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
+    mockAccountsQuery([account({ accountId: "acc_primary" })]);
+
+    render(
+      <MemoryRouter>
+        <AccountsPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("heading", { name: "Accounts" })).toBeInTheDocument();
+    expect(screen.queryByText("Proxy binding")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Account proxy pool" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Primary pool")).not.toBeInTheDocument();
+  });
+
+  it("renders the proxy-binding panel from upstream-proxy data for writers", () => {
+    mockedUseUpstreamProxyAdmin.mockReturnValue({
+      upstreamProxyQuery: { data: createUpstreamProxyAdmin(), error: null },
+      accountBindingMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
+    mockAccountsQuery([account({ accountId: "acc_primary" })]);
+
+    render(
+      <MemoryRouter>
+        <AccountsPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("Proxy binding")).toBeInTheDocument();
   });
 
   it("enables the upstream-proxy admin query and shows OAuth help for writers", () => {

@@ -76,7 +76,9 @@ export function SettingsPage() {
   const canWrite = useAuthStore((state) => state.canWrite);
   // API keys, upstream-proxy administration, and sticky sessions are write-only
   // reads on the backend (403 for guests), so they are not mounted or fetched
-  // without write access.
+  // without write access. `enabled: false` only stops fetching; cached data from
+  // an earlier admin session is still returned, so rendering is gated on
+  // `canWrite` as well.
   const {
     upstreamProxyQuery,
     createEndpointMutation,
@@ -250,7 +252,7 @@ export function SettingsPage() {
               <ResilienceSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               <SessionBridgeSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               <BackgroundJobsSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
-              {upstreamProxyQuery.data ? (
+              {canWrite && upstreamProxyQuery.data ? (
                 <UpstreamProxySettings
                   admin={upstreamProxyQuery.data}
                   busy={controlsDisabled}

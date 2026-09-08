@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { SettingsPage } from "@/features/settings/components/settings-page";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import type { DashboardSettings } from "@/features/settings/schemas";
-import { createDashboardSettings } from "@/test/mocks/factories";
+import { createDashboardSettings, createUpstreamProxyAdmin } from "@/test/mocks/factories";
 
 const useSettingsMock = vi.fn();
 const useAccountsMock = vi.fn();
@@ -291,7 +291,8 @@ describe("SettingsPage", () => {
 
   it("disables write-capable sections and hides restricted surfaces for read-only guests", async () => {
     useAuthStore.setState({ canWrite: false });
-    // A disabled query has no data, mirroring the real hook for guests.
+    // The guest query is disabled, so it usually has no data; the cached-data
+    // case is covered separately below.
     useUpstreamProxyAdminMock.mockReturnValue({
       upstreamProxyQuery: { data: undefined, error: null },
       createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
@@ -326,6 +327,26 @@ describe("SettingsPage", () => {
     expect(upstreamProxySettingsMock).not.toHaveBeenCalled();
     expect(screen.queryByText("Sticky Sessions Section")).not.toBeInTheDocument();
     expect(stickySessionsSectionMock).not.toHaveBeenCalled();
+  });
+
+  it("does not render cached upstream-proxy data for read-only guests", async () => {
+    useAuthStore.setState({ canWrite: false });
+    // `enabled: false` only stops fetching: data cached by an earlier admin
+    // session is still returned by the hook and must not reach the card.
+    useUpstreamProxyAdminMock.mockReturnValue({
+      upstreamProxyQuery: { data: createUpstreamProxyAdmin(), error: null },
+      createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      createPoolMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      addPoolMemberMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
+
+    renderSettings();
+    await expandAdvancedSettings();
+
+    expect(screen.getByText("Routing Settings")).toBeInTheDocument();
+    expect(screen.queryByText("Upstream Proxy Settings")).not.toBeInTheDocument();
+    expect(upstreamProxySettingsMock).not.toHaveBeenCalled();
   });
 
   it("mounts API key and sticky-session sections and enables the upstream-proxy query for writers", async () => {

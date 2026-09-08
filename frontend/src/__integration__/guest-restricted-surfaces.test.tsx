@@ -1,10 +1,11 @@
 import { HttpResponse, http } from "msw";
 import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import App from "@/App";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { createAccountSummary, createDashboardAuthSession } from "@/test/mocks/factories";
+import { createAccountSummary, createDashboardAuthSession, createUpstreamProxyAdmin } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
@@ -211,7 +212,7 @@ describe("guest restricted surfaces integration", () => {
     expect(await screen.findByRole("button", { name: "Create key" })).toBeInTheDocument();
   });
 
-  it("keeps the API key page and accounts help for writers (regression)", async () => {
+  it("keeps the API key page for writers (regression)", async () => {
     const paths = spyRequestPaths();
     window.history.pushState({}, "", "/apis");
 
@@ -220,5 +221,58 @@ describe("guest restricted surfaces integration", () => {
     expect(await screen.findByRole("button", { name: "Create API Key" })).toBeInTheDocument();
     await waitFor(() => expect(paths).toContain("/api/api-keys/"));
     expect(screen.queryByText("API keys are managed by administrators")).not.toBeInTheDocument();
+  });
+
+  it("keeps the upstream-proxy query and OAuth help (connect address) for writers on /accounts (regression)", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/settings/runtime/connect-address", () =>
+        HttpResponse.json({ connectAddress: "lb.example:2455" }),
+      ),
+    );
+    const paths = spyRequestPaths();
+    window.history.pushState({}, "", "/accounts");
+
+    renderWithProviders(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Accounts" })).toBeInTheDocument();
+    await waitFor(() => expect(paths).toContain("/api/settings/upstream-proxy"));
+
+    await user.click(await screen.findByRole("button", { name: "Need help?" }));
+
+    await waitFor(() => expect(paths).toContain("/api/settings/runtime/connect-address"));
+    expect(await screen.findByText("Windows OAuth Help")).toBeInTheDocument();
+  });
+
+  it("does not render upstream-proxy data cached by an earlier admin session for guests", async () => {
+    useGuestSession();
+    const paths = spyRequestPaths();
+    const cached = createUpstreamProxyAdmin();
+
+    window.history.pushState({}, "", "/settings?advanced=1");
+    const settingsRender = renderWithProviders(<App />);
+    // Simulates an admin's response still sitting in the cache after the
+    // session was downgraded; the disabled guest query still exposes it.
+    settingsRender.queryClient.setQueryData(["settings", "upstream-proxy"], cached);
+
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    await waitFor(() => expect(paths).toContain("/api/firewall/ips"));
+    expect(settingsRender.queryClient.getQueryData(["settings", "upstream-proxy"])).toEqual(cached);
+    expect(screen.queryByText("Upstream proxy routing")).not.toBeInTheDocument();
+    expect(screen.queryByText("Primary proxy")).not.toBeInTheDocument();
+    expect(screen.queryByText("Primary pool")).not.toBeInTheDocument();
+    settingsRender.unmount();
+
+    window.history.pushState({}, "", "/accounts");
+    const accountsRender = renderWithProviders(<App />);
+    accountsRender.queryClient.setQueryData(["settings", "upstream-proxy"], cached);
+
+    expect(await screen.findByRole("heading", { name: "p***@example.com" })).toBeInTheDocument();
+    await waitFor(() => expect(paths).toContain("/api/accounts/acc_primary/usage-reset-credits"));
+    expect(accountsRender.queryClient.getQueryData(["settings", "upstream-proxy"])).toEqual(cached);
+    expect(screen.queryByText("Proxy binding")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Account proxy pool" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Primary pool")).not.toBeInTheDocument();
+    expect(restrictedRequests(paths)).toEqual([]);
   });
 });

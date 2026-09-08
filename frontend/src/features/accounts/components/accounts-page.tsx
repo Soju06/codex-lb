@@ -56,7 +56,8 @@ export function AccountsPage() {
   } = useAccounts();
   const { settingsQuery } = useSettings();
   const canWrite = useAuthStore((state) => state.canWrite);
-  // Upstream-proxy administration is a write-only read on the backend.
+  // Upstream-proxy administration is a write-only read on the backend; cached
+  // data from an earlier admin session must not be rendered either.
   const { upstreamProxyQuery, accountBindingMutation, testEndpointMutation } = useUpstreamProxyAdmin({
     enabled: canWrite,
   });
@@ -241,7 +242,7 @@ export function AccountsPage() {
                 securityWorkAuthorized: enabled,
               })
             }
-            upstreamProxyAdmin={upstreamProxyQuery.data ?? null}
+            upstreamProxyAdmin={canWrite ? (upstreamProxyQuery.data ?? null) : null}
             onProxyBindingSave={(accountId, payload) =>
               accountBindingMutation.mutateAsync({ accountId, payload })
             }

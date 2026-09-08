@@ -3999,7 +3999,18 @@ class _HTTPBridgeUpstreamEventsMixin:
         settlement_payload = payload
         settlement_event = event
         settlement_event_type = event_type
-        if event_type == "error" and normalize_error_event:
+        safety_policy_error = False
+        if event_type == "error":
+            raw_error = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(raw_error, dict):
+                raw_code = raw_error.get("code")
+                raw_message = raw_error.get("message")
+                safety_policy_error = is_account_neutral_safety_policy_rejection(
+                    code=raw_code if isinstance(raw_code, str) else None,
+                    http_status=_http_error_status_from_payload(payload),
+                    message=raw_message if isinstance(raw_message, str) else None,
+                )
+        if event_type == "error" and normalize_error_event and not safety_policy_error:
             http_status = _http_error_status_from_payload(payload)
             if status_request_state is not None and status_request_state.error_http_status_override is None:
                 status_request_state.error_http_status_override = http_status

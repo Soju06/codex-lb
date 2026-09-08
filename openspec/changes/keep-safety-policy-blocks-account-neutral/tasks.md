@@ -8,10 +8,11 @@
 
 ## 2. HTTP bridge behavior
 
-- [x] 2.1 Exclude matching pre-output safety-policy failures from the bridge
-  retry-circuit strike path.
-- [x] 2.2 Verify the original `response.failed` event, error code, and message
-  reach the downstream queue unchanged.
+- [x] 2.1 Exclude matching pre-output `response.failed` and `error`
+  safety-policy failures from the bridge retry-circuit strike path and durable
+  anchor-poison path.
+- [x] 2.2 Verify each original terminal event, error code, message, and payload
+  shape reaches the downstream queue unchanged.
 
 ## 3. Verification
 

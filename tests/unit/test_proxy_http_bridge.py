@@ -38016,9 +38016,32 @@ _SAFETY_POLICY_RESPONSE_FAILED_FRAME = json.dumps(
 )
 
 
+_SAFETY_POLICY_ERROR_FRAME = json.dumps(
+    {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "misalignment_policy_violation",
+            "message": "This request was blocked by our safety systems.",
+        },
+    },
+    separators=(",", ":"),
+)
+
+
+@pytest.mark.parametrize(
+    ("frame", "expected_event_type"),
+    [
+        (_SAFETY_POLICY_RESPONSE_FAILED_FRAME, "response.failed"),
+        (_SAFETY_POLICY_ERROR_FRAME, "error"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_safety_policy_response_failed_does_not_poison_bridge_circuit(
+async def test_safety_policy_failure_does_not_poison_bridge_continuity(
     monkeypatch: pytest.MonkeyPatch,
+    frame: str,
+    expected_event_type: str,
 ) -> None:
     service, session, _request_state = _make_terminal_error_bridge_fixture(
         request_id="req-policy-block",
@@ -38027,21 +38050,27 @@ async def test_safety_policy_response_failed_does_not_poison_bridge_circuit(
     )
     _request_state.response_id = "resp_failed_policy"
     record_failure = AsyncMock(return_value=None)
+    poison_detail = AsyncMock(return_value=None)
     monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
+    monkeypatch.setattr(service, "_http_bridge_effective_anchor_poison_detail", poison_detail)
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
 
-    await service._process_http_bridge_upstream_text(session, _SAFETY_POLICY_RESPONSE_FAILED_FRAME)
+    await service._process_http_bridge_upstream_text(session, frame)
 
     record_failure.assert_not_awaited()
+    poison_detail.assert_not_awaited()
     assert _request_state.event_queue is not None
     forwarded_frame = await asyncio.wait_for(_request_state.event_queue.get(), timeout=1.0)
     assert forwarded_frame is not None
     forwarded_payload = proxy_service.parse_sse_data_json(forwarded_frame)
     assert isinstance(forwarded_payload, dict)
-    assert forwarded_payload["type"] == "response.failed"
-    forwarded_response = forwarded_payload["response"]
-    assert isinstance(forwarded_response, dict)
-    forwarded_error = forwarded_response["error"]
+    assert forwarded_payload == json.loads(frame)
+    assert forwarded_payload["type"] == expected_event_type
+    forwarded_error = (
+        forwarded_payload["response"]["error"]
+        if expected_event_type == "response.failed"
+        else forwarded_payload["error"]
+    )
     assert isinstance(forwarded_error, dict)
     assert forwarded_error["code"] == "misalignment_policy_violation"
     assert forwarded_error["message"] == "This request was blocked by our safety systems."

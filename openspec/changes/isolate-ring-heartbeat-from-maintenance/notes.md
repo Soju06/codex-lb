@@ -1,3 +1,12 @@
+## PR #2133 review follow-up
+
+- Stale-marking now depends only on registration and heartbeat stopping; an active maintenance owner still suppresses the SQLite clean marker but cannot prevent deliberate ring expiry after the bounded drain.
+- Kept the existing empty-ring readiness exemption. A stricter single-replica policy is deferred, not authorized by this PR; heartbeat-age diagnostics remain.
+- Registration and periodic shutdown share one monotonic deadline, without an additive 100ms grace. Periodic cancellation begins without waiting for registration to settle.
+- Fixed the gauge-observation race, added metric-label and idle-pass isolation assertions, clarified the health schema change, and moved architecture rationale out of the normative spec.
+- Validation: 115 lifecycle/readiness/lifespan/periodic tests and 14 selected metrics/maintenance tests passed; full lint (including architecture, cancellation, and timing guards), type checking, strict change validation and all 58 repository specs passed.
+- No production changes were made while addressing these comments.
+
 ## Integration baseline
 
 The reviewed implementation was checkpointed at `da5baa0232af1c56ee96c8ba421d391e0c67732b` with backup ref `backup/isolate-ring-heartbeat-before-main-rebase-20260905`, then rebased onto `origin/main@0a726558a1b9994d4943c9c8cff295b267d879f0`.

@@ -239,7 +239,8 @@ async def test_health_ready_fails_when_active_ring_exists_but_instance_is_missin
 
 
 @pytest.mark.asyncio
-async def test_health_ready_fails_when_registered_instance_ages_out_of_empty_ring():
+@pytest.mark.parametrize("heartbeat_age_seconds", [None, 31.0])
+async def test_health_ready_preserves_empty_ring_exemption(heartbeat_age_seconds: float | None):
     from app.modules.health.api import health_ready
     from app.modules.health.schemas import BridgeRingInfo
 
@@ -267,12 +268,13 @@ async def test_health_ready_fails_when_registered_instance_ages_out_of_empty_rin
 
         mock_get_session.return_value = mock_get_session_context()
 
-        response = cast(JSONResponse, await health_ready())
+        mock_bridge_ring.return_value.heartbeat_age_seconds = heartbeat_age_seconds
+        response = await health_ready()
 
-    assert response.status_code == 503
-    payload = json.loads(bytes(response.body))
-    assert payload["detail"] == "Service is not an active bridge ring member"
-    assert payload["bridge_ring"]["ring_size"] == 0
+    assert not isinstance(response, JSONResponse)
+    assert response.bridge_ring is not None
+    assert response.bridge_ring.ring_size == 0
+    assert response.bridge_ring.heartbeat_age_seconds == heartbeat_age_seconds
 
 
 @pytest.mark.asyncio
@@ -298,7 +300,7 @@ async def test_health_ready_503_payload_exposes_local_heartbeat_health(
     test_app = FastAPI()
     test_app.include_router(health_api.router)
     mock_session = AsyncMock()
-    ring_size = 1 if heartbeat_age_seconds is not None else 0
+    ring_size = 1  # Nonempty ring still requires local membership.
     with (
         patch("app.core.draining._draining", False),
         patch("app.core.startup._bridge_durable_schema_ready", True),

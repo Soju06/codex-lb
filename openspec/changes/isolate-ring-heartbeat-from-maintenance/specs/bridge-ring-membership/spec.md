@@ -38,20 +38,21 @@ Each registered replica MUST refresh its ring row via an upsert heartbeat every 
 #### Scenario: Shutdown owns every periodic worker
 - **WHEN** graceful shutdown begins
 - **THEN** the runtime cancels and drains the heartbeat and maintenance owners within the existing shutdown bounds
-- **AND** it stops heartbeat renewal before aging the shared ring row for shutdown
+- **AND** it stops registration and heartbeat renewal before aging the shared ring row for shutdown
+- **AND** a remaining maintenance owner MUST NOT prevent stale-marking once both ring writers have stopped
 - **AND** if any registration or periodic owner remains active after the bound, the runtime withholds the SQLite clean-shutdown marker
 
 ## ADDED Requirements
 
-### Requirement: Readiness requires active local bridge membership
-When the HTTP Responses session bridge is enabled and bridge registration has completed, `/health/ready` MUST return an unready response whenever the probed replica is absent from the active bridge ring. An empty active ring MUST NOT be treated as ready after registration. Liveness MUST remain independent of ring membership, and bridge-disabled deployments MUST retain their existing readiness behavior.
+### Requirement: Heartbeat diagnostics preserve readiness policy
+When the HTTP Responses session bridge is enabled and bridge registration has completed, `/health/ready` MUST preserve the empty-active-ring exemption. Absence from a nonempty active ring MUST remain unready. Liveness MUST remain independent of ring membership, and bridge-disabled deployments MUST retain their existing readiness behavior.
 
 #### Scenario: Single replica ages out of an empty ring
 - **GIVEN** bridge registration completed for the only replica
 - **AND** its heartbeat is older than the stale threshold so the active ring is empty
 - **WHEN** `/health/ready` probes that replica
-- **THEN** readiness returns HTTP 503
-- **AND** reports that the service is not an active bridge ring member
+- **THEN** ring membership does not make the readiness probe fail
+- **AND** the response reports the stale heartbeat age and inactive local membership
 
 #### Scenario: Active local member remains ready
 - **GIVEN** bridge registration completed and the probed replica has a fresh ring heartbeat

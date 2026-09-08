@@ -49,8 +49,7 @@ post-drain process cleanup. If that cleanup ignores cancellation at its bound,
 the launcher forces the captured signal (or SIGTERM for programmatic shutdown)
 instead of returning an unbounded task to asyncio runner teardown.
 
-**Upgrade warning:** the chart enforces a render-time timing guard (since
-chart `1.23.0-beta.2`). Existing
+**Upgrade warning:** the chart enforces a render-time timing guard. Existing
 values files, `--set` overrides, or values retained by
 `helm upgrade --reuse-values` with
 `terminationGracePeriodSeconds < config.shutdownDrainTimeoutSeconds + 32`

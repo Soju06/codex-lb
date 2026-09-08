@@ -30,8 +30,8 @@ body:
     id: version
     attributes:
       label: codex-lb version
-      description: Output of `codex-lb --version` or the image tag you deployed.
-      placeholder: "1.25.0 (dashboard status bar or `codex-lb --version`)"
+      description: Version shown in the dashboard status bar (or `GET /api/runtime/version`), or the image tag you deployed.
+      placeholder: "1.25.0 (dashboard status bar, `GET /api/runtime/version`, or the deployed image tag)"
     validations:
       required: true
 

@@ -23,6 +23,7 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 from app.core.config.settings import _REMOVED_SETTINGS, Settings
+from app.core.config.tiers import SETTING_TIERS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_PATH = REPO_ROOT / "docs" / "reference" / "settings.md"
@@ -237,17 +238,18 @@ def _render_section_table(names: list[str], fields: dict[str, FieldInfo]) -> lis
     with_description = any(fields[name].description for name in names)
     lines: list[str] = []
     if with_description:
-        lines.append("| Environment variable | Type | Default | Description |")
-        lines.append("| --- | --- | --- | --- |")
+        lines.append("| Environment variable | Tier | Type | Default | Description |")
+        lines.append("| --- | --- | --- | --- | --- |")
     else:
-        lines.append("| Environment variable | Type | Default |")
-        lines.append("| --- | --- | --- |")
+        lines.append("| Environment variable | Tier | Type | Default |")
+        lines.append("| --- | --- | --- | --- |")
     for name in names:
         field = fields[name]
         env_var = _render_env_cell(name, field)
+        tier_cell = SETTING_TIERS.get(name, "unassigned")
         type_cell = _escape_cell(f"`{_render_type(field.annotation)}`")
         default_cell = _escape_cell(_render_default(name, field))
-        row = f"| {env_var} | {type_cell} | {default_cell} |"
+        row = f"| {env_var} | {tier_cell} | {type_cell} | {default_cell} |"
         if with_description:
             row += f" {_escape_cell(field.description or '')} |"
         lines.append(row)
@@ -279,6 +281,18 @@ def render_settings_reference() -> str:
         "All defaults work with zero configuration —",
         "start from [Configuration](../configuration.md) for the handful that matter,",
         "and treat everything else as advanced operational tunables.",
+        "",
+        "## Tiers",
+        "",
+        "The **Tier** column is the configuration policy for each setting",
+        "(`app/core/config/tiers.py`, enforced by `scripts/check_settings_tiers.py`):",
+        "",
+        "- **T0** bootstrap — needed before the database is reachable; env only.",
+        "- **T1** instance topology — legitimately differs per replica or deployment; env only.",
+        "- **T2** secret — encrypted in the database; env is at most a seed.",
+        "- **T3** behaviour tunable / feature flag — the dashboard is the management",
+        "  surface; a T3 setting that is still env-only is migration backlog.",
+        "- **T4** incident debug — env allowed, dashboard toggle recommended.",
         "",
         "## `PORT` (special case, no prefix)",
         "",

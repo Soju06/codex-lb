@@ -87,7 +87,8 @@ remaining-quota and settlement rules do not change.
 
 Subscription update shape validation precedes update key-policy checks, so an
 unsupported effort returns the promised 400 even on a restricted owner-bound
-continuation. A valid but forbidden effort still returns 403. This ordering is
+continuation once its existing request-level and continuation policy permits
+processing the explicit updates. A valid but forbidden effort still returns 403. This ordering is
 limited to subscription configuration updates; the baseline's request-level
 policy ordering and source-owned schemas remain intact.
 

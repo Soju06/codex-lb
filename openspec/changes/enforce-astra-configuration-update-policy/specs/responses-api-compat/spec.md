@@ -64,6 +64,7 @@ validated before upstream connection or send, using client-plane values.
 #### Scenario: Malformed subscription updates have a consistent schema error
 
 - **GIVEN** a subscription Astra request contains an unsupported configuration-update effort or malformed update shape
+- **AND** its existing request-level and continuation reasoning policy checks permit processing the explicit updates
 - **WHEN** the request is checked with an unrestricted, allowed-effort or enforced-effort API key
 - **THEN** it SHALL return the subscription invalid-request 400 before upstream work
 - **AND** a schema-valid effort forbidden by the key SHALL still return reasoning_effort_not_allowed

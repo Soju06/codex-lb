@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import socket
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator
 from tempfile import SpooledTemporaryFile
-from typing import TypeAlias, cast
+from typing import cast
 
 import pytest
 import starlette.formparsers as starlette_formparsers
@@ -17,81 +16,14 @@ from app.db.models import ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
+from tests.integration.model_source_helpers import (
+    _create_model_source,
+    _enable_api_key_auth,
+    _free_port,
+    stub_source_upstreams,
+)
 
 pytestmark = pytest.mark.integration
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-async def _create_model_source(
-    async_client,
-    *,
-    name: str,
-    model: str,
-    base_url: str,
-    input_per_1m: float | None = None,
-    cached_input_per_1m: float | None = None,
-    output_per_1m: float | None = None,
-    audio_per_minute: float | None = None,
-    raw_metadata_json: str | None = None,
-    supports_responses: bool = False,
-    supports_streaming: bool = True,
-    supports_audio_transcriptions: bool = False,
-    supports_embeddings: bool = False,
-) -> str:
-    model_entry: dict[str, object] = {
-        "model": model,
-        "displayName": model,
-        "contextWindow": 8192,
-        "maxOutputTokens": 1024,
-        "supportsStreaming": supports_streaming,
-        "supportsTools": True,
-    }
-    if raw_metadata_json is not None:
-        model_entry["rawMetadataJson"] = raw_metadata_json
-    if input_per_1m is not None:
-        model_entry["inputPer1M"] = input_per_1m
-    if cached_input_per_1m is not None:
-        model_entry["cachedInputPer1M"] = cached_input_per_1m
-    if output_per_1m is not None:
-        model_entry["outputPer1M"] = output_per_1m
-    if audio_per_minute is not None:
-        model_entry["audioPerMinute"] = audio_per_minute
-    response = await async_client.post(
-        "/api/model-sources/",
-        json={
-            "name": name,
-            "baseUrl": base_url,
-            "apiKey": f"token-{name}",
-            "supportsChatCompletions": True,
-            "supportsResponses": supports_responses,
-            "supportsAudioTranscriptions": supports_audio_transcriptions,
-            "supportsEmbeddings": supports_embeddings,
-            "models": [model_entry],
-        },
-    )
-    assert response.status_code == 200
-    return response.json()["id"]
-
-
-async def _enable_api_key_auth(async_client) -> None:
-    response = await async_client.put(
-        "/api/settings",
-        json={
-            "stickyThreadsEnabled": False,
-            "preferEarlierResetAccounts": False,
-            "totpRequiredOnLogin": False,
-            "apiKeyAuthEnabled": True,
-        },
-    )
-    assert response.status_code == 200
-
-
-_UpstreamHandler: TypeAlias = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
 
 def _record_multipart_spools(monkeypatch: pytest.MonkeyPatch) -> list[SpooledTemporaryFile[bytes]]:
@@ -108,24 +40,9 @@ def _record_multipart_spools(monkeypatch: pytest.MonkeyPatch) -> list[SpooledTem
 
 
 @pytest.fixture
-async def source_upstream() -> AsyncIterator[Callable[[_UpstreamHandler], Awaitable[str]]]:
-    runners: list[web.AppRunner] = []
-
-    async def start(handler: _UpstreamHandler) -> str:
-        app = web.Application()
-        app.router.add_route("*", "/{tail:.*}", handler)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        port = _free_port()
-        site = web.TCPSite(runner, "127.0.0.1", port)
-        await site.start()
-        runners.append(runner)
-        return f"http://127.0.0.1:{port}/v1"
-
-    yield start
-
-    for runner in runners:
-        await runner.cleanup()
+async def source_upstream():
+    async with stub_source_upstreams() as start:
+        yield start
 
 
 def _embedding_success_response(model: str) -> web.Response:
@@ -1983,7 +1900,9 @@ async def test_source_stream_body_teardown_survives_repeated_cancellation(monkey
         content = _FakeContent()
 
     async def fake_open(*_args: object, **_kwargs: object) -> object:
-        return stack, _FakeResponse()
+        # The open hands back the first chunk it already read (P2 first-frame
+        # deadline); the body yields it before reading further.
+        return stack, _FakeResponse(), b"data: first\n\n"
 
     monkeypatch.setattr(forwarding_module, "_open_source_stream", fake_open)
 
@@ -2052,7 +1971,7 @@ async def test_open_source_stream_cleanup_finishes_after_cancellation(monkeypatc
             cleanup_finished.set()
             return False
 
-    monkeypatch.setattr(forwarding_module, "lease_http_session", lambda: _SessionLease())
+    monkeypatch.setattr(forwarding_module, "lease_model_source_session", lambda: _SessionLease())
 
     source = ModelSource(
         id="src_open_cancelled_cleanup",
@@ -2124,7 +2043,7 @@ async def test_forward_chat_completion_cleanup_finishes_after_cancellation(monke
             cleanup_finished.set()
             return False
 
-    monkeypatch.setattr(forwarding_module, "lease_http_session", lambda: _SessionLease())
+    monkeypatch.setattr(forwarding_module, "lease_model_source_session", lambda: _SessionLease())
 
     source = ModelSource(
         id="src_forward_cancelled_cleanup",

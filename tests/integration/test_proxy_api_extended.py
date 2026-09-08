@@ -2804,7 +2804,7 @@ async def test_source_responses_stream_starts_sse_keepalive_before_first_upstrea
         yield event[:mid].encode("utf-8")
         yield event[mid:].encode("utf-8")
 
-    async def fake_stream_source_responses(_source, _payload):
+    async def fake_stream_source_responses(_source, _payload, **_kwargs):
         return SourceResponsesStream(
             body=delayed_body(),
             usage_holder=SourceUsageHolder(),
@@ -2888,7 +2888,7 @@ async def test_source_responses_stream_reassembles_crlf_event_blocks(monkeypatch
         yield event[:mid].encode("utf-8")
         yield event[mid:].encode("utf-8")
 
-    async def fake_stream_source_responses(_source, _payload):
+    async def fake_stream_source_responses(_source, _payload, **_kwargs):
         return SourceResponsesStream(
             body=crlf_split_body(),
             usage_holder=SourceUsageHolder(),
@@ -2955,7 +2955,7 @@ async def test_source_responses_forwards_unparseable_blocks_without_synthetic_te
     async def malformed_body():
         yield malformed_block.encode("utf-8")
 
-    async def fake_stream_source_responses(_source, _payload):
+    async def fake_stream_source_responses(_source, _payload, **_kwargs):
         return SourceResponsesStream(
             body=malformed_body(),
             usage_holder=SourceUsageHolder(),
@@ -3424,7 +3424,7 @@ async def test_source_responses_stream_preserves_split_utf8_and_crlf(monkeypatch
         yield mid[4:] + b'"}}\r'
         yield b"\n\r\n"
 
-    async def fake_stream_source_responses(_source, _payload):
+    async def fake_stream_source_responses(_source, _payload, **_kwargs):
         return SourceResponsesStream(
             body=split_boundary_body(),
             usage_holder=SourceUsageHolder(),
@@ -3494,7 +3494,7 @@ async def test_source_responses_normalize_error_still_settles_reservation(monkey
         yield b'data: {"type":"error","error":{"message":"boom","code":"server_error"}}\n\n'
         yield b'data: {"type":"response.completed","response":{"id":"resp_should_not_matter"}}\n\n'
 
-    async def fake_stream_source_responses(_source, _payload):
+    async def fake_stream_source_responses(_source, _payload, **_kwargs):
         return SourceResponsesStream(
             body=error_then_completed_body(),
             usage_holder=SourceUsageHolder(usage=SourceUsage(input_tokens=1, output_tokens=1)),

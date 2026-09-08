@@ -235,6 +235,18 @@ def test_build_preflight_lists_missing_overflowable_registry_slugs_only() -> Non
     assert [(model.slug, model.enabled) for model in preflight.served_models] == [("gpt-5.1", True), ("gpt-5.4", False)]
 
 
+def test_build_preflight_counts_a_differently_cased_entry_as_serving_the_registry_slug() -> None:
+    registry = {"gpt-5.1": _registry_model("gpt-5.1"), "gpt-5.4": _registry_model("gpt-5.4")}
+    source = _source(models=[_entry("gpt-5.1"), _entry("GPT-5.4")])
+    preflight = _preflight(source, registry)
+
+    # served_models resolves GPT-5.4 case-insensitively (as the request path
+    # does); missing_models must agree instead of listing gpt-5.4 as missing.
+    served = {model.slug: model.never_overflows for model in preflight.served_models}
+    assert served == {"GPT-5.4": False, "gpt-5.1": False}
+    assert preflight.missing_models == []
+
+
 def test_build_preflight_marks_lite_family_and_unknown_slugs_as_never_overflowing() -> None:
     registry = {"gpt-5.6": _registry_model("gpt-5.6", raw={"use_responses_lite": True, "tool_mode": "code_mode_only"})}
     source = _source(models=[_entry("gpt-5.6", context_window=8_192, supports_vision=False), _entry("qwen-local")])

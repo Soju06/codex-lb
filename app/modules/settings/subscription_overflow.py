@@ -232,11 +232,18 @@ def build_preflight(
         _preflight_model(source, entry, subscription_models)
         for entry in sorted(source.models, key=lambda candidate: candidate.model)
     ]
-    enabled_slugs = {entry.model for entry in source.models if entry.is_enabled}
+    # Resolve enabled entries through the same lookup ``served_models`` uses so
+    # a differently cased entry (``GPT-5.4``) counts as serving ``gpt-5.4``
+    # instead of being reported both served and missing.
+    served_registry_slugs = {
+        registry_model.slug
+        for entry in source.models
+        if entry.is_enabled and (registry_model := _registry_lookup(subscription_models, entry.model)) is not None
+    }
     missing = sorted(
         slug
         for slug, model in subscription_models.items()
-        if slug not in enabled_slugs and never_overflows_reason(model) is None
+        if model.slug not in served_registry_slugs and never_overflows_reason(model) is None
     )
     return SubscriptionOverflowPreflightResponse(
         source_id=source.id,

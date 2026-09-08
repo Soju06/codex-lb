@@ -1,6 +1,8 @@
 """Subscription-overflow designation, preflight, and delete-clears behaviour (#2123 WP-B).
 
-Everything here is dashboard-side.
+Everything here is dashboard-side. The last test pins the stage's inertness
+end to end: with a source designated, an exhausted pool still answers today's
+``429 usage_limit_reached`` and the source is never contacted.
 """
 
 from __future__ import annotations
@@ -8,20 +10,28 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import socket
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from aiohttp import web
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session as SyncSession
 
+import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.auth.dependencies import require_dashboard_write_access
+from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import DashboardPermissionError
 from app.core.utils.time import utcnow
-from app.db.models import AuditLog, ModelSourcePin
+from app.db.models import Account, AccountStatus, AuditLog, ModelSourcePin
 from app.db.session import SessionLocal
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.settings.subscription_overflow import DRAIN_WINDOW
+from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -482,3 +492,117 @@ async def test_preflight_echoes_the_drain_deadline(async_client):
     response = await async_client.get("/api/settings/subscription-overflow/preflight", params={"source_id": source_id})
     assert response.status_code == 200
     _assert_drain_armed(response.json()["drainUntil"])
+
+
+# ---------------------------------------------------------------------------
+# Inert end to end: the designation never changes today's exhaustion answer
+# ---------------------------------------------------------------------------
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+_UpstreamHandler = Callable[[web.Request], Awaitable[web.StreamResponse]]
+
+
+@pytest.fixture
+async def source_upstream() -> AsyncIterator[Callable[[_UpstreamHandler], Awaitable[str]]]:
+    runners: list[web.AppRunner] = []
+
+    async def start(handler: _UpstreamHandler) -> str:
+        app = web.Application()
+        app.router.add_route("*", "/{tail:.*}", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        port = _free_port()
+        site = web.TCPSite(runner, "127.0.0.1", port)
+        await site.start()
+        runners.append(runner)
+        return f"http://127.0.0.1:{port}/v1"
+
+    yield start
+
+    for runner in runners:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_designated_source_is_inert_when_the_pool_is_exhausted(async_client, source_upstream, monkeypatch):
+    """Golden guard for WP-C2: a designated source must not change today's exhaustion answer.
+
+    The pool is usage-proven exhausted (QUOTA_EXCEEDED at 100 % with a known
+    reset), the requested model is a registry slug the designated source
+    serves, and the request still gets the structured ``429 usage_limit_reached``
+    with ``resets_at`` while the source receives nothing. WP-C2 replaces this
+    test when overflow routing becomes reachable.
+    """
+    account_id = await _import_account(async_client, "acc_overflow_inert", "overflow-inert@example.com")
+    now_epoch = int(time.time())
+    reset_at = now_epoch + 1800
+    now = utcnow()
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        # Mirror handle_quota_exceeded: status + blocked_at marker + reset deadline.
+        account.status = AccountStatus.QUOTA_EXCEEDED
+        account.blocked_at = now_epoch
+        account.reset_at = reset_at
+        usage = UsageRepository(session)
+        await usage.add_entry(
+            account_id=account_id,
+            used_percent=100.0,
+            window="primary",
+            reset_at=reset_at,
+            window_minutes=300,
+            recorded_at=now,
+        )
+        await usage.add_entry(
+            account_id=account_id,
+            used_percent=40.0,
+            window="secondary",
+            reset_at=reset_at + 6 * 86400,
+            window_minutes=10080,
+            recorded_at=now,
+        )
+        await session.commit()
+    get_account_selection_cache().invalidate()
+
+    hits: list[str] = []
+
+    async def record(request: web.Request) -> web.StreamResponse:
+        hits.append(request.path)
+        return web.json_response({"error": {"message": "source must never be contacted"}}, status=500)
+
+    base_url = await source_upstream(record)
+    source_id = await _create_model_source(async_client, name="overflow-stub", base_url=base_url)
+    designated = await async_client.put("/api/settings", json={"subscriptionOverflowSourceId": source_id})
+    assert designated.status_code == 200
+
+    subscription_attempts: list[str] = []
+
+    async def fail_fast_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        # Exhaustion must be decided before any upstream call; fail loudly
+        # instead of letting a mis-seeded pool hang on the unreachable upstream.
+        subscription_attempts.append(account_id)
+        raise ProxyResponseError(500, {"error": {"message": "unexpected subscription attempt"}})
+        yield  # pragma: no cover - async generator marker
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_fast_stream)
+
+    payload = {"model": _REGISTRY_SLUG, "instructions": "hi", "input": [], "stream": True}
+    response = await async_client.post("/backend-api/codex/responses", json=payload)
+    assert subscription_attempts == [], "an exhausted pool must not attempt a subscription stream"
+    assert response.status_code == 429
+    error = response.json()["error"]
+    assert error["code"] == "usage_limit_reached"
+    assert error["type"] == "usage_limit_reached"
+    assert error["resets_at"] == reset_at
+    assert hits == [], "the designated source must not be contacted before WP-C2"
+
+    # The designation itself is untouched by request traffic.
+    settings = await _get_settings(async_client)
+    assert settings["subscriptionOverflowSourceId"] == source_id
+    assert settings["subscriptionOverflowDrainUntil"] is None

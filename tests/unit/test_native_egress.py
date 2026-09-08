@@ -983,7 +983,10 @@ def test_bounded_event_queue_trips_on_bytes_or_events_and_releases_bytes_on_get(
     queue.put_nowait({"type": "chunk", "data": "abcd"})
     queue.put_nowait({"type": "sse", "text": "efgh"})
     assert queue.queued_bytes == 8 and not queue.full()
-    queue.put_nowait({"type": "chunk", "data": "ij"})  # 10 bytes reaches the budget
+    # The incoming event counts: 8 queued + 3 would exceed the 10-byte budget.
+    with pytest.raises(asyncio.QueueFull):
+        queue.put_nowait({"type": "chunk", "data": "klm"})
+    queue.put_nowait({"type": "chunk", "data": "ij"})  # exactly 10 bytes fills the budget
     assert queue.full()
     with pytest.raises(asyncio.QueueFull):
         queue.put_nowait({"type": "end"})
@@ -997,6 +1000,15 @@ def test_bounded_event_queue_trips_on_bytes_or_events_and_releases_bytes_on_get(
     assert queue.queued_bytes == 0
     queue.put_nowait(RuntimeError("x"))
     assert queue.queued_bytes == 0
+    queue.get_nowait()
+    # Text payloads are measured in UTF-8 bytes, not code points.
+    queue.put_nowait({"type": "sse", "text": "\u00e9\u00e9"})
+    assert queue.queued_bytes == 4
+    # A lone event larger than the whole budget is accepted at an empty queue
+    # (the SSE event size cap bounds it), so a single big chunk never fails.
+    big = native_egress_module._BoundedEventQueue(max_events=8, max_bytes=10)
+    big.put_nowait({"type": "chunk", "data": "x" * 64})
+    assert big.full()
 
 
 @pytest.mark.asyncio

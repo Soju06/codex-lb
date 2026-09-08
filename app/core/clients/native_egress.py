@@ -53,13 +53,17 @@ _NATIVE_WEBSOCKET_COMMAND_TIMEOUT_SECONDS = 30.0
 
 
 def _event_payload_size(item: object) -> int:
-    """Approximate queued payload bytes of one helper event (its body field)."""
+    """Queued payload bytes of one helper event: its base64 ``data`` (ASCII, so
+    the string length is the byte length) or its UTF-8 encoded SSE ``text``."""
     if not isinstance(item, dict):
         return 0
-    payload = item.get("data")
-    if not isinstance(payload, str):
-        payload = item.get("text")
-    return len(payload) if isinstance(payload, str) else 0
+    data = item.get("data")
+    if isinstance(data, str):
+        return len(data)
+    text = item.get("text")
+    if isinstance(text, str):
+        return len(text.encode("utf-8"))
+    return 0
 
 
 class _BoundedEventQueue(asyncio.Queue[dict[str, object] | BaseException]):
@@ -77,6 +81,15 @@ class _BoundedEventQueue(asyncio.Queue[dict[str, object] | BaseException]):
 
     def full(self) -> bool:
         return super().full() or self.queued_bytes >= self._max_bytes
+
+    def put_nowait(self, item: dict[str, object] | BaseException) -> None:
+        # Account for the incoming event too: a queue just under budget must
+        # not accept an event that carries it far past the budget. An event
+        # arriving at an empty queue is always accepted (the SSE event size cap
+        # bounds it separately) so a lone large chunk is never a failure.
+        if not self.empty() and self.queued_bytes + _event_payload_size(item) > self._max_bytes:
+            raise asyncio.QueueFull
+        super().put_nowait(item)
 
     def _put(self, item: dict[str, object] | BaseException) -> None:
         super()._put(item)

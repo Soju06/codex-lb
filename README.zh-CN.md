@@ -53,7 +53,7 @@ ChatGPT 账户负载均衡器。聚合多个账户、追踪用量、管理 API K
 # Docker（推荐）
 docker volume create codex-lb-data
 docker run -d --name codex-lb \
-  -p 2455:2455 -p 1455:1455 \
+  -p 2455:2455 \
   -v codex-lb-data:/var/lib/codex-lb \
   ghcr.io/soju06/codex-lb:latest
 
@@ -62,6 +62,8 @@ uvx codex-lb
 ```
 
 打开 [localhost:2455](http://localhost:2455) → 添加账户 → 完成。
+
+使用 Docker 添加或重新认证账户时，建议选择设备代码登录，或者将浏览器最终跳转到的 localhost 回调 URL 粘贴到对话框中。默认不会发布 1455 端口，以避免与 Codex Desktop 登录冲突。
 
 ## 远程访问初始化
 
@@ -84,7 +86,7 @@ docker logs codex-lb
 ```bash
 docker run -d --name codex-lb \
   -e CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN=your-secret-token \
-  -p 2455:2455 -p 1455:1455 \
+  -p 2455:2455 \
   -v codex-lb-data:/var/lib/codex-lb \
   ghcr.io/soju06/codex-lb:latest
 ```
@@ -394,7 +396,7 @@ CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER=Remote-User
 
 ```bash
 docker run -d --name codex-lb \
-  -p 2455:2455 -p 1455:1455 \
+  -p 2455:2455 \
   -e CODEX_LB_DASHBOARD_AUTH_MODE=trusted_header \
   -e CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER=Remote-User \
   -e CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS=true \
@@ -407,7 +409,7 @@ docker run -d --name codex-lb \
 
 ```bash
 docker run -d --name codex-lb \
-  -p 2455:2455 -p 1455:1455 \
+  -p 2455:2455 \
   -e CODEX_LB_DASHBOARD_AUTH_MODE=disabled \
   -v codex-lb-data:/var/lib/codex-lb \
   ghcr.io/soju06/codex-lb:latest

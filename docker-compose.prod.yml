@@ -19,7 +19,6 @@ services:
       - .env.local
     ports:
       - "2455:2455"
-      - "1455:1455"
     volumes:
       - codex-lb-data:/var/lib/codex-lb
     healthcheck:

@@ -91,7 +91,7 @@ SSE-field parsing for multiline or whitespace-prefixed frames.
 The Python fallback is still supported, so its parser is active code. Retired
 native-path branches must be removed in the migration that replaces them. Before
 removal, audit intervening Python commits and extend shared Rust/Python fixtures
-for applicable fixes. The ownership table and audit through `66b26fa8f` are in
+for applicable fixes. The ownership table and audit through `713fa5648` are in
 [the archived change](../../changes/archive/2026-09-08-native-websocket-event-interpretation/context.md).
 That change includes a tracked benchmark script/result; the final synthetic
 measurement shows no speedup (640 ms raw versus 674 ms interpreted).

@@ -50,10 +50,12 @@ or policy owner, and extend the shared fixtures before removing its tests.
 ## Python-to-Rust parity audit (2026-09-08)
 
 Reviewed the main history from native SSE framing (`8c6467d97`) through
-`66b26fa8f`, including HTTP collection/interpretation migrations and newly merged
-legacy cleanup PRs #2188 and #2191. Those new Python changes remove unused modules,
+`713fa5648`, including HTTP collection/interpretation migrations and newly merged
+legacy cleanup PRs #2188 and #2191. Also incorporated #2186/#2192
+(dashboard settings/transport ownership) and #2189 (unused ORM mappings). Those new Python changes remove unused modules,
 retry helpers, proxy functions and bridge shims; they add no event behavior to
-backport. Preserve their deletions when updating this branch from main.
+backport. The main merge preserves these deletions and the dashboard-owned
+transport decision before native dispatch; Rust does not read the removed env setting.
 
 The audit found corrections needed in this WebSocket slice: preserve original
 text and numeric values; use last-key precedence and typeless-error classification;

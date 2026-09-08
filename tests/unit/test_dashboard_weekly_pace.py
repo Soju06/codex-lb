@@ -16,7 +16,7 @@ from app.modules.dashboard.weekly_pace import PRO_WEEKLY_CAPACITY_CREDITS, build
 NOW = datetime(2026, 8, 17, 12, 0, 0)
 
 
-def _account(account_id: str, *, weekly_cap: int | None = None) -> Account:
+def _account(account_id: str, *, weekly_cap: float | None = None) -> Account:
     return Account(id=account_id, status=AccountStatus.ACTIVE, usage_cap_weekly_percent=weekly_cap)
 
 

@@ -756,16 +756,6 @@ class LoadBalancer:
             or (sticky_key is not None and sticky_kind is not None)
         )
         if needs_owner_lookups:
-            # One shared session serves the legacy/seed/first-sticky owner
-            # lookups. The SELECTs stay separate on purpose so the per-source
-            # predicate semantics of get_account_id_and_abandonment (tombstone
-            # visibility, max_age handling) are untouched; the saving is the
-            # 2-3 extra pool checkouts + session create/teardown lifecycles
-            # per request. Each later source still starts a fresh read
-            # transaction (release_read_snapshot): on SQLite/WAL the shared
-            # session would otherwise pin one snapshot at the first SELECT
-            # and hide a hard sticky or seed owner committed concurrently
-            # between the reads, letting selection overwrite that mapping.
             async with self._repo_factory() as repos:
                 owner_snapshot_pinned = False
                 if legacy_sticky_key is not None:
@@ -808,11 +798,6 @@ class LoadBalancer:
                 if sticky_key is not None and sticky_kind is not None:
                     if owner_snapshot_pinned:
                         await repos.sticky_sessions.release_read_snapshot()
-                    # First-iteration owner read for run_sticky_selection_path,
-                    # hoisted here so it shares this session. The selection
-                    # loop consumes it exactly once; every retry (including
-                    # post-reset attempts) still re-reads fresh ownership
-                    # evidence through its own repo bundle.
                     initial_sticky_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
                         sticky_key,
                         kind=sticky_kind,

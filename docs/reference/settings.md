@@ -8,8 +8,9 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `app/core/config/settings.py`.
 
 codex-lb currently exposes 137 settings. Every setting is an environment
-variable with the `CODEX_LB_` prefix (process environment or `.env` /
-`.env.local` next to the process). All defaults work with zero configuration —
+variable, normally with the `CODEX_LB_` prefix (process environment or `.env` /
+`.env.local` next to the process); aliased settings list every accepted name.
+All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
 and treat everything else as advanced operational tunables.
 
@@ -34,19 +35,22 @@ the env-file locations have to be known before env files are read.
 
 These are third-party or POSIX conventions codex-lb honors without
 making them settings. They are read by their owning launcher, library, or
-frozen migration rather than through `Settings`, and are the only
-sanctioned environment reads outside `app/core/config/settings.py`.
+frozen migration rather than through `Settings`. Together with `Settings`
+itself this table is the allowlist of environment reads under `app/`;
+anything else belongs in `app/core/config/settings.py`.
 
 | Environment variable(s) | Consumer |
 | --- | --- |
 | `HOST`, `PORT`, `SSL_CERTFILE`, `SSL_KEYFILE`, `UVICORN_TIMEOUT_KEEP_ALIVE`, `UVICORN_WS_MAX_SIZE` | Uvicorn launch defaults read once by the `codex-lb` CLI (`app/cli.py`); host runs only. |
 | `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `WS_PROXY`, `NO_PROXY` (and lowercase) | Outbound proxy conventions honored by httpx/aiohttp/websockets for upstream egress. |
+| `REQUEST_METHOD` | CGI marker; when present `HTTP_PROXY` is ignored (httpoxy guard, mirrors the httpx/requests rule). |
 | `TZ` | POSIX process timezone; automation schedules with the `server_default` timezone resolve to it (falling back to the host local zone, then UTC). |
 | `PROMETHEUS_MULTIPROC_DIR` | prometheus_client multiprocess-mode convention. |
 | `GITHUB_TOKEN` | Optional bearer token for the GitHub latest-release version check. |
 | `POD_IP`, `POD_NAME`, `HOSTNAME`, `KUBERNETES_SERVICE_HOST` | Kubernetes/pod identity used for multi-replica validation and deployment-kind telemetry. |
 | `CODEX_HOME`, `USERPROFILE`, `WSL_DISTRO_NAME` | Codex CLI home discovery for the `codex-lb codex-sessions retag` tool. |
 | `CODEX_LB_TEST_DATABASE_URL` | Test-suite/CI only: overrides the database used by the test session factory. |
+| `CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE`, `CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS` (inside `app/db/alembic/versions/**` only) | Frozen Alembic migrations read the process environment directly because migrations must not depend on `Settings`; the live settings of the same name are documented in the tables below. |
 
 ## Core
 

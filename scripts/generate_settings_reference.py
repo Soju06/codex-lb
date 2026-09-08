@@ -114,6 +114,10 @@ _PROCESS_ENV_CONVENTIONS: tuple[tuple[str, str], ...] = (
         "Outbound proxy conventions honored by httpx/aiohttp/websockets for upstream egress.",
     ),
     (
+        "`REQUEST_METHOD`",
+        "CGI marker; when present `HTTP_PROXY` is ignored (httpoxy guard, mirrors the httpx/requests rule).",
+    ),
+    (
         "`TZ`",
         "POSIX process timezone; automation schedules with the `server_default` timezone resolve "
         "to it (falling back to the host local zone, then UTC).",
@@ -137,6 +141,12 @@ _PROCESS_ENV_CONVENTIONS: tuple[tuple[str, str], ...] = (
     (
         "`CODEX_LB_TEST_DATABASE_URL`",
         "Test-suite/CI only: overrides the database used by the test session factory.",
+    ),
+    (
+        "`CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE`, `CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS` "
+        "(inside `app/db/alembic/versions/**` only)",
+        "Frozen Alembic migrations read the process environment directly because migrations must not "
+        "depend on `Settings`; the live settings of the same name are documented in the tables below.",
     ),
 )
 
@@ -271,8 +281,9 @@ def render_settings_reference() -> str:
         "`app/core/config/settings.py`.",
         "",
         f"codex-lb currently exposes {len(fields)} settings. Every setting is an environment",
-        f"variable with the `{ENV_PREFIX}` prefix (process environment or `.env` /",
-        "`.env.local` next to the process). All defaults work with zero configuration —",
+        f"variable, normally with the `{ENV_PREFIX}` prefix (process environment or `.env` /",
+        "`.env.local` next to the process); aliased settings list every accepted name.",
+        "All defaults work with zero configuration —",
         "start from [Configuration](../configuration.md) for the handful that matter,",
         "and treat everything else as advanced operational tunables.",
         "",
@@ -297,8 +308,9 @@ def render_settings_reference() -> str:
         "",
         "These are third-party or POSIX conventions codex-lb honors without",
         "making them settings. They are read by their owning launcher, library, or",
-        "frozen migration rather than through `Settings`, and are the only",
-        "sanctioned environment reads outside `app/core/config/settings.py`.",
+        "frozen migration rather than through `Settings`. Together with `Settings`",
+        "itself this table is the allowlist of environment reads under `app/`;",
+        "anything else belongs in `app/core/config/settings.py`.",
         "",
         "| Environment variable(s) | Consumer |",
         "| --- | --- |",

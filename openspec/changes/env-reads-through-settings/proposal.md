@@ -6,7 +6,7 @@ Three environment variables were consumed by ad-hoc `os.environ` reads outside `
 
 - Promote the three env names to `Settings` fields (`connect_address`, `additional_quota_registry_file`, `forwarded_allow_ips`) with the same env names. `FORWARDED_ALLOW_IPS` keeps its bare Uvicorn name as the primary alias and gains `CODEX_LB_FORWARDED_ALLOW_IPS` as the prefixed alias; its trust semantics are unchanged.
 - Consumers (`TrustedProxyHeadersMiddleware`, the connect-address resolver, the additional quota registry loader) read `get_settings()` instead of the process environment.
-- The settings reference generator renders alias env names and adds a "Process-level environment variables (not settings)" section documenting the remaining sanctioned bare env reads (Uvicorn launch knobs, outbound proxy family, `TZ`, `PROMETHEUS_MULTIPROC_DIR`, `GITHUB_TOKEN`, Kubernetes pod identity, Codex CLI home discovery, `CODEX_LB_TEST_DATABASE_URL`).
+- The settings reference generator renders alias env names and adds a "Process-level environment variables (not settings)" section documenting the remaining sanctioned bare env reads (Uvicorn launch knobs, outbound proxy family, `TZ`, `PROMETHEUS_MULTIPROC_DIR`, `GITHUB_TOKEN`, `REQUEST_METHOD` httpoxy guard, Kubernetes pod identity, Codex CLI home discovery, `CODEX_LB_TEST_DATABASE_URL`, frozen Alembic migration reads).
 - The settings-surface ratchet moves from 135 to 138 for the three promoted fields; they are existing knobs made visible, not new tunables.
 
 ## Capabilities

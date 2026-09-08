@@ -1138,6 +1138,76 @@ async def test_proxy_responses_openai_shape_custom_client_gets_sdk_sse_contract(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "native"),
+    [
+        ("/v1/responses", False),
+        ("/v1/responses/", False),
+        ("/backend-api/codex/responses", False),
+        ("/backend-api/codex/responses/", False),
+        ("/backend-api/codex/responses", True),
+        ("/backend-api/codex/responses/", True),
+    ],
+    ids=["v1", "v1-slash", "backend-public", "backend-public-slash", "backend-native", "backend-native-slash"],
+)
+async def test_responses_routes_filter_vendor_events_only_for_public_contract(async_client, monkeypatch, route, native):
+    auth_json = _make_auth_json("acc_vendor_events", "vendor-events@example.com")
+    response = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    )
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        yield 'data: {"type":"codex.rate_limits","plan_type":"pro","rate_limits":{"allowed":true}}\n\n'
+        yield (
+            'event: response.created\ndata: {"type":"response.created","sequence_number":0,'
+            '"response":{"id":"resp_vendor","object":"response","status":"in_progress",'
+            '"instructions":"Keep this string.","output":[]}}\n\n'
+        )
+        yield (
+            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","sequence_number":1,'
+            '"item_id":"msg_vendor","output_index":0,"content_index":0,"delta":"Commit message"}\n\n'
+        )
+        yield 'event: responsesapi.websocket_timing\ndata: {"type":"responsesapi.websocket_timing","latency_ms":12}\n\n'
+        yield (
+            'event: response.completed\ndata: {"type":"response.completed","sequence_number":2,'
+            '"response":{"id":"resp_vendor","object":"response","status":"completed","output":[]}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    payload = {"model": "gpt-5.1", "input": "hi", "stream": True}
+    if native:
+        payload["instructions"] = "hi"
+    async with async_client.stream(
+        "POST",
+        route,
+        json=payload,
+        headers={"accept": "text/event-stream", "user-agent": "codex-cli/1.0" if native else "custom-client/1.0"},
+    ) as resp:
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = list(_iter_sse_events(lines))
+    event_types = [event["type"] for event in events]
+    if native:
+        assert event_types == [
+            "codex.rate_limits",
+            "response.created",
+            "response.output_text.delta",
+            "responsesapi.websocket_timing",
+            "response.completed",
+        ]
+    else:
+        assert event_types == ["response.created", "response.output_text.delta", "response.completed"]
+    created = next(event for event in events if event["type"] == "response.created")
+    assert created["response"]["instructions"] == "Keep this string."
+    delta = next(event for event in events if event["type"] == "response.output_text.delta")
+    assert delta["delta"] == "Commit message"
+    assert events[-1]["response"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_null_instructions_gets_sdk_sse_contract(async_client, monkeypatch):
     email = "backend-openai-null-instructions@example.com"
     raw_account_id = "acc_backend_openai_null_instructions"

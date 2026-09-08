@@ -47,7 +47,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_usage_history_bulk_covering_indexes_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_usage_history_covering_index_migration_repairs_invalid_leftover_postgresql \
 	tests/integration/test_migrations.py::test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql
-SHELL := /bin/bash
+SHELL := bash
 
 .PHONY: help
 help:

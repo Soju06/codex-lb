@@ -523,9 +523,6 @@ from app.modules.proxy._service.streaming.helpers import (
     _push_stream_attempt_timeout_overrides as _push_stream_attempt_timeout_overrides,
 )
 from app.modules.proxy._service.streaming.helpers import (
-    _resolve_upstream_stream_transport as _resolve_upstream_stream_transport,
-)
-from app.modules.proxy._service.streaming.helpers import (
     _rewrite_previous_response_stream_error as _rewrite_previous_response_stream_error,
 )
 from app.modules.proxy._service.streaming.helpers import (

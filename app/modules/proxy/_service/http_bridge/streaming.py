@@ -202,6 +202,7 @@ from app.modules.proxy._service.support import (
     _signal_propagated_responses_service_cleanup_ready,
     _ttft_event_visible_at,
     _WebSocketRequestState,
+    configured_upstream_stream_transport,
     mark_upstream_websocket_transport_failure,
     upstream_websocket_transport_recently_failed,
     websocket_connect_transport_failure_code,
@@ -1024,10 +1025,7 @@ class _HTTPBridgeStreamingMixin:
         # The bridge exists to hold upstream websocket sessions, so a pinned
         # "http" upstream transport must bypass it; without this gate the
         # dashboard pin is silently ignored for bridged follow-up turns.
-        configured_upstream_transport = getattr(dashboard_settings, "upstream_stream_transport", "default")
-        if configured_upstream_transport == "default":
-            configured_upstream_transport = getattr(_service_get_settings(), "upstream_stream_transport", "auto")
-        if runtime_config.enabled and configured_upstream_transport == "http":
+        if runtime_config.enabled and configured_upstream_stream_transport(dashboard_settings) == "http":
             logger.info(
                 "stream_responses bypassing http bridge for pinned http upstream transport request_id=%s",
                 request_id,

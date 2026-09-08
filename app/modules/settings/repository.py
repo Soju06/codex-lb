@@ -28,7 +28,7 @@ class SettingsRepository:
         row = DashboardSettings(
             id=_SETTINGS_ID,
             sticky_threads_enabled=True,
-            upstream_stream_transport="default",
+            upstream_stream_transport="auto",
             prohibit_fast_mode=False,
             http_downstream_transport_policy=get_settings().http_downstream_transport_policy,
             proxy_account_response_create_limit=get_settings().proxy_account_response_create_limit,

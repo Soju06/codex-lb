@@ -1113,7 +1113,6 @@
   "settings.routing.description": "Control how requests are distributed across accounts.",
   "settings.routing.upstream.label": "Upstream stream transport",
   "settings.routing.upstream.description": "Choose how `codex-lb` connects upstream for streaming responses.",
-  "settings.routing.upstream.default": "Server default",
   "settings.routing.upstream.auto": "Auto",
   "settings.routing.upstream.http": "Responses",
   "settings.routing.upstream.websocket": "WebSockets",

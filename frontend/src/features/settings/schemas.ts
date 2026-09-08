@@ -11,7 +11,6 @@ const RoutingStrategySchema = z.enum([
   "fill_first",
 ]);
 const UpstreamStreamTransportSchema = z.enum([
-  "default",
   "auto",
   "http",
   "websocket",
@@ -55,7 +54,7 @@ export const DashboardSettingsSchema = z
   .object({
     stickyThreadsEnabled: z.boolean(),
     upstreamStreamTransport:
-      UpstreamStreamTransportSchema.optional().default("default"),
+      UpstreamStreamTransportSchema.optional().default("auto"),
     prohibitFastMode: z.boolean().optional().default(false),
     httpDownstreamTransportPolicy:
       HttpDownstreamTransportPolicySchema.optional().default("smart"),

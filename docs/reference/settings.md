@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 135 settings. Every setting is an environment
+codex-lb currently exposes 134 settings. Every setting is an environment
 variable with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process). All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
@@ -67,7 +67,6 @@ the env-file locations have to be known before env files are read.
 | `CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS` | `float` | `8.0` |
 | `CODEX_LB_UPSTREAM_RESPONSE_CREATE_MAX_BYTES` | `int` | `15728640` |
 | `CODEX_LB_UPSTREAM_ROUTE_CACHE_TTL_SECONDS` | `float` | `60.0` |
-| `CODEX_LB_UPSTREAM_STREAM_TRANSPORT` | `'http' \| 'websocket' \| 'auto'` | `'auto'` |
 | `CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV` | `bool` | auto-detected from outbound proxy env vars |
 
 ## HTTP & streaming
@@ -333,6 +332,7 @@ issue [#1340](https://github.com/Soju06/codex-lb/issues/1340)):
 - `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT`
 - `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ALLOW_API_KEY_IDS`
 - `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_DENY_API_KEY_IDS`
+- `CODEX_LB_UPSTREAM_STREAM_TRANSPORT`
 
 ---
 

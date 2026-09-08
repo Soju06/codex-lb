@@ -837,8 +837,8 @@ class DashboardSettings(Base):
     sticky_threads_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     upstream_stream_transport: Mapped[str] = mapped_column(
         String,
-        default="default",
-        server_default=text("'default'"),
+        default="auto",
+        server_default=text("'auto'"),
         nullable=False,
     )
     prohibit_fast_mode: Mapped[bool] = mapped_column(

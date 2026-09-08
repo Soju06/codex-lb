@@ -116,6 +116,9 @@ _REMOVED_SETTINGS: tuple[str, ...] = (
     "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT",
     "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ALLOW_API_KEY_IDS",
     "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_DENY_API_KEY_IDS",
+    # Dashboard-authoritative settings (remove-upstream-stream-transport-env):
+    # the dashboard row is the only source of the upstream stream transport.
+    "CODEX_LB_UPSTREAM_STREAM_TRANSPORT",
 )
 
 
@@ -277,7 +280,6 @@ class Settings(BaseSettings):
     database_alembic_auto_remap_enabled: bool = True
     database_migration_lock_timeout_seconds: float = Field(default=300.0, gt=0)
     upstream_base_url: str = "https://chatgpt.com/backend-api"
-    upstream_stream_transport: Literal["http", "websocket", "auto"] = "auto"
     http_downstream_transport_policy: Literal["smart", "always_http", "always_websocket", "pinned"] = "smart"
     upstream_connect_timeout_seconds: float = 8.0
     upstream_compact_timeout_seconds: float | None = None

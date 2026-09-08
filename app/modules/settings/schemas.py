@@ -33,7 +33,7 @@ class AdditionalQuotaPolicy(DashboardModel):
 
 class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
-    upstream_stream_transport: str = Field(pattern=r"^(default|auto|http|websocket)$")
+    upstream_stream_transport: str = Field(pattern=r"^(auto|http|websocket)$")
     prohibit_fast_mode: bool
     http_downstream_transport_policy: str = Field(pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN)
     proxy_account_response_create_limit: int = Field(ge=0)
@@ -101,7 +101,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     sticky_threads_enabled: bool | None = None
     upstream_stream_transport: str | None = Field(
         default=None,
-        pattern=r"^(default|auto|http|websocket)$",
+        pattern=r"^(auto|http|websocket)$",
     )
     prohibit_fast_mode: bool | None = None
     http_downstream_transport_policy: str | None = Field(

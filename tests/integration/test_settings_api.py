@@ -50,7 +50,7 @@ async def test_settings_api_get_and_update(async_client):
     assert response.status_code == 200
     payload = response.json()
     assert payload["stickyThreadsEnabled"] is True
-    assert payload["upstreamStreamTransport"] == "default"
+    assert payload["upstreamStreamTransport"] == "auto"
     assert payload["prohibitFastMode"] is False
     assert payload["proxyAccountResponseCreateLimit"] == 4
     assert payload["proxyAccountResponseCreateLimitEnvironmentValue"] == 4

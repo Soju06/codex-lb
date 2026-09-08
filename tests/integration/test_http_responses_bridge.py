@@ -213,7 +213,6 @@ def _make_app_settings(
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
-        upstream_stream_transport="auto",
         stream_idle_timeout_seconds=300.0,
         openai_prompt_cache_key_derivation_enabled=True,
     )

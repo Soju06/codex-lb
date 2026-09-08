@@ -1297,7 +1297,6 @@
   "settings.routing.strategy.usageWeighted": "Usage weighted",
   "settings.routing.title": "Routing",
   "settings.routing.upstream.auto": "Auto",
-  "settings.routing.upstream.default": "서버 기본값",
   "settings.routing.upstream.description": "`codex-lb`가 streaming response를 위해 upstream에 연결하는 방식을 선택합니다.",
   "settings.routing.upstream.http": "Responses",
   "settings.routing.upstream.label": "Upstream stream transport",

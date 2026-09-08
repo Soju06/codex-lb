@@ -99,7 +99,6 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
-        upstream_stream_transport="auto",
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,

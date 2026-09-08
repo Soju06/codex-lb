@@ -1113,7 +1113,6 @@
   "settings.routing.description": "控制请求如何在多个账户之间分发。",
   "settings.routing.upstream.label": "上游流式传输",
   "settings.routing.upstream.description": "选择 `codex-lb` 与上游建立流式响应连接的方式。",
-  "settings.routing.upstream.default": "服务器默认",
   "settings.routing.upstream.auto": "自动",
   "settings.routing.upstream.http": "Responses",
   "settings.routing.upstream.websocket": "WebSocket",

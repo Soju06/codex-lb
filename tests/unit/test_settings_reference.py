@@ -80,7 +80,14 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # 135 -> 134: upstream_stream_transport removed (remove-upstream-stream-transport-env).
 # The dashboard row is the only source; the env var only ever fed the DB
 # "default" sentinel, which was two places to configure one value.
-MAX_SETTINGS_FIELDS = 134
+# 134 -> 137: connect_address, additional_quota_registry_file,
+# forwarded_allow_ips (slop-removal 0908, env reads outside Settings). Not new
+# knobs: all three env names were already consumed via ad-hoc ``os.environ``
+# reads in request/registry code without appearing in this reference; they are
+# promoted so the generator, ``.env`` files, and the removed-settings warning
+# govern them. The remaining bare env reads are third-party conventions listed
+# in the reference's process-level section.
+MAX_SETTINGS_FIELDS = 137
 
 
 def test_generated_settings_reference_matches_code() -> None:

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import TypedDict
+
+from app.core.config.settings import get_settings
 
 _NORMALIZE_PATTERN = re.compile(r"[^a-z0-9]+")
 ADDITIONAL_QUOTA_ROUTING_POLICIES = frozenset({"inherit", "burn_first", "normal", "preserve"})
@@ -63,9 +64,9 @@ def _default_registry_path() -> Path:
 
 
 def _registry_path() -> Path:
-    configured = os.environ.get("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", "").strip()
-    if configured:
-        return Path(configured).expanduser().resolve()
+    configured = get_settings().additional_quota_registry_file
+    if configured is not None:
+        return configured.expanduser().resolve()
     return _default_registry_path()
 
 

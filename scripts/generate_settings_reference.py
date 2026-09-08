@@ -18,6 +18,7 @@ import typing
 from pathlib import Path
 from typing import cast
 
+from pydantic import AliasChoices
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
@@ -94,7 +95,50 @@ _EXACT_SECTIONS: dict[str, str] = {
     "data_dir": "Core",
     "trace": "Observability",
     "workers_per_instance": "Multi-replica",
+    "connect_address": "Dashboard",
+    "additional_quota_registry_file": "Usage & retention",
+    "forwarded_allow_ips": "Firewall",
 }
+
+# Process-level environment variables codex-lb honors that are NOT Settings
+# fields: third-party or POSIX conventions read by the launcher, libraries, or
+# frozen Alembic migrations. Listed so operators can find them and so the
+# ``os.environ``-outside-Settings lint allowlist has a documented source.
+_PROCESS_ENV_CONVENTIONS: tuple[tuple[str, str], ...] = (
+    (
+        "`HOST`, `PORT`, `SSL_CERTFILE`, `SSL_KEYFILE`, `UVICORN_TIMEOUT_KEEP_ALIVE`, `UVICORN_WS_MAX_SIZE`",
+        "Uvicorn launch defaults read once by the `codex-lb` CLI (`app/cli.py`); host runs only.",
+    ),
+    (
+        "`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `WS_PROXY`, `NO_PROXY` (and lowercase)",
+        "Outbound proxy conventions honored by httpx/aiohttp/websockets for upstream egress.",
+    ),
+    (
+        "`TZ`",
+        "POSIX process timezone; automation schedules with the `server_default` timezone resolve "
+        "to it (falling back to the host local zone, then UTC).",
+    ),
+    (
+        "`PROMETHEUS_MULTIPROC_DIR`",
+        "prometheus_client multiprocess-mode convention.",
+    ),
+    (
+        "`GITHUB_TOKEN`",
+        "Optional bearer token for the GitHub latest-release version check.",
+    ),
+    (
+        "`POD_IP`, `POD_NAME`, `HOSTNAME`, `KUBERNETES_SERVICE_HOST`",
+        "Kubernetes/pod identity used for multi-replica validation and deployment-kind telemetry.",
+    ),
+    (
+        "`CODEX_HOME`, `USERPROFILE`, `WSL_DISTRO_NAME`",
+        "Codex CLI home discovery for the `codex-lb codex-sessions retag` tool.",
+    ),
+    (
+        "`CODEX_LB_TEST_DATABASE_URL`",
+        "Test-suite/CI only: overrides the database used by the test session factory.",
+    ),
+)
 
 _SECTION_ORDER: tuple[str, ...] = (
     "Core",
@@ -150,6 +194,23 @@ def _render_type(annotation: object) -> str:
     return str(annotation)
 
 
+def _env_names(name: str, field: FieldInfo) -> list[str]:
+    alias = field.validation_alias
+    if isinstance(alias, AliasChoices):
+        return [choice for choice in alias.choices if isinstance(choice, str)]
+    if isinstance(alias, str):
+        return [alias]
+    return [f"{ENV_PREFIX}{name.upper()}"]
+
+
+def _render_env_cell(name: str, field: FieldInfo) -> str:
+    primary, *aliases = _env_names(name, field)
+    cell = f"`{primary}`"
+    if aliases:
+        cell += " (alias " + ", ".join(f"`{alias}`" for alias in aliases) + ")"
+    return cell
+
+
 def _render_default(name: str, field: FieldInfo) -> str:
     symbolic = _SYMBOLIC_DEFAULTS.get(name)
     if symbolic is not None:
@@ -176,7 +237,7 @@ def _render_section_table(names: list[str], fields: dict[str, FieldInfo]) -> lis
         lines.append("| --- | --- | --- |")
     for name in names:
         field = fields[name]
-        env_var = f"`{ENV_PREFIX}{name.upper()}`"
+        env_var = _render_env_cell(name, field)
         type_cell = _escape_cell(f"`{_render_type(field.annotation)}`")
         default_cell = _escape_cell(_render_default(name, field))
         row = f"| {env_var} | {type_cell} | {default_cell} |"
@@ -231,7 +292,18 @@ def render_settings_reference() -> str:
         "contain env files (the Nix package wrapper points it at the launch",
         "directory). It must be set in the process environment, not in an env file:",
         "the env-file locations have to be known before env files are read.",
+        "",
+        "## Process-level environment variables (not settings)",
+        "",
+        "These are third-party or POSIX conventions codex-lb honors without",
+        "making them settings. They are read by their owning launcher, library, or",
+        "frozen migration rather than through `Settings`, and are the only",
+        "sanctioned environment reads outside `app/core/config/settings.py`.",
+        "",
+        "| Environment variable(s) | Consumer |",
+        "| --- | --- |",
     ]
+    lines.extend(f"| {names} | {_escape_cell(purpose)} |" for names, purpose in _PROCESS_ENV_CONVENTIONS)
 
     for section in _SECTION_ORDER:
         names = sections.get(section)

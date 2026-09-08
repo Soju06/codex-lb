@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 134 settings. Every setting is an environment
+codex-lb currently exposes 137 settings. Every setting is an environment
 variable with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process). All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
@@ -29,6 +29,24 @@ of paths — overrides that discovery for installs whose module root cannot
 contain env files (the Nix package wrapper points it at the launch
 directory). It must be set in the process environment, not in an env file:
 the env-file locations have to be known before env files are read.
+
+## Process-level environment variables (not settings)
+
+These are third-party or POSIX conventions codex-lb honors without
+making them settings. They are read by their owning launcher, library, or
+frozen migration rather than through `Settings`, and are the only
+sanctioned environment reads outside `app/core/config/settings.py`.
+
+| Environment variable(s) | Consumer |
+| --- | --- |
+| `HOST`, `PORT`, `SSL_CERTFILE`, `SSL_KEYFILE`, `UVICORN_TIMEOUT_KEEP_ALIVE`, `UVICORN_WS_MAX_SIZE` | Uvicorn launch defaults read once by the `codex-lb` CLI (`app/cli.py`); host runs only. |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `WS_PROXY`, `NO_PROXY` (and lowercase) | Outbound proxy conventions honored by httpx/aiohttp/websockets for upstream egress. |
+| `TZ` | POSIX process timezone; automation schedules with the `server_default` timezone resolve to it (falling back to the host local zone, then UTC). |
+| `PROMETHEUS_MULTIPROC_DIR` | prometheus_client multiprocess-mode convention. |
+| `GITHUB_TOKEN` | Optional bearer token for the GitHub latest-release version check. |
+| `POD_IP`, `POD_NAME`, `HOSTNAME`, `KUBERNETES_SERVICE_HOST` | Kubernetes/pod identity used for multi-replica validation and deployment-kind telemetry. |
+| `CODEX_HOME`, `USERPROFILE`, `WSL_DISTRO_NAME` | Codex CLI home discovery for the `codex-lb codex-sessions retag` tool. |
+| `CODEX_LB_TEST_DATABASE_URL` | Test-suite/CI only: overrides the database used by the test session factory. |
 
 ## Core
 
@@ -159,6 +177,7 @@ the env-file locations have to be known before env files are read.
 
 | Environment variable | Type | Default |
 | --- | --- | --- |
+| `CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE` | `Path \| None` | `None` |
 | `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED` | `bool` | `True` |
 | `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED` | `bool` | `True` |
 | `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_INTERVAL_SECONDS` | `int` | `60` |
@@ -201,11 +220,13 @@ the env-file locations have to be known before env files are read.
 | `CODEX_LB_FIREWALL_IP_CACHE_TTL_SECONDS` | `int` | `30` |
 | `CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS` | `bool` | `False` |
 | `CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS` | `list[str]` | `['127.0.0.1/32', '::1/128']` |
+| `FORWARDED_ALLOW_IPS` (alias `CODEX_LB_FORWARDED_ALLOW_IPS`) | `str \| None` | `None` |
 
 ## Dashboard
 
 | Environment variable | Type | Default |
 | --- | --- | --- |
+| `CODEX_LB_CONNECT_ADDRESS` | `str \| None` | `None` |
 | `CODEX_LB_DASHBOARD_AUTH_MODE` | `'standard' \| 'trusted_header' \| 'disabled'` | `'standard'` |
 | `CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER` | `str` | `'Remote-User'` |
 | `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` | `str \| None` | `None` |

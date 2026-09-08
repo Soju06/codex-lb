@@ -820,7 +820,7 @@ async def test_native_compact_large_result_is_fragmented_and_stops_before_late_f
 
 
 @pytest.mark.asyncio
-async def test_native_compact_escaped_surrogate_key_preserves_python_result(
+async def test_native_compact_escaped_surrogate_key_preserves_python_validation(
     monkeypatch: pytest.MonkeyPatch,
     native_worker: SubprocessNativeEgressClient,
     routed: bool,
@@ -835,11 +835,14 @@ async def test_native_compact_escaped_surrogate_key_preserves_python_result(
         await _write_chunk(writer, body)
         await _finish_chunks(writer)
 
-    async with _serve_http(handler) as base_url:
-        result = await asyncio.wait_for(_compact(base_url, native_worker, monkeypatch, routed=routed), 2)
-        assert result.model_extra is not None
-        assert result.model_extra["\ud800"] == 1
-        assert result.model_extra["output"] == [{}]
+    async with _serve_http(handler) as base_url, aiohttp.ClientSession() as session:
+        with pytest.raises(ProxyResponseError) as expected:
+            await asyncio.wait_for(_compact(base_url, None, monkeypatch, routed=routed, session=session), 2)
+        with pytest.raises(ProxyResponseError) as actual:
+            await asyncio.wait_for(_compact(base_url, native_worker, monkeypatch, routed=routed), 2)
+        assert actual.value.status_code == expected.value.status_code == 502
+        assert actual.value.payload == expected.value.payload
+        assert actual.value.failure_phase == expected.value.failure_phase == "parse"
     assert not native_worker._streams
 
 

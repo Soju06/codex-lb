@@ -60,6 +60,15 @@ the extra lookup introduced with early schema selection exposed the race.
 
 ## Example
 
+An enabled HTTP bridge keeps the original client body for continuation
+bookkeeping and prepares a separate copy for dispatch. If session creation
+fails before submission, the eligible raw-HTTP retry must prepare that original
+body again, using the same trim-then-validate order as a disabled bridge. For
+example, an anchored Low request without usage limits must forward a leading
+Low update even after a WebSocket connect failure. This completes the new
+continuation policy across the existing fallback; it does not change which
+failures are eligible for replay or who owns a usage reservation.
+
 A policy reset inserted after an operation-ledger anchor
 belongs to the forwarded request, while continuation fingerprints describe the
 client's history. Keep those representations separate: a later full resend does

@@ -8,10 +8,14 @@ import pytest
 from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
+from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy_websocket import UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL
+from app.core.errors import openai_error
 from app.core.openai.requests import ResponsesRequest
 from app.db.models import ApiKeyLimit, ApiKeyUsageReservation, HttpBridgeOperationRecord, HttpBridgeSessionRecord
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
+from app.modules.proxy._service import support as transport_health
 from app.modules.proxy._service.http_bridge import request_submit as bridge_request_submit
 from app.modules.proxy._service.http_bridge import streaming as bridge_streaming
 from app.modules.proxy.load_balancer import AccountSelection
@@ -20,6 +24,7 @@ from tests.integration.test_http_responses_bridge import (
     _cleanup_http_bridge_sessions as _cleanup_http_bridge_sessions,
 )
 from tests.integration.test_http_responses_bridge import (
+    _ClosingBridgeUpstreamWebSocket,
     _FakeBridgeUpstreamWebSocket,
     _get_account,
     _import_account,
@@ -428,3 +433,120 @@ async def test_astra_full_resend_http_fallback_keeps_reset(
         {"type": "configuration_update", "reasoning": {"effort": "high"}},
         tool_output,
     ]
+
+
+@pytest.mark.parametrize(
+    ("path", "stream"),
+    [("/v1/responses", False), ("/v1/responses", True), ("/backend-api/codex/responses", True)],
+    ids=["v1-collect", "v1-stream", "backend-stream"],
+)
+@pytest.mark.parametrize("history", ["plain", "replay", "explicit"])
+@pytest.mark.parametrize("key_mode", ["allowed", "enforced-ultra", "other-model-limit"])
+async def test_astra_connect_fallback_preserves_prepared_continuation(
+    async_client, monkeypatch, app_instance, path: str, stream: bool, history: str, key_mode: str
+) -> None:
+    account_id = await _import_account(async_client, "astra-connect-fallback", "astra-connect-fallback@example.com")
+    account = await _get_account(account_id)
+    settings = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert settings.status_code == 200
+    effort = "ultra" if key_mode == "enforced-ultra" else "low"
+    key_body = {"name": "astra-connect-fallback"}
+    if key_mode != "enforced-ultra":
+        key_body["allowedReasoningEfforts"] = [effort]
+    if key_mode == "enforced-ultra":
+        key_body["enforcedReasoningEffort"] = effort
+    if key_mode == "other-model-limit":
+        key_body["limits"] = [
+            {"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 1000000, "modelFilter": "gpt-5.4"}
+        ]
+    created = await async_client.post("/api/api-keys/", json=key_body)
+    assert created.status_code == 200, created.text
+    key = created.json()
+    _install_bridge_settings(monkeypatch, enabled=True)
+    service = get_proxy_service_for_app(app_instance)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    first_upstream = _ClosingBridgeUpstreamWebSocket()
+    connect = AsyncMock(
+        side_effect=[
+            first_upstream,
+            ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", "Synthetic WebSocket connect failure", error_type="server_error"),
+                failure_phase="connect",
+                failure_detail=UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL,
+            ),
+        ],
+    )
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    forwarded = []
+
+    async def raw_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        forwarded.append(payload.to_payload())
+        yield _completed_event("resp_connect_fallback")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", raw_stream)
+    reset = {"type": "configuration_update", "reasoning": {"effort": effort}}
+    user = {"role": "user", "content": "Continue"}
+    tool_output = {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+    input_items = [user]
+    if history == "replay":
+        input_items = [
+            {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "shell", "arguments": "{}"},
+            tool_output,
+        ]
+    elif history == "explicit":
+        input_items = [reset, user]
+    transport_health.clear_upstream_websocket_transport_failure()
+    try:
+        with anyio.fail_after(10):
+            first = await async_client.post(
+                "/v1/responses",
+                json={
+                    "model": "gpt-6-astra",
+                    "instructions": "",
+                    "input": "Hello",
+                    "reasoning": {"effort": effort},
+                    "prompt_cache_key": f"astra-fallback-{account_id}",
+                },
+                headers={"Authorization": f"Bearer {key['key']}"},
+            )
+        assert first.status_code == 200, first.text
+        anchor = first.json()["id"]
+        connect.assert_awaited_once()
+        connect.reset_mock()
+        assert not forwarded
+        with anyio.fail_after(10):
+            response = await async_client.post(
+                path,
+                json={
+                    "model": "gpt-6-astra",
+                    "instructions": "",
+                    "reasoning": {"effort": effort},
+                    "previous_response_id": anchor,
+                    "prompt_cache_key": f"astra-fallback-{account_id}",
+                    "input": input_items,
+                    "stream": stream,
+                },
+                headers={"Authorization": f"Bearer {key['key']}"},
+            )
+        assert response.status_code == 200, response.text
+        assert "resp_connect_fallback" in response.text
+        connect.assert_awaited_once()
+        assert len(forwarded) == 1
+        sent = forwarded[0]
+        wire_effort = "max" if effort == "ultra" else effort
+        assert sent["previous_response_id"] == anchor
+        assert sent["reasoning"] == {"effort": wire_effort}
+        wire_reset = {"type": "configuration_update", "reasoning": {"effort": wire_effort}}
+        normalized_user = {"role": "user", "content": "Continue"}
+        assert sent["input"] == [wire_reset, tool_output if history == "replay" else normalized_user]
+        await service.drain_persistence_tasks(timeout_seconds=5)
+        async with SessionLocal() as db:
+            assert list((await db.execute(select(ApiKeyUsageReservation.status))).scalars()) == []
+    finally:
+        transport_health.clear_upstream_websocket_transport_failure()

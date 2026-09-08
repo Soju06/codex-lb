@@ -53,6 +53,15 @@ preparation SHALL be idempotent.
 - **AND** streaming and collected HTTP routes preserve the original full-resend item count and fingerprint for bridge completion bookkeeping
 - **AND** a subsequent full resend matching that stored prefix remains eligible for continuation anchoring and fresh-replay recovery
 
+#### Scenario: A pre-submit HTTP fallback retains continuation policy
+
+- **GIVEN** an anchored subscription Astra request uses a reasoning-restricted key without an applicable usage reservation
+- **WHEN** the HTTP bridge encounters an eligible pre-submit WebSocket transport failure and retries over raw HTTP
+- **THEN** the fallback SHALL trim stored replay input before applying the same continuation policy as the other HTTP paths
+- **AND** the forwarded body SHALL retain exactly one required leading update and the client-supplied anchor
+- **AND** Ultra SHALL retain its client identity through validation and serialize as Max only on the subscription wire
+- **AND** fallback eligibility, account ownership and reservation settlement SHALL remain unchanged
+
 #### Scenario: Injected Ultra resets survive repeated anchor advances
 
 - **GIVEN** a proxy-injected HTTP-bridge anchor for an Ultra-only key

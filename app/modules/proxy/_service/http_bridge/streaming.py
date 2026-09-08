@@ -562,6 +562,13 @@ def _http_bridge_durable_owner_is_dead(
     return owner_instance_is_dead or process_epoch_is_dead or not lookup.lease_is_active(now=utcnow())
 
 
+def _prepare_http_fallback_payload(payload: ResponsesRequest, api_key: ApiKeyData | None) -> ResponsesRequest:
+    if payload.previous_response_id is not None and isinstance(payload.input, list):
+        payload = payload.model_copy(update={"input": _trim_http_bridge_previous_response_input_items(payload.input)})
+    validate_astra_request(payload, api_key)
+    return payload
+
+
 def _http_bridge_payload_is_account_neutral_fresh_replay(payload: ResponsesRequest) -> bool:
     return responses_payload_is_account_neutral_fresh_replay(payload.to_replay_safety_payload())
 
@@ -1054,11 +1061,7 @@ class _HTTPBridgeStreamingMixin:
                 runtime_config = dataclasses.replace(runtime_config, enabled=False)
             force_upstream_stream_transport = "http"
         if not runtime_config.enabled:
-            if payload.previous_response_id is not None and isinstance(payload.input, list):
-                payload = payload.model_copy(
-                    update={"input": _trim_http_bridge_previous_response_input_items(payload.input)}
-                )
-            validate_astra_request(payload, api_key)
+            payload = _prepare_http_fallback_payload(payload, api_key)
             stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
             async for line in stream_with_retry(
                 payload,
@@ -1211,6 +1214,7 @@ class _HTTPBridgeStreamingMixin:
                     )
         if not bridge_transport_unavailable:
             return
+        payload = _prepare_http_fallback_payload(payload, api_key)
         logger.warning(
             "stream_responses http bridge upstream unavailable; retrying over http upstream transport request_id=%s",
             request_id,

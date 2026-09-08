@@ -61,7 +61,7 @@ The July settings-surface reduction (#1340, 164 → ~114 fields) came with a tes
 - D1 explicit env lock for T3 values (GitOps/enterprise), tied to the RBAC plan.
 - D2 tier of `DASHBOARD_AUTH_MODE` (proposed T1: reverse-proxy dependent; dashboard edit risks self-lockout).
 - D3 leader election (proposed T1) vs scheduler on/off toggles (proposed T3).
-- D4 telemetry: `TELEMETRY_ENABLED` as T3 with an env opt-out seed; `TELEMETRY_ENDPOINT` as T1.
+- D4 telemetry: `TELEMETRY_ENABLED` as T3 with the environment as the fallback for an undecided consent state (no seed); `TELEMETRY_ENDPOINT` as T1.
 - D5 migration order and release batching for the 42 tunables and 16 flags.
 
 ## Failure modes

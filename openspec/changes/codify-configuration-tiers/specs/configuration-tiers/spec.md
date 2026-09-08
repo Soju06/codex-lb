@@ -12,7 +12,7 @@ Every configurable value SHALL belong to exactly one tier, chosen with the discr
 | T3 | Behaviour tunable | `dashboard_settings` (or another database configuration table) | no | no | routing strategy, caps, timeouts, retries, circuit breakers, retention, feature toggles, image and model policy |
 | T4 | Incident debug | environment permitted; dashboard toggle recommended | no | yes | trace channels |
 
-A value that is needed before the database is reachable is T0. A value that may legitimately differ between two replicas is T1 (or T4 for debug-only channels). Every other operator-changeable value is T3. Every field of `Settings` in `app/core/config/settings.py` MUST declare its tier in field metadata (`json_schema_extra={"tier": "T0" | "T1" | "T2" | "T3" | "T4"}`), and the CI check `check_settings_tiers.py` (introduced by the slop-removal B4 change) MUST fail when a field declares no tier.
+The tier is decided in order: a value that is needed before the database is reachable is T0; otherwise a value that may legitimately differ between two replicas is T1 (or T4 for a debug-only channel); otherwise a credential or token is T2; every other operator-changeable value is T3. Every field of `Settings` in `app/core/config/settings.py` MUST declare its tier in field metadata (`json_schema_extra={"tier": "T0" | "T1" | "T2" | "T3" | "T4"}`), and the CI check `check_settings_tiers.py` (introduced by the slop-removal B4 change) MUST fail when a field declares no tier.
 
 #### Scenario: Replica question places a per-instance value in the environment
 
@@ -33,7 +33,7 @@ A value that is needed before the database is reachable is T0. A value that may 
 
 ### Requirement: Precedence is code default, then environment, then dashboard
 
-For every T3 setting the effective value MUST be resolved as: the dashboard value when it is non-NULL; otherwise the environment value when the variable is set; otherwise the code default. An environment value MUST NOT override a non-NULL dashboard value, and no code path MAY invert this order (environment-wins kill switches, environment values that gate whether a dashboard value is honoured, sentinel dashboard values that defer to the environment, or `max()`/`min()` merges of environment and dashboard values are all prohibited).
+For every T3 setting the effective value MUST be resolved as: the dashboard value when it is non-NULL; otherwise the environment value when the setting has an environment fallback and the variable is set; otherwise the code default. An environment value MUST NOT override a non-NULL dashboard value, and no code path MAY invert this order (environment-wins kill switches, environment values that gate whether a dashboard value is honoured, sentinel dashboard values that defer to the environment, or `max()`/`min()` merges of environment and dashboard values are all prohibited). Where another capability specification currently mandates such an inversion (the `telemetry` environment kill switch, the `rate-limit-reset-credits` polling toggle that gates `auto_redeem_reset_credits_before_expiry`), that specification MUST be amended to this precedence in the same change that removes the inversion from code; until then the inversion is a tracked defect, not an exception to this requirement.
 
 #### Scenario: Dashboard value wins over environment
 
@@ -55,7 +55,7 @@ For every T3 setting the effective value MUST be resolved as: the dashboard valu
 
 ### Requirement: Environment values are fallbacks, never seeds
 
-When the settings row is created for the first time, every T3 dashboard column that has an environment fallback MUST be left NULL. The creation path MUST NOT copy process environment values into non-NULL dashboard columns. A NULL dashboard column continues to inherit the environment value (or code default) until an operator explicitly sets a value through the dashboard or the settings API.
+When the settings row is created for the first time, every T3 dashboard column that has an environment fallback MUST be left NULL. The creation path MUST NOT copy process environment values into non-NULL dashboard columns. A NULL dashboard column continues to inherit the environment value (or code default) until an operator explicitly sets a value through the dashboard or the settings API. A NOT NULL dashboard column that is seeded once from an environment field which no other code reads MUST be resolved by deleting the environment field (the column's code default becomes the only default), not by making the column nullable; the deleted name follows the retirement rule below. Rows that already exist when the seed is removed MUST be left as they are: a non-NULL value whose provenance is unknown (it may be a seed or an operator edit) MUST NOT be cleared by a migration; the operator clears it through the dashboard or the settings API.
 
 #### Scenario: Environment change after first boot takes effect
 
@@ -68,6 +68,18 @@ When the settings row is created for the first time, every T3 dashboard column t
 - **GIVEN** a T3 setting inheriting its environment value
 - **WHEN** an operator sets a value through `PUT /api/settings`
 - **THEN** the dashboard column becomes non-NULL, the effective value is the operator's value, and later environment changes have no effect until the operator clears the value
+
+#### Scenario: Existing rows are not cleared when the seed is removed
+
+- **GIVEN** an existing install whose cap columns hold non-NULL values written by the first-boot seed or by an operator
+- **WHEN** the release that removes the seed is applied
+- **THEN** no migration sets those columns to NULL; the settings API reports `source: "dashboard"` for them until the operator clears the value
+
+#### Scenario: Seed-once column loses its environment field
+
+- **GIVEN** a NOT NULL `dashboard_settings` column whose only environment reader is the first-row seed (for example `warmup_model`)
+- **WHEN** the column is aligned to this requirement
+- **THEN** the environment field is removed from `Settings`, its name is added to the removed-settings registry, and first-row creation persists the column's code default
 
 ### Requirement: One resolver computes effective values and consumers read the snapshot
 
@@ -86,19 +98,25 @@ The effective value of a T3 setting MUST be computed only by the effective-value
 
 ### Requirement: The settings API reports value, source, environment value and default
 
-For every T3 setting, `GET /api/settings` MUST expose an object with `value` (the effective value), `source` (`"default"`, `"env"` or `"dashboard"`), `env_value` (the environment value, or the code default when the variable is unset) and `default` (the code default). `PUT /api/settings` MUST accept a concrete value to set the dashboard column and `null` to clear it and return to inheritance. The dashboard MUST show a T3 setting whose `source` is not `"dashboard"` as inherited. Pre-existing flat fields (`<name>`, `<name>_environment_value`, `<name>_override`) MAY be exposed alongside the object for one stable release and then removed.
+For every T3 setting, `GET /api/settings` MUST expose an object with `value` (the effective value), `source` (`"default"`, `"env"` or `"dashboard"`), `env_value` (the environment value, or the code default when the variable is unset) and `default` (the code default). For a T3 setting without an environment fallback (a database-only column) `env_value` MUST be omitted and `source` MUST be `"default"` when the stored value equals the code default and `"dashboard"` otherwise. `PUT /api/settings` MUST accept a concrete value to set the dashboard column and `null` to clear it: for a nullable override column `null` sets the column to NULL and the setting returns to inheritance; for a NOT NULL database-only column `null` resets the column to the code default. The dashboard MUST show a T3 setting whose `source` is not `"dashboard"` as inherited. Pre-existing flat fields (`<name>`, `<name>_environment_value`, `<name>_override`) MAY be exposed alongside the object for one stable release and then removed.
 
 #### Scenario: Provenance of an operator-set value
 
-- **GIVEN** a T3 setting with a non-NULL dashboard value
+- **GIVEN** a T3 setting with an environment fallback whose dashboard column is non-NULL
 - **WHEN** `GET /api/settings` is called
 - **THEN** the setting's `source` is `"dashboard"`, `value` equals the dashboard value, and `env_value` and `default` are reported alongside
 
 #### Scenario: Clearing returns to inheritance
 
-- **GIVEN** a T3 setting with a non-NULL dashboard value
+- **GIVEN** a T3 setting with an environment fallback and a non-NULL dashboard value
 - **WHEN** `PUT /api/settings` sets it to `null`
 - **THEN** the dashboard column becomes NULL and a subsequent `GET` reports `source` as `"env"` (variable set) or `"default"` (variable unset)
+
+#### Scenario: Resetting a database-only setting
+
+- **GIVEN** a T3 setting stored in a NOT NULL column with no environment fallback (for example `warmup_model`)
+- **WHEN** `PUT /api/settings` sets it to `null`
+- **THEN** the column holds the code default and a subsequent `GET` reports `source: "default"` with no `env_value`
 
 ### Requirement: T3 settings have a database home
 

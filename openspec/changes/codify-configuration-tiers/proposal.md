@@ -10,7 +10,7 @@ codex-lb keeps its configuration in two stores with no rule about which value be
 - Require a single resolver (`SettingsService` effective-value functions) and `SettingsCache` snapshot reads for T3 fields, a `value / source / env_value / default` shape per T3 setting in the settings API, a declared tier on every `Settings` field, a database home (or an explicit `migrating_until` marker) for every T3 field, no `os.environ` access outside `app/core/config/settings.py`, T0/T1-only content in `.env.example` and `docs/configuration.md`, and a one-stable-release warning window (via the removed-settings registry) before an environment name is deleted — with immediate deletion for environment fields nobody reads.
 - Amend `proxy-admission-control` "Dashboard-configurable account concurrency caps": a settings row created for the first time leaves the cap overrides NULL (inherit) instead of persisting the process environment values.
 - Add `PRINCIPLES.md` P6 "The dashboard is the primary configuration surface", a matching CONTRIBUTING simplicity gate, a PR-template line asking for the tier of every new setting, and a "Where settings live" paragraph in `docs/configuration.md` linking back to the spec.
-- This change is documentation and contract only. Code enforcement (`check_settings_tiers.py`, tier metadata, the field-count ratchet) lands in the slop-removal B4 PR; the seed→NULL migration, `telemetry_enabled` precedence flip and `upstream_stream_transport` sentinel removal in B5; promotion of out-of-`Settings` `os.environ` reads in B6.
+- This change is documentation and contract only. Code enforcement (`check_settings_tiers.py`, tier metadata, the field-count ratchet) lands in the slop-removal B4 PR; the first-boot seed removal (existing rows preserved), `telemetry_enabled` precedence flip and `upstream_stream_transport` sentinel removal in B5; promotion of out-of-`Settings` `os.environ` reads in B6.
 
 ## Capabilities
 
@@ -21,6 +21,8 @@ codex-lb keeps its configuration in two stores with no rule about which value be
 ### Modified Capabilities
 
 - `proxy-admission-control`: first-row creation no longer persists process environment values for the per-account cap overrides; NULL inherits the environment (or code default) until an operator sets a value, so an environment change made after first boot takes effect.
+
+Known conflicts not amended here: `telemetry` ("Settings toggle and environment kill switch", env overrides persisted consent) and `rate-limit-reset-credits` ("Reset credit polling interval is configurable", env toggle gates a dashboard opt-in) still mandate inversions of the new precedence. Their deltas belong to the B5 change that removes the inversions from code (tasks 3.5); this change is not archived before that.
 
 ## Impact
 

@@ -69,8 +69,8 @@ an AI assistant most often needs are:
 - [Merge gates](.github/CONTRIBUTING.md#merge-gates) — CI green +
   actionable CodeRabbit findings addressed + `mergeable=CLEAN` +
   OpenSpec change folder for behavior changes + `Fixes #N` /
-  `Closes #N` for issue cover + the five simplicity rules
-  (PRINCIPLES.md P1-P5; see
+  `Closes #N` for issue cover + the six simplicity rules
+  (PRINCIPLES.md P1-P6; see
   [Simplicity gates](.github/CONTRIBUTING.md#simplicity-gates)).
 - [Collaborator rules](.github/CONTRIBUTING.md#collaborator-rules) —
   no self-merge by default; large PRs get split (≈1-concern per PR,

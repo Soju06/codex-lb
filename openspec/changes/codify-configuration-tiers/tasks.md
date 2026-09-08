@@ -17,10 +17,12 @@
 
 ## 3. Data-model alignment (slop-removal B5 PR)
 
-- [ ] 3.1 `SettingsRepository.get_or_create` stops copying environment values into `proxy_account_response_create_limit`, `proxy_account_stream_limit`, `proxy_account_stream_recovery_reserve`, `proxy_api_key_fair_share_congestion_threshold_pct`; alembic migration sets existing rows to NULL where the stored value equals the current environment value.
-- [ ] 3.2 `telemetry_enabled`: dashboard decision wins over a non-NULL dashboard value; environment remains the pre-first-boot opt-out seed only.
+- [ ] 3.1 `SettingsRepository.get_or_create` stops copying environment values into `proxy_account_response_create_limit`, `proxy_account_stream_limit`, `proxy_account_stream_recovery_reserve`, `proxy_api_key_fair_share_congestion_threshold_pct`; existing rows are preserved (equality with the current environment value cannot prove a value was seeded rather than set by an operator) and the release notes tell operators on existing installs to clear a cap in the dashboard to return to inheritance.
+- [ ] 3.2 `telemetry_enabled`: `resolve_consent` treats the environment value as the fallback for an undecided (NULL) consent decision — `source: "env"` still suppresses the consent dialog — and a persisted dashboard decision wins over it; the environment value is never written into the consent row.
 - [ ] 3.3 `upstream_stream_transport`: remove the `default` sentinel and the environment field; Helm `configmap.yaml` and `docs/client-setup.md` updated.
 - [ ] 3.4 `GET /api/settings` exposes `{value, source, env_value, default}` per T3 setting; `PUT` accepts `null` to clear; flat `*_environment_value` / `*_override` fields kept for one release; dashboard shows an "inherited from env/default" badge when `source != "dashboard"`.
+- [ ] 3.5 Spec deltas that B5 MUST carry so the archived specs do not contradict `configuration-tiers`: MODIFIED `telemetry` "Settings toggle and environment kill switch" (environment is the fallback for an undecided consent state, never a seed; a persisted dashboard decision wins) and MODIFIED `rate-limit-reset-credits` "Reset credit polling interval is configurable" (`rate_limit_reset_credits_refresh_enabled` gets a dashboard home or the AND-gate on `auto_redeem_reset_credits_before_expiry` is removed).
+- [ ] 3.6 Seed-once NOT NULL columns (`http_downstream_transport_policy`, `openai_cache_affinity_max_age_seconds`, `warmup_model`): delete the environment fields (their only reader is the first-row seed), add the names to `_REMOVED_SETTINGS`, remove `CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS` from Helm `configmap.yaml`; `proxy-warmup` "Warmup model defaults on first settings creation" stays true via the code default.
 
 ## 4. Environment-read confinement (slop-removal B6 PR)
 

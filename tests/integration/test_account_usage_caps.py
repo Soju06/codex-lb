@@ -245,6 +245,28 @@ async def test_caps_api_round_trip_and_removal(async_client):
 
 
 @pytest.mark.asyncio
+async def test_caps_api_succeeds_when_post_commit_cache_refresh_fails(async_client, monkeypatch):
+    await _seed()
+    cache = get_routing_availability_cache()
+
+    async def fail_refresh() -> None:
+        raise RuntimeError("cache refresh failed")
+
+    monkeypatch.setattr(cache, "refresh_usage_caps_from_db", fail_refresh)
+    response = await async_client.put(
+        "/api/accounts/capped/usage-caps",
+        json={"usageCap5HPercent": 70, "usageCapWeeklyPercent": 60},
+    )
+
+    assert response.status_code == 200
+    async with SessionLocal() as session:
+        account = await session.get(Account, "capped")
+        assert account is not None
+        assert account.usage_cap_5h_percent == 70
+        assert account.usage_cap_weekly_percent == 60
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("value", [0, -1, 101, "80", True])
 async def test_caps_api_rejects_invalid_values_atomically(async_client, value):
     await _seed()

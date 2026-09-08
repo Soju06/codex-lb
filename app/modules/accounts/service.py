@@ -68,7 +68,6 @@ from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.proxy.account_cache import (
     clear_account_routing_unavailable,
     get_account_selection_cache,
-    get_routing_availability_cache,
     mark_account_routing_unavailable,
     propagate_account_routing_change,
     refresh_usage_cap_caches_after_write,
@@ -685,8 +684,7 @@ class AccountsService:
     async def set_usage_caps(self, account_id: str, *, cap_5h: float | None, cap_weekly: float | None) -> bool:
         result = await self._repo.update_usage_caps(account_id, cap_5h=cap_5h, cap_weekly=cap_weekly)
         if result:
-            get_account_selection_cache().invalidate()
-            await get_routing_availability_cache().refresh_usage_caps_from_db()
+            await refresh_usage_cap_caches_after_write()
         return result
 
     async def delete_account(self, account_id: str, *, delete_history: bool = False) -> bool:

@@ -76,6 +76,9 @@ def test_resolve_pins_expire_by_is_the_clear_time_plus_the_pin_idle_ttl() -> Non
     # pinned conversations are gone 7 days after the clear -- 22 days before the
     # lookup window itself closes. The dashboard shows this date, not the deadline.
     drain_until = resolve_drain_until("src_a", None, None, NOW)
+    # ``is not None`` narrows ``datetime | None`` for the type checker (an ``==``
+    # assertion does not) so the arithmetic below type-checks under ``ty``.
+    assert drain_until is not None
     assert drain_until == NOW + DRAIN_WINDOW
     assert resolve_pins_expire_by(drain_until) == NOW + PIN_IDLE_TTL
     assert resolve_pins_expire_by(drain_until) == drain_until - PIN_TOMBSTONE_GRACE - timedelta(days=1)

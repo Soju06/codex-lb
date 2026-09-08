@@ -1309,6 +1309,7 @@
   "settings.routing.subscriptionOverflow.ineligibleSource": "{{name}} (더 이상 적격이 아님)",
   "settings.routing.subscriptionOverflow.label": "모든 subscription Account가 소진되면 Model source로 overflow",
   "settings.routing.subscriptionOverflow.loading": "Model sources 불러오는 중...",
+  "settings.routing.subscriptionOverflow.loadFailed": "Model sources를 불러오지 못했습니다. 다시 불러올 때까지 overflow를 설정할 수 없습니다.",
   "settings.routing.subscriptionOverflow.off": "Off",
   "settings.routing.subscriptionOverflow.placeholder": "Model source 선택",
   "settings.routing.subscriptionOverflow.preflight.blockers.source_kind_unsupported": "Source kind가 OpenAI 호환이 아닙니다",

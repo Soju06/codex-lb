@@ -213,6 +213,7 @@ export function SettingsPage() {
                 accountsLoading={accountsQuery.isLoading}
                 modelSources={modelSourcesQuery.data?.sources ?? []}
                 modelSourcesLoading={modelSourcesQuery.isLoading}
+                modelSourcesError={modelSourcesQuery.error !== null}
                 busy={controlsDisabled}
                 onSave={handleSave}
               />

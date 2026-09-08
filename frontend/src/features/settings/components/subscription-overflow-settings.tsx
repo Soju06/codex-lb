@@ -35,6 +35,7 @@ export type SubscriptionOverflowSettingsProps = {
   settings: DashboardSettings;
   modelSources?: ModelSource[];
   modelSourcesLoading?: boolean;
+  modelSourcesError?: boolean;
   busy: boolean;
   onSave: (payload: SettingsUpdateRequest) => Promise<void>;
 };
@@ -43,6 +44,7 @@ export function SubscriptionOverflowSettings({
   settings,
   modelSources = EMPTY_SOURCES,
   modelSourcesLoading = false,
+  modelSourcesError = false,
   busy,
   onSave,
 }: SubscriptionOverflowSettingsProps) {
@@ -55,10 +57,14 @@ export function SubscriptionOverflowSettings({
   // stays visible but unselectable, like a blocked single-account choice.
   const ineligibleSelectedSource =
     selectedSource !== undefined && !isSubscriptionOverflowEligibleSource(selectedSource) ? selectedSource : null;
+  // While the source list is loading or failed to load nothing is known about
+  // which sources exist: no deleted marker and no empty-state prompt.
+  const modelSourcesUnavailable = modelSourcesLoading || modelSourcesError;
+  const unresolvedSelectedSourceId =
+    selectedSourceId !== null && selectedSource === undefined ? selectedSourceId : null;
   // A dangling id (source deleted out of band) means "off" server-side; show
   // it so the operator can see what the row still names and clear it.
-  const deletedSelectedSourceId =
-    selectedSourceId !== null && selectedSource === undefined && !modelSourcesLoading ? selectedSourceId : null;
+  const deletedSelectedSourceId = modelSourcesUnavailable ? null : unresolvedSelectedSourceId;
   const pinsExpireBy = settings.subscriptionOverflowPinsExpireBy;
   const draining = selectedSourceId === null && isSubscriptionOverflowDraining(pinsExpireBy);
   const label = t("settings.routing.subscriptionOverflow.label");
@@ -106,6 +112,11 @@ export function SubscriptionOverflowSettings({
                 {t("settings.routing.subscriptionOverflow.deletedSource", { id: deletedSelectedSourceId })}
               </SelectItem>
             ) : null}
+            {modelSourcesError && unresolvedSelectedSourceId ? (
+              <SelectItem value={unresolvedSelectedSourceId} disabled>
+                {unresolvedSelectedSourceId}
+              </SelectItem>
+            ) : null}
             {eligibleSources.map((source) => (
               <SelectItem key={source.id} value={source.id}>
                 {source.name}
@@ -114,7 +125,12 @@ export function SubscriptionOverflowSettings({
           </SelectContent>
         </Select>
       </div>
-      {!modelSourcesLoading && eligibleSources.length === 0 ? (
+      {modelSourcesError ? (
+        <p role="alert" className="text-xs text-destructive">
+          {t("settings.routing.subscriptionOverflow.loadFailed")}
+        </p>
+      ) : null}
+      {!modelSourcesUnavailable && eligibleSources.length === 0 ? (
         <p className="text-xs text-muted-foreground">{t("settings.routing.subscriptionOverflow.empty")}</p>
       ) : null}
       {draining ? (

@@ -1189,6 +1189,7 @@
   "settings.routing.subscriptionOverflow.off": "Off",
   "settings.routing.subscriptionOverflow.placeholder": "Choose model source",
   "settings.routing.subscriptionOverflow.loading": "Loading model sources...",
+  "settings.routing.subscriptionOverflow.loadFailed": "Model sources could not be loaded; overflow cannot be configured until they load.",
   "settings.routing.subscriptionOverflow.empty": "Add an OpenAI-compatible model source with Responses support to enable overflow.",
   "settings.routing.subscriptionOverflow.ineligibleSource": "{{name}} (no longer eligible)",
   "settings.routing.subscriptionOverflow.deletedSource": "{{id}} (deleted)",

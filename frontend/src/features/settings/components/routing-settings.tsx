@@ -78,6 +78,7 @@ export type RoutingSettingsProps = {
   accountsLoading?: boolean;
   modelSources?: ModelSource[];
   modelSourcesLoading?: boolean;
+  modelSourcesError?: boolean;
   busy: boolean;
   onSave: (payload: SettingsUpdateRequest) => Promise<void>;
 };
@@ -183,6 +184,7 @@ export function RoutingSettings({
   accountsLoading = false,
   modelSources,
   modelSourcesLoading = false,
+  modelSourcesError = false,
   busy,
   onSave,
 }: RoutingSettingsProps) {
@@ -760,6 +762,7 @@ export function RoutingSettings({
             settings={settings}
             modelSources={modelSources}
             modelSourcesLoading={modelSourcesLoading}
+            modelSourcesError={modelSourcesError}
             busy={busy}
             onSave={onSave}
           />

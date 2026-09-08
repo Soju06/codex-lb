@@ -124,6 +124,45 @@ describe("SubscriptionOverflowSettings", () => {
     expect(screen.getByText(/Add an OpenAI-compatible model source with Responses support/)).toBeInTheDocument();
   });
 
+  it("reports a failed model-source load instead of asking for a source", () => {
+    renderWithProviders(
+      <SubscriptionOverflowSettings
+        settings={BASE_SETTINGS}
+        modelSources={[]}
+        modelSourcesError
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("Model sources could not be loaded");
+    expect(
+      screen.queryByText(/Add an OpenAI-compatible model source with Responses support/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not mark the designated source deleted while the source list failed to load", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/settings/subscription-overflow/preflight", () =>
+        HttpResponse.json(createSubscriptionOverflowPreflight({ sourceId: "src_responses" })),
+      ),
+    );
+    renderWithProviders(
+      <SubscriptionOverflowSettings
+        settings={{ ...BASE_SETTINGS, subscriptionOverflowSourceId: "src_responses" }}
+        modelSources={[]}
+        modelSourcesError
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const trigger = screen.getByRole("combobox", { name: OVERFLOW_LABEL });
+    expect(trigger).toHaveTextContent("src_responses");
+    await user.click(trigger);
+    expect(screen.queryByRole("option", { name: /\(deleted\)/ })).not.toBeInTheDocument();
+  });
+
   it("renders the preflight report for the designated source", async () => {
     server.use(
       http.get("/api/settings/subscription-overflow/preflight", ({ request }) => {

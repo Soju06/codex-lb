@@ -1189,6 +1189,7 @@
   "settings.routing.subscriptionOverflow.off": "关闭",
   "settings.routing.subscriptionOverflow.placeholder": "选择 Model source",
   "settings.routing.subscriptionOverflow.loading": "正在加载 Model sources...",
+  "settings.routing.subscriptionOverflow.loadFailed": "无法加载 Model sources；在重新加载之前无法配置溢出。",
   "settings.routing.subscriptionOverflow.empty": "请先添加支持 Responses 的 OpenAI 兼容 Model source，再启用溢出。",
   "settings.routing.subscriptionOverflow.ineligibleSource": "{{name}}（已不再符合条件）",
   "settings.routing.subscriptionOverflow.deletedSource": "{{id}}（已删除）",

@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.core.balancer import USAGE_LIMIT_REACHED
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, StickySession
@@ -168,17 +169,23 @@ async def _foreground_selection(
     )
 
 
-async def _probe(service: ProxyService, *, model: str | None, service_tier: str | None = None) -> PoolExhaustion | None:
-    return await probe_pool_usage_exhaustion(service, api_key=None, model=model, service_tier=service_tier)
+async def _probe(
+    service: ProxyService, *, model: str | None, service_tier: str | None = None, settings: object | None = None
+) -> PoolExhaustion | None:
+    """Probe with the settings snapshot the routing stage hands it (the cached dashboard settings by default)."""
+    snapshot = settings if settings is not None else await get_settings_cache().get()
+    return await probe_pool_usage_exhaustion(
+        service, settings=snapshot, api_key=None, model=model, service_tier=service_tier
+    )
 
 
 async def _probe_leaving_runtime_untouched(
-    service: ProxyService, *, model: str | None, service_tier: str | None = None
+    service: ProxyService, *, model: str | None, service_tier: str | None = None, settings: object | None = None
 ) -> PoolExhaustion | None:
     """Probe and assert the live balancer runtime is byte-identical before and after."""
     runtime = service._load_balancer._runtime
     runtime_before = deepcopy(runtime)
-    exhaustion = await _probe(service, model=model, service_tier=service_tier)
+    exhaustion = await _probe(service, model=model, service_tier=service_tier, settings=settings)
     assert runtime == runtime_before, "the probe must not create, lease, refresh or mark any runtime entry"
     return exhaustion
 
@@ -332,3 +339,27 @@ async def test_fresh_rate_limit_without_usage_evidence_is_not_exhaustion(db_setu
     status, envelope = selection_failure_response(selection)
     assert status == 503
     assert envelope["error"]["code"] == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_drain_strategies_decline_the_probe_even_when_the_pool_is_exhausted(db_setup) -> None:
+    """Design decision 28: probe/foreground parity is established only outside the drain family, so under
+    ``sequential_drain`` / ``reset_drain`` / ``single_account`` the probe declines (not exhausted) for a pool that
+    the same probe reports exhausted under the default strategy, and it still touches no runtime state."""
+
+    now_epoch = int(time.time())
+    reset_at = now_epoch + 1800
+    await _seed(
+        [(_exhausted("acc_exhausted_drain", now_epoch=now_epoch, reset_at=reset_at), 100.0, 40.0)],
+        primary_reset_at=reset_at,
+        secondary_reset_at=reset_at + 6 * 86400,
+    )
+    service = ProxyService(_repo_factory)
+
+    parity = await _probe_leaving_runtime_untouched(service, model=_MODEL)
+    assert parity is not None and parity.resets_at == reset_at
+
+    for routing_strategy in ("sequential_drain", "reset_drain", "single_account"):
+        drain_settings = SimpleNamespace(routing_strategy=routing_strategy, single_account_id="acc_exhausted_drain")
+        assert await _probe_leaving_runtime_untouched(service, model=_MODEL, settings=drain_settings) is None
+    assert service._load_balancer._runtime == {}

@@ -416,6 +416,14 @@ if PROMETHEUS_AVAILABLE:
         registry=REGISTRY,
         **({"multiprocess_mode": "liveall"} if MULTIPROCESS_MODE else {}),
     )
+    # Read-only pool-exhaustion probe (#2123 WP-C1, design decision 28): declines
+    # by reason; the label set is closed (``drain_strategy``).
+    pool_exhaustion_probe_declined_total = Counter(
+        "codex_lb_pool_exhaustion_probe_declined_total",
+        "Total read-only pool-exhaustion probes that declined to evaluate the pool, by reason",
+        ["reason"],
+        registry=REGISTRY,
+    )
 
     def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
@@ -495,6 +503,7 @@ else:
     model_source_bulkhead_in_flight: GaugeLike | None = None
     model_source_usage_estimated_total: CounterLike | None = None
     model_source_live_pins: GaugeLike | None = None
+    pool_exhaustion_probe_declined_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -559,6 +568,7 @@ __all__ = [
     "model_source_live_pins",
     "model_source_timeout_total",
     "model_source_usage_estimated_total",
+    "pool_exhaustion_probe_declined_total",
     "prometheus_client",
     "proxy_phase_latency_seconds",
     "rate_limit_hits_total",

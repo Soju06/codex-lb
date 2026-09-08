@@ -4418,7 +4418,9 @@ async def test_exhaustion_probe_ignores_account_caps_that_close_the_opportunisti
     assert capped.error_code == "opportunistic_burn_window_closed"
 
     runtime_before = deepcopy(service._load_balancer._runtime)
-    exhaustion = await probe_pool_usage_exhaustion(service, api_key=None, model="gpt-5.1", service_tier=None)
+    exhaustion = await probe_pool_usage_exhaustion(
+        service, settings=settings, api_key=None, model="gpt-5.1", service_tier=None
+    )
     assert exhaustion is not None
     assert exhaustion.resets_at == reset_at
     assert exhaustion.selection.error_code == "usage_limit_reached"
@@ -4475,7 +4477,10 @@ async def test_exhaustion_probe_observes_health_tiers_without_refreshing_the_liv
     assert runtime == {}
 
     # The observation neither creates a runtime entry nor refreshes health.
-    assert await probe_pool_usage_exhaustion(service, api_key=None, model="gpt-5.1", service_tier=None) is None
+    assert (
+        await probe_pool_usage_exhaustion(service, settings=settings, api_key=None, model="gpt-5.1", service_tier=None)
+        is None
+    )
     assert runtime == {}
 
     # The same question asked as a live admission check performs the ordinary refresh.
@@ -4488,7 +4493,10 @@ async def test_exhaustion_probe_observes_health_tiers_without_refreshing_the_liv
 
     # And a subsequent observation still leaves that live state exactly as the refresh left it.
     snapshot = deepcopy(runtime)
-    assert await probe_pool_usage_exhaustion(service, api_key=None, model="gpt-5.1", service_tier=None) is None
+    assert (
+        await probe_pool_usage_exhaustion(service, settings=settings, api_key=None, model="gpt-5.1", service_tier=None)
+        is None
+    )
     assert runtime == snapshot
 
 

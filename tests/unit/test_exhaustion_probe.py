@@ -11,6 +11,7 @@ foreground selection does, with the same ``resets_at``.
 
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import cast
@@ -39,7 +40,10 @@ from app.core.balancer.logic import ROUTING_POLICY_NORMAL
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy._load_balancer import exhaustion_probe as exhaustion_probe_module
 from app.modules.proxy._load_balancer.exhaustion_probe import (
+    DRAIN_ROUTING_STRATEGIES,
+    PROBE_DECLINED_DRAIN_STRATEGY,
     AdmissionProbeService,
     PoolExhaustion,
     probe_pool_usage_exhaustion,
@@ -75,6 +79,10 @@ def _service(selection: AccountSelection) -> tuple[AdmissionProbeService, AsyncM
     return cast(AdmissionProbeService, SimpleNamespace(check_opportunistic_admission=admission)), admission
 
 
+# The settings snapshot the routing stage hands the probe: any strategy outside the drain family.
+_NON_DRAIN_SETTINGS = SimpleNamespace(routing_strategy="capacity_weighted", single_account_id=None)
+
+
 # --- probe contract -----------------------------------------------------------
 
 
@@ -89,7 +97,9 @@ async def test_probe_forwards_the_request_shape_as_an_observation_without_a_leas
     )
     service, admission = _service(exhausted)
 
-    exhaustion = await probe_pool_usage_exhaustion(service, api_key=api_key, model="gpt-5.4", service_tier="priority")
+    exhaustion = await probe_pool_usage_exhaustion(
+        service, settings=_NON_DRAIN_SETTINGS, api_key=api_key, model="gpt-5.4", service_tier="priority"
+    )
 
     admission.assert_awaited_once_with(
         api_key=api_key, model="gpt-5.4", service_tier="priority", lease_kind=None, observe_only=True
@@ -104,7 +114,9 @@ async def test_probe_keeps_a_missing_reset_timestamp() -> None:
         AccountSelection(account=None, error_message="Usage limit reached", error_code=USAGE_LIMIT_REACHED)
     )
 
-    exhaustion = await probe_pool_usage_exhaustion(service, api_key=None, model=None, service_tier=None)
+    exhaustion = await probe_pool_usage_exhaustion(
+        service, settings=_NON_DRAIN_SETTINGS, api_key=None, model=None, service_tier=None
+    )
 
     assert exhaustion is not None
     assert exhaustion.resets_at is None
@@ -160,7 +172,12 @@ async def test_probe_keeps_a_missing_reset_timestamp() -> None:
 async def test_probe_reports_not_exhausted_for_every_other_selection_answer(selection: AccountSelection) -> None:
     service, admission = _service(selection)
 
-    assert await probe_pool_usage_exhaustion(service, api_key=_api_key(), model="gpt-5.4", service_tier=None) is None
+    assert (
+        await probe_pool_usage_exhaustion(
+            service, settings=_NON_DRAIN_SETTINGS, api_key=_api_key(), model="gpt-5.4", service_tier=None
+        )
+        is None
+    )
     admission.assert_awaited_once()
     assert admission.await_args is not None
     assert admission.await_args.kwargs["lease_kind"] is None
@@ -394,8 +411,8 @@ def test_probe_selection_answers_usage_exhaustion_exactly_when_foreground_select
     instant because ordinary selection expires elapsed windows in place. The
     budget subset the two production paths draw from differs
     (``apply_secondary_budget_threshold``): the production-knob instance holds
-    outside the drain strategies (property below) and its drain-strategy
-    divergence is pinned as a strict xfail.
+    outside the drain strategies (property below); under the drain strategies
+    the probe declines instead (``test_probe_declines_under_the_drain_strategies_*``).
     """
     with mock.patch("time.time", return_value=_NOW):
         probe_states = deepcopy(states)
@@ -436,11 +453,18 @@ def test_probe_selection_answers_usage_exhaustion_exactly_when_foreground_select
         assert probe.error_message == foreground.error_message
 
 
+# The complement of the probe's decline set: exactly the strategies the production-knob property below proves.
 _NON_DRAIN_STRATEGIES: tuple[RoutingStrategy, ...] = tuple(
-    strategy
-    for strategy in _ROUTING_STRATEGIES
-    if strategy not in ("sequential_drain", "reset_drain", "single_account")
+    strategy for strategy in _ROUTING_STRATEGIES if strategy not in DRAIN_ROUTING_STRATEGIES
 )
+
+
+def test_probe_decline_set_is_exactly_the_selectors_drain_family() -> None:
+    """The decline set, the proven complement and the selector's own special-cased branch must stay one set."""
+
+    assert DRAIN_ROUTING_STRATEGIES == frozenset({"sequential_drain", "reset_drain", "single_account"})
+    assert DRAIN_ROUTING_STRATEGIES | frozenset(_NON_DRAIN_STRATEGIES) == frozenset(_ROUTING_STRATEGIES)
+    assert DRAIN_ROUTING_STRATEGIES.isdisjoint(_NON_DRAIN_STRATEGIES)
 
 
 @given(
@@ -522,18 +546,15 @@ def _drain_budget_subsets(
     return result.error_code == USAGE_LIMIT_REACHED, result.resets_at
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Pre-existing divergence found by the parity property (reported with #2123 WP-C1 P4): under the drain "
-        "strategies the opportunistic path (apply_secondary_budget_threshold=True) and the foreground path "
-        "(False) select from different budget subsets and return the subset's answer directly, so a pool that "
-        "mixes an available additional-quota-scoped account (ignore_standard_quota=True, exempt from the "
-        "exhaustion predicate) with a usage-exhausted account can be called exhausted by one path and not the "
-        "other. Flip to a passing assertion when the selector evaluates exhaustion over the full pool."
-    ),
-)
-def test_drain_strategy_budget_subsets_agree_on_exhaustion_in_mixed_quota_pools() -> None:
+def test_drain_strategy_budget_subsets_diverge_in_mixed_quota_pools_which_is_why_the_probe_declines() -> None:
+    """Premise of design decision 28, kept as a positive assertion: under the drain strategies the opportunistic
+    path (``apply_secondary_budget_threshold=True``) and the foreground path (``False``) select from different
+    budget subsets and return the subset's answer directly, so a pool mixing an available additional-quota-scoped
+    account (exempt from the exhaustion predicate) with a usage-exhausted account is called exhausted by foreground
+    selection and not by the probe's selector. The probe therefore declines under the drain family instead of
+    claiming parity it cannot establish; when the selector evaluates exhaustion over the full pool this assertion
+    fails and the decline can be revisited."""
+
     # Available, but outside both budget subsets (preserve) and outside the exhaustion
     # predicate's eligibility (additional-quota scoped).
     exempt_available = AccountState(
@@ -561,7 +582,9 @@ def test_drain_strategy_budget_subsets_agree_on_exhaustion_in_mixed_quota_pools(
         states, apply_secondary_budget_threshold=False, traffic_class=TRAFFIC_CLASS_FOREGROUND
     )
 
-    assert probe_path == foreground_path
+    assert probe_path != foreground_path
+    assert foreground_path == (True, int(_NOW + 3600)), "foreground selection answers the structured 429"
+    assert probe_path == (False, None), "the probe's selector falls back to the whole pool and sees the exempt account"
 
 
 def test_probe_selection_reports_the_earliest_exhausted_window_reset() -> None:
@@ -601,3 +624,122 @@ def test_probe_selection_reports_the_earliest_exhausted_window_reset() -> None:
     assert result.error_code == USAGE_LIMIT_REACHED
     # The secondary-window exhaustion resets at +3d, not at its unrelated +300s primary reset.
     assert result.resets_at == int(_NOW + 1800)
+
+
+# --- drain-strategy decline (design decision 28) --------------------------------
+
+_EXHAUSTED_ANSWER = AccountSelection(
+    account=None,
+    error_message="Rate limit exceeded. Try again in 30m",
+    error_code=USAGE_LIMIT_REACHED,
+    resets_at=1_700_001_800,
+)
+
+
+class _LabelRecorder:
+    """Records ``labels(**kw).inc()`` so the decline scenario can assert the exact label set."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str]] = []
+        self.incs = 0
+
+    def labels(self, **labels: str) -> _LabelRecorder:
+        self.calls.append(labels)
+        return self
+
+    def inc(self, amount: float = 1) -> None:
+        del amount
+        self.incs += 1
+
+
+@pytest.mark.parametrize("routing_strategy", sorted(DRAIN_ROUTING_STRATEGIES))
+@pytest.mark.asyncio
+async def test_probe_declines_under_the_drain_strategies_without_consulting_the_selector(
+    routing_strategy: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """account-routing 'Drain strategies never trigger overflow in v1': not exhausted, no selector call, one
+    ``codex_lb_pool_exhaustion_probe_declined_total{reason=drain_strategy}`` increment and a reason log line."""
+
+    counter = _LabelRecorder()
+    monkeypatch.setattr(exhaustion_probe_module, "pool_exhaustion_probe_declined_total", counter)
+    service, admission = _service(_EXHAUSTED_ANSWER)
+
+    with caplog.at_level(logging.INFO, logger=exhaustion_probe_module.logger.name):
+        exhaustion = await probe_pool_usage_exhaustion(
+            service,
+            settings=_settings(routing_strategy, "acc_a"),
+            api_key=_api_key(),
+            model="gpt-5.4",
+            service_tier="priority",
+        )
+
+    assert exhaustion is None
+    admission.assert_not_awaited()
+    assert counter.calls == [{"reason": PROBE_DECLINED_DRAIN_STRATEGY}]
+    assert counter.incs == 1
+    declined = [record for record in caplog.records if "pool_exhaustion_probe_declined" in record.getMessage()]
+    assert len(declined) == 1
+    message = declined[0].getMessage()
+    assert f"reason={PROBE_DECLINED_DRAIN_STRATEGY}" in message
+    assert f"routing_strategy={routing_strategy}" in message
+    assert "model=gpt-5.4" in message
+
+
+@pytest.mark.parametrize("routing_strategy", _NON_DRAIN_STRATEGIES)
+@pytest.mark.asyncio
+async def test_probe_follows_the_selector_outside_the_drain_strategies(
+    routing_strategy: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counter = _LabelRecorder()
+    monkeypatch.setattr(exhaustion_probe_module, "pool_exhaustion_probe_declined_total", counter)
+    service, admission = _service(_EXHAUSTED_ANSWER)
+
+    exhaustion = await probe_pool_usage_exhaustion(
+        service, settings=_settings(routing_strategy), api_key=_api_key(), model="gpt-5.4", service_tier=None
+    )
+
+    assert exhaustion == PoolExhaustion(resets_at=1_700_001_800, selection=_EXHAUSTED_ANSWER)
+    admission.assert_awaited_once()
+    assert counter.calls == []
+
+
+@pytest.mark.parametrize(
+    "settings_snapshot",
+    [
+        pytest.param(SimpleNamespace(), id="stale_snapshot_without_strategy"),
+        pytest.param(_settings(None), id="unset_strategy"),
+        pytest.param(_settings("not-a-strategy"), id="unknown_value_falls_back_like_the_check"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_probe_consults_the_selector_when_the_snapshot_names_no_drain_strategy(
+    settings_snapshot: SimpleNamespace,
+) -> None:
+    """The admission check itself falls back to ``capacity_weighted`` for a missing or unknown value."""
+
+    service, admission = _service(_EXHAUSTED_ANSWER)
+
+    exhaustion = await probe_pool_usage_exhaustion(
+        service, settings=settings_snapshot, api_key=None, model="gpt-5.4", service_tier=None
+    )
+
+    assert exhaustion is not None
+    admission.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_probe_decline_metric_failure_never_breaks_the_decline(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Broken:
+        def labels(self, **labels: str) -> _Broken:
+            raise RuntimeError("metrics client down")
+
+    monkeypatch.setattr(exhaustion_probe_module, "pool_exhaustion_probe_declined_total", _Broken())
+    service, admission = _service(_EXHAUSTED_ANSWER)
+
+    assert (
+        await probe_pool_usage_exhaustion(
+            service, settings=_settings("reset_drain"), api_key=None, model=None, service_tier=None
+        )
+        is None
+    )
+    admission.assert_not_awaited()

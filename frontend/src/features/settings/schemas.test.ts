@@ -635,7 +635,7 @@ describe("subscription overflow fields", () => {
   it("defaults the designation and drain deadline to null for older backends", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
+      upstreamStreamTransport: "auto",
       preferEarlierResetAccounts: false,
       routingStrategy: "round_robin",
       openaiCacheAffinityMaxAgeSeconds: 300,
@@ -654,7 +654,7 @@ describe("subscription overflow fields", () => {
   it("round-trips a designation, an ISO drain deadline and the derived pin expiry", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
+      upstreamStreamTransport: "auto",
       preferEarlierResetAccounts: false,
       routingStrategy: "round_robin",
       openaiCacheAffinityMaxAgeSeconds: 300,

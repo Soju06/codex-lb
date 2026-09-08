@@ -1147,6 +1147,16 @@ def test_bounded_event_queue_trips_on_bytes_or_events_and_releases_bytes_on_get(
     queue.get_nowait()
     assert queue.get_nowait() == interpreted
     assert queue.queued_bytes == 0
+    # WebSocket IPC also embeds the original JSON object. Both copies count.
+    websocket_event = {"type": "websocket_responses_text", "text": "{}", "payload": {}, "event_type": None}
+    queue.put_nowait(websocket_event)
+    queue.put_nowait(websocket_event)
+    assert queue.queued_bytes == 8
+    with pytest.raises(asyncio.QueueFull):
+        queue.put_nowait(websocket_event)
+    queue.get_nowait()
+    queue.get_nowait()
+    assert queue.queued_bytes == 0
     # A lone event larger than the whole budget is accepted at an empty queue
     # (the SSE event size cap bounds it), so a single big chunk never fails;
     # anything but a zero-byte event is then rejected until it drains.

@@ -26,6 +26,15 @@ async def test_native_websocket_values_and_policy_match_python(monkeypatch: pyte
     if not binary:
         pytest.skip("set CODEX_LB_NATIVE_EGRESS_TEST_BINARY to run the native wire probe")
     cases = json.loads(FIXTURES.read_text())
+    prefix = '{"type":"response.output_text.delta","delta":"'
+    cases.append(
+        {
+            "name": "interpretation_size_boundary",
+            "text": prefix + "x" * (1024 * 1024 - len(prefix) - 2) + '"}',
+            "interpreted": True,
+            "event_type": "response.output_text.delta",
+        }
+    )
     cases.append(
         {
             "name": "large_opaque_object",

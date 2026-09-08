@@ -1270,6 +1270,9 @@ export const handlers = [
       port: payload.port,
       username: payload.username ?? null,
       isActive: payload.isActive ?? true,
+      // Mirrors the server: credentials on http/socks5 cross the proxy hop unencrypted.
+      plaintextCredentials:
+        payload.scheme !== "https" && (payload.username != null || payload.password != null),
     };
     state.upstreamProxyAdmin = {
       ...state.upstreamProxyAdmin,

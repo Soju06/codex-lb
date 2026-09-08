@@ -68,6 +68,33 @@ class DurableBridgeLookup:
         return to_utc_naive(self.lease_expires_at) > to_utc_naive(now)
 
 
+def durable_bridge_snapshot_is_detached(snapshot: DurableBridgeSessionSnapshot) -> bool:
+    """Return True for a row whose owner account was invalidated.
+
+    Account deactivation, re-authentication demands, proxy-binding changes and
+    deletion detach every durable bridge row of that account: the row is
+    CLOSED, its owner account, lease and every continuity anchor are cleared,
+    and its aliases are deleted. Such a row proves only that a conversation
+    once existed; it names no account that could still preserve continuity,
+    so it MUST NOT be treated as durable owner evidence. Reporting it as a
+    lookup hit made every hard-affinity (thread/session header) continuation
+    fail closed forever with ``previous_response_owner_unavailable`` even
+    after the account was reactivated, while a fresh thread on the same
+    client worked.
+
+    A CLOSED row that still names its account (ordinary release) keeps its
+    continuity value and is intentionally not covered here.
+    """
+
+    return (
+        snapshot.account_id is None
+        and snapshot.state == HttpBridgeSessionState.CLOSED
+        and snapshot.owner_instance_id is None
+        and snapshot.latest_turn_state is None
+        and snapshot.latest_response_id is None
+    )
+
+
 class DurableBridgeSessionCoordinator:
     def __init__(self, session_factory: Callable[[], AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -99,7 +126,7 @@ class DurableBridgeSessionCoordinator:
                     alias_value=alias_value,
                     api_key_scope=api_key_scope,
                 )
-                if snapshot is not None:
+                if snapshot is not None and not durable_bridge_snapshot_is_detached(snapshot):
                     resolved_aliases.append((alias_kind, snapshot))
             resolved_identities = {(snapshot.id, snapshot.account_id) for _alias_kind, snapshot in resolved_aliases}
             resolved_account_ids = {
@@ -170,6 +197,12 @@ class DurableBridgeSessionCoordinator:
                 session_key_value=session_key_value,
                 api_key_scope=api_key_scope,
             )
+            if snapshot is not None and durable_bridge_snapshot_is_detached(snapshot):
+                # The canonical key still maps to a row the account
+                # invalidation path detached. Let the request start fresh on
+                # a selectable account (the later claim re-owns this row)
+                # instead of failing closed on an owner that no longer exists.
+                snapshot = None
             if snapshot is None:
                 if turn_state is not None:
                     snapshot = await repository.find_session_by_latest_turn_state(

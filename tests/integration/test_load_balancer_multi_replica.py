@@ -116,7 +116,7 @@ async def test_usage_limit_requires_available_windows_before_early_recovery(
 ):
     blocked_at = int(time.time())
     now = blocked_at
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     limited = _make_account("usage_limit")
     healthy = _make_account("usage_available")
     await _seed_accounts_with_usage((healthy, 20.0, 10.0))
@@ -194,7 +194,7 @@ async def test_usage_limit_requires_available_windows_before_early_recovery(
 async def test_rate_limit_deadline_expires_without_usage_refresh(db_setup, monkeypatch, use_peer_replica):
     blocked_at = int(time.time())
     now = blocked_at
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     account = _make_account("rate_limit_expiry")
     async with SessionLocal() as session:
         await AccountsRepository(session).upsert(account)
@@ -278,7 +278,7 @@ async def test_peer_replica_requires_post_block_credits_to_recover_quota(
 ):
     blocked_time = float(int(time.time())) + 0.8
     now = blocked_time
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     limited = _make_account("quota_stale_credits")
     healthy = _make_account("quota_healthy")
     await _seed_accounts_with_usage((healthy, 20.0, 10.0))
@@ -341,7 +341,7 @@ async def test_stale_quota_exhaustion_preserves_original_deadline_across_replica
 ):
     blocked_time = float(int(time.time())) + 0.8
     now = blocked_time
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     account = _make_account("quota_historical_reset")
     async with SessionLocal() as session:
         await AccountsRepository(session).upsert(account)

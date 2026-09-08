@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -38,8 +38,10 @@ from app.modules.proxy.load_balancer import (
     _select_long_window_entry,
     _state_above_sticky_budget_threshold,
     _state_from_account,
+    _usage_entry_is_recent_enough,
     background_recovery_state_from_account,
 )
+from tests.simulation.virtual_time import VirtualClock
 
 pytestmark = pytest.mark.unit
 
@@ -1678,9 +1680,8 @@ def test_select_account_caps_cooldown_retry_hint():
     assert states[0].cooldown_until == now + 86_400
 
 
-def test_apply_usage_quota_sets_fallback_reset_for_primary_window(monkeypatch):
+def test_apply_usage_quota_sets_fallback_reset_from_evaluation_time():
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     status, used_percent, reset_at = apply_usage_quota(
         status=AccountStatus.ACTIVE,
         primary_used=100.0,
@@ -1689,11 +1690,21 @@ def test_apply_usage_quota_sets_fallback_reset_for_primary_window(monkeypatch):
         runtime_reset=None,
         secondary_used=None,
         secondary_reset=None,
+        now=now,
     )
     assert status == AccountStatus.RATE_LIMITED
     assert used_percent == 100.0
     assert reset_at is not None
     assert reset_at == pytest.approx(now + 60.0)
+
+
+def test_usage_recency_uses_injected_evaluation_time() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    recent = datetime.fromtimestamp(clock.time() - 179.0, tz=timezone.utc)
+    stale = datetime.fromtimestamp(clock.time() - 181.0, tz=timezone.utc)
+
+    assert _usage_entry_is_recent_enough(recent, now=clock.time())
+    assert not _usage_entry_is_recent_enough(stale, now=clock.time())
 
 
 def test_apply_usage_quota_secondary_exhausted_without_credits_sets_quota_exceeded():
@@ -1813,6 +1824,64 @@ def test_apply_usage_quota_respects_runtime_reset_for_quota_exceeded(monkeypatch
     assert status == AccountStatus.QUOTA_EXCEEDED
     assert used_percent == 50.0
     assert reset_at == future
+
+
+@pytest.mark.parametrize(
+    ("status", "primary_used", "secondary_used"),
+    [
+        (AccountStatus.QUOTA_EXCEEDED, None, 50.0),
+        (AccountStatus.RATE_LIMITED, 50.0, None),
+        (AccountStatus.RATE_LIMITED, None, 50.0),
+    ],
+)
+def test_apply_usage_quota_uses_explicit_evaluation_time_for_runtime_recovery(
+    status: AccountStatus,
+    primary_used: float | None,
+    secondary_used: float | None,
+) -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+
+    recovered, _, reset_at = apply_usage_quota(
+        status=status,
+        primary_used=primary_used,
+        primary_reset=None,
+        primary_window_minutes=None,
+        runtime_reset=clock.time() - 1.0,
+        secondary_used=secondary_used,
+        secondary_reset=None,
+        now=clock.time(),
+    )
+    blocked, _, blocked_reset_at = apply_usage_quota(
+        status=status,
+        primary_used=primary_used,
+        primary_reset=None,
+        primary_window_minutes=None,
+        runtime_reset=clock.time() + 1.0,
+        secondary_used=secondary_used,
+        secondary_reset=None,
+        now=clock.time(),
+    )
+
+    assert recovered == AccountStatus.ACTIVE
+    assert reset_at is None
+    assert blocked == status
+    assert blocked_reset_at == clock.time() + 1.0
+
+
+def test_state_from_account_passes_injected_time_to_runtime_recovery() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=int(clock.time() - 1.0))
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=_make_test_usage(window="primary", used_percent=50.0),
+        secondary_entry=None,
+        runtime=RuntimeState(reset_at=clock.time() - 1.0),
+        now=clock.time(),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
 
 
 def test_apply_usage_quota_respects_runtime_reset_for_rate_limited(monkeypatch):
@@ -2214,7 +2283,7 @@ def test_state_from_account_keeps_active_account_selectable_when_primary_usage_s
 ):
     now = 1_700_000_000.0
     future_reset = int(now + 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     state = _state_from_account(
@@ -2241,7 +2310,7 @@ def test_state_from_account_keeps_active_account_selectable_when_primary_usage_s
 def test_state_from_account_keeps_raw_usage_evidence_separate_from_pressure(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     state = _state_from_account(
@@ -2263,7 +2332,7 @@ def test_state_from_account_keeps_raw_usage_evidence_separate_from_pressure(monk
 def test_state_from_account_preserves_pressure_for_active_routing(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     state = _state_from_account(
@@ -2287,7 +2356,7 @@ def test_state_from_account_preserves_pressure_for_active_routing(monkeypatch):
 def test_state_from_account_clears_stale_advisory_account_reset_for_active_account(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)
 
@@ -2324,7 +2393,7 @@ def test_state_from_account_floors_resetless_rate_limited_row_instead_of_advisor
     now = 1_700_000_000.0
     future_reset = int(now + 300)
     cooldown_until = now + 0.2
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     blocked_at = now - 1
@@ -2356,7 +2425,7 @@ def test_state_from_account_keeps_active_account_selectable_when_secondary_usage
 ):
     now = 1_700_000_000.0
     future_reset = int(now + 7 * 24 * 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     state = _state_from_account(
@@ -2382,7 +2451,7 @@ def test_state_from_account_keeps_active_account_selectable_when_secondary_usage
 
 def test_state_from_account_zeroes_stale_exhausted_primary_usage_after_reset(monkeypatch):
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -2404,7 +2473,7 @@ def test_state_from_account_zeroes_stale_exhausted_primary_usage_after_reset(mon
 
 def test_state_from_account_zeroes_stale_exhausted_secondary_usage_after_reset(monkeypatch):
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     state = _state_from_account(
@@ -2425,7 +2494,7 @@ def test_state_from_account_zeroes_stale_exhausted_secondary_usage_after_reset(m
 
 def test_state_from_account_expires_stale_partial_primary_usage_after_reset(monkeypatch):
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     state = _state_from_account(
@@ -2455,7 +2524,7 @@ def test_state_from_account_expires_stale_partial_primary_usage_after_reset(monk
 
 def test_state_from_account_drops_stale_window_duration_when_superseded(monkeypatch):
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     state = _state_from_account(
@@ -2483,7 +2552,7 @@ def test_state_from_account_drops_stale_window_duration_when_superseded(monkeypa
 
 def test_state_from_account_drops_superseded_window_duration_before_expiry(monkeypatch):
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     state = _state_from_account(
@@ -2512,7 +2581,7 @@ def test_state_from_account_drops_superseded_window_duration_before_expiry(monke
 
 def test_state_from_account_keeps_window_duration_for_same_fetch_rows(monkeypatch):
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     state = _state_from_account(
@@ -2540,7 +2609,7 @@ def test_state_from_account_keeps_window_duration_for_same_fetch_rows(monkeypatc
 
 def test_state_from_account_expires_stale_partial_secondary_usage_after_reset(monkeypatch):
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     state = _state_from_account(
@@ -2561,7 +2630,7 @@ def test_state_from_account_expires_stale_partial_secondary_usage_after_reset(mo
 
 def test_state_from_account_carries_primary_window_minutes(monkeypatch):
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     state = _state_from_account(
@@ -2583,7 +2652,7 @@ def test_state_from_account_carries_primary_window_minutes(monkeypatch):
 
 def test_state_from_account_clears_primary_window_minutes_for_weekly_only(monkeypatch):
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     state = _state_from_account(
@@ -2608,7 +2677,7 @@ def test_state_from_account_clears_primary_window_minutes_for_weekly_only(monkey
 def test_state_from_account_treats_monthly_usage_as_advisory_long_window_pressure(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 30 * 24 * 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     state = _state_from_account(
@@ -2635,7 +2704,7 @@ def test_state_from_account_ignores_stale_monthly_usage_after_upgrade(monkeypatc
     now = 1_700_000_000.0
     weekly_reset = int(now + 7 * 24 * 3600)
     monthly_reset = int(now + 30 * 24 * 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(status=AccountStatus.ACTIVE, plan_type="plus")
@@ -2679,7 +2748,7 @@ def test_state_from_account_ignores_stale_monthly_usage_after_upgrade(monkeypatc
 def test_state_from_account_ignores_zero_capacity_monthly_primary_window(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 14 * 24 * 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -2715,7 +2784,7 @@ def test_state_from_account_ignores_zero_capacity_monthly_primary_window(monkeyp
 def test_state_from_account_ignores_zero_capacity_primary_for_active_free_account(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 14 * 24 * 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -2743,7 +2812,7 @@ def test_state_from_account_ignores_zero_capacity_primary_for_active_free_accoun
 def test_state_from_account_preserves_free_rate_limit_without_weekly_usage_signal(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 14 * 24 * 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -2770,7 +2839,7 @@ def test_state_from_account_preserves_free_rate_limit_without_weekly_usage_signa
 def test_state_from_account_preserves_free_rate_limit_for_legacy_unknown_primary_window(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 14 * 24 * 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=future_reset)
@@ -2807,7 +2876,7 @@ def test_state_from_account_free_plan_rate_limit_holds_floor_despite_fresh_month
     # blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS floor applies first.
     now = 1_700_000_000.0
     blocked_at = int(now - 5)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -2837,7 +2906,7 @@ def test_state_from_account_free_plan_rate_limit_holds_floor_despite_fresh_month
 
     # Once the floor has elapsed the zero-primary recovery proceeds as before.
     later = blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS + 1.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: later)
+    monkeypatch.setattr("time.time", lambda: later)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: later)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(later))
     recovered = _state_from_account(
@@ -2857,7 +2926,7 @@ def test_state_from_account_free_plan_peer_honors_persisted_rate_limit_deadline(
     now = 1_700_000_000.0
     blocked_at = int(now - 5)
     cooldown_reset = int(now + 25)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -2893,7 +2962,7 @@ def test_state_from_account_zero_capacity_recovery_respects_recent_blocked_at_fl
     now = 1_700_000_000.0
     future_reset = int(now + 14 * 24 * 3600)
     blocked_at = int(now - 5)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -2934,7 +3003,7 @@ def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_blo
     # deadline.
     now = 1_700_000_000.0
     blocked_at = now - 10.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -2967,7 +3036,7 @@ def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_blo
 def test_rate_limit_recovery_ignores_expired_long_window_veto(monkeypatch, long_reset_offset, primary_available):
     now = 1_700_000_000.0
     blocked_at = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
     account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=int(now + 7200), blocked_at=blocked_at)
     state = _state_from_account(
@@ -2997,7 +3066,7 @@ def test_quota_deadline_replacement_requires_fresh_post_block_exhaustion(monkeyp
     blocked_at = int(now - 300)
     fallback = int(now - 1)
     long_reset = int(now + 7200) if long_has_reset else None
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
     account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=fallback, blocked_at=blocked_at)
     state = _state_from_account(
@@ -3023,7 +3092,7 @@ def test_state_from_account_stale_runtime_block_does_not_recover_free_plan_peer_
     stale_runtime_blocked_at = now - 900.0
     persisted_blocked_at = int(now - 10)
     persisted_reset = int(now + 1200)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3061,7 +3130,7 @@ def test_state_from_account_stale_runtime_block_does_not_recover_peer_marked_rat
     stale_runtime_blocked_at = now - 900.0
     persisted_blocked_at = int(now - 60)
     persisted_reset = int(now + 1200)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(
@@ -3093,7 +3162,7 @@ def test_state_from_account_recovers_quota_exceeded_on_restart_without_blocked_a
     now = 1_700_000_000.0
     future_reset = int(now + 3600)
     next_reset = int(now + 7200)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3116,7 +3185,7 @@ def test_state_from_account_recovers_quota_exceeded_on_restart_without_blocked_a
 def test_state_from_account_uses_secondary_credits_when_primary_lacks_credit_fields(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3151,7 +3220,7 @@ def test_state_from_account_keeps_quota_exceeded_on_restart_when_fresh_usage_is_
 ):
     now = 1_700_000_000.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3174,7 +3243,7 @@ def test_state_from_account_keeps_quota_exceeded_on_restart_when_fresh_usage_is_
 def test_state_from_account_preserves_credits_when_weekly_primary_replaces_secondary(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3211,7 +3280,7 @@ def test_state_from_account_preserves_credits_when_weekly_primary_replaces_secon
 def test_state_from_account_uses_freshest_credit_snapshot(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3255,7 +3324,7 @@ def test_state_from_account_keeps_quota_exceeded_without_blocked_at_when_usage_s
 ):
     now = 1_700_000_000.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3279,7 +3348,7 @@ def test_state_from_account_clears_quota_exceeded_after_restart_with_persisted_b
     now = 1_700_000_000.0
     blocked = now - 130.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(
@@ -3308,7 +3377,7 @@ def test_state_from_account_keeps_quota_exceeded_after_cooldown_when_secondary_u
     blocked = now - 130.0
     fallback_reset = int(now + 3600)
     secondary_reset = int(now + 5 * 24 * 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3349,7 +3418,7 @@ def test_state_from_account_keeps_quota_exceeded_after_restart_when_persisted_bl
     now = 1_700_000_000.0
     blocked = now - 60.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(
@@ -3376,7 +3445,7 @@ def test_state_from_account_keeps_quota_exceeded_after_restart_when_secondary_us
     now = 1_700_000_000.0
     blocked = now - 130.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(
@@ -3403,7 +3472,7 @@ def test_state_from_account_clears_quota_exceeded_after_cooldown_expiry(monkeypa
     now = 1_700_000_000.0
     blocked = now - 130.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=future_reset)
@@ -3430,7 +3499,7 @@ def test_state_from_account_keeps_quota_exceeded_during_active_cooldown(monkeypa
     now = 1_700_000_000.0
     blocked = now - 10.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=future_reset)
@@ -3457,7 +3526,7 @@ def test_state_from_account_keeps_quota_exceeded_when_usage_is_stale(monkeypatch
     now = 1_700_000_000.0
     blocked = now - 60.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=future_reset)
@@ -3484,7 +3553,7 @@ def test_state_from_account_keeps_quota_exceeded_when_no_usage_data(monkeypatch)
     now = 1_700_000_000.0
     blocked = now - 130.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=future_reset)
@@ -3506,7 +3575,7 @@ def test_state_from_account_rate_limited_checks_primary_freshness(monkeypatch):
     now = 1_700_000_000.0
     blocked = now - 130.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=future_reset)
@@ -3541,7 +3610,7 @@ def test_state_from_account_rate_limited_requires_available_primary(monkeypatch,
     now = 1_700_000_000.0
     blocked = now - 130.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=future_reset)
@@ -3573,7 +3642,7 @@ def test_state_from_account_early_recovery_requires_elapsed_primary_and_availabl
     now = 1_700_000_000.0
     blocked = now - 130
     deadline = int(now + 7200)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     account = _make_test_account(
         status=AccountStatus.RATE_LIMITED,
         reset_at=deadline,
@@ -3605,7 +3674,7 @@ def test_background_recovery_state_preserves_rate_limit_cooldown_when_reset_is_i
     now = 1_700_000_000.0
     blocked = now - 300.0
     future_reset = int(now + 1500)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(
@@ -3633,7 +3702,7 @@ def test_background_recovery_state_preserves_rate_limit_cooldown_when_reset_is_i
 def test_state_from_account_rejected_reset_requires_fresh_post_block_evidence(monkeypatch):
     now = 1_700_000_000.0
     blocked = now - 60.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3664,7 +3733,7 @@ def test_state_from_account_rejected_reset_requires_fresh_post_block_evidence(mo
 def test_state_from_account_rejected_reset_requires_all_quota_windows_available(monkeypatch):
     now = 1_700_000_000.0
     blocked = now - 60.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3700,7 +3769,7 @@ def test_state_from_account_rejected_reset_requires_all_quota_windows_available(
 
 def test_state_from_account_rejected_reset_without_block_recovers_from_fresh_usage(monkeypatch):
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3731,7 +3800,7 @@ def test_state_from_account_rejected_reset_without_block_recovers_from_fresh_usa
 def test_state_from_account_preserves_elapsed_reset_for_selector_recovery(monkeypatch):
     now = 1_700_000_000.0
     elapsed_reset = now - 10.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(
@@ -3757,7 +3826,7 @@ def test_state_from_account_preserves_elapsed_reset_for_selector_recovery(monkey
 def test_state_from_account_does_not_apply_rate_limit_repair_to_quota_exceeded(monkeypatch):
     now = 1_700_000_000.0
     implausible_reset = 15_023_672_358
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(
@@ -3788,7 +3857,7 @@ def test_background_recovery_state_recovers_rate_limited_after_reset_elapses(mon
     now = 1_700_000_000.0
     blocked = now - 7200.0
     past_reset = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(
@@ -3819,7 +3888,7 @@ def test_background_recovery_state_ignores_only_unsupported_monthly_exhaustion(
 ):
     now = 1_700_000_000.0
     blocked = int(now - 7200)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
     account = _make_test_account(
         status=AccountStatus.RATE_LIMITED,
@@ -3859,7 +3928,7 @@ def test_background_recovery_state_ignores_only_unsupported_monthly_exhaustion(
 
 def test_background_recovery_state_recovers_monthly_only_rate_limited_after_reset_elapses(monkeypatch):
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3890,7 +3959,7 @@ def test_background_recovery_state_prefers_fresh_monthly_over_stale_primary(monk
     now = 1_700_000_000.0
     blocked = now - 7200.0
     past_reset = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3929,7 +3998,7 @@ def test_background_recovery_state_recovers_when_upstream_stops_reporting_primar
     now = 1_700_000_000.0
     blocked = now - 7200.0
     past_reset = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3968,7 +4037,7 @@ def test_background_recovery_state_recovers_without_any_primary_row(monkeypatch)
     now = 1_700_000_000.0
     blocked = now - 7200.0
     past_reset = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
 
@@ -3998,7 +4067,7 @@ def test_background_recovery_state_recovers_without_any_primary_row(monkeypatch)
 
 def test_state_from_account_keeps_resetless_rate_limit_without_primary_row(monkeypatch):
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     # A resetless 429 whose runtime cooldown was lost to a restart: an old
@@ -4030,7 +4099,7 @@ def test_background_recovery_state_keeps_rate_limited_without_primary_row_and_st
     now = 1_700_000_000.0
     blocked = now - 7200.0
     past_reset = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(
@@ -4059,7 +4128,7 @@ def test_background_recovery_state_keeps_rate_limited_when_long_window_exhausted
     now = 1_700_000_000.0
     blocked = now - 7200.0
     past_reset = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(
@@ -4096,7 +4165,7 @@ def test_background_recovery_state_keeps_rate_limited_when_primary_reset_metadat
     now = 1_700_000_000.0
     blocked = now - 7200.0
     past_reset = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(
@@ -4133,7 +4202,7 @@ def test_background_recovery_state_keeps_rate_limited_when_all_rows_predate_bloc
     now = 1_700_000_000.0
     blocked = now - 7200.0
     past_reset = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(
@@ -4169,7 +4238,7 @@ def test_background_recovery_state_keeps_rate_limited_when_primary_predates_bloc
     now = 1_700_000_000.0
     blocked = now - 7200.0
     past_reset = int(now - 300)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(
@@ -4199,7 +4268,7 @@ def test_background_recovery_state_keeps_rate_limited_when_primary_predates_bloc
 def test_background_recovery_state_keeps_rate_limited_without_persisted_reset(monkeypatch):
     now = 1_700_000_000.0
     blocked = now - 7200.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
     account = _make_test_account(
@@ -4231,7 +4300,7 @@ def test_state_from_account_drains_at_fixed_primary_threshold(monkeypatch):
     settings plumbing.
     """
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_settings",
@@ -4258,7 +4327,7 @@ def test_state_from_account_drains_at_fixed_primary_threshold(monkeypatch):
 
 def test_state_from_account_promotes_to_probing_after_fixed_quiet_window(monkeypatch):
     now = 1_700_000_000.0
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_settings",

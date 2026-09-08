@@ -21,6 +21,7 @@ from app.core.clients.proxy_websocket import (
     UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL,
     UpstreamWebSocket,
 )
+from app.core.clock import REAL_CLOCK, Clock, Scheduler
 from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, OpenAIErrorParam, openai_error
 from app.core.openai.model_registry import get_model_registry
@@ -33,7 +34,7 @@ from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.locks import fast_lock
 from app.core.utils.sse import sse_event_type_from_block
-from app.db.models import Account
+from app.db.models import Account, StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyRequestUsageBudget,
@@ -80,6 +81,22 @@ _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE = {
 _PENDING_TOOL_CALL_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE)
 _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE.values())
 _TTFT_OUTPUT_ITEM_TYPES = _PENDING_TOOL_CALL_ITEM_TYPES - {"function_call"}
+# Upstream ``response.*`` events that prove the model already ran for a turn.
+# Both relay surfaces flip ``upstream_model_output_seen`` on them; in the
+# Responses protocol the first one is always ``response.output_item.added``.
+_MODEL_OUTPUT_EVENT_TYPES = frozenset(
+    {
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.output_text.delta",
+        "response.refusal.delta",
+        "response.reasoning_text.delta",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.function_call_arguments.delta",
+        "response.output_tool_call.delta",
+    }
+)
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
 _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
@@ -179,17 +196,18 @@ def _visible_reasoning_prefix_before_blank_comment_candidate(text: str) -> str:
 
 def _finalize_ttft_reasoning_deltas(
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
+    *,
+    now: float,
 ) -> float | None:
+    # ``now`` is the caller's owner-clock sample; it stamps every pending
+    # reasoning delta that became visible without a stamp of its own.
     visible_at_values: list[float] = []
-    now: float | None = None
     for pending in pending_reasoning_deltas.values():
         if not _strip_blank_html_comment_lines(pending.text):
             continue
         if pending.visible_at is not None:
             visible_at_values.append(pending.visible_at)
             continue
-        if now is None:
-            now = time.monotonic()
         visible_at_values.append(now)
     pending_reasoning_deltas.clear()
     return min(visible_at_values) if visible_at_values else None
@@ -199,8 +217,11 @@ def _ttft_event_visible_at(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState] | None = None,
+    *,
+    now: float,
 ) -> float | None:
-    now = time.monotonic()
+    # ``now`` is the caller's owner-clock sample (``clock_for(owner).monotonic()``);
+    # it stamps every visible_at value this event makes visible.
     pending = pending_reasoning_deltas if pending_reasoning_deltas is not None else {}
     event_key = _reasoning_summary_delta_key(payload) if payload is not None else (None, None, None)
     if (
@@ -208,7 +229,7 @@ def _ttft_event_visible_at(
         and not _is_reasoning_summary_interleavable_event(event_type)
         and not (event_type in _TTFT_REASONING_EVENT_TYPES and event_key in pending)
     ):
-        visible_at = _finalize_ttft_reasoning_deltas(pending)
+        visible_at = _finalize_ttft_reasoning_deltas(pending, now=now)
         if visible_at is not None:
             return visible_at
     if event_type == "response.reasoning_summary_text.delta":
@@ -232,7 +253,7 @@ def _ttft_event_visible_at(
             return None
         return previous.visible_at if previous is not None and previous.visible_at is not None else now
     if event_type == "response.reasoning_summary_text.done" and event_key in pending:
-        visible_at = _finalize_ttft_reasoning_deltas({event_key: pending.pop(event_key)})
+        visible_at = _finalize_ttft_reasoning_deltas({event_key: pending.pop(event_key)}, now=now)
         return visible_at
     if event_type in _TTFT_TOOL_DELTA_EVENT_TYPES:
         if payload is None:
@@ -260,8 +281,10 @@ def _is_ttft_event(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState] | None = None,
+    *,
+    now: float,
 ) -> bool:
-    return _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas) is not None
+    return _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas, now=now) is not None
 
 
 def _ttft_latency_ms_from_visible_at(visible_at: float | None, started_at: float) -> int | None:
@@ -273,17 +296,23 @@ def _ttft_event_latency_ms(
     payload: dict[str, JsonValue] | None,
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
     started_at: float,
+    *,
+    now: float,
 ) -> int | None:
     return _ttft_latency_ms_from_visible_at(
-        _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas), started_at
+        _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas, now=now), started_at
     )
 
 
 def _finalize_ttft_latency_ms(
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
     started_at: float,
+    *,
+    now: float,
 ) -> int | None:
-    return _ttft_latency_ms_from_visible_at(_finalize_ttft_reasoning_deltas(pending_reasoning_deltas), started_at)
+    return _ttft_latency_ms_from_visible_at(
+        _finalize_ttft_reasoning_deltas(pending_reasoning_deltas, now=now), started_at
+    )
 
 
 # Stream frames whose parsed payload feeds a real per-event consumer:
@@ -480,9 +509,12 @@ def _account_capacity_wait_payload(
     reason: str | None,
     retry_after_seconds: float | None,
     started_at: float | None = None,
+    now: float,
 ) -> dict[str, JsonValue]:
     wait_started_at = request_state.account_capacity_wait_started_at if request_state is not None else started_at
-    waited_seconds = int(max(0.0, time.monotonic() - wait_started_at)) if wait_started_at is not None else 0
+    # ``now`` must come from the clock that stamped ``wait_started_at``;
+    # callers pass their owner clock sample.
+    waited_seconds = int(max(0.0, now - wait_started_at)) if wait_started_at is not None else 0
     payload: dict[str, JsonValue] = {
         "type": "codex.keepalive",
         "status": "waiting_for_account_capacity",
@@ -506,6 +538,8 @@ async def _sleep_for_account_selection_recovery(
     max_sleep_seconds: float | None = None,
     request_state: "_WebSocketRequestState | None" = None,
     heartbeat: Callable[[float], Awaitable[None]] | None = None,
+    scheduler: Scheduler,
+    clock: Clock,
 ) -> bool:
     sleep_seconds = _account_selection_recovery_sleep_seconds(selection)
     if sleep_seconds is None:
@@ -519,7 +553,7 @@ async def _sleep_for_account_selection_recovery(
         request_state.account_capacity_waiting = True
         request_state.account_capacity_wait_reason = selection.error_message
         request_state.account_capacity_wait_started_at = (
-            request_state.account_capacity_wait_started_at or time.monotonic()
+            request_state.account_capacity_wait_started_at or clock.monotonic()
         )
         request_state.account_capacity_wait_retry_after_seconds = sleep_seconds
 
@@ -539,7 +573,7 @@ async def _sleep_for_account_selection_recovery(
             if heartbeat is not None:
                 await heartbeat(remaining)
             chunk = min(remaining, _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS)
-            await asyncio.sleep(chunk)
+            await scheduler.sleep(chunk)
             remaining -= chunk
     finally:
         if request_state is not None:
@@ -830,6 +864,7 @@ class _StreamSettlement:
     error_message: str | None = None
     error: UpstreamError | None = None
     account_health_error: bool = False
+    settlement_order_required: bool = False
     record_success: bool = True
     downstream_visible: bool = False
     downstream_text_visible: bool = False
@@ -1228,6 +1263,10 @@ class _WebSocketRequestState:
     deferred_keyed_stream_health: list[_DeferredKeyedStreamHealthPenalty] = field(default_factory=list)
     deferred_reasoning_downstream_texts: list[str] = field(default_factory=list)
     suppress_next_created_downstream: bool = False
+    # Armed together with the created suppression when the client already saw
+    # ``response.in_progress`` from the failed attempt, so the replay's
+    # duplicate prelude frame is dropped and the lifecycle stays single.
+    suppress_next_in_progress_downstream: bool = False
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
     completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None = None
@@ -1512,11 +1551,21 @@ class _WebSocketUpstreamControl:
 
 @dataclass(slots=True)
 class _DownstreamWebSocketActivity:
-    last_activity_at: float = field(default_factory=time.monotonic)
+    """Downstream websocket liveness stamps, read with the owner's clock.
+
+    ``clock`` is the owner's collaborator (``clock_for(proxy)``); the real
+    default keeps the previous ``time.monotonic`` stamps verbatim.
+    """
+
+    clock: Clock = field(default=REAL_CLOCK, kw_only=True)
+    last_activity_at: float = field(init=False)
     disconnected: bool = False
 
+    def __post_init__(self) -> None:
+        self.last_activity_at = self.clock.monotonic()
+
     def mark(self) -> None:
-        self.last_activity_at = time.monotonic()
+        self.last_activity_at = self.clock.monotonic()
 
     def mark_disconnected(self) -> None:
         self.disconnected = True
@@ -1608,11 +1657,18 @@ def _mark_response_create_attempt_observed(
             attempt.non_terminal_response_observed = True
 
 
-def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
+def _record_response_event(
+    request_state: _WebSocketRequestState | None,
+    event_type: str | None,
+    *,
+    now: float,
+) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
     _mark_response_create_attempt_observed(request_state, event_type)
-    request_state.last_upstream_activity_at = time.monotonic()
+    # ``now`` is the owner clock sample the bridge/websocket idle deadlines are
+    # later compared against; callers pass ``clock_for(owner).monotonic()``.
+    request_state.last_upstream_activity_at = now
     if event_type in {"response.failed", "response.incomplete"}:
         return
     request_state.response_event_count += 1
@@ -1627,13 +1683,24 @@ def _websocket_request_can_replay_before_visible_output(
         return False
     if request_state.transport == _REQUEST_TRANSPORT_WEBSOCKET and request_state.response_create_sent_at is None:
         return False
+    # The bounded clean-close retry is a pre-created affordance. An accepted
+    # lifecycle (``replay_downstream_response_id`` captured) is re-sent exactly
+    # once; a clean close of the replacement socket before its
+    # ``response.created`` surfaces one terminal under the visible id instead
+    # of a third send (openspec: retry-accepted-output-free-capacity-failures).
     if request_state.replay_count >= 1 and not (
         allow_clean_close_retry
         and request_state.replay_count == 1
         and request_state.response_event_count == 0
         and request_state.clean_close_replay_count == 0
+        and request_state.replay_downstream_response_id is None
     ):
         return False
+    # A sequenced downstream frame pins the request to its socket: a fresh
+    # upstream generation restarts ``sequence_number`` from zero (openspec
+    # requirement "Direct WebSocket replay never mixes numeric response
+    # sequences"). The accepted-lifecycle replay does not widen this; the
+    # created-only ``generate: false`` prewarm keeps its watermark-0 exception.
     sequenced_created_only_prewarm = (
         request_state.generate_false_prewarm
         and request_state.last_downstream_sequence_number == 0
@@ -1654,15 +1721,67 @@ def _websocket_request_can_replay_before_visible_output(
     precreated_pending = request_state.response_id is None and request_state.awaiting_response_created
     if precreated_pending and request_state.previous_response_id is not None and not has_retry_safe_fresh_payload:
         return False
-    created_only_pending = (
-        request_state.response_id is not None
-        and not request_state.awaiting_response_created
-        and request_state.response_event_count <= 1
-        and (request_state.previous_response_id is None or has_retry_safe_fresh_payload)
+    accepted_lifecycle_only_pending = _websocket_request_is_accepted_lifecycle_only(request_state) and (
+        request_state.previous_response_id is None or has_retry_safe_fresh_payload
     )
     if precreated_pending and request_state.response_event_count > 0:
         return False
-    return precreated_pending or created_only_pending
+    return precreated_pending or accepted_lifecycle_only_pending
+
+
+def _websocket_request_is_accepted_lifecycle_only(request_state: _WebSocketRequestState) -> bool:
+    """Return whether upstream accepted the request without producing any output.
+
+    True only while the accepted response consists of its lifecycle prelude:
+    ``response.created`` and optionally ``response.in_progress``. In the
+    Responses protocol every other counted ``response.*`` event follows
+    ``response.output_item.added``, which is a model-output event
+    (``_MODEL_OUTPUT_EVENT_TYPES``) that both the HTTP bridge and the direct
+    websocket relay record in ``upstream_model_output_seen``, so "at most two
+    counted events and no output marker" is equivalent to "lifecycle only"
+    even when upstream skips ``response.in_progress``. A buffered reasoning
+    prelude or a pending tool call disqualifies the request. Such a turn has
+    no client-observable or conversational side effect, which is what makes
+    its single-lifecycle replay safe.
+
+    This predicate describes the upstream lifecycle only. Downstream sequence
+    exposure (``last_downstream_sequence_number``) is judged by the callers:
+    ``_websocket_request_can_replay_before_visible_output`` and the accepted
+    capacity classifier both keep refusing a sequenced request, so the direct
+    websocket surface never replays after a finite ``sequence_number`` frame
+    was forwarded.
+    """
+    if request_state.response_id is None or request_state.awaiting_response_created:
+        return False
+    if not 1 <= request_state.response_event_count <= 2:
+        return False
+    if request_state.downstream_visible or request_state.upstream_model_output_seen:
+        return False
+    if request_state.deferred_reasoning_downstream_texts:
+        return False
+    return not (request_state.pending_function_call_ids or request_state.pending_tool_call_types)
+
+
+def _affinity_may_resolve_hard_owner(affinity_policy: _AffinityPolicy) -> bool:
+    """Return whether sticky selection may bind this affinity to one owner account.
+
+    A resolved hard ``CODEX_SESSION`` row narrows selection to its owner
+    (``hard_sticky`` in ``sticky_selection``): turn-state ownership, or the raw
+    compatibility row an old replica persisted for a bare session or thread
+    header, which every policy exposing ``legacy_selection_key`` consults and
+    which wins over the namespaced soft row. The owner is not a request-state
+    pin -- it is read from the database at selection time -- so neither the
+    direct websocket request nor the HTTP bridge session can tell whether its
+    affinity resolves to a hard owner. Any policy that may is treated as
+    owner-bound: excluding that owner would leave every re-selection at
+    ``hard_affinity_saturated`` until the connect budget runs out. Shared by
+    the direct websocket accepted-replay exclusion and the HTTP bridge one.
+    """
+    return (
+        affinity_policy.kind == StickySessionKind.CODEX_SESSION
+        or affinity_policy.legacy_selection_key is not None
+        or affinity_policy.legacy_continuity_source is not None
+    )
 
 
 def _record_websocket_route_metadata(
@@ -1748,16 +1867,18 @@ async def _wait_for_websocket_continuity_gap(
     *,
     pending_lock: anyio.Lock,
     timeout_seconds: float,
+    scheduler: Scheduler,
+    clock: Clock,
 ) -> bool:
-    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    deadline = clock.monotonic() + max(0.0, timeout_seconds)
     while True:
         async with pending_lock:
             if not pending_requests:
                 return True
-        remaining = deadline - time.monotonic()
+        remaining = deadline - clock.monotonic()
         if remaining <= 0:
             return False
-        await asyncio.sleep(min(_WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS, remaining))
+        await scheduler.sleep(min(_WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS, remaining))
 
 
 async def _websocket_full_replay_should_wait_for_continuity(

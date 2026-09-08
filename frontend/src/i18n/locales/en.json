@@ -1453,6 +1453,7 @@
   "upstreamProxy.endpoints.connectionFailed": "Connection failed",
   "upstreamProxy.endpoints.connectionOk": "Connection ok",
   "upstreamProxy.endpoints.empty": "No proxy endpoints configured.",
+  "upstreamProxy.endpoints.plaintextCredentials": "Credentials are sent to this proxy unencrypted over {{scheme}}. Use an https:// proxy or an IP allowlist without credentials to protect them.",
   "upstreamProxy.endpoints.title": "Endpoints",
   "upstreamProxy.memberDialog.alreadyPresent": "Endpoint is already in {{pool}}.",
   "upstreamProxy.memberDialog.description": "Attach an existing endpoint to a proxy pool.",

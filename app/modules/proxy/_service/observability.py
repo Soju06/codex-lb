@@ -12,6 +12,7 @@ from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
+    upstream_reasoning_replay_400_total,
     upstream_transport_decisions_total,
 )
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, canonicalized_tools
@@ -55,6 +56,51 @@ def _record_upstream_transport_decision(
         sticky="true" if sticky else "false",
         status="success" if status == "success" else "error",
     ).inc()
+
+
+def _is_reasoning_replay_rejection(
+    *,
+    code: str,
+    http_status: int | None,
+    message: str | None,
+) -> bool:
+    """Return whether upstream rejected replayed reasoning items with a 400.
+
+    Observation only: a forked thread that replays reasoning ciphertext minted
+    for another account dies on ChatGPT's 400 and is undetectable from ids,
+    so this predicate feeds ``codex_lb_upstream_reasoning_replay_400_total``
+    to size that residual. It never alters classification, account health,
+    or failover. Without an HTTP status (terminal ``error`` /
+    ``response.failed`` frames) only the ``invalid_request_error`` code
+    qualifies.
+    """
+    if http_status is None:
+        if code != "invalid_request_error":
+            return False
+    elif http_status != 400:
+        return False
+    return "reasoning" in (message or "").lower()
+
+
+def _record_upstream_reasoning_replay_rejection() -> None:
+    if PROMETHEUS_AVAILABLE and upstream_reasoning_replay_400_total is not None:
+        upstream_reasoning_replay_400_total.inc()
+    logger.info("Counted upstream reasoning replay rejection request_id=%s", get_request_id())
+
+
+def _observe_terminal_stream_error_frame(code: str | None, message: str | None) -> None:
+    """Count a reasoning-replay rejection carried by a terminal ``error``/``response.failed`` frame.
+
+    Runs where the frame is classified, before and independent of any account
+    health write: ``invalid_request_error`` is never penalized, so
+    ``_handle_stream_error`` never sees these frames. HTTP status rejections
+    are counted by ``_handle_stream_error`` instead, so each upstream failure
+    is counted exactly once.
+    """
+    if code is None:
+        return
+    if _is_reasoning_replay_rejection(code=code, http_status=None, message=message):
+        _record_upstream_reasoning_replay_rejection()
 
 
 def _maybe_log_proxy_request_shape(

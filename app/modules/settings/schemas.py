@@ -218,6 +218,9 @@ class UpstreamProxyEndpointResponse(DashboardModel):
     port: int
     username: str | None
     is_active: bool
+    # Credentials cross the LB-to-proxy hop unencrypted (http/socks5/socks5h
+    # with a username or password); the dashboard renders a warning.
+    plaintext_credentials: bool = False
 
 
 class UpstreamProxyEndpointTestResponse(DashboardModel):

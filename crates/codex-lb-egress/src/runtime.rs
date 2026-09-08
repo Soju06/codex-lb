@@ -85,7 +85,12 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                             ).await?;
                             continue;
                         }
-                        if request.timeout_ms == 0 || request.connect_timeout_ms == Some(0) {
+                        if request.timeout_ms == 0
+                            || request.connect_timeout_ms == Some(0)
+                            || request.sse.is_some_and(|options| {
+                                options.idle_timeout_ms == 0 || options.max_event_bytes == 0
+                            })
+                        {
                             emit_error(
                                 &output,
                                 &request.request_id,
@@ -99,6 +104,10 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                         let key = ClientKey {
                             proxy_url: request.proxy_url.clone(),
                             connect_timeout_ms: request.connect_timeout_ms,
+                            decode_response: request
+                                .headers
+                                .iter()
+                                .any(|(name, _)| name.eq_ignore_ascii_case("accept-encoding")),
                         };
                         let client = match clients.get(&key) {
                             Ok(client) => client,
@@ -404,6 +413,7 @@ mod tests {
         let key = ClientKey {
             proxy_url: None,
             connect_timeout_ms: Some(10_000),
+            decode_response: true,
         };
 
         pool.get(&key).expect("first client");
@@ -413,16 +423,39 @@ mod tests {
     }
 
     #[test]
+    fn response_decode_policy_partitions_client_pool_entries() {
+        install_provider();
+        let mut pool = ClientPool::default();
+        let decoding = ClientKey {
+            proxy_url: None,
+            connect_timeout_ms: Some(10_000),
+            decode_response: true,
+        };
+        let decoding_disabled = ClientKey {
+            decode_response: false,
+            ..decoding.clone()
+        };
+
+        pool.get(&decoding).expect("decoding client");
+        pool.get(&decoding_disabled)
+            .expect("decoding-disabled client");
+
+        assert_eq!(pool.clients.len(), 2);
+    }
+
+    #[test]
     fn connector_policy_partitions_client_pool_entries() {
         install_provider();
         let mut pool = ClientPool::default();
         let direct = ClientKey {
             proxy_url: None,
             connect_timeout_ms: Some(10_000),
+            decode_response: true,
         };
         let proxied = ClientKey {
             proxy_url: Some("http://127.0.0.1:18080".to_owned()),
             connect_timeout_ms: Some(10_000),
+            decode_response: true,
         };
 
         pool.get(&direct).expect("direct client");

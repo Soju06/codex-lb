@@ -5,15 +5,19 @@ import base64
 import contextlib
 import json
 import logging
+import math
 import os
 import shutil
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Protocol, cast
 
 from multidict import CIMultiDict
+
+from app.core.clients.stream_errors import StreamEventTooLargeError, StreamIdleTimeoutError
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +29,7 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
         "failure_provenance_v1",
         "http",
         "http2_profile_v1",
+        "http_sse_v1",
         "websocket",
         "websocket_send_ack",
     }
@@ -72,6 +77,12 @@ class NativeEgressTransportError(NativeEgressError):
 
 
 @dataclass(frozen=True, slots=True)
+class NativeSseOptions:
+    idle_timeout_seconds: float
+    max_event_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class NativeEgressRequest:
     method: str
     url: str
@@ -81,6 +92,7 @@ class NativeEgressRequest:
     connect_timeout_seconds: float | None = None
     response_head_timeout_seconds: float | None = None
     proxy_url: str | None = None
+    sse: NativeSseOptions | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,12 +136,14 @@ class NativeEgressResponse:
         request_id: str,
         generation: int,
         events: asyncio.Queue[dict[str, object] | BaseException],
+        sse_framed: bool = False,
     ) -> None:
         self.status = status
         self.http_version = http_version
         self.raw_headers = headers
         self.headers: CIMultiDict[str] = CIMultiDict(headers)
         self.content = _NativeEgressContent(self)
+        self.sse_framed = sse_framed
         self._client = client
         self._request_id = request_id
         self._generation = generation
@@ -139,6 +153,41 @@ class NativeEgressResponse:
         self._body_cache: bytes | None = None
 
     async def iter_bytes(self) -> AsyncIterator[bytes]:
+        if self.sse_framed:
+            raise NativeEgressProtocolError("native SSE response requires framed consumption")
+        async with contextlib.aclosing(self._iter_body_events("chunk")) as events:
+            async for event in events:
+                encoded = event.get("data")
+                if not isinstance(encoded, str):
+                    raise NativeEgressProtocolError("native chunk is missing base64 data")
+                try:
+                    yield base64.b64decode(encoded, validate=True)
+                except ValueError as exc:
+                    raise NativeEgressProtocolError("native chunk contains invalid base64 data") from exc
+
+    async def iter_sse_events(self) -> AsyncGenerator[str, None]:
+        if not self.sse_framed:
+            raise NativeEgressProtocolError("native response did not request SSE framing")
+        fragments: list[str] = []
+        async with contextlib.aclosing(self._iter_body_events("sse")) as events:
+            async for event in events:
+                text = event.get("text")
+                more = event.get("more")
+                if not isinstance(text, str) or type(more) is not bool:
+                    raise NativeEgressProtocolError("native SSE fragment has an invalid shape")
+                if more:
+                    fragments.append(text)
+                elif fragments:
+                    fragments.append(text)
+                    block = "".join(fragments)
+                    fragments.clear()
+                    yield block
+                else:
+                    yield text
+        if fragments:
+            raise NativeEgressProtocolError("native SSE response ended during an event")
+
+    async def _iter_body_events(self, expected_type: str) -> AsyncGenerator[dict[str, object], None]:
         if self._iterated:
             raise NativeEgressProtocolError("native response body can only be consumed once")
         self._iterated = True
@@ -151,14 +200,8 @@ class NativeEgressResponse:
                     raise item
                 event = item
                 event_type = event.get("type")
-                if event_type == "chunk":
-                    encoded = event.get("data")
-                    if not isinstance(encoded, str):
-                        raise NativeEgressProtocolError("native chunk is missing base64 data")
-                    try:
-                        yield base64.b64decode(encoded, validate=True)
-                    except ValueError as exc:
-                        raise NativeEgressProtocolError("native chunk contains invalid base64 data") from exc
+                if event_type == expected_type:
+                    yield event
                     continue
                 if event_type == "end":
                     self._completed = True
@@ -167,7 +210,17 @@ class NativeEgressResponse:
                 if event_type == "error":
                     self._completed = True
                     self._client._finish_request(self._request_id, self._generation, self._events)
+                    if self.sse_framed and event.get("failure_phase") == "stream_idle_timeout":
+                        raise StreamIdleTimeoutError()
                     raise _transport_error_from_event(event)
+                if self.sse_framed and event_type == "sse_event_too_large":
+                    size = event.get("size_bytes")
+                    limit = event.get("limit_bytes")
+                    if type(size) is not int or type(limit) is not int or not 0 < limit < size:
+                        raise NativeEgressProtocolError("native SSE size failure has an invalid shape")
+                    self._completed = True
+                    self._client._finish_request(self._request_id, self._generation, self._events)
+                    raise StreamEventTooLargeError(size, limit)
                 if event_type == "cancelled":
                     self._completed = True
                     self._client._finish_request(self._request_id, self._generation, self._events)
@@ -196,7 +249,11 @@ class NativeEgressResponse:
         if self._completed:
             return
         self._completed = True
-        await self._client._cancel_request(self._request_id, self._generation, self._events)
+        cancellation = await _await_cleanup_deferring_cancellation(
+            self._client._cancel_request(self._request_id, self._generation, self._events)
+        )
+        if cancellation is not None:
+            raise cancellation
 
     async def __aenter__(self) -> NativeEgressResponse:
         return self
@@ -511,6 +568,11 @@ class SubprocessNativeEgressClient:
             raise ValueError("native egress connect_timeout_seconds must be positive")
         if request.response_head_timeout_seconds is not None and request.response_head_timeout_seconds <= 0:
             raise ValueError("native egress response_head_timeout_seconds must be positive")
+        if request.sse is not None:
+            if not math.isfinite(request.sse.idle_timeout_seconds) or request.sse.idle_timeout_seconds <= 0:
+                raise ValueError("native SSE idle_timeout_seconds must be finite and positive")
+            if type(request.sse.max_event_bytes) is not int or request.sse.max_event_bytes <= 0:
+                raise ValueError("native SSE max_event_bytes must be a positive integer")
 
         process, generation = await self._ensure_process()
         self._request_sequence += 1
@@ -531,6 +593,14 @@ class SubprocessNativeEgressClient:
                 else None
             ),
             "proxy_url": request.proxy_url,
+            "sse": (
+                {
+                    "idle_timeout_ms": max(1, round(request.sse.idle_timeout_seconds * 1000)),
+                    "max_event_bytes": request.sse.max_event_bytes,
+                }
+                if request.sse is not None
+                else None
+            ),
         }
         try:
             await self._send_command(process, generation, request_event)
@@ -569,6 +639,7 @@ class SubprocessNativeEgressClient:
             request_id=request_id,
             generation=generation,
             events=events,
+            sse_framed=request.sse is not None and status < 400,
         )
 
     async def websocket(self, request: NativeWebSocketRequest) -> NativeEgressWebSocket:
@@ -784,10 +855,12 @@ class SubprocessNativeEgressClient:
                 events = state[1]
                 try:
                     events.put_nowait(event)
-                    if event.get("type") in {"head", "websocket_open"}:
+                    if event.get("type") in {"head", "websocket_open", "sse"}:
                         # Hand the accepted response to its consumer before a
                         # helper with already-buffered output can fill the body
                         # queue in this reader task's scheduling turn.
+                        # Framing may produce many tiny events from one body
+                        # read; let their consumer drain them between lines.
                         await asyncio.sleep(0)
                 except asyncio.QueueFull:
                     overflow_failure = NativeEgressTransportError(
@@ -836,7 +909,12 @@ class SubprocessNativeEgressClient:
                 )
                 while True:
                     item = await asyncio.wait_for(events.get(), timeout=_NATIVE_CANCEL_TIMEOUT_SECONDS)
-                    if isinstance(item, BaseException) or item.get("type") in {"cancelled", "end", "error"}:
+                    if isinstance(item, BaseException) or item.get("type") in {
+                        "cancelled",
+                        "end",
+                        "error",
+                        "sse_event_too_large",
+                    }:
                         break
             except (TimeoutError, NativeEgressError):
                 pass

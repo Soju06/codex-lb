@@ -19,6 +19,7 @@ from app.core.clients.native_egress import (
     NativeEgressRequest,
     NativeEgressTransportError,
     NativeEgressUnavailable,
+    NativeSseOptions,
     NativeWebSocketRequest,
     discover_native_egress_client,
 )
@@ -234,11 +235,19 @@ class CodexClient:
         return (await self.request_with_route_metadata(method, url, route=route, **kwargs)).response
 
     async def request_with_route_metadata(
-        self, method: str, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any
+        self,
+        method: str,
+        url: str,
+        *,
+        route: ResolvedUpstreamRoute,
+        native_sse: NativeSseOptions | None = None,
+        **kwargs: Any,
     ) -> CodexRequestResult:
         if route is None:
             raise ValueError("Codex upstream calls require a resolved upstream proxy route")
         buffer_response = bool(kwargs.pop("buffer_response", True))
+        if native_sse is not None and buffer_response:
+            raise ValueError("Native SSE framing requires buffer_response=False")
         _reject_reserved(kwargs)
         native_request = _prepare_native_request(url, kwargs)
         aiohttp_kwargs = dict(kwargs)
@@ -262,6 +271,7 @@ class CodexClient:
                                 connect_timeout_seconds=native_request.connect_timeout_seconds,
                                 response_head_timeout_seconds=native_request.response_head_timeout_seconds,
                                 proxy_url=endpoint.proxy_url,
+                                sse=native_sse,
                             )
                         )
                         if buffer_response:

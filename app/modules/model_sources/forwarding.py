@@ -317,7 +317,16 @@ async def stream_chat_completion(
     )
     usage_holder.first_frame_at = clock.monotonic()
     transport = SourceStreamTransport(stack, scheduler=scheduler)
-    body = _source_stream_body(response, first_chunk, usage_parser, usage_holder, transport, on_first_content=None)
+    body = _source_stream_body(
+        response,
+        first_chunk,
+        usage_parser,
+        usage_holder,
+        transport,
+        on_first_content=None,
+        idle_seconds=source_stream_idle_seconds(),
+        scheduler=scheduler,
+    )
     return SourceChatStream(body=body, usage_holder=usage_holder, upstream_status_code=response.status)
 
 
@@ -470,6 +479,8 @@ async def stream_responses(
         usage_holder,
         transport,
         on_first_content=on_first_content,
+        idle_seconds=source_stream_idle_seconds(),
+        scheduler=scheduler,
     )
     return SourceResponsesStream(
         body=body,
@@ -477,6 +488,25 @@ async def stream_responses(
         upstream_status_code=response.status,
         transport=transport,
     )
+
+
+class _SourceBudgetExpired(Exception):
+    """aiohttp's own total-budget timer fired inside a chunk read (not the idle cap)."""
+
+    def __init__(self, original: TimeoutError) -> None:
+        super().__init__(str(original))
+        self.original = original
+
+
+async def _next_source_chunk(chunks: AsyncIterator[bytes]) -> bytes | None:
+    """One chunk, ``None`` at EOF; aiohttp's total-budget ``TimeoutError`` is tagged so the idle timer is not blamed."""
+
+    try:
+        return await anext(chunks)
+    except StopAsyncIteration:
+        return None
+    except TimeoutError as exc:
+        raise _SourceBudgetExpired(exc) from exc
 
 
 async def _source_stream_body(
@@ -487,8 +517,18 @@ async def _source_stream_body(
     transport: SourceStreamTransport,
     *,
     on_first_content: OnFirstContent | None,
+    idle_seconds: float,
+    scheduler: Scheduler,
 ) -> AsyncIterator[bytes]:
     """Relay source bytes chunk by chunk; the transport is released exactly once.
+
+    Every chunk read after the first frame is bounded by ``idle_seconds``
+    (``source_stream_idle_seconds()``) through the scheduler seam rather than
+    aiohttp's ``sock_read``: the socket timer is armed from request send and a
+    low configured idle window would pre-empt the header and first-frame
+    deadlines, whereas this timer starts only once the open has proved the
+    source is producing. Expiry raises ``model_source_idle_timeout``; the
+    source's own total budget (aiohttp ``total``) keeps propagating as today.
 
     Without a hook every chunk is yielded as soon as it is parsed (the direct
     routing path adds no buffering). With ``on_first_content`` armed, chunks
@@ -508,13 +548,13 @@ async def _source_stream_body(
         while True:
             if chunk is None:
                 try:
-                    chunk = await anext(chunks)
-                except StopAsyncIteration:
+                    chunk = await scheduler.wait_for(_next_source_chunk(chunks), idle_seconds)
+                except _SourceBudgetExpired as exc:
+                    raise exc.original from exc.original.__cause__
+                except TimeoutError as exc:
+                    raise _idle_timeout_error(idle_seconds) from exc
+                if chunk is None:
                     break
-                except aiohttp.ServerTimeoutError as exc:
-                    # ``sock_read`` expired mid-stream: the source went silent
-                    # for ``source_stream_idle_seconds()``.
-                    raise _idle_timeout_error() from exc
             usage_parser.feed(chunk)
             if withheld is None:
                 yield chunk
@@ -561,7 +601,8 @@ async def _open_source_stream(
     open is bounded per phase (design v3 §8.2): connect establishment by
     ``ClientTimeout``, the header wait by ``SOURCE_HEADER_DEADLINE_SECONDS``
     and the first body chunk by ``SOURCE_FIRST_FRAME_DEADLINE_SECONDS``, both
-    through ``scheduler.fail_after`` so virtual time can expire them. The
+    through ``scheduler.fail_after`` so virtual time can expire them; the
+    mid-stream idle cap is the body's (``_source_stream_body``). The
     returned exit stack owns the session lease and response and must be closed
     by the stream body (or ``SourceResponsesStream.aclose``); the returned
     bytes are the first chunk, which the body yields before reading further.
@@ -570,7 +611,6 @@ async def _open_source_stream(
     opened_at = clock.monotonic()
     try:
         session = await stack.enter_async_context(lease_model_source_session())
-        timeout = _source_client_timeout(source, sock_read=source_stream_idle_seconds())
         try:
             with scheduler.fail_after(SOURCE_HEADER_DEADLINE_SECONDS):
                 response = await stack.enter_async_context(
@@ -578,15 +618,13 @@ async def _open_source_stream(
                         _source_url(source, path),
                         headers=_source_headers(source, encryptor=encryptor, stream=True),
                         json=payload,
-                        timeout=timeout,
+                        timeout=_source_client_timeout(source),
                     )
                 )
         except aiohttp.ConnectionTimeoutError as exc:
             # ``connect`` / ``sock_connect`` expired: the source never accepted
             # a connection, which is the existing "unreachable" verdict.
             raise _unreachable_error(exc, timeout_phase="connect") from exc
-        except aiohttp.SocketTimeoutError as exc:
-            raise _timeout_error("header", source, elapsed=clock.monotonic() - opened_at) from exc
         except aiohttp.ClientError as exc:
             raise _unreachable_error(exc) from exc
         except TimeoutError as exc:
@@ -600,9 +638,9 @@ async def _open_source_stream(
             with scheduler.fail_after(SOURCE_FIRST_FRAME_DEADLINE_SECONDS):
                 first_chunk = await response.content.readany()
         except TimeoutError as exc:
-            # anyio's deadline or aiohttp's ``sock_read`` (a ``TimeoutError``
-            # subclass) -- either way the source accepted the request and
-            # produced nothing.
+            # anyio's deadline (or the source's total budget, a ``TimeoutError``
+            # too) -- either way the source accepted the request and produced
+            # nothing.
             raise _timeout_error("first_frame", source, elapsed=clock.monotonic() - opened_at) from exc
         except aiohttp.ClientError as exc:
             raise _unreachable_error(exc) from exc
@@ -617,19 +655,20 @@ async def _open_source_stream(
 _CREDENTIAL_REJECTION_STATUSES = frozenset({401, 403})
 
 
-def _source_client_timeout(source: ModelSource, *, sock_read: float | None = None) -> aiohttp.ClientTimeout:
+def _source_client_timeout(source: ModelSource) -> aiohttp.ClientTimeout:
     """Per-request timeout: the source's total budget plus bounded connect establishment.
 
-    ``sock_read`` is set only for streams (the idle cap); non-stream forwards
-    keep it unset so a long generation that sends nothing until the final JSON
-    body is bounded by the source's total budget alone.
+    ``sock_read`` stays unset on purpose: aiohttp arms it from request send, so
+    it would shorten the header and first-frame phases under a low configured
+    idle window, and a non-stream generation that sends nothing until its
+    final JSON body must be bounded by the total budget alone. Stream idle is
+    enforced per chunk by ``_source_stream_body``.
     """
 
     return aiohttp.ClientTimeout(
         total=_source_timeout_seconds(source),
         connect=SOURCE_CONNECT_DEADLINE_SECONDS,
         sock_connect=SOURCE_CONNECT_DEADLINE_SECONDS,
-        sock_read=sock_read,
     )
 
 
@@ -718,12 +757,12 @@ def _timeout_error(phase: TimeoutPhase, source: ModelSource, *, elapsed: float) 
     )
 
 
-def _idle_timeout_error() -> ModelSourceForwardingError:
+def _idle_timeout_error(idle_seconds: float) -> ModelSourceForwardingError:
     return ModelSourceForwardingError(
         status_code=504,
         payload={
             "error": {
-                "message": "OpenAI-compatible model source stream went idle",
+                "message": f"OpenAI-compatible model source stream went idle for {idle_seconds:.0f}s",
                 "type": "upstream_error",
                 "code": "model_source_idle_timeout",
             }

@@ -645,7 +645,9 @@ async def test_stream_responses_yields_the_first_chunk_before_reading_further(mo
     assert timeout.total == 600.0
     assert timeout.connect == SOURCE_CONNECT_DEADLINE_SECONDS
     assert timeout.sock_connect == SOURCE_CONNECT_DEADLINE_SECONDS
-    assert timeout.sock_read == SOURCE_STREAM_IDLE_CAP_SECONDS
+    # The idle cap is the body's scheduler timer, never aiohttp's socket timer
+    # (which would pre-empt the header/first-frame phases under a low idle window).
+    assert timeout.sock_read is None
     assert cast(dict[str, str], session.calls[0]["headers"])["Accept"] == "text/event-stream"
 
     # The first chunk is already in hand: it is yielded without touching the
@@ -737,22 +739,6 @@ async def test_open_source_stream_first_frame_deadline_expires_at_thirty_virtual
     assert context.exited == 1
     assert lease.released == 1
     await scheduler.cancel_owned_tasks()
-
-
-@pytest.mark.asyncio
-async def test_open_source_stream_maps_sock_read_expiry_before_headers_to_the_header_phase(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    response = _FakeResponse()
-    _install_session(
-        monkeypatch, response, enter_error=aiohttp.SocketTimeoutError("Timeout on reading data from socket")
-    )
-
-    with pytest.raises(ModelSourceForwardingError) as excinfo:
-        await forwarding_module.stream_responses(_responses_source(), {"model": "m"})
-
-    assert excinfo.value.status_code == 504
-    assert excinfo.value.timeout_phase == "header"
 
 
 @pytest.mark.asyncio
@@ -856,26 +842,106 @@ async def test_cancelling_the_open_during_the_first_frame_wait_releases_the_leas
 # -- stream body: idle timeout, hook, close latch --------------------------------
 
 
+@pytest.mark.parametrize(
+    ("configured_idle", "expected_idle"),
+    [(7200.0, 300.0), (30.0, 30.0)],
+)
 @pytest.mark.asyncio
-async def test_stream_body_maps_sock_read_expiry_to_idle_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_stream_body_idle_cap_expires_in_virtual_time_never_after_7200(
+    monkeypatch: pytest.MonkeyPatch, configured_idle: float, expected_idle: float
+) -> None:
     created = _sse({"type": "response.created", "response": {"id": "resp_idle"}})
-    response = _FakeResponse(
-        content=_FakeContent(created, [aiohttp.SocketTimeoutError("Timeout on reading data from socket")])
-    )
+    response = _FakeResponse(content=_FakeContent(created, stall_after_rest=True))
     _session, context, lease = _install_session(monkeypatch, response)
+    monkeypatch.setattr(
+        forwarding_module, "get_settings", lambda: SimpleNamespace(stream_idle_timeout_seconds=configured_idle)
+    )
+    clock, scheduler = _virtual()
 
-    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"})
+    stream = await forwarding_module.stream_responses(
+        _responses_source(), {"model": "m"}, scheduler=scheduler, clock=clock
+    )
     chunks: list[bytes] = []
-    with pytest.raises(ModelSourceForwardingError) as excinfo:
+
+    async def consume() -> None:
         async for chunk in stream.body:
             chunks.append(chunk)
 
-    error = excinfo.value
+    task = scheduler.create_task(consume())
+    await scheduler.drain()
     assert chunks == [created]
+
+    await scheduler.advance(expected_idle - 0.1)
+    assert not task.done()
+
+    await scheduler.advance(0.1)
+    assert task.done()
+    with pytest.raises(ModelSourceForwardingError) as excinfo:
+        task.result()
+
+    error = excinfo.value
     assert error.status_code == 504
     assert error.timeout_phase == "idle"
     assert cast(dict[str, object], error.payload["error"])["code"] == "model_source_idle_timeout"
     assert context.exited == 1
+    assert lease.released == 1
+    await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
+async def test_low_idle_window_does_not_shorten_the_header_or_first_frame_phases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 5 s idle window bounds silence *after* the first frame only (codex review P2)."""
+
+    first_frame_gate = asyncio.Event()
+
+    async def wait_first_frame() -> None:
+        await first_frame_gate.wait()
+
+    response = _FakeResponse(content=_FakeContent(b"data: late\n\n", first_gate=wait_first_frame))
+    headers_gate = asyncio.Event()
+    _session, _context, lease = _install_session(monkeypatch, response, enter_gate=headers_gate.wait)
+    monkeypatch.setattr(forwarding_module, "get_settings", lambda: SimpleNamespace(stream_idle_timeout_seconds=5.0))
+    clock, scheduler = _virtual()
+
+    task = scheduler.create_task(
+        forwarding_module.stream_responses(_responses_source(), {"model": "m"}, scheduler=scheduler, clock=clock)
+    )
+    # Headers take 15 s (> idle, < header deadline): still waiting, not failed.
+    await scheduler.advance(15.0)
+    assert not task.done()
+    headers_gate.set()
+    await scheduler.drain()
+    # The first frame takes another 25 s (> idle, < first-frame deadline).
+    await scheduler.advance(25.0)
+    assert not task.done()
+    first_frame_gate.set()
+    await scheduler.drain()
+
+    stream = task.result()
+    assert stream.usage_holder.first_frame_at == 40.0
+    await stream.aclose()
+    assert lease.released == 1
+    await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
+async def test_stream_body_lets_the_source_total_budget_expiry_propagate_raw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """aiohttp's ``total`` timer mid-stream is not the idle cap: today's raw propagation is kept."""
+
+    budget_expired = TimeoutError("total budget")
+    response = _FakeResponse(content=_FakeContent(b"data: a\n\n", [budget_expired]))
+    _session, _context, lease = _install_session(monkeypatch, response)
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"})
+    with pytest.raises(TimeoutError) as excinfo:
+        await _collect(stream.body)
+
+    assert excinfo.value is budget_expired
+    assert not isinstance(excinfo.value, ModelSourceForwardingError)
     assert lease.released == 1
 
 
@@ -1234,10 +1300,10 @@ async def test_stream_chat_completion_keeps_the_source_401_envelope(monkeypatch:
     assert excinfo.value.status_code == 401
     assert excinfo.value.payload == payload
     assert response.json_calls == 1
-    # Chat streams share the hardened open: same deadlines and idle cap.
+    # Chat streams share the hardened open: same connect bounds, no socket read timer.
     timeout = cast(aiohttp.ClientTimeout, session.calls[0]["timeout"])
     assert timeout.connect == SOURCE_CONNECT_DEADLINE_SECONDS
-    assert timeout.sock_read == SOURCE_STREAM_IDLE_CAP_SECONDS
+    assert timeout.sock_read is None
 
 
 @pytest.mark.asyncio

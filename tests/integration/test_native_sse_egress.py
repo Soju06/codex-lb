@@ -836,8 +836,9 @@ async def test_native_compact_escaped_surrogate_key_preserves_python_validation(
         await _finish_chunks(writer)
 
     async with _serve_http(handler) as base_url, aiohttp.ClientSession() as session:
+        missing = SubprocessNativeEgressClient(Path("/tmp/missing-compact-surrogate-helper"))
         with pytest.raises(ProxyResponseError) as expected:
-            await asyncio.wait_for(_compact(base_url, None, monkeypatch, routed=routed, session=session), 2)
+            await asyncio.wait_for(_compact(base_url, missing, monkeypatch, routed=routed, session=session), 2)
         with pytest.raises(ProxyResponseError) as actual:
             await asyncio.wait_for(_compact(base_url, native_worker, monkeypatch, routed=routed), 2)
         assert actual.value.status_code == expected.value.status_code == 502

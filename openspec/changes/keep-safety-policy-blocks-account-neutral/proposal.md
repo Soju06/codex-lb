@@ -28,5 +28,7 @@ None.
 ## Impact
 
 - Proxy failure classification and stream health handling only.
-- No schema, migration, setting, credential, routing-selection, or public API
-  shape changes.
+- No schema, migration, setting, credential, or public API shape changes.
+- No direct routing-selection algorithm changes; account eligibility changes
+  intentionally through account-health handling, while repeated payload
+  rejections must not cause saturated-hard-affinity selection failures.

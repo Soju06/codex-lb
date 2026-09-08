@@ -30,6 +30,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AuditLog, ModelSourcePin
 from app.db.session import SessionLocal
 from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.subscription_overflow import DRAIN_WINDOW
 from app.modules.usage.repository import UsageRepository
 
@@ -276,35 +277,52 @@ async def test_deleting_the_designated_source_invalidates_the_settings_cache_aft
 
     cache = get_settings_cache()
     original_invalidate = cache.invalidate
+    original_clear = SettingsRepository.clear_subscription_overflow_source_if_matches
     sequence: list[str] = []
-    armed = {"on": False}
+    request_sessions: list[SyncSession] = []
 
-    def _after_commit(_session: SyncSession) -> None:
-        if armed["on"]:
+    # Both spies are scoped to the request under test. The app lifespan runs the
+    # cache-invalidation poller, whose ``settings`` callback replays the PUT's
+    # bump as ``invalidate(propagate=False)`` on some later tick, and the audit
+    # writer commits from its own session in the background; either can land
+    # inside this window, so only the route's propagating invalidation and the
+    # request session's own commit are recorded.
+    async def _spy_clear(self: SettingsRepository, source_id: str, **kwargs):
+        request_sessions.append(self._session.sync_session)
+        return await original_clear(self, source_id, **kwargs)
+
+    def _after_commit(session: SyncSession) -> None:
+        if any(session is candidate for candidate in request_sessions):
             sequence.append("commit")
 
     async def _spy_invalidate(*args, **kwargs):
-        if armed["on"]:
+        if kwargs.get("propagate", True):
             sequence.append("invalidate")
         return await original_invalidate(*args, **kwargs)
 
+    monkeypatch.setattr(SettingsRepository, "clear_subscription_overflow_source_if_matches", _spy_clear)
     monkeypatch.setattr(cache, "invalidate", _spy_invalidate)
     event.listen(SyncSession, "after_commit", _after_commit)
     try:
-        armed["on"] = True
         assert (await async_client.delete(f"/api/model-sources/{other}")).status_code == 204
-        assert "invalidate" not in sequence, "deleting a non-designated source must not bump the settings cache"
+        assert sequence == ["commit"], (
+            "deleting a non-designated source commits once and never bumps the settings cache",
+            sequence,
+        )
         sequence.clear()
+        # Deterministic stand-ins for the background traffic described above:
+        # a poller-style local invalidation and an unrelated session's commit
+        # must both be invisible to the spies.
+        await cache.invalidate(propagate=False)
+        async with SessionLocal() as unrelated:
+            await unrelated.commit()
         assert (await async_client.delete(f"/api/model-sources/{designated}")).status_code == 204
     finally:
-        armed["on"] = False
         event.remove(SyncSession, "after_commit", _after_commit)
 
-    assert "commit" in sequence and "invalidate" in sequence, sequence
-    # The clear + delete commit lands first; the invalidation (and its
-    # cross-replica bump) must follow it so peers re-read the cleared row.
-    assert sequence.index("commit") < sequence.index("invalidate")
-    assert sequence.count("invalidate") == 1
+    # The clear + delete commit lands first; the single propagating invalidation
+    # (and its cross-replica bump) must follow it so peers re-read the cleared row.
+    assert sequence == ["commit", "invalidate"], sequence
 
 
 # ---------------------------------------------------------------------------

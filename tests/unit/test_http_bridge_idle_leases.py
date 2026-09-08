@@ -1327,6 +1327,7 @@ async def test_usage_cap_blocks_reused_bridge_before_send_without_releasing_othe
         )
     assert exc.value.status_code == 429
     assert exc.value.payload["error"]["code"] == "account_usage_cap_reached"
+    assert exc.value.payload["error"]["type"] == "rate_limit_error"
     assert session.account_lease is not None
     assert not session.closed
     assert request_state.response_create_attempt_count == 0

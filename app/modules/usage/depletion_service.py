@@ -70,6 +70,7 @@ def compute_depletion_for_account(
     window: str,
     history: list,  # list of objects with: used_percent, recorded_at, reset_at, window_minutes
     now: datetime | None = None,
+    usage_cap_percent: float | None = None,
 ) -> DepletionMetrics | None:
     """
     Compute depletion metrics for a single account using EWMA.
@@ -135,25 +136,28 @@ def compute_depletion_for_account(
     total_window_seconds = (latest.window_minutes * 60) if latest.window_minutes else 0.0
     seconds_elapsed = max(0.0, total_window_seconds - seconds_until_reset)
 
-    risk = compute_depletion_risk(used_percent, state.rate, seconds_until_reset)
+    usage_scale = 100.0 / usage_cap_percent if usage_cap_percent is not None else 1.0
+    effective_used_percent = used_percent * usage_scale
+    effective_rate = state.rate * usage_scale
+    risk = compute_depletion_risk(effective_used_percent, effective_rate, seconds_until_reset)
     risk_level = classify_risk(risk)
-    burn_rate = compute_burn_rate(state.rate, 100.0 - used_percent, seconds_until_reset)
-    safe_pct = compute_safe_usage_percent(seconds_elapsed, total_window_seconds)
+    burn_rate = compute_burn_rate(effective_rate, max(0.0, 100.0 - effective_used_percent), seconds_until_reset)
+    safe_pct = min(100.0, compute_safe_usage_percent(seconds_elapsed, total_window_seconds) * usage_scale)
 
     projected_exhaustion_at = None
     seconds_until_exhaustion = None
-    if state.rate > 0 and seconds_until_reset > 0:
-        remaining = 100.0 - used_percent
-        secs = remaining / state.rate
+    if effective_rate > 0 and seconds_until_reset > 0:
+        remaining = max(0.0, 100.0 - effective_used_percent)
+        secs = remaining / effective_rate
         if secs <= seconds_until_reset:
-            seconds_until_exhaustion = secs
             projected_exhaustion_at = now + timedelta(seconds=secs)
+            seconds_until_exhaustion = secs
         # else: exhaustion falls after the window resets — leave as None
 
     return DepletionMetrics(
         risk=risk,
         risk_level=risk_level,
-        rate_per_second=state.rate,
+        rate_per_second=effective_rate,
         burn_rate=burn_rate,
         safe_usage_percent=safe_pct,
         projected_exhaustion_at=projected_exhaustion_at,

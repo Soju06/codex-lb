@@ -13,12 +13,17 @@ from app.db.models import Account, AccountStatus, StickySessionKind, UsageHistor
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.proxy.account_cache import get_account_selection_cache, get_routing_availability_cache
+from app.modules.proxy.account_cache import (
+    AccountSelectionCache,
+    get_account_selection_cache,
+    get_routing_availability_cache,
+)
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+from tests.simulation.virtual_time import VirtualClock
 
 pytestmark = pytest.mark.integration
 
@@ -159,6 +164,29 @@ async def test_caps_recover_only_after_both_windows_reset(db_setup):
             assert (selection.account is None) == blocked
     finally:
         cache.reset()
+
+
+@pytest.mark.asyncio
+async def test_cached_cap_expires_at_known_reset(db_setup):
+    now = time.time()
+    await _seed(primary=80)
+    async with SessionLocal() as session:
+        await session.execute(
+            update(UsageHistory)
+            .where(UsageHistory.account_id == "capped", UsageHistory.window == "primary")
+            .values(reset_at=int(now) + 1)
+        )
+        await session.commit()
+    get_account_selection_cache().invalidate()
+    clock = VirtualClock(epoch_value=now)
+    balancer = LoadBalancer(_repos, clock=clock)
+    balancer._selection_inputs_cache = AccountSelectionCache(5, clock=clock)
+    assert (await balancer.select_account(required_account_id="capped")).account is None
+
+    clock.advance(2)
+
+    selection = await balancer.select_account(required_account_id="capped")
+    assert selection.account is not None and selection.account.id == "capped"
 
 
 @pytest.mark.asyncio

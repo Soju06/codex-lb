@@ -88,7 +88,7 @@ class SelectionInputsProtocol(Protocol):
     error_code: str | None
     ignore_standard_quota_account_ids: frozenset[str]
     routing_policy_override: str | None
-    usage_capped_account_ids: frozenset[str]
+    usage_cap_resets_by_account: Mapping[str, tuple[int | None, ...]]
 
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]: ...
@@ -503,7 +503,9 @@ async def run_sticky_selection_path(
                     error_message=_AMBIGUOUS_CONVERSATION_OWNER_MESSAGE,
                     error_code=_AMBIGUOUS_CONVERSATION_OWNER_CODE,
                 )
-            usage_states = filter_usage_capped_states(states, selection_inputs.usage_capped_account_ids)
+            usage_states = filter_usage_capped_states(
+                states, selection_inputs.usage_cap_resets_by_account, now=owner._clock.time()
+            )
             usage_cap_exhausted = bool(states and not usage_states)
             # Fair share is measured against the full cap-eligible pool, before
             # hard-sticky narrows selection to the owner account.

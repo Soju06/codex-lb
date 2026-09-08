@@ -103,6 +103,38 @@ def test_compute_depletion_zero_rate_is_safe() -> None:
     assert result.risk == pytest.approx(0.5, abs=0.01)
 
 
+def test_aggregate_depletion_applies_caps_before_selecting_worst_account() -> None:
+    reset_ewma_state()
+    now = BASE_TIME + timedelta(minutes=3)
+    uncapped = compute_depletion_for_account(
+        "uncapped",
+        "standard",
+        "primary",
+        [
+            _entry(55.0, BASE_TIME, account_id="uncapped"),
+            _entry(55.0, BASE_TIME + timedelta(minutes=1), account_id="uncapped"),
+        ],
+        now=now,
+    )
+    capped = compute_depletion_for_account(
+        "capped",
+        "standard",
+        "primary",
+        [
+            _entry(40.0, BASE_TIME, account_id="capped"),
+            _entry(40.0, BASE_TIME + timedelta(minutes=1), account_id="capped"),
+        ],
+        now=now,
+        usage_cap_percent=50,
+    )
+
+    aggregate = compute_aggregate_depletion([uncapped, capped])
+
+    assert aggregate is not None
+    assert aggregate.risk == pytest.approx(0.8)
+    assert aggregate.risk_level == "danger"
+
+
 def test_compute_depletion_window_reset_handled() -> None:
     reset_ewma_state()
     # Usage drops from 90% to 5% — window reset

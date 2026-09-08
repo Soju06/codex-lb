@@ -5,7 +5,7 @@ import inspect
 import json
 import logging
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Iterable
 from uuid import uuid4
@@ -137,7 +137,7 @@ from app.modules.proxy._load_balancer.unbound_selection import (
 )
 from app.modules.proxy._load_balancer.usage_cap_selection import (
     filter_usage_capped_states,
-    usage_capped_account_ids,
+    usage_cap_resets_by_account,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.account_eligibility import (
@@ -248,7 +248,7 @@ class _SelectionInputs(SelectionInputsProtocol):
     persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
     quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
-    usage_capped_account_ids: frozenset[str] = frozenset()
+    usage_cap_resets_by_account: Mapping[str, tuple[int | None, ...]] = field(default_factory=dict)
 
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]:
@@ -1304,7 +1304,7 @@ class LoadBalancer:
             # serializes statements per connection anyway.
             standard_latest_primary = await repos.usage.latest_by_account()
             standard_latest_secondary = await repos.usage.latest_by_account(window="secondary")
-            capped_account_ids = usage_capped_account_ids(
+            cap_resets_by_account = usage_cap_resets_by_account(
                 accounts, standard_latest_primary, standard_latest_secondary, now=self._clock.time()
             )
             latest_monthly = await repos.usage.latest_by_account(window="monthly")
@@ -1356,7 +1356,7 @@ class LoadBalancer:
                 persist_standard_quota_status=True,
                 routing_policy_override=routing_policy_override,
                 quota_admitted_catalog_omission_account_ids=quota_admitted_catalog_omission_account_ids,
-                usage_capped_account_ids=capped_account_ids,
+                usage_cap_resets_by_account=cap_resets_by_account,
             )
             await self._selection_inputs_cache.set(
                 _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
@@ -1402,7 +1402,9 @@ class LoadBalancer:
                 ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
                 encryptor=self._encryptor,
             )
-            states = filter_usage_capped_states(states, selection_inputs.usage_capped_account_ids)
+            states = filter_usage_capped_states(
+                states, selection_inputs.usage_cap_resets_by_account, now=self._clock.time()
+            )
             selection_states = _filter_states_for_account_caps(
                 states,
                 lease_kind=lease_kind,
@@ -2961,7 +2963,7 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         quota_admitted_catalog_omission_account_ids=frozenset(
             selection_inputs.quota_admitted_catalog_omission_account_ids
         ),
-        usage_capped_account_ids=frozenset(selection_inputs.usage_capped_account_ids),
+        usage_cap_resets_by_account=dict(selection_inputs.usage_cap_resets_by_account),
     )
 
 

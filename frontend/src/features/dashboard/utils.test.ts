@@ -107,17 +107,6 @@ describe("buildDepletionView", () => {
       riskLevel: "critical",
     });
   });
-
-  it("scales the safe line to the usable capped capacity", () => {
-    const depletion: Depletion = {
-      risk: 0.5,
-      riskLevel: "warning",
-      burnRate: 1.5,
-      safeUsagePercent: 70,
-    };
-
-    expect(buildDepletionView(depletion, 100_000, 80_000)?.safePercent).toBe(87.5);
-  });
 });
 
 function remainingItem(overrides: Partial<RemainingItem> & Pick<RemainingItem, "accountId">): RemainingItem {

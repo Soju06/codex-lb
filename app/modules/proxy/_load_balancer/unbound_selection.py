@@ -159,7 +159,9 @@ async def run_unbound_selection_path(
                 required_account_id=required_account_id,
                 redact_sensitive_details=redact_sensitive_details,
             )
-            usage_states = filter_usage_capped_states(states, selection_inputs.usage_capped_account_ids)
+            usage_states = filter_usage_capped_states(
+                states, selection_inputs.usage_cap_resets_by_account, now=selection_now
+            )
             usage_cap_exhausted = bool(states and not usage_states)
             effective_routing_costs = (
                 routing_costs_by_account_id

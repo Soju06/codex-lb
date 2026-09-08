@@ -106,17 +106,9 @@ function resolveDashboardViewOptions(optionsOrIsDark: DashboardViewOptions | boo
   };
 }
 
-export function buildDepletionView(
-  depletion: Depletion | null | undefined,
-  fullCapacity?: number,
-  usableCapacity?: number,
-): SafeLineView | null {
+export function buildDepletionView(depletion: Depletion | null | undefined): SafeLineView | null {
   if (!depletion || depletion.riskLevel === "safe") return null;
-  const safePercent =
-    isPositiveFinite(fullCapacity) && isPositiveFinite(usableCapacity) && usableCapacity < fullCapacity
-      ? clamp((depletion.safeUsagePercent * fullCapacity) / usableCapacity, 0, 100)
-      : depletion.safeUsagePercent;
-  return { safePercent, riskLevel: depletion.riskLevel };
+  return { safePercent: depletion.safeUsagePercent, riskLevel: depletion.riskLevel };
 }
 
 function buildWindowIndex(window: UsageWindow | null): Map<string, number> {
@@ -939,16 +931,8 @@ export function buildDashboardView(
     primaryCapacityTotal,
     secondaryCapacityTotal,
     requestLogs,
-    safeLinePrimary: buildDepletionView(
-      projections?.depletionPrimary ?? overview.depletionPrimary,
-      overview.summary.primaryWindow.capacityCredits,
-      primaryCapacityTotal,
-    ),
-    safeLineSecondary: buildDepletionView(
-      projections?.depletionSecondary ?? overview.depletionSecondary,
-      secondaryFullCapacity,
-      secondaryCapacityTotal,
-    ),
+    safeLinePrimary: buildDepletionView(projections?.depletionPrimary ?? overview.depletionPrimary),
+    safeLineSecondary: buildDepletionView(projections?.depletionSecondary ?? overview.depletionSecondary),
     weeklyCreditPace,
   };
 }

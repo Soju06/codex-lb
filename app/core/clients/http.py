@@ -28,6 +28,10 @@ class HttpClient:
     session: aiohttp.ClientSession
     websocket_session: aiohttp.ClientSession
     retry_client: RetryClient
+    # Dedicated connector for OpenAI-compatible model sources (#2123 WP-C1):
+    # a stalled source must never occupy the ChatGPT connector. ``None`` falls
+    # back to ``session`` until the transport package builds it.
+    model_source_session: aiohttp.ClientSession | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,6 +348,14 @@ async def lease_http_session(
         return
     async with lease_http_client() as client:
         yield client.session
+
+
+@contextlib.asynccontextmanager
+async def lease_model_source_session() -> AsyncIterator[aiohttp.ClientSession]:
+    """Lease the model-source session of the current client generation (falls back to ``session`` when ``None``)."""
+
+    raise NotImplementedError
+    yield  # pragma: no cover - makes this an async generator for ``asynccontextmanager``
 
 
 @contextlib.asynccontextmanager

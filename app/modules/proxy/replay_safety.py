@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from app.core.openai.requests import extract_input_file_ids
 from app.core.types import JsonValue
+from app.modules.model_sources.projection import DeclineReason, PortabilityView
 
 _TOOL_CALL_TYPE_BY_OUTPUT_TYPE = {
     "function_call_output": "function_call",
@@ -1049,3 +1050,44 @@ def _mapping_has_account_scoped_reference(value: Mapping[str, JsonValue]) -> boo
         if identifiers is not None and identifiers != []:
             return True
     return False
+
+
+# --- Provider portability (#2123 WP-C1, design v3 §4.4) -------------------------
+#
+# Evaluated on the allowlisted ``PortabilityView`` (never the raw body). Steps,
+# in order: (1) account-neutral fresh replay -> ``not_portable_history``;
+# (2) no ``reasoning``/``compaction`` items; (3) no ``additional_tools`` ->
+# ``not_portable_lite_namespace``; (4) every input item type provider-universal
+# or its tool type declared -> ``not_portable_items``; (5) every ``tools[].type``
+# ``function`` or declared, ``namespace`` never -> ``not_portable_tools``;
+# (6) ``input_image`` requires vision -> ``not_portable_vision``; (7) binding
+# ``x-codex-turn-state`` -> ``turn_state_bound``.
+
+
+@dataclass(frozen=True, slots=True)
+class PortabilityVerdict:
+    portable: bool
+    reason: DeclineReason | None = None
+    detail: str | None = None
+
+
+def responses_payload_is_provider_portable(
+    view: PortabilityView,
+    headers: Mapping[str, str],
+    *,
+    supported_tool_types: frozenset[str],
+    supports_vision: bool,
+) -> PortabilityVerdict:
+    raise NotImplementedError
+
+
+def transcript_is_source_free(view: PortabilityView) -> bool:
+    """Steps 1-2 of ``responses_payload_is_provider_portable`` only."""
+
+    raise NotImplementedError
+
+
+def is_binding_turn_state(headers: Mapping[str, str]) -> bool:
+    """Non-blank ``x-codex-turn-state`` that does not match ``_SYNTHESIZED_TURN_STATE_PATTERN``."""
+
+    raise NotImplementedError

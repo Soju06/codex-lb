@@ -164,3 +164,22 @@ async def responses_model_is_source_owned(
             exc_info=True,
         )
         return False
+
+
+async def select_overflow_model_source(
+    source_id: str,
+    model: str,
+    api_key: ApiKeyData | None,
+    *,
+    raw_model: str | None = None,
+    require_streaming: bool = False,
+) -> tuple[ModelSource, str] | None:
+    """Resolve ``model`` on the designated overflow source only (#2123 WP-C1, design v3 §4.4).
+
+    Same candidate order and ``allowed_models`` filter as
+    ``select_responses_model_source`` but *without* the registry-precedence
+    skip (a registry slug is exactly what overflows), looked up with
+    ``allowed_source_ids={source_id}``; rows are detached from the session.
+    """
+
+    raise NotImplementedError

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from json import JSONDecodeError
 from math import isfinite
-from typing import cast
+from typing import Literal, cast
 
 import aiohttp
 
@@ -22,6 +22,20 @@ from app.db.models import ModelSource
 
 _DEFAULT_SOURCE_TIMEOUT_SECONDS = 600
 
+# Bounded exposure for OpenAI-compatible model-source transport (#2123 WP-C1,
+# design v3 §3, §8.2). Single definition: callers import, never re-literal.
+SOURCE_CONNECT_DEADLINE_SECONDS = 10.0
+SOURCE_HEADER_DEADLINE_SECONDS = 20.0
+# Streaming only: time from response headers to the first body chunk.
+SOURCE_FIRST_FRAME_DEADLINE_SECONDS = 30.0
+# Mid-stream silence cap; ``source_stream_idle_seconds()`` takes the minimum
+# with ``settings.stream_idle_timeout_seconds`` so a source never inherits the
+# 7200 s subscription idle window.
+SOURCE_STREAM_IDLE_CAP_SECONDS = 300.0
+
+TimeoutPhase = Literal["connect", "header", "first_frame", "idle"]
+FrameKind = Literal["non_content", "content", "success_terminal", "failure_terminal"]
+
 
 class ModelSourceForwardingError(Exception):
     def __init__(
@@ -30,11 +44,17 @@ class ModelSourceForwardingError(Exception):
         status_code: int,
         payload: dict[str, JsonValue],
         upstream_status_code: int | None = None,
+        retry_after: str | None = None,
+        timeout_phase: TimeoutPhase | None = None,
     ) -> None:
         super().__init__(str(payload))
         self.status_code = status_code
         self.payload = payload
         self.upstream_status_code = upstream_status_code
+        # Source ``Retry-After`` for honest passthrough of 429/5xx (I8).
+        self.retry_after = retry_after
+        # Which bounded phase expired for ``model_source_timeout``/``model_source_idle_timeout``.
+        self.timeout_phase = timeout_phase
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,11 +125,41 @@ class SourceResponsesStream:
     usage_holder: "SourceUsageHolder"
     upstream_status_code: int
 
+    async def aclose(self) -> None:
+        """Release the source connection directly (idempotent), even if ``body`` was never started."""
+
+        raise NotImplementedError
+
 
 @dataclass(slots=True)
 class SourceUsageHolder:
     usage: SourceUsage | None = None
     timings: SourceTimings | None = None
+    # Responses-stream observations for the dispatch owner (#2123 WP-C1, design §6).
+    response_id: str | None = None
+    created_envelope: dict[str, JsonValue] | None = None
+    first_frame_at: float | None = None
+    first_content_seen: bool = False
+    first_output_item_seen: bool = False
+    terminal_kind: Literal["completed", "incomplete", "failed", "error"] | None = None
+    delta_chars: int = 0
+
+
+# Awaited once, before the first content frame is released to the client
+# (the pin hook); a failure terminal with no prior content never invokes it.
+OnFirstContent = Callable[[SourceUsageHolder], Awaitable[None]]
+
+
+def source_stream_idle_seconds() -> float:
+    """``min(settings.stream_idle_timeout_seconds, SOURCE_STREAM_IDLE_CAP_SECONDS)``."""
+
+    raise NotImplementedError
+
+
+def classify_responses_frame(event_type: str | None) -> FrameKind:
+    """``response.created``/``in_progress``/``queued`` -> ``non_content``; unknown types are ``content``."""
+
+    raise NotImplementedError
 
 
 async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> None:
